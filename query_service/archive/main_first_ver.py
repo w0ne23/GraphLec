@@ -5,8 +5,9 @@ Django는 /internal/query 로 stem + question 만 전달한다 (lecture_id → s
 
 /internal/query: 질문 유형에 따라
   - 구조(structural): LLM이 Cypher 생성 → Neo4j 조회(읽기 전용 검증, $stem 필수)
-  - 내용(content): 의도 추론(LLM JSON) → Neo4j 광범위 조회 → 임베딩 재순위·MMR → Lance 2-pass → Gemini 답변
-  그래프 근거가 없으면 답변 거부.
+  - 내용(content): 고정 Cypher 템플릿 + 키워드(파라미터 바인딩, stem 필터)
+  이후 Gemini 답변. 그래프 근거가 없으면 답변 거부.
+  Lance는 linked_node_id가 조회된 노드 id와 일치할 때만 보강(최대 4개).
 
 /internal/query_graph_evidence: 키워드 기반 엣지 근거(디버그·경량 조회용, 기존 유지).
 """
@@ -18,6 +19,7 @@ import math
 import os
 import re
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,10 +35,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from lance_ingest import default_lance_root, lance_search  # noqa: E402
 
-from .content_retrieval import EvidenceItem, infer_intents_json, run_enhanced_content_pipeline  # noqa: E402
-from .graph_constants import CONCEPT_SEMANTIC_REL_TYPES  # noqa: E402
-
-app = FastAPI(title="GraphLEC Query Service", version="0.3.0")
+app = FastAPI(title="GraphLEC Query Service", version="0.2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +53,25 @@ NEO4J_URI = os.getenv("NEO4J_URI", "").strip()
 NEO4J_USER = os.getenv("NEO4J_USER", "").strip()
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
+# Concept→Concept 의미 엣지 (json_to_graph_triples.RELATION_TYPES 와 동일)
+CONCEPT_SEMANTIC_REL_TYPES = (
+    "is_a",
+    "part_of",
+    "instance_of",
+    "has_attribute",
+    "prerequisite_of",
+    "causes",
+    "influences",
+    "uses",
+    "applies",
+    "compared_to",
+    "illustrates",
+    "abstracts",
+    "solves",
+    "optimizes",
+    "implements",
+    "replaces",
+)
 _CONCEPT_REL_CYPHER_ALT = "|".join(CONCEPT_SEMANTIC_REL_TYPES)
 
 GRAPH_SCHEMA = f"""
@@ -109,12 +127,7 @@ ANSWER_SYSTEM_PROMPT = """
 [근거 규칙]
 - 답변의 사실·관계·용어는 반드시 제공된 "근거" 안에 있을 때만 쓴다.
 - 근거에 없으면 추측하지 말고 짧게 "근거에 없어 답할 수 없다"고 한다.
-- 근거에 "[질문 의도(모델 추론)]"가 있으면 참고만 하되, 답의 내용은 반드시 그 아래 실제 인용 근거에만 기대어라.
-- 의미 검색(보조)로 표시된 텍스트은 그래프 근거와 모순 없을 때만 보강에 사용한다.
-
-[복합 질문]
-- 질문이 정의와 예시·사례 등을 동시에 요구하면, 근거에서 가능한 범위로 각 요구를 모두 다룬다.
-- 특정 요구에 해당하는 근거가 없으면 그 한 가지만 짧게 밝힌다.
+- [Lance 보강 텍스트]가 있으면 그래프 근거와 모순 없을 때만 설명을 보강한다.
 
 [답변 스타일]
 1. 직접 답변을 먼저 한다. 길이는 질문에 맞게 조절한다.
@@ -331,12 +344,9 @@ def _call_gemini_answer(context: str, question: str) -> str:
     raise last_err
 
 
-def generate_cypher(question: str, stem: str, intent_hint: str = "") -> str:
-    extra = ""
-    if intent_hint.strip():
-        extra = f"\n질문 의도 힌트(참고): {intent_hint.strip()}\n"
+def generate_cypher(question: str, stem: str) -> str:
     text = _call_gemini_raw(
-        f"stem 파라미터 값은 실행 시 전달된다.{extra}질문: {question}\n\n위 질문에 맞는 Cypher만 생성하라.",
+        f"stem 파라미터 값은 실행 시 전달된다. 질문: {question}\n\n위 질문에 맞는 Cypher만 생성하라.",
         CYPHER_SYSTEM_PROMPT,
     )
     m = re.search(r"```(?:cypher)?\s*(.*?)```", text, re.DOTALL)
@@ -353,10 +363,8 @@ def run_cypher_structural(session, cypher: str, stem: str) -> list[dict[str, Any
     return _run_cypher_dicts(session, cypher, {"stem": stem})
 
 
-def run_cypher_safe_structural(
-    session, question: str, stem: str, intent_hint: str = ""
-) -> tuple[list[dict[str, Any]], str]:
-    cypher = generate_cypher(question, stem, intent_hint=intent_hint)
+def run_cypher_safe_structural(session, question: str, stem: str) -> tuple[list[dict[str, Any]], str]:
+    cypher = generate_cypher(question, stem)
     try:
         return run_cypher_structural(session, cypher, stem), cypher
     except Exception as e:
@@ -369,6 +377,142 @@ def run_cypher_safe_structural(
         m = re.search(r"```(?:cypher)?\s*(.*?)```", fixed_text, re.DOTALL)
         fixed_cypher = m.group(1).strip() if m else fixed_text.strip()
         return run_cypher_structural(session, fixed_cypher, stem), fixed_cypher
+
+
+def _relevance_score(text: str, keywords: list[str]) -> int:
+    return sum(1 for kw in keywords if kw in text)
+
+
+def run_content_queries(
+    session, stem: str, keywords: list[str]
+) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    results: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    raw_all: list[dict[str, Any]] = []
+    seen_segs: set[tuple[Any, Any]] = set()
+    seen_slides: set[Any] = set()
+
+    q_sub = """
+    MATCH (sub:Concept {stem: $stem})-[r]->(c:Concept {stem: $stem})
+    WHERE type(r) IN $concept_rel_types
+      AND toLower(coalesce(c.name,'')) CONTAINS toLower($kw)
+    RETURN coalesce(sub.id,'') AS sub_id, sub.name AS sub_concept,
+           coalesce(c.id,'') AS concept_id, c.name AS parent_concept
+    LIMIT 20
+    """
+    q_seg = """
+    MATCH (slide:Slide {stem: $stem})-[:HAS_SCENE]->(scene:Scene {stem: $stem})
+          -[:HAS_SEGMENT]->(seg:Segment {stem: $stem})-[:MENTIONS]->(c:Concept {stem: $stem})
+    WHERE toLower(coalesce(c.name,'')) CONTAINS toLower($kw)
+    RETURN coalesce(seg.text,'') AS segment_text, seg.start AS start, seg.end AS end,
+           slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id, coalesce(c.id,'') AS concept_id,
+           c.name AS concept
+    ORDER BY seg.start LIMIT 15
+    """
+    q_slide_concept = """
+    MATCH (slide:Slide {stem: $stem})-[:APPEARS_IN]->(c:Concept {stem: $stem})
+    WHERE toLower(coalesce(c.name,'')) CONTAINS toLower($kw)
+    RETURN slide.slide_number AS slide_number, coalesce(slide.id,'') AS slide_id,
+           slide.title AS title, slide.slide_text AS slide_text, coalesce(c.id,'') AS concept_id
+    ORDER BY slide.slide_number LIMIT 5
+    """
+    q_slide_text = """
+    MATCH (slide:Slide {stem: $stem})
+    WHERE toLower(coalesce(slide.slide_text,'')) CONTAINS toLower($kw)
+    RETURN slide.slide_number AS slide_number, coalesce(slide.id,'') AS slide_id,
+           slide.title AS title, slide.slide_text AS slide_text
+    ORDER BY slide.slide_number LIMIT 5
+    """
+    q_seg_text = """
+    MATCH (slide:Slide {stem: $stem})-[:HAS_SCENE]->(scene:Scene {stem: $stem})
+          -[:HAS_SEGMENT]->(seg:Segment {stem: $stem})
+    WHERE toLower(coalesce(seg.text,'')) CONTAINS toLower($kw)
+    RETURN coalesce(seg.text,'') AS segment_text, seg.start AS start, seg.end AS end,
+           slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id
+    ORDER BY seg.start LIMIT 15
+    """
+
+    for kw in keywords:
+        for key, q in (
+            ("sub_concepts", q_sub),
+            ("segments", q_seg),
+            ("slides", q_slide_concept),
+            ("slides", q_slide_text),
+            ("segments", q_seg_text),
+        ):
+            params = {"stem": stem, "kw": kw}
+            if q is q_sub:
+                params["concept_rel_types"] = list(CONCEPT_SEMANTIC_REL_TYPES)
+            for row in _run_cypher_dicts(session, q, params):
+                raw_all.append(row)
+                if key == "segments":
+                    k2 = (row.get("slide_number"), row.get("start"))
+                    if k2 not in seen_segs:
+                        seen_segs.add(k2)
+                        results["segments"].append(row)
+                elif key == "slides":
+                    sn = row.get("slide_number")
+                    if sn not in seen_slides:
+                        seen_slides.add(sn)
+                        results["slides"].append(row)
+                else:
+                    results["sub_concepts"].append(row)
+
+    if results.get("segments"):
+        results["segments"].sort(
+            key=lambda r: _relevance_score(str(r.get("segment_text", "")), keywords),
+            reverse=True,
+        )
+    if results.get("slides"):
+        results["slides"].sort(
+            key=lambda r: _relevance_score(
+                str(r.get("slide_text", "")) + str(r.get("title", "")), keywords
+            ),
+            reverse=True,
+        )
+
+    return dict(results), raw_all
+
+
+def _build_content_context(question: str, structured: dict[str, list[dict[str, Any]]]) -> str:
+    lines = [
+        f"질문: {question}",
+        "",
+        "[지식 그래프 조회 결과 — 내용 질문]",
+        "아래 데이터만 사실로 사용한다.",
+    ]
+    if structured.get("sub_concepts"):
+        subs = list(
+            dict.fromkeys(str(r.get("sub_concept", "")) for r in structured["sub_concepts"] if r.get("sub_concept"))
+        )
+        if subs:
+            lines.append(f"[구성 개념] {', '.join(subs[:15])}")
+
+    if structured.get("segments"):
+        lines.append("")
+        lines.append("[음성·개념 연결 구간]")
+        for r in structured["segments"][:8]:
+            t = r.get("start", 0) or 0
+            try:
+                t = float(t)
+            except (TypeError, ValueError):
+                t = 0.0
+            mm, ss = int(t) // 60, int(t) % 60
+            lines.append(f"  {mm}:{ss:02d} | {r.get('segment_text', '')}")
+            if r.get("concept"):
+                lines.append(f"    (개념: {r.get('concept')})")
+
+    if structured.get("slides"):
+        lines.append("")
+        lines.append("[슬라이드 본문 요약]")
+        for r in structured["slides"][:3]:
+            lines.append(
+                f"  슬라이드 {r.get('slide_number')} '{r.get('title', '')}'\n"
+                f"  {str(r.get('slide_text', ''))[:400]}"
+            )
+
+    return "\n".join(lines)
 
 
 def _build_structural_context(question: str, raw_rows: list[dict[str, Any]], cypher: str) -> str:
@@ -568,31 +712,6 @@ def _rows_to_chunks(df) -> list[RetrievedChunk]:
     return out
 
 
-def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[RetrievedChunk]:
-    """선택된 근거 중 Lance 계열만 API용 청크로."""
-    out: list[RetrievedChunk] = []
-    for it in items:
-        if not it.kind.startswith("lance"):
-            continue
-        cid = it.uid
-        if cid.startswith("lance:"):
-            cid = cid[6:]
-        out.append(
-            RetrievedChunk(
-                chunk_id=cid[:500],
-                stem=stem,
-                chunk_type=it.chunk_type,
-                text=it.text[:2000],
-                score=it.lance_score,
-                slide_number=it.slide_number,
-                start_sec=it.start_sec,
-                end_sec=it.end_sec,
-                linked_node_id=it.linked_node_id,
-            )
-        )
-    return out
-
-
 def _chunks_to_timestamps(chunks: list[RetrievedChunk]) -> list[dict]:
     ts: list[dict] = []
     for c in chunks:
@@ -765,34 +884,24 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     allowed_ids: set[str] = set()
     timestamps: list[dict] = []
     graph: dict = {"nodes": [], "edges": []}
-    selected_items: list[EvidenceItem] = []
 
     try:
         with driver.session() as session:
             if q_type == "content":
-                graph_context, _intent_w, allowed_ids, structured, selected_items = run_enhanced_content_pipeline(
-                    session,
-                    stem,
-                    question,
-                    extract_keywords_from_question,
-                    _call_gemini_raw,
-                )
-                if not graph_context.strip():
+                keywords = extract_keywords_from_question(question)
+                if not keywords:
                     return _empty_query_response()
+                structured, _raw = run_content_queries(session, stem, keywords)
+                n_total = sum(len(v) for v in structured.values())
+                if n_total == 0:
+                    return _empty_query_response()
+                graph_context = _build_content_context(question, structured)
+                allowed_ids = _collect_ids_from_content(structured)
                 timestamps = _timestamps_from_content(structured)
                 graph = _graph_from_content_structured(structured)
             else:
                 try:
-                    iw, _ = infer_intents_json(question, _call_gemini_raw)
-                    intent_hint = ", ".join(
-                        f"{k}:{v:.2f}" for k, v in sorted(iw.items(), key=lambda x: -x[1]) if v >= 0.04
-                    )
-                except Exception:
-                    intent_hint = ""
-                try:
-                    raw_rows, cypher_used = run_cypher_safe_structural(
-                        session, question, stem, intent_hint=intent_hint
-                    )
+                    raw_rows, cypher_used = run_cypher_safe_structural(session, question, stem)
                 except Exception:
                     return _empty_query_response()
                 if not raw_rows:
@@ -805,35 +914,25 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         driver.close()
 
     supporting_chunks: list[RetrievedChunk] = []
-    if q_type == "content":
-        try:
-            supporting_chunks = _evidence_to_retrieved_chunks(stem, selected_items)
-        except Exception:
-            supporting_chunks = []
-    else:
-        try:
-            lance_root = default_lance_root()
-            if lance_root.exists() and allowed_ids:
-                df = lance_search(
-                    stem=stem,
-                    query=question,
-                    lance_root=lance_root,
-                    top_k=TOP_K,
+    try:
+        lance_root = default_lance_root()
+        if lance_root.exists() and allowed_ids:
+            df = lance_search(
+                stem=stem,
+                query=question,
+                lance_root=lance_root,
+                top_k=TOP_K,
+            )
+            if df is not None and len(df) > 0:
+                supporting_chunks = _select_lance_supporting_chunks(
+                    _rows_to_chunks(df),
+                    allowed_node_ids=allowed_ids,
+                    max_items=4,
                 )
-                if df is not None and len(df) > 0:
-                    supporting_chunks = _select_lance_supporting_chunks(
-                        _rows_to_chunks(df),
-                        allowed_node_ids=allowed_ids,
-                        max_items=4,
-                    )
-        except Exception:
-            supporting_chunks = []
+    except Exception:
+        supporting_chunks = []
 
-    context = (
-        graph_context
-        if q_type == "content"
-        else _build_hybrid_context_base(graph_context, supporting_chunks)
-    )
+    context = _build_hybrid_context_base(graph_context, supporting_chunks)
     try:
         answer = _call_gemini_answer(context, question)
     except Exception as e:
