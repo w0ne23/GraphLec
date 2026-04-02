@@ -767,6 +767,7 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     _done("메타데이터 생성", elapsed)
     return {"metadata_path": str(output_path), "elapsed": elapsed}
 
+<<<<<<< HEAD
 def _start_services(args) -> None:
     repo_root    = Path(__file__).resolve().parent
     metadata_dir = str(getattr(args, "metadata_dir", "metadata"))
@@ -816,6 +817,8 @@ def _start_services(args) -> None:
         print("\n  서비스 종료 중...")
         for p in procs.values():
             p.terminate()
+=======
+>>>>>>> f37025c (질의응답 과정 변경)
 
 # ──────────────────────────────────────────────────────────────
 # 메인 파이프라인
@@ -1006,10 +1009,6 @@ def run_pipeline(args, progress_callback=None):
         # ── Lecture 자동 등록 ──
         _auto_register_lecture(stem)
 
-        # ── 서비스 시작 (--serve 지정 시) ──
-        if getattr(args, "serve", False):
-            _start_services(args)
-
         # ── 생성된 파일 목록 ──
         print("\n  생성된 파일:")
         output_files = [
@@ -1107,6 +1106,7 @@ def get_parser():
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
+<<<<<<< HEAD
     parser.add_argument("--serve", action="store_true",
                         help="파이프라인 완료 후 query_service(8001) + recommender_web(8002) 자동 시작")
     
@@ -1114,6 +1114,9 @@ def get_parser():
 
 def main():
     args = get_parser.parse_args()
+=======
+    args = parser.parse_args()
+>>>>>>> f37025c (질의응답 과정 변경)
 
     if not args.skip_extract and not Path(args.input).exists():
         print(f"❌ 입력 영상 없음: {args.input}")
