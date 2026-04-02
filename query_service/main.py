@@ -53,7 +53,28 @@ NEO4J_URI = os.getenv("NEO4J_URI", "").strip()
 NEO4J_USER = os.getenv("NEO4J_USER", "").strip()
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
-GRAPH_SCHEMA = """
+# Concept→Concept 의미 엣지 (json_to_graph_triples.RELATION_TYPES 와 동일)
+CONCEPT_SEMANTIC_REL_TYPES = (
+    "is_a",
+    "part_of",
+    "instance_of",
+    "has_attribute",
+    "prerequisite_of",
+    "causes",
+    "influences",
+    "uses",
+    "applies",
+    "compared_to",
+    "illustrates",
+    "abstracts",
+    "solves",
+    "optimizes",
+    "implements",
+    "replaces",
+)
+_CONCEPT_REL_CYPHER_ALT = "|".join(CONCEPT_SEMANTIC_REL_TYPES)
+
+GRAPH_SCHEMA = f"""
 노드 타입과 주요 프로퍼티:
 - Video          : id, stem, title
 - Slides         : id, stem
@@ -75,14 +96,14 @@ GRAPH_SCHEMA = """
 - (Segment)-[:REFERS_TO]->(AnnotationEmphasis)
 - (Segment)-[:MENTIONS]->(Concept)
 - (Slide)-[:APPEARS_IN]->(Concept)
-- (Concept)-[:is_a|part_of|implements|abstracts|prerequisite_of|uses|calls|compared_to|extends|replaces|solves|optimizes]->(Concept)
+- (Concept)-[:{_CONCEPT_REL_CYPHER_ALT}]->(Concept)
 
 금지 패턴:
 - (Segment)-[:APPEARS_IN]->(...)
 - (...)-[:MENTIONS]->(Slide)
 - (Concept)-[:APPEARS_IN]->(Slide)
 
-모든 노드 패턴에는 반드시 {stem: $stem} 를 포함한다. 쿼리 실행 시 stem 파라미터가 전달된다.
+모든 노드 패턴에는 반드시 {{stem: $stem}} 를 포함한다. 쿼리 실행 시 stem 파라미터가 전달된다.
 """
 
 CYPHER_SYSTEM_PROMPT = f"""
@@ -372,7 +393,7 @@ def run_content_queries(
 
     q_sub = """
     MATCH (sub:Concept {stem: $stem})-[r]->(c:Concept {stem: $stem})
-    WHERE type(r) IN ['part_of','is_a','implements']
+    WHERE type(r) IN $concept_rel_types
       AND toLower(coalesce(c.name,'')) CONTAINS toLower($kw)
     RETURN coalesce(sub.id,'') AS sub_id, sub.name AS sub_concept,
            coalesce(c.id,'') AS concept_id, c.name AS parent_concept
@@ -420,7 +441,10 @@ def run_content_queries(
             ("slides", q_slide_text),
             ("segments", q_seg_text),
         ):
-            for row in _run_cypher_dicts(session, q, {"stem": stem, "kw": kw}):
+            params = {"stem": stem, "kw": kw}
+            if q is q_sub:
+                params["concept_rel_types"] = list(CONCEPT_SEMANTIC_REL_TYPES)
+            for row in _run_cypher_dicts(session, q, params):
                 raw_all.append(row)
                 if key == "segments":
                     k2 = (row.get("slide_number"), row.get("start"))
