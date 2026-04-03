@@ -75,6 +75,32 @@ TRANSITIONAL_MID_RATIO  = 0.6   # 5~15초 구간: silence_ratio > 0.6 → transi
 TRANSITIONAL_MID_SEC    = 15.0
 TRANSITIONAL_LONG_RATIO = 0.8   # 15초 초과: silence_ratio > 0.8 → transitional
 
+# objectives 판정 — 제목 키워드 기반
+OBJECTIVES_TITLE_KEYWORDS: frozenset = frozenset({
+    # 한국어 — 조사 없는 형태
+    "목차", "학습목표", "강의목표", "학습 목표", "강의 목표",
+    "개요", "강의개요", "강의 개요", "차례", "강의계획",
+    "이번 강의", "이번강의", "오늘 강의", "오늘강의",
+    # 한국어 — 조사 포함 형태
+    "의 목표", "의 개요", "의 목차",
+    # 영어
+    "outline", "agenda", "objectives", "overview",
+    "table of contents", "toc", "syllabus",
+})
+
+# 표지 슬라이드 판정 — 번호 목록만 있고 실질 내용 없는 슬라이드
+import re as _re
+_NUMBERED_LIST_RE = _re.compile(r"^\s*\d+[.]\s+.+", _re.MULTILINE)
+
+def _is_cover_or_toc_slide(title: str, slide_text: str) -> bool:
+    """제목이 강의명이고 본문이 번호 목록(1. 2. 3.)만으로 구성된 경우 — 표지/목차"""
+    lines = [l.strip() for l in slide_text.splitlines() if l.strip()]
+    if not lines:
+        return False
+    # 본문 라인 중 번호 목록 비율이 60% 이상
+    numbered = sum(1 for l in lines if _re.match(r"^\d+[.]", l))
+    return len(lines) > 0 and numbered / len(lines) >= 0.6
+
 # silent_new 판정 (단독 슬라이드)
 SILENT_NEW_MAX_SEC   = 5.0
 SILENT_NEW_MIN_RATIO = 0.6
@@ -420,9 +446,18 @@ class ClassificationPipeline:
                 "continuous":    False,
             })
 
+            # 제목 키워드 기반 objectives 판정 (체류/침묵 기반 분류보다 우선)
+            title_lower = slide.get("title", "").lower().strip()
+            slide_text  = slide.get("t1", "")
+            is_objectives = (
+                any(kw in title_lower for kw in OBJECTIVES_TITLE_KEYWORDS)
+                or _is_cover_or_toc_slide(title_lower, slide_text)
+            )
+            final_role = "objectives" if is_objectives else cls["role"]
+
             classified_slide = {
                 **slide,                          # textualized 전체 필드 계승
-                "role":          cls["role"],
+                "role":          final_role,
                 "score":         cls.get("score"),
                 "revisited":     cls.get("revisited", False),
                 "revisit_count": cls.get("revisit_count", 0),
@@ -472,7 +507,7 @@ class ClassificationPipeline:
         print("="*70)
         print(f"\n📊 결과:")
         print(f"  • 전체 슬라이드: {len(classified_slides)}개")
-        for role in ["core", "elaborated", "transitional", "silent_new"]:
+        for role in ["core", "elaborated", "transitional", "silent_new", "objectives"]:
             print(f"  • {role:<12}: {role_counter.get(role, 0)}개")
         revisited_count = sum(1 for s in classified_slides if s.get("revisited"))
         print(f"  • revisited    : {revisited_count}개")
