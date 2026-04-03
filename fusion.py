@@ -35,10 +35,11 @@ class Config:
     slides_dir:      Path = Path("output_slides")
 
     # 경로 — 직접 지정 시 우선, 없으면 __post_init__에서 config.output_paths()로 채움
-    audio_path:      Path = field(default=None)
-    classified_path: Path = field(default=None)
-    annotation_path: Path = field(default=None)
-    output_path:     Path = field(default=None)
+    audio_path:          Path = field(default=None)
+    classified_path:     Path = field(default=None)
+    annotation_path:     Path = field(default=None)
+    output_path:         Path = field(default=None)
+    slide_metadata_path: Path = field(default=None)  # output_slides/metadata.json
 
     def __post_init__(self):
         try:
@@ -54,6 +55,8 @@ class Config:
             if self.classified_path is None: self.classified_path = d / f"{s}_slide_classified.json"
             if self.annotation_path is None: self.annotation_path = d / f"{s}_annotation.json"
             if self.output_path     is None: self.output_path     = d / f"{s}_fused.json"
+        if self.slide_metadata_path is None:
+            self.slide_metadata_path = self.slides_dir / "metadata.json"
 
     # 강조 가중치
     W_AUDIO:    float = 0.8

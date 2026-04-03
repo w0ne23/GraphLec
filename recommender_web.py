@@ -78,25 +78,15 @@ async def index():
 async def recommend(req: RecommendRequest):
     """자연어 질의 기반 강의 추천"""
     try:
-        # 이력 기록
-        _recommender.history.records.clear()
-        for vid in req.history:
-            _recommender.record_view(vid)
+        if not req.query.strip():
+            return JSONResponse({"error": "질의를 입력하세요."}, status_code=400)
+
+        raw = _recommender.recommend_from_query(req.query.strip(), top_k=req.top_k)
 
         results = []
-
-        if req.query.strip():
-            # 자연어 질의 추천
-            raw = _recommender.recommend_from_query(req.query.strip(), top_k=req.top_k)
-            mode = "query"
-        elif req.history:
-            # 이력 기반 추천
-            raw = _recommender.recommend_from_history(top_k=req.top_k)
-            mode = "history"
-        else:
-            return JSONResponse({"error": "질의 또는 시청 이력을 입력하세요."}, status_code=400)
-
         for r in raw:
+            lec = _recommender.collection.get(r.video_id)
+            kw_list = [k["keyword"] for k in (lec.keywords if lec else [])[:8]]
             results.append(LectureResult(
                 video_id   = r.video_id,
                 title      = r.title,
@@ -105,12 +95,12 @@ async def recommend(req: RecommendRequest):
                 score      = round(r.score, 4),
                 reason     = r.reason,
                 summary    = r.summary[:200] + ("…" if len(r.summary) > 200 else ""),
-                keywords   = _recommender.collection.get(r.video_id).top_keywords[:8],
-                difficulty = _recommender.collection.get(r.video_id).difficulty_level,
+                keywords   = kw_list,
+                difficulty = "unclassified",
                 detail     = r.score_detail,
             ).model_dump())
 
-        return {"mode": mode, "query": req.query, "results": results}
+        return {"mode": "query", "query": req.query, "results": results}
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -423,6 +413,32 @@ HTML_PAGE = """<!DOCTYPE html>
     color: var(--muted);
   }
 
+  .qtype-tag {
+    background: rgba(56,189,248,.1);
+    border: 1px solid rgba(56,189,248,.3);
+    border-radius: 6px;
+    padding: 1px 7px;
+    font-size: 11px;
+    color: var(--accent2);
+  }
+
+  .penalty-badge {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 11px;
+    background: rgba(248,113,113,.12);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 5px;
+    padding: 1px 6px;
+    color: var(--score-l);
+    vertical-align: middle;
+    margin-left: 6px;
+  }
+
+  .result-card.penalized {
+    opacity: 0.65;
+    border-color: rgba(248,113,113,.2);
+  }
+
   /* ── 신호 디테일 (토글) ── */
   .detail-toggle {
     margin-top: 12px;
@@ -564,17 +580,15 @@ HTML_PAGE = """<!DOCTYPE html>
     const status = document.getElementById('status');
     const results = document.getElementById('results');
 
-    if (!query && selectedHistory.length === 0) {
+    if (!query) {
       status.className = 'error';
-      status.textContent = '질의를 입력하거나 시청 이력을 선택하세요.';
+      status.textContent = '질의를 입력하세요.';
       return;
     }
 
     btn.disabled = true;
     status.className = 'loading';
-    status.textContent = query
-      ? `"${query}" 분석 중…`
-      : '시청 이력 기반 추천 계산 중…';
+    status.textContent = `"${query}" 분석 중…`;
     results.innerHTML = '';
 
     try {
@@ -592,14 +606,9 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       status.className = '';
-      if (data.mode === 'query') {
-        const kws = data.results[0]?.detail?.extracted_keywords;
-        status.textContent = kws?.length
-          ? `추출 키워드: ${kws.join(', ')}`
-          : `${data.results.length}개 강의 추천됨`;
-      } else {
-        status.textContent = `이력 기반 추천 ${data.results.length}개`;
-      }
+      const qtypeLabel = { direct:'직접 검색', prerequisite:'선수 강의', followup:'연계 강의', career:'진로 기반' };
+      const qtype = data.results[0]?.detail?.query_type || 'direct';
+      status.textContent = `[${qtypeLabel[qtype] || qtype}] ${data.results.length}개 강의 추천됨`;
 
       if (data.results.length === 0) {
         results.innerHTML = `
@@ -626,14 +635,25 @@ HTML_PAGE = """<!DOCTYPE html>
     return 'var(--score-l)';
   }
 
+  const QUERY_TYPE_LABEL = {
+    direct:       '직접 검색',
+    prerequisite: '선수 강의',
+    followup:     '연계 강의',
+    career:       '진로 기반',
+  };
+
   function renderCard(r, i) {
     const rankClass = i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : 'rank-n';
     const color = scoreColor(r.score);
     const kws = (r.keywords || []).map(k => `<span class="kw-tag">${k}</span>`).join('');
 
     const detail = r.detail || {};
+    const qtype  = detail.query_type || 'direct';
+    const qtypeLabel = QUERY_TYPE_LABEL[qtype] || qtype;
+    const penalized  = detail.context_penalty === true;
+
     const detailLines = Object.entries(detail)
-      .filter(([k]) => !['extracted_keywords'].includes(k))
+      .filter(([k]) => !['query_type', 'context_penalty'].includes(k))
       .map(([k, v]) => {
         const val = typeof v === 'number' ? v.toFixed(4) : JSON.stringify(v);
         return `${k.padEnd(20)} ${val}`;
@@ -642,18 +662,19 @@ HTML_PAGE = """<!DOCTYPE html>
     const detailId = 'detail-' + i;
 
     return `
-      <div class="result-card" style="animation-delay:${i * 60}ms">
+      <div class="result-card${penalized ? ' penalized' : ''}" style="animation-delay:${i * 60}ms">
         <div class="card-top">
           <div class="rank-badge ${rankClass}">${i + 1}</div>
           <div class="card-meta">
-            <div class="card-title">${r.title}</div>
+            <div class="card-title">${r.title}${penalized ? ' <span class="penalty-badge">억제됨</span>' : ''}</div>
             <div class="card-sub">
               <span>${r.instructor}</span>
               <span class="dot">·</span>
               <span>${r.domain}</span>
               <span class="dot">·</span>
               <span>${r.video_id}</span>
-              ${r.difficulty !== 'unclassified' ? `<span class="dot">·</span><span>${r.difficulty}</span>` : ''}
+              <span class="dot">·</span>
+              <span class="qtype-tag">${qtypeLabel}</span>
             </div>
           </div>
           <div class="score-pill" style="color:${color};border-color:${color}">

@@ -1,519 +1,422 @@
 """
-generate_metadata.py
-────────────────────
-강의 메타데이터 추출 스크립트
+generate_metadata.py — 강의 메타데이터 추출
 
 입력:
-  - {stem}_nodes.parquet
-  - {stem}_edges.parquet
-  - {stem}_fused.json          (config.output_paths 기준)
+  - {stem}_fused.json      → 슬라이드 텍스트, 전사, 강조 키워드, 길이
+  - Neo4j                  → Concept 노드 degree (중심성)
 
 출력:
   - metadata/{stem}_metadata.json
 
 사용법:
-  python generate_metadata.py --stem os1-1
-  python generate_metadata.py --stem os1-1 --title "운영체제의 정의" --instructor "황기태"
-  python generate_metadata.py --stem os1-1 --output_dir output --data_dir output
+  python generate_metadata.py --stem os1-1 --title "운영체제 개론" --instructor_id prof_001
+  python generate_metadata.py --stem os1-1 --title "운영체제 개론" --instructor_id prof_001 \\
+      --output_dir output --metadata_dir metadata
 """
 
-import json
+import os
 import re
+import json
+import math
 import argparse
 from pathlib import Path
+from collections import Counter
 
-import pandas as pd
+from neo4j import GraphDatabase
 from google import genai
 from dotenv import load_dotenv
-import os
 
-load_dotenv()
+load_dotenv(override=True)
+
+# ── 설정 ──────────────────────────────────────────────────────────────────────
+
+NEO4J_URI      = os.getenv("NEO4J_URI",      "bolt://localhost:7687")
+NEO4J_USER     = os.getenv("NEO4J_USER",     "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
+
+print(f"[디버그] NEO4J URI={NEO4J_URI}  USER={NEO4J_USER}  PW={'*'*len(NEO4J_PASSWORD)}")
+
 _client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_1"))
+MODEL   = "gemini-2.5-flash"
 
 
-# ============================================================================
-#  STOPWORDS — fusion.py Config.STOPWORDS와 동일하게 유지
-# ============================================================================
+def _sample_uniform(texts: list[str], n: int) -> list[str]:
+    """리스트에서 균등 간격으로 n개 샘플링"""
+    if len(texts) <= n:
+        return texts
+    step = len(texts) / n
+    return [texts[int(i * step)] for i in range(n)]
 
-STOPWORDS: frozenset = frozenset({
-    "이", "그", "저", "은", "는", "가", "을", "를", "의", "에", "도",
-    "와", "과", "하고", "이고", "이며", "그리고", "그래서", "하지만",
-    "또한", "즉", "따라서", "그러나", "또는", "및",
-    "있습니다", "있어요", "합니다", "해요", "됩니다", "돼요",
-    "입니다", "이에요", "이다", "한다", "된다",
-    "것", "거", "수", "때", "더", "많이", "같은", "이런", "그런",
-    "개념", "정의", "목표", "목적", "기능", "시작", "발전", "차이",
-    "종류", "특징", "핵심", "단어", "강의", "내용", "설명", "이해",
-    "개요", "소개", "정리", "비교", "분석", "예시", "문제",
-    "실행", "요청", "종료", "생각", "과정", "사용", "제공",
-    "처리", "수행", "동작", "발생", "설치", "구현", "관련",
-    "the", "a", "an", "is", "are", "was", "were", "to", "of", "in",
-    "and", "or", "for", "with", "that", "this", "be", "by",
-    "키보드", "마우스", "콘솔", "램", "캐시", "입출력 장치", "모니터", "프린터",
-    "컴퓨터", "사용자", "하드웨어", "소프트웨어",
-})
+DOMAIN_LIST = """
+ENG: eng/cs, eng/electrical, eng/mechanical, eng/civil, eng/chemical,
+     eng/industrial, eng/biomedical, eng/aerospace, eng/materials, eng/environmental
+SCI: sci/physics, sci/chemistry, sci/biology, sci/earth_science, sci/astronomy, sci/ecology
+MATH: math/calculus, math/linear_algebra, math/discrete, math/probability,
+      math/statistics, math/numerical, math/optimization
+HUM: hum/philosophy, hum/history, hum/linguistics, hum/literature,
+     hum/art_history, hum/religion
+SOC: soc/economics, soc/business, soc/law, soc/political_science,
+     soc/sociology, soc/psychology, soc/education
+MED: med/anatomy, med/physiology, med/pharmacology, med/clinical,
+     med/public_health, med/nursing
+ART: art/fine_arts, art/music, art/design, art/film, art/theater,
+     art/physical_education, art/sports_science
+GEN: gen/writing, gen/critical_thinking, gen/career, gen/ethics,
+     gen/language, gen/interdisciplinary, gen/other
+"""
 
-
-# ============================================================================
-#  그룹 A — 기본 정보
-# ============================================================================
-
-def infer_title(
-    top_concepts: list[dict],
-    top_keywords: list[str],
-    topic_segments: list[dict],
-) -> str:
-    """top_concepts/keywords/segments로 강의 제목 자동 생성"""
-    concept_names = [c["name"] for c in top_concepts[:5]]
-    segment_titles = [s["title"] for s in topic_segments[:4]]
-    prompt = f"""다음 정보를 바탕으로 강의 제목을 한 줄로 작성해줘.
-
-핵심 개념: {', '.join(concept_names)}
-핵심 키워드: {', '.join(top_keywords[:6])}
-강의 흐름: {' → '.join(segment_titles)}
-
-조건:
-- 10자 내외의 간결한 강의 제목
-- '~의 정의', '~의 개념', '~의 기초' 형식 허용
-- 제목만 출력 (따옴표, 설명 없이)"""
-    response = _client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config={"temperature": 0.0},
-    )
-    return response.text.strip().strip('"').strip("'")
+# 키워드 점수 가중치
+W_FREQ       = 0.4
+W_EMPHASIS   = 0.2
+W_CENTRALITY = 0.4
 
 
-def infer_domain(
-    nodes: "pd.DataFrame",
-    top_concepts: list[dict],
-    top_keywords: list[str],
-) -> str:
-    """
-    KG Domain 노드 → broad category 추출 후,
-    top_concepts/keywords로 세부 도메인을 Gemini가 추론.
-    """
-    # KG에서 broad domain 추출
-    domain_nodes = nodes[nodes["label"] == "Domain"]
-    broad = ""
-    if not domain_nodes.empty:
-        props = json.loads(domain_nodes.iloc[0]["properties_json"])
-        subdomain = props.get("subdomain", "")
-        name = props.get("name", "")
-        broad = f"{name}/{subdomain}" if subdomain else name
+# ── fused.json 파싱 ────────────────────────────────────────────────────────────
 
-    concept_names = [c["name"] for c in top_concepts[:7]]
-    prompt = f"""다음 강의의 도메인을 추론해줘.
-
-KG 추출 카테고리: {broad}
-핵심 개념: {', '.join(concept_names)}
-핵심 키워드: {', '.join(top_keywords[:8])}
-
-규칙:
-- 아래 형식 중 하나로만 출력: cs/operating_system, cs/network, cs/data_structure,
-  cs/algorithm, cs/database, cs/software_engineering, math/linear_algebra,
-  math/statistics, math/calculus, ml/deep_learning, ml/machine_learning, other
-- 형식 문자열만 출력 (설명 없이)"""
-    response = _client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config={"temperature": 0.0},
-    )
-    return response.text.strip()
+def load_fused(stem: str, output_dir: Path) -> dict:
+    try:
+        from config import output_paths
+        paths = output_paths(stem, output_dir, output_dir)
+        path  = paths["fused"]
+    except ImportError:
+        path = output_dir / f"{stem}_fused.json"
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
 
 
-def extract_basic_info(fused: dict, overrides: dict) -> dict:
+def get_duration(fused: dict) -> float:
+    """마지막 슬라이드 end_sec 기준 총 길이(초)"""
     slides = fused.get("slides", [])
-    duration_sec = max((s.get("end_sec", 0) for s in slides), default=0)
-    return {
-        "video_id":    overrides.get("video_id", Path(fused.get("video_path", "")).stem),
-        "instructor":  overrides.get("instructor", ""),
-        "duration_sec": round(duration_sec),
-        "language":    overrides.get("language", "ko"),
-    }
+    if not slides:
+        return 0.0
+    last = slides[-1]
+    # contexts가 있으면 마지막 context의 end, 없으면 slide의 end_sec
+    ctxs = last.get("contexts", [])
+    if ctxs:
+        segs = ctxs[-1].get("segments", [])
+        if segs:
+            return float(segs[-1].get("end", 0.0))
+        return float(ctxs[-1].get("end", 0.0))
+    return float(last.get("end_sec", 0.0))
 
 
-# ============================================================================
-#  그룹 B — KG 기반 정보
-# ============================================================================
+def collect_texts(fused: dict) -> tuple[list[str], list[str], list[str], list[str]]:
+    """
+    slide_texts, transcript_texts: 전체 (키워드 점수용)
+    core_slide_texts, core_trans_texts: core/elaborated만 (요약용)
+    """
+    slide_texts      = []
+    transcript_texts = []
+    core_slide_texts = []
+    core_trans_texts = []
 
-def extract_fused_keyword_scores(fused: dict) -> dict[str, float]:
+    for slide in fused.get("slides", []):
+        # objectives 슬라이드 스킵
+        if slide.get("role") == "objectives":
+            continue
+
+        role = slide.get("role", "")
+        parts = []
+        if slide.get("title"):
+            parts.append(slide["title"])
+        if slide.get("slide_text"):
+            parts.append(slide["slide_text"])
+        text = " ".join(parts)
+        slide_texts.append(text)
+        if role == "core":
+            core_slide_texts.append(text)
+
+        for ctx in slide.get("contexts", []):
+            for seg in ctx.get("segments", []):
+                t = seg.get("text", "")
+                if t:
+                    transcript_texts.append(t)
+                    if role in ("core", "elaborated"):
+                        core_trans_texts.append(t)
+
+    # core/elaborated가 하나도 없으면 전체로 fallback
+    if not core_slide_texts:
+        core_slide_texts = slide_texts
+    if not core_trans_texts:
+        core_trans_texts = transcript_texts
+
+    return slide_texts, transcript_texts, core_slide_texts, core_trans_texts
+
+
+def collect_emphasized(fused: dict) -> dict[str, float]:
+    """키워드 → 강조 점수 합산 (emphasized_keywords 기반)"""
     scores: dict[str, float] = {}
     for slide in fused.get("slides", []):
         for kw in slide.get("emphasized_keywords", []):
-            k = kw["keyword"]
-            scores[k] = scores.get(k, 0) + (
-                kw.get("audio_score", 0)
-                + kw.get("visual_score", 0)
-                + kw.get("annotation_score", 0)
-                + kw.get("slide_text_score", 0)
+            name = kw.get("keyword", "")
+            if not name:
+                continue
+            score = (
+                kw.get("audio_score", 0.0)
+                + kw.get("annotation_score", 0.0)
+                + kw.get("visual_score", 0.0)
+                + kw.get("slide_text_score", 0.0)
             )
+            scores[name] = scores.get(name, 0.0) + score
     return scores
 
 
-def extract_top_concepts(
-    nodes: pd.DataFrame,
-    edges: pd.DataFrame,
-    fused_kw_scores: dict[str, float],
-    top_n: int = 10,
+# ── Neo4j: Concept 노드 degree 조회 ──────────────────────────────────────────
+
+def fetch_concept_degrees(stem: str) -> dict[str, int]:
+    """
+    stem에 해당하는 Concept 노드 name → degree 반환
+    lecture_video/{stem} 노드로부터 연결된 Concept 탐색
+    """
+    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+    result = {}
+    with driver.session() as session:
+        # Video 노드 경유로 해당 강의의 Concept만 조회
+        records = session.run(
+            """
+            MATCH (v:Video {id: $vid})
+                  -[:HAS_SLIDES]->(:Slides)
+                  -[:CONTAINS]->(s:Slide)
+                  -[:MENTIONS|APPEARS_IN]-(c:Concept)
+            RETURN c.name AS name, COUNT { (c)-[]-() } AS degree
+            """,
+            vid=f"lecture_video/{stem}",
+        )
+        for r in records:
+            if r["name"]:
+                result[r["name"]] = r["degree"]
+    driver.close()
+    return result
+
+
+# ── 키워드 점수 산출 ───────────────────────────────────────────────────────────
+
+def _normalize(d: dict[str, float]) -> dict[str, float]:
+    if not d:
+        return d
+    max_v = max(d.values()) or 1.0
+    return {k: v / max_v for k, v in d.items()}
+
+
+def _count_freq(name: str, slide_texts: list[str], transcript_texts: list[str]) -> float:
+    """슬라이드 등장 횟수 × 1.0 + 전사 등장 횟수 × 0.5"""
+    slide_cnt = sum(t.count(name) for t in slide_texts)
+    trans_cnt = sum(t.count(name) for t in transcript_texts)
+    return slide_cnt * 1.0 + trans_cnt * 0.5
+
+
+def score_keywords(
+    concept_degrees: dict[str, int],
+    emphasized:      dict[str, float],
+    slide_texts:     list[str],
+    transcript_texts: list[str],
+    duration_sec:    float,
+    debug:           bool = False,
 ) -> list[dict]:
-    concept_nodes = nodes[nodes["label"] == "Concept"]["node_id"].tolist()
-    concept_names = {nid: nid.replace("concept/", "") for nid in concept_nodes}
+    """
+    score = 0.4·freq + 0.2·emphasis + 0.4·centrality
+    반환: [{"keyword": ..., "score": ...}, ...]  (score 내림차순)
+    """
+    all_names = set(concept_degrees) | set(emphasized)
+    if not all_names:
+        return []
 
-    in_degree  = edges[edges["rel_type"] == "MENTIONS"]["tgt_id"].value_counts().to_dict()
-    max_degree = max(in_degree.values(), default=1)
-    max_score  = max(fused_kw_scores.values(), default=1)
+    # 원시값 수집
+    raw_freq  = {n: _count_freq(n, slide_texts, transcript_texts) for n in all_names}
+    raw_emph  = {n: emphasized.get(n, 0.0) for n in all_names}
+    raw_cent  = {n: float(concept_degrees.get(n, 0)) for n in all_names}
 
-    results = []
-    for nid, name in concept_names.items():
-        centrality = round(in_degree.get(nid, 0) / max_degree, 3)
-        weight     = round(fused_kw_scores.get(name, 0) / max_score * 5, 3)
-        results.append({"name": name, "weight": weight, "centrality": centrality})
+    # [0,1] 정규화
+    norm_freq  = _normalize(raw_freq)
+    norm_emph  = _normalize(raw_emph)
+    norm_cent  = _normalize(raw_cent)
 
-    results.sort(key=lambda x: x["weight"] + x["centrality"], reverse=True)
-    return results[:top_n]
-
-
-PREREQUISITE_RELATIONS = {"is_a", "part_of", "uses", "implements", "extends"}
-PREREQ_VALID_ENTITY_TYPES = {
-    "system", "artifact", "method", "agent", "phenomenon", "metric", "event"
-}
-
-def extract_prerequisites(
-    nodes: pd.DataFrame,
-    edges: pd.DataFrame,
-    top_concept_names: set[str],
-    max_prereqs: int = 5,
-    min_mention: int = 8,
-) -> list[str]:
-    concept_nodes = nodes[nodes["label"] == "Concept"].copy()
-    concept_nodes["entity_type"] = concept_nodes["properties_json"].apply(
-        lambda x: json.loads(x).get("entity_type", "") if x else ""
-    )
-    valid_node_ids = set(
-        concept_nodes[concept_nodes["entity_type"].isin(PREREQ_VALID_ENTITY_TYPES)]["node_id"]
-    )
-
-    semantic_edges    = edges[edges["rel_type"].isin(PREREQUISITE_RELATIONS)]
-    prereq_candidates = semantic_edges[
-        semantic_edges["tgt_id"].isin(valid_node_ids)
-    ]["tgt_id"].value_counts()
-
-    mention_counts = edges[edges["rel_type"] == "MENTIONS"]["tgt_id"].value_counts().to_dict()
-
-    results = []
-    for nid, ref_count in prereq_candidates.items():
-        name = nid.replace("concept/", "")
-        if name in top_concept_names:
-            continue
-        if mention_counts.get(nid, 0) < min_mention:
-            continue
-        results.append((name, ref_count))
-
-    results.sort(key=lambda x: x[1], reverse=True)
-    return [name for name, _ in results[:max_prereqs]]
-
-
-def extract_kg_stats(nodes: pd.DataFrame, edges: pd.DataFrame) -> dict:
-    return {
-        "concept_node_count":  len(nodes[nodes["label"] == "Concept"]),
-        "total_node_count":    len(nodes),
-        "semantic_edge_count": len(edges[edges["rel_type"].isin(PREREQUISITE_RELATIONS)]),
-        "mention_edge_count":  len(edges[edges["rel_type"] == "MENTIONS"]),
+    # 최종 점수
+    scored = {
+        n: W_FREQ * norm_freq[n] + W_EMPHASIS * norm_emph[n] + W_CENTRALITY * norm_cent[n]
+        for n in all_names
     }
 
-
-def compute_knowledge_density(kg_stats: dict, duration_sec: float) -> float:
-    if duration_sec <= 0:
-        return 0.0
-    return round(min(kg_stats["concept_node_count"] / (duration_sec / 60) / 10.0, 1.0), 3)
-
-
-def fetch_graph_from_neo4j(
-    stem: str,
-    uri: str,
-    user: str,
-    password: str,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Neo4j에서 stem 서브그래프를 조회해 nodes/edges DataFrame으로 반환.
-    반환 스키마는 parquet와 동일: node_id, stem, label, properties_json / src_id, rel_type, tgt_id, stem, properties_json
-    """
-    from neo4j import GraphDatabase
-
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    node_rows, edge_rows = [], []
-
-    try:
-        with driver.session() as session:
-            # 노드: id, stem은 메타키이므로 properties_json에서 제외
-            for rec in session.run(
-                "MATCH (n {stem: $stem}) RETURN n.id AS node_id, labels(n)[0] AS label, properties(n) AS props",
-                stem=stem,
-            ):
-                extra = {k: v for k, v in dict(rec["props"]).items() if k not in ("id", "stem")}
-                node_rows.append({
-                    "node_id":         rec["node_id"],
-                    "stem":            stem,
-                    "label":           rec["label"],
-                    "properties_json": json.dumps(extra, ensure_ascii=False),
-                })
-
-            # 엣지
-            for rec in session.run(
-                """MATCH (a {stem: $stem})-[r]->(b {stem: $stem})
-                   RETURN a.id AS src_id, type(r) AS rel_type, b.id AS tgt_id, properties(r) AS props""",
-                stem=stem,
-            ):
-                edge_rows.append({
-                    "src_id":          rec["src_id"],
-                    "rel_type":        rec["rel_type"],
-                    "tgt_id":          rec["tgt_id"],
-                    "stem":            stem,
-                    "properties_json": json.dumps(dict(rec["props"]), ensure_ascii=False),
-                })
-    finally:
-        driver.close()
-
-    print(f"  [Neo4j] 노드 {len(node_rows)}개, 엣지 {len(edge_rows)}개 조회")
-    return pd.DataFrame(node_rows), pd.DataFrame(edge_rows)
-
-# ============================================================================
-#  그룹 C — 요약/검색용
-# ============================================================================
-
-_JOSA_PATTERN = re.compile(r"(의|와|과|에서|에|은|는|이|가|을|를|로|으로|도|만)$")
-
-def _strip_josa(word: str) -> str:
-    return _JOSA_PATTERN.sub("", word)
-
-
-def extract_top_keywords(fused: dict, top_n: int = 10) -> list[str]:
-    TITLE_BOOST = 10.0
-
-    scores: dict[str, dict] = {}
-    for slide in fused.get("slides", []):
-        for kw in slide.get("emphasized_keywords", []):
-            k = kw["keyword"]
-            if k not in scores:
-                scores[k] = {"total": 0.0, "is_both": False}
-            scores[k]["total"] += (
-                kw.get("audio_score", 0)
-                + kw.get("visual_score", 0)
-                + kw.get("annotation_score", 0)
-                + kw.get("slide_text_score", 0)
+    if debug:
+        print("\n[디버그] 키워드 점수 상세 (상위 15개)")
+        print(f"{'키워드':<20} {'최종':>6}  {'freq':>6}(raw={'{:>5}'.format('')})  {'emph':>6}(raw={'{:>5}'.format('')})  {'cent':>6}(raw)")
+        top15 = sorted(scored.items(), key=lambda x: -x[1])[:15]
+        for n, s in top15:
+            print(
+                f"{n:<20} {s:>6.4f}  "
+                f"freq={norm_freq[n]:>5.3f}(raw={raw_freq[n]:>5.1f})  "
+                f"emph={norm_emph[n]:>5.3f}(raw={raw_emph[n]:>5.2f})  "
+                f"cent={norm_cent[n]:>5.3f}(raw={int(raw_cent[n]):>3d})"
             )
-            if set(kw.get("sources", [])) >= {"audio", "visual"}:
-                scores[k]["is_both"] = True
+        print()
 
-    title_word_counts: dict[str, int] = {}
-    for slide in fused.get("slides", []):
-        for w in re.split(r"[\s,.\-·]+", slide.get("title", "")):
-            normalized = _strip_josa(w)
-            if len(normalized) >= 2:
-                title_word_counts[normalized] = title_word_counts.get(normalized, 0) + 1
+    # 개수 결정: [min_k, max_k] + score 임계값 컷
+    duration_min = duration_sec / 60.0
+    min_k = max(5, int(duration_min // 10))
+    max_k = min(20, int(duration_min // 5))
+    if max_k < min_k:
+        max_k = min_k  # 5분 미만 초단편 강의 안전장치
 
-    for k in scores:
-        scores[k]["total"] += title_word_counts.get(k, 0) * TITLE_BOOST
-
-    for word, count in title_word_counts.items():
-        if word in STOPWORDS:
-            continue
-        if word not in scores:
-            scores[word] = {"total": count * TITLE_BOOST, "is_both": False}
-
-    sorted_kw = sorted(
-        [(k, v) for k, v in scores.items() if k not in STOPWORDS],
-        key=lambda x: (x[1]["is_both"], x[1]["total"]),
-        reverse=True,
+    threshold = sum(scored.values()) / len(scored) * 1.2
+    candidates = sorted(
+        [(n, s) for n, s in scored.items() if s >= threshold],
+        key=lambda x: -x[1],
     )
-    return [k for k, _ in sorted_kw[:top_n]]
+
+    # 범위 클리핑
+    if len(candidates) < min_k:
+        candidates = sorted(scored.items(), key=lambda x: -x[1])[:min_k]
+    elif len(candidates) > max_k:
+        candidates = candidates[:max_k]
+
+    return [{"keyword": n, "score": round(s, 4)} for n, s in candidates]
 
 
-def extract_topic_segments(fused: dict) -> list[dict]:
-    return [
-        {
-            "slide_idx": s["slide_number"],
-            "title":     s["title"],
-            "start_sec": round(s.get("start_sec", 0)),
-            "end_sec":   round(s.get("end_sec", 0)),
-            "role":      s.get("role"),
-        }
-        for s in fused.get("slides", [])
-        if s.get("role") in ("core", "elaborated")
-    ]
+# ── LLM 호출 ──────────────────────────────────────────────────────────────────
+
+def _gemini(prompt: str) -> str:
+    resp = _client.models.generate_content(
+        model=MODEL,
+        contents=prompt,
+        config={"temperature": 0.0},
+    )
+    return resp.text.strip()
+
+
+def classify_domain(slide_texts: list[str], transcript_texts: list[str]) -> str:
+    sample_slide = " ".join(slide_texts[:5])[:800]
+    sample_trans = " ".join(transcript_texts[:20])[:800]
+    prompt = f"""아래는 강의 내용 일부다.
+
+슬라이드: {sample_slide}
+전사: {sample_trans}
+
+다음 도메인 목록 중 가장 적합한 것 하나만 출력하라. 설명 없이 도메인 코드만 출력.
+예시 출력: eng/cs
+
+도메인 목록:
+{DOMAIN_LIST}
+"""
+    result = _gemini(prompt).strip().lower()
+    # 목록에 없는 값이면 gen/other 반환
+    valid = re.findall(r"[a-z]+/[a-z_]+", result)
+    return valid[0] if valid else "gen/other"
 
 
 def generate_summary(
-    title: str,
-    top_keywords: list[str],
-    top_concepts: list[dict],
-    topic_segments: list[dict],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+    concept_degrees:  dict | None = None,
 ) -> str:
-    prompt = f"""다음 정보를 바탕으로 강의 요약을 작성해줘.
+    # core/elaborated 슬라이드: 장당 150자 제한, 전체 한도 = 장수 × 150
+    MAX_PER_SLIDE = 150
+    slide_block = " / ".join(
+        s.strip()[:MAX_PER_SLIDE] for s in core_slide_texts if s.strip()
+    )[:MAX_PER_SLIDE * len(core_slide_texts)]
 
-강의 제목: {title}
-핵심 개념: {', '.join(c['name'] for c in top_concepts[:7])}
-핵심 키워드: {', '.join(top_keywords[:10])}
-강의 흐름: {' → '.join(s['title'] for s in topic_segments)}
+    # core/elaborated 전사: 균등 샘플링 후 1500자 컷
+    n_sample = min(40, len(core_trans_texts))
+    sampled_trans = _sample_uniform(core_trans_texts, n_sample)
+    trans_block = " ".join(sampled_trans)[:1500]
 
-조건:
-- 3~5문장으로 작성
-- 학습자가 이 강의에서 무엇을 배울 수 있는지 명확히 전달
-- 강의 흐름(도입→핵심→마무리)을 반영
-- 한국어로 작성
-- 요약문만 출력 (다른 텍스트 없이)"""
+    # KG 핵심 concept 상위 10개
+    concept_block = ""
+    if concept_degrees:
+        top = sorted(concept_degrees.items(), key=lambda x: -x[1])[:10]
+        concept_block = f"\n핵심 개념 (지식그래프 기반): {', '.join(n for n, _ in top)}\n"
 
-    response = _client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-    )
-    return response.text.strip()
+    prompt = f"""아래는 강의의 슬라이드 텍스트, 전사본, 핵심 개념 목록이다.
+
+슬라이드 (강의 전체 균등 샘플):
+{slide_block}
+
+전사 (강의 전체 균등 샘플):
+{trans_block}
+{concept_block}
+두 소스 모두에서 언급된 내용을 중심으로 3문장으로 요약하라.
+단순 나열이 아니라 강의의 핵심 흐름이 드러나도록 작성하라.
+한국어로 작성하고 설명 없이 요약문만 출력하라.
+"""
+    print(f"\n[디버그] 요약 입력 슬라이드 ({len(core_slide_texts)}장):")
+    for i, s in enumerate(core_slide_texts):
+        print(f"  [{i+1}] {s.strip()[:80]}")
+    print(f"\n[디버그] 요약 입력 전사 segment 수: {len(core_trans_texts)}")
+    if concept_degrees:
+        top = sorted(concept_degrees.items(), key=lambda x: -x[1])[:10]
+        print(f"[디버그] KG 핵심 개념: {[n for n, _ in top]}")
+    print(f"\n[디버그] slide_block ({len(slide_block)}자):\n{slide_block[:500]}")
+    print(f"\n[디버그] trans_block ({len(trans_block)}자):\n{trans_block[:300]}\n")
+    return _gemini(prompt)
 
 
-# ============================================================================
-#  통합 실행
-# ============================================================================
+# ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def generate_metadata(
-    nodes_path: str,
-    edges_path: str,
-    fused_path: str,
-    output_path: str,
-    basic_info_overrides: dict,
-    top_concepts_n: int = 10,
-    top_keywords_n: int = 10,
-    use_neo4j: bool = True,
+    stem:          str,
+    title:         str,
+    instructor_id: str,
+    output_dir:    Path,
+    metadata_dir:  Path,
 ) -> dict:
-    
-    # ── 노드/엣지 로드: Neo4j 우선, 폴백 parquet ──
-    neo4j_uri  = os.getenv("NEO4J_URI", "").strip()
-    neo4j_user = os.getenv("NEO4J_USER", "").strip()
-    neo4j_pw   = os.getenv("NEO4J_PASSWORD", "")
-    stem = basic_info_overrides.get("video_id", Path(nodes_path).stem.replace("_nodes", ""))
+    print(f"[{stem}] fused.json 로드 중...")
+    fused = load_fused(stem, output_dir)
 
-    if use_neo4j and neo4j_uri and neo4j_user:
-        print("[0/6] Neo4j에서 노드/엣지 로드...")
-        nodes, edges = fetch_graph_from_neo4j(stem, neo4j_uri, neo4j_user, neo4j_pw)
-    else:
-        print("[0/6] Parquet에서 노드/엣지 로드...")
-        nodes = pd.read_parquet(nodes_path)
-        edges = pd.read_parquet(edges_path)
+    duration_sec                     = get_duration(fused)
+    slide_texts, transcript_texts, core_slide_texts, core_trans_texts = collect_texts(fused)
+    emphasized                       = collect_emphasized(fused)
 
-    with open(fused_path, encoding="utf-8") as f:
-        fused = json.load(f)
+    print(f"[{stem}] Neo4j Concept 노드 조회 중...")
+    concept_degrees = fetch_concept_degrees(stem)
+    print(f"       → Concept {len(concept_degrees)}개")
 
-    nodes = pd.read_parquet(nodes_path)
-    edges = pd.read_parquet(edges_path)
-    with open(fused_path, encoding="utf-8") as f:
-        fused = json.load(f)
+    print(f"[{stem}] 도메인 분류 중...")
+    domain = classify_domain(slide_texts, transcript_texts)
 
-    print("[1/6] 기본 정보 추출...")
-    basic = extract_basic_info(fused, basic_info_overrides)
+    print(f"[{stem}] 요약 생성 중...")
+    summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
 
-    print("[2/6] 키워드 점수 집계...")
-    fused_kw_scores = extract_fused_keyword_scores(fused)
-
-    print(f"[3/6] 핵심 개념 추출 (top {top_concepts_n})...")
-    top_concepts = extract_top_concepts(nodes, edges, fused_kw_scores, top_concepts_n)
-
-    print("[4/6] 선수 지식 추출...")
-    prerequisites = extract_prerequisites(nodes, edges, {c["name"] for c in top_concepts})
-
-    print("[5/6] 요약/검색 정보 추출...")
-    kg_stats          = extract_kg_stats(nodes, edges)
-    knowledge_density = compute_knowledge_density(kg_stats, basic["duration_sec"])
-    top_keywords      = extract_top_keywords(fused, top_keywords_n)
-    topic_segments    = extract_topic_segments(fused)
-
-    print("[5.5/6] 제목·도메인 자동 추론 (Gemini)...")
-    title  = basic_info_overrides.get("title") or infer_title(top_concepts, top_keywords, topic_segments)
-    domain = basic_info_overrides.get("domain") or infer_domain(nodes, top_concepts, top_keywords)
-    print(f"  title  = {title}")
-    print(f"  domain = {domain}")
-
-    print("[6/6] 요약 생성 (Gemini)...")
-    summary = generate_summary(
-        title=title,
-        top_keywords=top_keywords,
-        top_concepts=top_concepts,
-        topic_segments=topic_segments,
+    print(f"[{stem}] 키워드 점수 산출 중...")
+    keywords = score_keywords(
+        concept_degrees, emphasized, slide_texts, transcript_texts, duration_sec,
+        debug=True,
     )
+    print(f"       → {len(keywords)}개 선택")
 
     metadata = {
-        "video_id":    basic["video_id"],
-        "title":       title,
-        "instructor":  basic["instructor"],
-        "domain":      domain,
-        "duration_sec": basic["duration_sec"],
-        "language":    basic["language"],
-        "top_concepts":      top_concepts,
-        "prerequisites":     prerequisites,
-        "knowledge_density": knowledge_density,
-        "kg_stats":          kg_stats,
-        "summary":          summary,
-        "top_keywords":     top_keywords,
-        "topic_segments":   topic_segments,
-        "difficulty_level": "unclassified",
+        "video_id":      stem,
+        "title":         title,
+        "instructor_id": instructor_id,
+        "duration_sec":  round(duration_sec, 1),
+        "domain":        domain,
+        "summary":       summary,
+        "keywords":      keywords,
     }
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
+    # 저장
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    out_path = metadata_dir / f"{stem}_metadata.json"
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
+    print(f"[{stem}] 완료 → {out_path}")
 
-    print(f"\n✅ 메타데이터 저장 완료: {output_path}")
     return metadata
 
 
-# ============================================================================
-#  CLI
-# ============================================================================
+# ── CLI ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="강의 메타데이터 생성기")
-    parser.add_argument("--stem",         required=True, help="강의 파일 stem (예: os1-1)")
-    parser.add_argument("--output_dir",   default="output",       help="parquet/fused 파일 위치")
-    parser.add_argument("--slides_dir",   default="output_slides", help="슬라이드 이미지 디렉토리")
-    parser.add_argument("--metadata_dir", default="metadata",     help="메타데이터 저장 위치")
-    parser.add_argument("--title",        default="",  help="강의명 (미입력 시 Gemini 자동 생성)")
-    parser.add_argument("--instructor",   default="",  help="교수자명")
-    parser.add_argument("--domain",       default="",  help="도메인 (미입력 시 Gemini 자동 추론)")
-    parser.add_argument("--language",     default="ko")
-    parser.add_argument("--top_concepts", type=int, default=10)
-    parser.add_argument("--top_keywords", type=int, default=10)
-    parser.add_argument("--use-parquet", action="store_true", help="Neo4j 대신 로컬 parquet 파일에서 노드/엣지 로드 (NEO4J_* 환경변수 없을 때 자동 폴백)")
+    parser = argparse.ArgumentParser(description="강의 메타데이터 생성")
+    parser.add_argument("--stem",          required=True,           help="강의 식별자 (예: os1-1)")
+    parser.add_argument("--title",         required=True,           help="강의 제목")
+    parser.add_argument("--instructor_id", required=True,           help="교수 ID")
+    parser.add_argument("--output_dir",    default="output",        help="fused.json 위치")
+    parser.add_argument("--metadata_dir",  default="metadata",      help="메타데이터 저장 디렉토리")
     args = parser.parse_args()
 
-    # config.py 패턴: output_paths()가 있으면 사용, 없으면 직접 경로 구성
-    try:
-        from config import output_paths
-        paths = output_paths(args.stem, Path(args.output_dir), Path(args.slides_dir))
-        nodes_path = str(Path(args.output_dir) / f"{args.stem}_nodes.parquet")
-        edges_path = str(Path(args.output_dir) / f"{args.stem}_edges.parquet")
-        fused_path = str(paths["fused"])
-    except (ImportError, KeyError):
-        nodes_path = str(Path(args.output_dir) / f"{args.stem}_nodes.parquet")
-        edges_path = str(Path(args.output_dir) / f"{args.stem}_edges.parquet")
-        fused_path = str(Path(args.output_dir) / f"{args.stem}_fused.json")
-
-    output_path = str(Path(args.metadata_dir) / f"{args.stem}_metadata.json")
-
-    metadata = generate_metadata(
-        nodes_path  = nodes_path,
-        edges_path  = edges_path,
-        fused_path  = fused_path,
-        output_path = output_path,
-        basic_info_overrides = {
-            "video_id":   args.stem,
-            "title":      args.title,
-            "instructor": args.instructor,
-            "domain":     args.domain,
-            "language":   args.language,
-        },
-        top_concepts_n = args.top_concepts,
-        top_keywords_n = args.top_keywords,
+    generate_metadata(
+        stem          = args.stem,
+        title         = args.title,
+        instructor_id = args.instructor_id,
+        output_dir    = Path(args.output_dir),
+        metadata_dir  = Path(args.metadata_dir),
     )
-
-    preview = {k: v for k, v in metadata.items() if k not in ("topic_segments", "summary")}
-    preview["topic_segments"] = f"[{len(metadata['topic_segments'])}개]"
-    preview["summary"] = metadata["summary"][:80] + "..."
-    print(json.dumps(preview, ensure_ascii=False, indent=2))
