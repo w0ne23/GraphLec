@@ -41,7 +41,7 @@ GraphLec은 강의 영상에서 시각적 정보(슬라이드)와 청각적 정�
     ├─ Neo4j 적재 (기본) — nodes/edges Parquet → Neo4j (`--skip-neo4j`로 생략 가능)
     └─ Stage 7 Lance 인덱스 → Parquet 백업 + LanceDB
 
-질의: LanceDB 검색 + Gemini 답변 (query_service) ← Django 웹이 프록시
+질의: Neo4j(구조/내용) + Lance 보조·재순위(내용형) + Gemini (query_service) ← Django 프록시
 ```
 
 ---
@@ -170,7 +170,7 @@ opencv-python, numpy, Pillow, google-generativeai, google-genai, groq, torch, tr
 ### 구성
 
 - **Django** (`web/`): 강의 메타(`Lecture`), 질의 페이지, `/api/query/`·`/api/graph/full/` 등
-- **FastAPI** (`query_service/`): `POST /internal/query` — `stem` + `question`(LanceDB 검색 + Gemini 답변)
+- **FastAPI** (`query_service/`): `POST /internal/query` — `stem` + `question`(질문 유형별 Neo4j·Lance·Gemini; 아래 **질의응답: 이전 버전과 현재 버전의 차이** 참고)
 
 ### 실행 (터미널 2개, 프로젝트 루트에서 가상환경 활성화 후)
 
@@ -200,6 +200,67 @@ python manage.py runserver 8000
 
 질의 서비스는 **프로젝트 루트**에서 실행하는 것을 권장합니다(`python main.py`로 만든 LanceDB 경로와 맞추기 쉬움).  
 Django는 로컬 테스트 기준으로 SQLite(`web/db.sqlite3`)를 사용합니다.
+
+### 질의응답: 이전 버전과 현재 버전의 차이
+
+구현 기준은 **이전**: `query_service/archive/main_first_ver.py`(FastAPI 앱 버전 **0.2.0**), **현재**: `query_service/main.py`(**0.3.0**)입니다. 공통으로 Django는 `lecture_id`→`stem` 변환 후 `POST /internal/query`에 `stem`·`question`만 넘기고, 질문은 키워드 휴리스틱으로 **구조형(structural)** 과 **내용형(content)** 으로 나뉩니다. 차이는 주로 **내용형 파이프라인**과 **구조형 Cypher 생성 보조**, **응답에 실리는 보조 메타데이터**입니다.
+
+---
+
+#### 공통 동작(두 버전 모두)
+
+- **구조형 질문**: 슬라이드 번호·시간·구간·장면 등 `STRUCTURAL_KEYWORDS`에 걸리면 LLM이 읽기 전용 Cypher를 생성하고 Neo4j에 `$stem` 필터로 조회합니다. 그래프 결과가 비면 답을 내지 않습니다.
+- **Neo4j 내용 조회 골격**: 키워드마다 고정 Cypher 템플릿으로 서브개념·세그먼트·슬라이드(개념/본문)를 `CONTAINS` 매칭해 모읍니다. (현재는 `query_service/neo4j_content_queries.py`로 분리·한도 설정 가능.)
+- **최종 답변**: 근거 문자열 + 사용자 질문을 Gemini에 넘기며, 시스템 프롬프트로 환각을 줄입니다.
+
+---
+
+#### 1) 내용형(content) 질문 — 이전 버전(0.2.x)
+
+| 항목 | 동작 |
+|------|------|
+| 키워드 | 질문에서 따옴표·토큰 분리 등으로만 추출 (`extract_keywords_from_question`). |
+| Neo4j | 키워드로 위 고정 템플릿을 돌려 슬라이드·세그먼트·개념 관계를 모음. 행 수 상한은 쿼리에 박힌 고정 `LIMIT`(예: 세그먼트 15, 슬라이드 5 등). |
+| 근거 문자열 | `_build_content_context`: 질문 복사 + `[지식 그래프 조회 결과 — 내용 질문]` 아래에 구성 개념·음성 구간·슬라이드 본문을 **고정 섹션 순서**로 나열. 키워드 출현 빈도로 슬라이드·세그먼트 정렬. |
+| Lance(벡터) | 그래프에서 나온 노드 `id` 집합(`allowed_ids`)이 있을 때만, 질문 문장으로 `lance_search` **1회**, 상위 `TOP_K` 후 **`linked_node_id`가 `allowed_ids`에 있는 청크만 최대 4개** 선택. |
+| LLM 컨텍스트 | 그래프 텍스트 뒤에 `[Lance 보강 텍스트]` 블록을 **붙인 하이브리드** (`_build_hybrid_context_base`). Lance는 그래프와 **노드 id로만** 연결된 경우에 한해 보강. |
+| 답변 프롬프트 | 근거에 `[Lance 보강 텍스트]` 규칙만 명시. 복합 질문(정의+예시 동시)에 대한 별도 지시는 없음. |
+
+**요약**: 내용형은 “키워드 → 고정 그래프 조회 → 단순 정렬된 긴 컨텍스트 → (선택) id 일치 Lance 소량 보강” 구조입니다. 의도 분류·임베딩 재순위는 없습니다.
+
+---
+
+#### 2) 내용형(content) 질문 — 현재 버전(0.3.x)
+
+| 항목 | 동작 |
+|------|------|
+| 의도 + 키워드 | Gemini로 **JSON 의도 분류**(`infer_intents_json`: definition / example / explanation / comparison / temporal / location / general 및 가중치)와 **`keywords_hint`** 를 받아, 추출 키워드 목록에 **추가 검색어**로 합칩니다. |
+| Neo4j | 동일한 템플릿 계열이나 `neo4j_content_queries.py`로 이전했고, `intent_config.json`의 `neo4j_limits`·환경변수 `GRAPHLEC_CONTENT_*` 로 키워드당 행 수 상한을 조정할 수 있습니다. |
+| 그래프+Lance 후보 | 그래프 행을 `EvidenceItem`으로 올린 뒤, Lance는 **2-pass**: 1차 넓게 검색해 `linked_node_id ∈ allowed_ids` 인 **strict** 를 우선 채우고, 부족하면 2차로 더 가져와 **soft**(id 불일치 보조)를 섞습니다. |
+| 재순위 | 후보 전체에 대해 **질문·근거 임베딩 코사인 유사도**, **의도 가중치·출처 종류별 사전(intent_source_prior)**, **키워드 겹침**을 합산한 점수로 정렬한 뒤 **MMR**로 중복이 큰 근거를 줄여 `mmr_pick_k`개만 선택합니다. |
+| 근거 문자열 | `build_sectioned_context`: 상단에 **`[질문 의도(모델 추론)]`**, 아래에 출처 종류별 태그(개념 관계, 슬라이드 본문, 음성 구간, 의미 검색 strict/soft 등). Lance soft에는 **“(그래프 id 미일치 보조)”** 메타가 붙을 수 있습니다. |
+| LLM 컨텍스트 | 내용형은 하이브리드 블록 대신 **위 한 덩어리 sectioned context만** Gemini에 넘깁니다(Lance가 이미 재순위·섹션에 녹아 있음). |
+| 답변 프롬프트 | 의도 블록은 참고용, 실제 사실은 아래 근거에만 의존하라는 규칙·**복합 질문** 처리·의미 검색 보조 사용 조건이 **ANSWER_SYSTEM_PROMPT**에 추가됨. |
+| API `retrieved_chunks` | 내용형 응답에서 청크 목록은 **파이프라인에 포함된 Lance 계열 근거**만 옮깁니다(`_evidence_to_retrieved_chunks`). 그래프-only 근거는 청크 필드에 안 실릴 수 있습니다. |
+
+**요약**: 현재 버전은 “의도 추론 → 더 많은 후보(그래프+Lance 2-pass) → 임베딩+의도+키워드+MMR으로 압축 → 한 근거 문자열”로, **검색 품질과 다양성**을 올리는 쪽으로 바뀌었습니다.
+
+---
+
+#### 3) 구조형(structural) 질문 — 차이
+
+| 항목 | 이전(0.2.x) | 현재(0.3.x) |
+|------|-------------|-------------|
+| Cypher 생성 입력 | 질문·스키마만으로 `generate_cypher` 호출. | 답 생성 전에 같은 **의도 JSON**을 한 번 돌려, 가중치가 일정 이상인 의도만 요약한 **`intent_hint` 문자열**을 Cypher 프롬프트에 **추가**합니다. |
+| 목적 | 슬라이드/시간 등 구조 질의에 맞는 쿼리만 생성. | “몇 번 슬라이드”류에서도 질문 속 **의도(예: 예시 위주)** 를 힌트로 넣어 생성 품질을 보완. |
+| Lance | 구조형은 조회 후 `allowed_ids`로 Lance 1회 검색·id 필터 **최대 4개** 보강 후, 그래프+Lance 하이브리드로 답변. | 동일하게 **구조형 경로만** `_build_hybrid_context_base`를 탑니다(내용형과 대칭). |
+
+---
+
+#### 4) 코드·설정 측면
+
+- **모듈 분리**: 현재는 `content_retrieval.py`(의도·재순위·MMR·컨텍스트), `neo4j_content_queries.py`(고정 Cypher), `graph_constants.py`(개념 간 관계 타입)로 나뉘어 단일 파일보다 역할이 분리되어 있습니다.
+- **튜닝**: `query_service/intent_config.json`에서 Lance 상한·MMR·의도-출처 가중 등을 조정할 수 있습니다(이전은 코드 상수 위주).
 
 ---
 
