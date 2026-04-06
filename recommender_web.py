@@ -83,6 +83,11 @@ async def recommend(req: RecommendRequest):
 
         raw = _recommender.recommend_from_query(req.query.strip(), top_k=req.top_k)
 
+        # unknown 유형: 추천 불가 안내
+        if not raw and req.query.strip():
+            return {"mode": "unknown", "query": req.query, "results": [],
+                    "message": "강의 추천 질의를 입력해주세요. 예) '운영체제 강의 추천해줘'"}
+
         results = []
         for r in raw:
             lec = _recommender.collection.get(r.video_id)
@@ -602,6 +607,12 @@ HTML_PAGE = """<!DOCTYPE html>
       if (data.error) {
         status.className = 'error';
         status.textContent = data.error;
+        return;
+      }
+
+      if (data.mode === 'unknown') {
+        status.className = 'error';
+        status.textContent = data.message;
         return;
       }
 
