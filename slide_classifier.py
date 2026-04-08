@@ -76,30 +76,73 @@ TRANSITIONAL_MID_SEC    = 15.0
 TRANSITIONAL_LONG_RATIO = 0.8   # 15초 초과: silence_ratio > 0.8 → transitional
 
 # objectives 판정 — 제목 키워드 기반
+#
+# ★ 설계 원칙:
+#   "목차", "학습목표" 처럼 오직 TOC/목표 슬라이드에서만 쓰이는 단어만 포함.
+#   "개요", "강의 내용", "의 목표" 처럼 일반 섹션 헤더나 내용 슬라이드 제목에도
+#   등장하는 단어는 제외한다 — 이런 슬라이드는 _is_cover_or_toc_slide()의
+#   구조 검사(번호 목록 비율)로만 판정한다.
 OBJECTIVES_TITLE_KEYWORDS: frozenset = frozenset({
-    # 한국어 — 조사 없는 형태
-    "목차", "학습목표", "강의목표", "학습 목표", "강의 목표",
-    "개요", "강의개요", "강의 개요", "차례", "강의계획",
-    "이번 강의", "이번강의", "오늘 강의", "오늘강의",
-    # 한국어 — 조사 포함 형태
-    "의 목표", "의 개요", "의 목차",
-    # 영어
-    "outline", "agenda", "objectives", "overview",
-    "table of contents", "toc", "syllabus",
+    # 한국어 — 명백히 목차/목표 전용 단어
+    "목차", "학습목표", "강의목표", "학습 목표", "강의 목표", "차례", "강의계획",
+    # 영어 — 명백히 TOC/목표 전용
+    "outline", "agenda", "objectives", "table of contents", "toc", "syllabus",
+    # 제외 목록 (주석으로 이유 명시)
+    # "개요", "강의 개요" — "UX 개요", "1차시 강의 개요" 등 섹션 헤더에 오탐
+    # "강의 내용", "이번 강의", "오늘 강의" — "1차시 강의 내용" 등에 오탐
+    # "의 목표", "의 개요", "의 목차" — "디자인의 목표", "UX의 개요" 등에 오탐
+    # "overview" — 영문 섹션 헤더에 광범위하게 사용
 })
 
-# 표지 슬라이드 판정 — 번호 목록만 있고 실질 내용 없는 슬라이드
 import re as _re
-_NUMBERED_LIST_RE = _re.compile(r"^\s*\d+[.]\s+.+", _re.MULTILINE)
+
+# 강의자 소개 슬라이드 판별 패턴 — objectives 오탐 방지
+# "1987~2007", "2014 ~ 현재" 등 연도 범위, 경력·인사말 키워드
+_INSTRUCTOR_INTRO_RE = _re.compile(
+    r"\d{4}\s*[~_\u2013-]\s*(\d{4}|현재)"
+    r"|(경력|약력|인사말|강의자\s*소개|교수\s*소개|담당\s*교수)",
+    _re.MULTILINE,
+)
+
+def _is_instructor_intro_slide(title: str, slide_text: str) -> bool:
+    """강의자 소개·경력 슬라이드 여부 판별 — objectives 오탐 방지."""
+    return bool(_INSTRUCTOR_INTRO_RE.search(title + " " + slide_text))
+
 
 def _is_cover_or_toc_slide(title: str, slide_text: str) -> bool:
-    """제목이 강의명이고 본문이 번호 목록(1. 2. 3.)만으로 구성된 경우 — 표지/목차"""
     lines = [l.strip() for l in slide_text.splitlines() if l.strip()]
     if not lines:
         return False
-    # 본문 라인 중 번호 목록 비율이 60% 이상
-    numbered = sum(1 for l in lines if _re.match(r"^\d+[.]", l))
-    return len(lines) > 0 and numbered / len(lines) >= 0.6
+
+    numbered_items = []
+    for l in lines:
+        if _re.match(r"^[•\-\*]", l):
+            continue
+        m = _re.match(r"^(\d+)\s*[.)]?\s+\S+", l)
+        if m:
+            numbered_items.append(int(m.group(1)))
+
+    if len(numbered_items) < 5:
+        return False
+
+    # set() 중복 제거 대신: 처음 등장한 순서대로 단조 증가인지 확인
+    # 중복 번호가 있으면(반복 섹션) 즉시 False
+    seen = []
+    for n in numbered_items:
+        if n in seen:
+            return False          # 같은 번호 재등장 → IA/sitemap 구조
+        seen.append(n)
+
+    # 1부터 시작하고 연속(최대 1 건너뜀)이며 5개 이상
+    if seen[0] != 1:
+        return False
+    consecutive = 1
+    for i in range(1, len(seen)):
+        if seen[i] - seen[i-1] <= 2:
+            consecutive += 1
+        else:
+            break
+    return consecutive >= 5
 
 # silent_new 판정 (단독 슬라이드)
 SILENT_NEW_MAX_SEC   = 5.0
@@ -452,7 +495,7 @@ class ClassificationPipeline:
             is_objectives = (
                 any(kw in title_lower for kw in OBJECTIVES_TITLE_KEYWORDS)
                 or _is_cover_or_toc_slide(title_lower, slide_text)
-            )
+            ) and not _is_instructor_intro_slide(title_lower, slide_text)
             final_role = "objectives" if is_objectives else cls["role"]
 
             classified_slide = {
