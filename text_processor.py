@@ -80,7 +80,7 @@ def correct_segments_dual(segments: list[dict], batch_size: int = 100) -> list[d
     - text_raw: 원본 전사 텍스트
     - text_corrected: 1단계 교정 텍스트 (전문용어 오타 수정, 구어체 유지)
     - text_natural: 2단계 교정 텍스트 (추임새 제거 + 자연스러운 문장)
-    - text: text_corrected (후속 파이프라인에서 사용할 기본 텍스트)
+    - text: text_corrected (후속 파이프라인에서 사용할 기본 텍스트)    
     """
     total = len(segments)
     if total == 0:
