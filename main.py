@@ -742,39 +742,25 @@ def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     return {"elapsed": elapsed, **result}
 
 def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
-    """Stage 8: 강의 메타데이터 생성 (Neo4j 우선, 폴백 parquet)."""
+    """Stage 8: 강의 메타데이터 생성."""
     from generate_metadata import generate_metadata
-    from config import output_paths
 
-    stem = Path(args.input).stem
+    stem         = Path(args.input).stem
     metadata_dir = Path(getattr(args, "metadata_dir", "metadata"))
-    output_path = metadata_dir / f"{stem}_metadata.json"
+    output_path  = metadata_dir / f"{stem}_metadata.json"
 
     if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
         return {"metadata_path": str(output_path), "elapsed": 0.0}
 
-    paths = output_paths(stem, output_dir, slides_dir)
-    nodes_path = str(output_dir / f"{stem}_nodes.parquet")
-    edges_path = str(output_dir / f"{stem}_edges.parquet")
-    fused_path  = str(paths["fused"])
-
     _banner("Stage 8  —  메타데이터 생성  (generate_metadata)")
     t0 = time.time()
 
-    use_neo4j = not getattr(args, "skip_neo4j", False)
     generate_metadata(
-        nodes_path  = nodes_path,
-        edges_path  = edges_path,
-        fused_path  = fused_path,
-        output_path = str(output_path),
-        basic_info_overrides = {
-            "video_id":   stem,
-            "title":      getattr(args, "title", ""),
-            "instructor": getattr(args, "instructor", ""),
-            "domain":     getattr(args, "domain", ""),
-            "language":   "ko",
-        },
-        use_neo4j = use_neo4j,
+        stem          = stem,
+        title         = getattr(args, "title", ""),
+        instructor_id = getattr(args, "instructor", ""),
+        output_dir    = output_dir,
+        metadata_dir  = metadata_dir,
     )
 
     elapsed = time.time() - t0
