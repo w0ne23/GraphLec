@@ -782,56 +782,6 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     return {"metadata_path": str(output_path), "elapsed": elapsed}
 
 
-def _start_services(args) -> None:
-    repo_root    = Path(__file__).resolve().parent
-    metadata_dir = str(getattr(args, "metadata_dir", "metadata"))
-    web_dir      = repo_root / "web"
-
-    cmds = {
-        "query_service  (8001)": [
-            sys.executable, "-m", "uvicorn",
-            "query_service.main:app",
-            "--host", "127.0.0.1", "--port", "8001",
-        ],
-        "recommender_web(8002)": [
-            sys.executable, str(repo_root / "recommender_web.py"),
-            "--metadata_dir", metadata_dir,
-            "--port", "8002",
-        ],
-        "django         (8000)": [                          # ← 추가
-            sys.executable, "manage.py", "runserver", "8000",
-        ],
-    }
-    cwd_map = {                                             # ← 추가
-        "django         (8000)": str(web_dir),
-    }
-
-    _banner("서비스 시작  —  Django + query_service + recommender_web (병렬)")
-    procs: dict[str, subprocess.Popen] = {}
-    for name, cmd in cmds.items():
-        cwd = cwd_map.get(name, str(repo_root))
-        proc = subprocess.Popen(cmd, cwd=cwd)
-        procs[name] = proc
-        print(f"  ▶ {name}  PID {proc.pid}")
-
-    print()
-    print("    강의 질의     → http://127.0.0.1:8000/")   # ← Django가 진입점
-    print("    추천 서비스   → http://127.0.0.1:8002/")
-    print("\n  종료: Ctrl+C")
-    print("─" * 70)
-
-    try:
-        while True:
-            time.sleep(5)
-            dead = [n for n, p in procs.items() if p.poll() is not None]
-            if dead:
-                print(f"\n  ⚠️ 비정상 종료: {', '.join(dead)}")
-                break
-    except KeyboardInterrupt:
-        print("\n  서비스 종료 중...")
-        for p in procs.values():
-            p.terminate()
-
 # ──────────────────────────────────────────────────────────────
 # 메인 파이프라인
 # ──────────────────────────────────────────────────────────────
@@ -1021,10 +971,6 @@ def run_pipeline(args, progress_callback=None):
         # ── Lecture 자동 등록 ──
         _auto_register_lecture(stem)
 
-        # ── 서비스 시작 (--serve 지정 시) ──
-        if getattr(args, "serve", False):
-            _start_services(args)
-
         # ── 생성된 파일 목록 ──
         print("\n  생성된 파일:")
         output_files = [
@@ -1122,13 +1068,11 @@ def get_parser():
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
-    parser.add_argument("--serve", action="store_true",
-                        help="파이프라인 완료 후 query_service(8001) + recommender_web(8002) 자동 시작")
     
     return parser
 
 def main():
-    args = get_parser.parse_args()
+    args = get_parser().parse_args()
 
     if not args.skip_extract and not Path(args.input).exists():
         print(f"❌ 입력 영상 없음: {args.input}")

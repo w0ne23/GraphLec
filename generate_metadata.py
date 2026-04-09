@@ -174,7 +174,7 @@ def extract_top_concepts(
     return results[:top_n]
 
 
-PREREQUISITE_RELATIONS = {"is_a", "part_of", "uses", "implements", "extends"}
+PREREQUISITE_RELATIONS = {"is_a", "part_of", "uses", "implements", "prerequisite_of"}
 PREREQ_VALID_ENTITY_TYPES = {
     "system", "artifact", "method", "agent", "phenomenon", "metric", "event"
 }

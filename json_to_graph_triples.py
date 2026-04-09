@@ -58,10 +58,13 @@ class Config:
 
 
 RELATION_TYPES = {
-    "is_a", "part_of", "implements", "abstracts",
-    "prerequisite_of", "uses", "calls",
-    "compared_to", "extends", "replaces",
-    "solves", "optimizes"
+    "is_a", "part_of", "instance_of", "has_attribute",
+    "prerequisite_of", "causes", "influences",
+    "uses", "applies",
+    "compared_to", "illustrates",
+    "abstracts",
+    "solves", "optimizes",
+    "implements", "replaces",
 }
 
 ENTITY_TYPES = {
@@ -69,6 +72,47 @@ ENTITY_TYPES = {
     "method", "event", "phenomenon", "metric",
     "location", "time_period"
 }
+
+# 상위 도메인 (프롬프트·후처리와 동일 집합 유지)
+DOMAIN_TYPES = frozenset({
+    "engineering",
+    "natural_science",
+    "humanities",
+    "social_science",
+    "arts",
+    "health_sciences",
+    "sports",
+    "education",
+    "etc",
+})
+DOMAIN_FALLBACK = "etc"
+
+
+def _normalize_domain_token(raw: str) -> str:
+    s = raw.strip().lower().replace("-", "_")
+    return s
+
+
+def resolve_domain_from_api(domain_result: Optional[Dict]) -> Tuple[str, str]:
+    """
+    Gemini 도메인 JSON → (domain, subdomain).
+    API 실패·누락·허용 목록 밖 값은 DOMAIN_FALLBACK(etc), engineering 등 임의 기본값은 쓰지 않음.
+    """
+    if not domain_result or not isinstance(domain_result, dict):
+        return DOMAIN_FALLBACK, ""
+
+    sub = domain_result.get("subdomain", "")
+    subdomain = sub.strip() if isinstance(sub, str) else ""
+
+    dom = domain_result.get("domain")
+    if not dom or not isinstance(dom, str):
+        return DOMAIN_FALLBACK, subdomain
+
+    token = _normalize_domain_token(dom)
+    if token in DOMAIN_TYPES:
+        return token, subdomain
+    return DOMAIN_FALLBACK, subdomain
+
 
 DOMAIN_PROMPT = """
 아래 강의 내용을 보고 도메인을 분류해라. 설명 없이 JSON만 출력.
@@ -78,16 +122,22 @@ DOMAIN_PROMPT = """
 
 출력 형식:
 {{
-  "domain": "engineering|natural_science|humanities|social_science|arts",
-  "subdomain": "computer_science|physics|economics|..."
+  "domain": "engineering|natural_science|humanities|social_science|arts|health_sciences|sports|education|etc",
+  "subdomain": "세부 분야를 짧은 영어 스네이크케이스로 (예: computer_science, cardiology). 애매하면 빈 문자열 \"\""
 }}
 
-도메인 기준:
-- engineering: 설계·시스템·구현·최적화 중심
-- natural_science: 자연 현상·법칙·실험·측정 중심
-- humanities: 해석·사상·텍스트·역사·철학 중심
-- social_science: 사회 구조·제도·정책·행위자·지표 중심
-- arts: 작품·표현·매체·양식·창작 중심
+도메인 기준 (위 목록 중 정확히 하나만 선택):
+- engineering: 설계·시스템·구현·최적화·공학적 문제 해결 중심
+- natural_science: 자연 현상·법칙·실험·측정·이론 모델링 중심
+- humanities: 해석·사상·텍스트·역사·철학·언어·문화 비평 중심
+- social_science: 사회 구조·제도·정책·행위자·지표·조사·경제·법 중심
+- arts: 작품·표현·매체·양식·창작·미학·공연·시각예술 중심
+- health_sciences: 의학·간호·보건·역학·임상·신체·질병·치료·예방 중심
+- sports: 체육·운동생리·경기·훈련법·스포츠 과학·신체 활동 교육 중심
+- education: 교수학습·교육과정·평가·교육 심리·교수법 일반(특정 교과 내용이 주가 아닐 때)
+- etc: 위 어디에도 단일하게 속하기 어렵거나, 학제간·소개·행정 안내 위주 등 판단이 애매할 때
+
+반드시 domain 값은 위 파이프(|)로 나열한 토큰 중 하나와 정확히 일치해야 한다.
 """
 
 EXTRACTION_PROMPT = """
@@ -140,9 +190,38 @@ EXTRACTION_PROMPT = """
 - 수량 제한 없음: 강의에 등장하는 모든 의미있는 엔티티 추출
 - 자기 자신과의 관계 제외
 
-관계 타입 (12가지만 사용):
-is_a, part_of, implements, abstracts, prerequisite_of, uses, calls,
-compared_to, extends, replaces, solves, optimizes
+관계 타입 (아래 16가지만 사용; 다른 문자열 금지):
+is_a, part_of, instance_of, has_attribute,
+prerequisite_of, causes, influences,
+uses, applies,
+compared_to, illustrates,
+abstracts,
+solves, optimizes,
+implements, replaces
+
+각 관계 의미 (방향: from → to):
+- is_a: from은 to의 한 종류·범주·유형이다.
+- part_of: from은 to의 구성 요소·부분·하위 단위다.
+- instance_of: from은 to의 구체적 사례·실례·표본이다. (분류 관점이면 is_a와 둘 중 하나만; 애매하면 instance_of 우선)
+- has_attribute: from은 속성·특성·조건으로 to를 갖는다 (정의·성질·전제).
+- prerequisite_of: from을 이해·다루기 전에 to가 필요하다 (선행 지식).
+- causes: from이 to를 일으키거나 강한 인과로 이끈다 (메커니즘·직접 원인).
+- influences: from이 to에 영향을 준다 (causes보다 약하거나 다방향·맥락적 영향).
+- uses: from이 to를 수단·도구·방법·자료로 쓴다.
+- applies: from(이론·규칙·방법)이 to(상황·대상·문제)에 적용된다.
+- compared_to: from과 to가 대조·비교된다.
+- illustrates: from(사례·예)가 to(개념·주장)를 설명·뒷받침한다. (단순 분류가 아닐 때; 분류면 instance_of/is_a)
+- abstracts: from(개념·틀)이 to(현상·사례·세부)를 포괄·일반화한다.
+- solves: from이 to(문제·과제)를 해결한다.
+- optimizes: from이 to(목표·지표·과정)를 개선·최적화한다.
+- implements: from이 to(명세·아이디어·요구)를 실현·구현한다.
+- replaces: from이 to를 대체한다.
+
+관계 작성 규칙:
+- 위 16개 외 타입 금지. 애매하면 엣지를 생략한다.
+- causes vs influences: 직접·강한 인과면 causes, 약하거나 상호·맥락적이면 influences.
+- uses vs applies: 도구·자료 활용은 uses; 이론·규칙의 적용은 applies.
+- illustrates 남용 금지: 명백한 예시·사례 설명일 때만.
 
 mentions 작성 규칙:
 - 각 엔티티가 직접 언급·설명·예시로 다뤄지는 모든 source_id 나열
@@ -388,8 +467,7 @@ class ConceptLayerBuilder:
         # ── 0. 도메인 감지 ───────────────────────────────────────────────────
         # 토큰 절약: 앞 3000자만 사용
         domain_result = self._call_gemini(DOMAIN_PROMPT.format(content=content[:3000]))
-        domain    = domain_result.get('domain', 'engineering') if domain_result else 'engineering'
-        subdomain = domain_result.get('subdomain', '')         if domain_result else ''
+        domain, subdomain = resolve_domain_from_api(domain_result)
         logger.info(f"  도메인: {domain} / {subdomain}")
 
         # 도메인 노드 저장
