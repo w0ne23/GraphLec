@@ -1,698 +1,782 @@
 """
 recommender_web.py
 ──────────────────
-강의 추천 시스템 웹 인터페이스 (FastAPI, port 8002)
+FastAPI 기반 강의 추천 웹 서버
 
 실행:
-  python recommender_web.py
-  python recommender_web.py --metadata_dir metadata/
-  python recommender_web.py --metadata_dir metadata/ --port 8002
+  uvicorn recommender_web:app --port 8002 --reload
+
+엔드포인트:
+  POST /recommend   { "query": "스레드 자세히 설명하는 강의", "top_k": 3 }
+  GET  /health
 """
 
-import argparse
-import json
 import os
-from pathlib import Path
+from contextlib import asynccontextmanager
+from typing import Optional
 
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-# recommender.py가 같은 디렉토리에 있다고 가정
-from recommender import Recommender
+from recommender import Recommender, RecommenderConfig
+
 
 # ============================================================================
-#  CLI 파싱 (uvicorn 실행 전에 미리)
+#  앱 초기화
 # ============================================================================
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--metadata_dir", default="metadata/", help="메타데이터 디렉토리")
-parser.add_argument("--port", type=int, default=8002, help="포트 번호")
-args, _ = parser.parse_known_args()
+METADATA_DIR = os.getenv("METADATA_DIR", "metadata/")
+_recommender: Optional[Recommender] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _recommender
+    print(f"[시작] 메타데이터 로드: {METADATA_DIR}")
+    _recommender = Recommender(metadata_dir=METADATA_DIR, config=RecommenderConfig())
+    yield
+    print("[종료]")
+
+
+app = FastAPI(
+    title="GraphLEC Recommender",
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ============================================================================
-#  Recommender 초기화
+#  요청 / 응답 스키마
 # ============================================================================
-
-print(f"[초기화] 메타데이터 로드 중: {args.metadata_dir}")
-_recommender = Recommender(args.metadata_dir)
-print(f"[초기화] 완료")
-
-# ============================================================================
-#  FastAPI 앱
-# ============================================================================
-
-app = FastAPI(title="GraphLEC 강의 추천")
-
-
-# ── 요청/응답 모델 ──────────────────────────────────────────────────────────
 
 class RecommendRequest(BaseModel):
-    query: str = ""
-    history: list[str] = []   # video_id 목록 (선택)
-    top_k: int = 5
+    query: str
+    top_k: int = 3
+
+
+class ScoreDetail(BaseModel):
+    query_type:      str
+    keyword_score:   float
+    title_score:     float
+    summary_score:   float
+    domain_score:    float
+    domain_boost:    float
+    depth_score:     float
+    depth_boost:     float
+    context_penalty: bool
 
 
 class LectureResult(BaseModel):
-    video_id: str
-    title: str
-    instructor: str
-    domain: str
-    score: float
-    reason: str
-    summary: str
-    keywords: list[str]
-    difficulty: str
-    detail: dict
+    video_id:     str
+    title:        str
+    domain:       str
+    instructor:   str
+    score:        float
+    reason:       str
+    summary:      str
+    score_detail: ScoreDetail
 
 
-# ── 엔드포인트 ──────────────────────────────────────────────────────────────
+class RecommendResponse(BaseModel):
+    query:   str
+    results: list[LectureResult]
+
+
+# ============================================================================
+#  엔드포인트
+# ============================================================================
 
 @app.get("/", response_class=HTMLResponse)
-async def index():
-    return HTML_PAGE
+def root():
+    return HTMLResponse(content=_HTML)
 
 
-@app.post("/api/recommend")
-async def recommend(req: RecommendRequest):
-    """자연어 질의 기반 강의 추천"""
-    try:
-        # 이력 기록
-        _recommender.history.records.clear()
-        for vid in req.history:
-            _recommender.record_view(vid)
-
-        results = []
-
-        if req.query.strip():
-            # 자연어 질의 추천
-            raw = _recommender.recommend_from_query(req.query.strip(), top_k=req.top_k)
-            mode = "query"
-        elif req.history:
-            # 이력 기반 추천
-            raw = _recommender.recommend_from_history(top_k=req.top_k)
-            mode = "history"
-        else:
-            return JSONResponse({"error": "질의 또는 시청 이력을 입력하세요."}, status_code=400)
-
-        for r in raw:
-            results.append(LectureResult(
-                video_id   = r.video_id,
-                title      = r.title,
-                instructor = r.instructor,
-                domain     = r.domain,
-                score      = round(r.score, 4),
-                reason     = r.reason,
-                summary    = r.summary[:200] + ("…" if len(r.summary) > 200 else ""),
-                keywords   = _recommender.collection.get(r.video_id).top_keywords[:8],
-                difficulty = _recommender.collection.get(r.video_id).difficulty_level,
-                detail     = r.score_detail,
-            ).model_dump())
-
-        return {"mode": mode, "query": req.query, "results": results}
-
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+@app.get("/health")
+def health():
+    loaded = _recommender is not None
+    count  = len(_recommender.collection.lectures) if loaded else 0
+    return {"status": "ok", "lectures_loaded": count}
 
 
-@app.get("/api/lectures")
-async def list_lectures():
-    """로드된 강의 목록 반환 (이력 입력용)"""
-    lecs = [
-        {
-            "video_id": lec.video_id,
-            "title":    lec.title,
-            "domain":   lec.domain,
-        }
-        for lec in _recommender.collection.all()
-    ]
-    lecs.sort(key=lambda x: (x["domain"], x["video_id"]))
-    return {"lectures": lecs, "total": len(lecs)}
+@app.post("/recommend", response_model=RecommendResponse)
+def recommend(req: RecommendRequest):
+    if not _recommender:
+        raise HTTPException(status_code=503, detail="추천 엔진 초기화 중")
+    if not req.query.strip():
+        raise HTTPException(status_code=400, detail="query가 비어 있습니다")
+
+    results = _recommender.recommend_from_query(req.query, top_k=req.top_k)
+    top     = [r for r in results if r.score > 0][: req.top_k]
+
+    return RecommendResponse(
+        query=req.query,
+        results=[
+            LectureResult(
+                video_id  = r.video_id,
+                title     = r.title,
+                domain    = r.domain,
+                instructor= r.instructor,
+                score     = r.score,
+                reason    = r.reason,
+                summary   = r.summary,
+                score_detail=ScoreDetail(
+                    query_type      = r.score_detail.get("query_type", ""),
+                    keyword_score   = r.score_detail.get("keyword_score", 0.0),
+                    title_score     = r.score_detail.get("title_score", 0.0),
+                    summary_score   = r.score_detail.get("summary_score", 0.0),
+                    domain_score    = r.score_detail.get("domain_score", 0.0),
+                    domain_boost    = r.score_detail.get("domain_boost", 1.0),
+                    depth_score     = r.score_detail.get("depth_score", 0.0),
+                    depth_boost     = r.score_detail.get("depth_boost", 1.0),
+                    context_penalty = r.score_detail.get("context_penalty", False),
+                ),
+            )
+            for r in top
+        ],
+    )
 
 
 # ============================================================================
-#  HTML 페이지 (단일 파일 인라인)
+#  임베디드 UI
 # ============================================================================
 
-HTML_PAGE = """<!DOCTYPE html>
+_HTML = """
+<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GraphLEC · 강의 추천</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&display=swap" rel="stylesheet">
+<title>GraphLEC 강의 추천</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
-  /* ── 변수 ── */
   :root {
-    --bg:       #0d0f14;
-    --surface:  #13161e;
-    --border:   #1f2433;
-    --accent:   #6ee7b7;
-    --accent2:  #38bdf8;
-    --text:     #e2e8f0;
-    --muted:    #64748b;
-    --tag-bg:   #1a2235;
-    --radius:   14px;
-    --score-h:  #6ee7b7;
-    --score-m:  #fbbf24;
-    --score-l:  #f87171;
+    --bg: #0d0f14;
+    --surface: #151820;
+    --surface2: #1c2030;
+    --border: #252a3a;
+    --accent: #4f8cff;
+    --accent2: #7b5ea7;
+    --green: #3dd68c;
+    --yellow: #f0c040;
+    --red: #ff5f57;
+    --text: #e2e8f0;
+    --text-muted: #6b7a99;
+    --text-dim: #3a4258;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'Noto Sans KR', sans-serif;
   }
 
-  /* ── 기본 ── */
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 15px;
-    line-height: 1.6;
+    font-family: var(--sans);
     min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
   }
 
-  /* ── 배경 그래프 패턴 ── */
+  /* 배경 그리드 */
   body::before {
     content: '';
-    position: fixed; inset: 0; z-index: 0;
+    position: fixed;
+    inset: 0;
     background-image:
-      linear-gradient(rgba(110,231,183,.04) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(110,231,183,.04) 1px, transparent 1px);
+      linear-gradient(var(--border) 1px, transparent 1px),
+      linear-gradient(90deg, var(--border) 1px, transparent 1px);
     background-size: 40px 40px;
+    opacity: 0.3;
     pointer-events: none;
+    z-index: 0;
   }
 
-  /* ── 레이아웃 ── */
-  .page { position: relative; z-index: 1; max-width: 820px; margin: 0 auto; padding: 48px 24px 80px; }
+  .wrap {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    max-width: 780px;
+    padding: 60px 24px 100px;
+  }
 
-  /* ── 헤더 ── */
-  header { margin-bottom: 48px; }
+  /* 헤더 */
+  header {
+    margin-bottom: 48px;
+  }
+
   .logo {
-    font-family: 'DM Serif Display', serif;
-    font-size: 2.6rem;
-    letter-spacing: -.02em;
-    background: linear-gradient(135deg, var(--accent) 0%, var(--accent2) 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    line-height: 1.1;
-  }
-  .logo span { font-style: italic; }
-  .subtitle {
-    margin-top: 8px;
-    color: var(--muted);
-    font-size: 14px;
-    font-weight: 300;
-    letter-spacing: .02em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
   }
 
-  /* ── 검색 박스 ── */
-  .search-wrap {
+  .logo-icon {
+    width: 32px; height: 32px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+  }
+
+  .logo-text {
+    font-family: var(--mono);
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.5px;
+  }
+
+  .logo-text span { color: var(--accent); }
+
+  .subtitle {
+    font-size: 13px;
+    color: var(--text-muted);
+    font-weight: 300;
+    letter-spacing: 0.3px;
+  }
+
+  /* 검색 영역 */
+  .search-box {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 14px;
     padding: 20px;
-    margin-bottom: 20px;
-    transition: border-color .2s;
+    margin-bottom: 12px;
+    transition: border-color 0.2s;
   }
-  .search-wrap:focus-within { border-color: var(--accent); }
 
-  .input-row { display: flex; gap: 10px; align-items: flex-start; }
+  .search-box:focus-within {
+    border-color: var(--accent);
+  }
 
-  textarea#query {
-    flex: 1;
+  .search-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  textarea {
+    width: 100%;
     background: transparent;
     border: none;
     outline: none;
     color: var(--text);
-    font-family: 'DM Sans', sans-serif;
+    font-family: var(--sans);
     font-size: 15px;
+    font-weight: 400;
     resize: none;
-    min-height: 52px;
-    max-height: 160px;
-    overflow-y: auto;
-    padding: 4px 0;
     line-height: 1.6;
+    min-height: 60px;
   }
-  textarea#query::placeholder { color: var(--muted); }
 
-  button#search-btn {
-    flex-shrink: 0;
+  textarea::placeholder { color: var(--text-dim); }
+
+  .search-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+
+  .topk-control {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+
+  .topk-control input[type=range] {
+    -webkit-appearance: none;
+    width: 80px; height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  .topk-control input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px; height: 12px;
     background: var(--accent);
-    color: #0d0f14;
+    border-radius: 50%;
+    cursor: pointer;
+  }
+
+  .topk-val {
+    color: var(--accent);
+    min-width: 16px;
+    text-align: center;
+  }
+
+  .btn-search {
+    background: var(--accent);
+    color: #fff;
     border: none;
-    border-radius: 10px;
-    padding: 10px 22px;
-    font-family: 'DM Sans', sans-serif;
+    border-radius: 8px;
+    padding: 9px 22px;
+    font-family: var(--sans);
     font-size: 14px;
     font-weight: 500;
     cursor: pointer;
-    transition: opacity .15s, transform .1s;
-    align-self: flex-end;
-  }
-  button#search-btn:hover { opacity: .85; }
-  button#search-btn:active { transform: scale(.97); }
-  button#search-btn:disabled { opacity: .4; cursor: default; }
-
-  /* ── 이력 토글 ── */
-  .history-toggle {
+    transition: opacity 0.15s, transform 0.1s;
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-top: 14px;
-    cursor: pointer;
-    color: var(--muted);
-    font-size: 13px;
-    user-select: none;
+    gap: 6px;
   }
-  .history-toggle:hover { color: var(--text); }
-  .chevron { transition: transform .2s; display: inline-block; }
-  .chevron.open { transform: rotate(90deg); }
 
-  .history-panel {
-    display: none;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
-  }
-  .history-panel.open { display: block; }
+  .btn-search:hover { opacity: 0.88; }
+  .btn-search:active { transform: scale(0.97); }
+  .btn-search:disabled { opacity: 0.4; cursor: not-allowed; }
 
-  .history-label { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
-  .lecture-list {
+  /* 예시 질의 */
+  .examples {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    max-height: 160px;
-    overflow-y: auto;
+    margin-bottom: 36px;
   }
-  .lec-chip {
-    background: var(--tag-bg);
+
+  .ex-chip {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 5px 12px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+
+  .ex-chip:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* 분석 결과 뱃지 */
+  .analysis-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 24px;
+    animation: fadeIn 0.3s ease;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--surface2);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 4px 10px;
-    font-size: 12px;
-    cursor: pointer;
-    transition: background .15s, border-color .15s;
-    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-muted);
   }
-  .lec-chip:hover { background: #1f2a3f; }
-  .lec-chip.selected { border-color: var(--accent); color: var(--accent); background: rgba(110,231,183,.08); }
 
-  .history-selected {
-    margin-top: 10px;
-    font-size: 12px;
-    color: var(--muted);
-    min-height: 18px;
-  }
-  .history-selected span { color: var(--accent); }
+  .badge .key { color: var(--text-dim); margin-right: 2px; }
+  .badge .val { color: var(--text); }
+  .badge.type .val { color: var(--accent); }
+  .badge.focus .val { color: var(--yellow); }
+  .badge.domain .val { color: var(--green); }
 
-  /* ── 상태 영역 ── */
-  #status {
-    min-height: 28px;
-    padding: 4px 0;
-    font-size: 13px;
-    color: var(--muted);
-  }
-  #status.loading { color: var(--accent); }
-  #status.error   { color: var(--score-l); }
+  /* 결과 카드 */
+  .results { display: flex; flex-direction: column; gap: 14px; }
 
-  /* ── 결과 ── */
-  #results { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
-
-  .result-card {
+  .card {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius);
+    border-radius: 14px;
     padding: 22px 24px;
-    animation: slideUp .3s ease both;
-    transition: border-color .2s;
+    animation: slideUp 0.3s ease both;
+    transition: border-color 0.2s;
   }
-  .result-card:hover { border-color: #2d3650; }
 
+  .card:hover { border-color: #2e3550; }
+
+  .card:nth-child(1) { animation-delay: 0.05s; }
+  .card:nth-child(2) { animation-delay: 0.10s; }
+  .card:nth-child(3) { animation-delay: 0.15s; }
+
+  .card-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+
+  .card-rank {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 3px;
+    min-width: 20px;
+  }
+
+  .card-title-wrap { flex: 1; }
+
+  .card-title {
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin-bottom: 4px;
+  }
+
+  .card-meta {
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+
+  .card-meta .dot { color: var(--text-dim); }
+
+  .card-score {
+    text-align: right;
+    flex-shrink: 0;
+  }
+
+  .score-num {
+    font-family: var(--mono);
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--accent);
+    line-height: 1;
+  }
+
+  .score-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .card-reason {
+    font-size: 12px;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .card-summary {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.6;
+    border-left: 2px solid var(--border);
+    padding-left: 12px;
+    margin-bottom: 14px;
+  }
+
+  /* 스코어 바 */
+  .score-bars {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+
+  .bar-item { }
+
+  .bar-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text-dim);
+    margin-bottom: 4px;
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .bar-label span:last-child { color: var(--text-muted); }
+
+  .bar-track {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .bar-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width 0.6s cubic-bezier(.4,0,.2,1);
+  }
+
+  .bar-fill.green { background: var(--green); }
+  .bar-fill.yellow { background: var(--yellow); }
+  .bar-fill.purple { background: var(--accent2); }
+
+  .depth-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(240,192,64,0.1);
+    border: 1px solid rgba(240,192,64,0.25);
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--yellow);
+    margin-left: 6px;
+  }
+
+  /* 빈 상태 */
+  .empty {
+    text-align: center;
+    padding: 60px 0;
+    color: var(--text-dim);
+    font-size: 14px;
+  }
+
+  /* 에러 */
+  .error-box {
+    background: rgba(255,95,87,0.08);
+    border: 1px solid rgba(255,95,87,0.2);
+    border-radius: 10px;
+    padding: 16px 20px;
+    font-size: 13px;
+    color: #ff8a85;
+    animation: fadeIn 0.2s ease;
+  }
+
+  /* 로딩 */
+  .loading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 40px 0;
+    color: var(--text-muted);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
   @keyframes slideUp {
     from { opacity: 0; transform: translateY(12px); }
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  .card-top {
-    display: flex;
-    align-items: flex-start;
-    gap: 16px;
-    margin-bottom: 12px;
-  }
-
-  .rank-badge {
-    flex-shrink: 0;
-    width: 28px; height: 28px;
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-family: 'DM Serif Display', serif;
-    font-size: 14px;
-    color: var(--bg);
-  }
-  .rank-1 { background: var(--accent); }
-  .rank-2 { background: var(--accent2); }
-  .rank-n { background: var(--muted); }
-
-  .card-meta { flex: 1; min-width: 0; }
-
-  .card-title {
-    font-family: 'DM Serif Display', serif;
-    font-size: 1.1rem;
-    color: var(--text);
-    line-height: 1.3;
-    margin-bottom: 4px;
-  }
-
-  .card-sub {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    align-items: center;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .dot { color: #2d3650; }
-
-  .score-pill {
-    margin-left: auto;
-    flex-shrink: 0;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 3px 10px;
-    border-radius: 20px;
-    border: 1px solid currentColor;
-  }
-
-  .card-reason {
-    font-size: 13px;
-    color: var(--accent);
-    margin-bottom: 10px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .card-reason::before {
-    content: '';
-    display: inline-block;
-    width: 5px; height: 5px;
-    border-radius: 50%;
-    background: var(--accent);
-    flex-shrink: 0;
-  }
-
-  .card-summary {
-    font-size: 13.5px;
-    color: #94a3b8;
-    line-height: 1.65;
+  /* 구분선 */
+  .section-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
     margin-bottom: 14px;
-  }
-
-  .kw-row {
     display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-  }
-  .kw-tag {
-    background: var(--tag-bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 2px 9px;
-    font-size: 11.5px;
-    color: var(--muted);
-  }
-
-  /* ── 신호 디테일 (토글) ── */
-  .detail-toggle {
-    margin-top: 12px;
-    font-size: 12px;
-    color: var(--muted);
-    cursor: pointer;
-    display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 10px;
   }
-  .detail-toggle:hover { color: var(--text); }
 
-  .detail-body {
-    display: none;
-    margin-top: 10px;
-    padding: 12px;
-    background: #0d0f14;
-    border-radius: 8px;
-    font-size: 12px;
-    color: var(--muted);
-    font-family: 'DM Mono', 'Courier New', monospace;
-    line-height: 1.7;
+  .section-title::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
   }
-  .detail-body.open { display: block; }
-
-  /* ── 빈 상태 ── */
-  .empty {
-    text-align: center;
-    padding: 60px 24px;
-    color: var(--muted);
-    font-size: 14px;
-  }
-  .empty-icon { font-size: 40px; margin-bottom: 12px; }
-
-  /* ── 스크롤바 ── */
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 </style>
 </head>
 <body>
-<div class="page">
+<div class="wrap">
 
-  <!-- 헤더 -->
   <header>
-    <div class="logo">Graph<span>LEC</span></div>
-    <div class="subtitle">멀티모달 강의 지식 그래프 · 자연어 추천 시스템</div>
+    <div class="logo">
+      <div class="logo-icon">◈</div>
+      <div class="logo-text">Graph<span>LEC</span></div>
+    </div>
+    <div class="subtitle">지식 그래프 기반 강의 추천 시스템</div>
   </header>
 
-  <!-- 검색 -->
-  <div class="search-wrap">
-    <div class="input-row">
-      <textarea id="query" rows="2"
-        placeholder="배우고 싶은 내용을 자유롭게 입력하세요.  예) 프로세스 스케줄링이 궁금해, 신경망 학습 원리 알고 싶어"></textarea>
-      <button id="search-btn" onclick="search()">추천받기</button>
-    </div>
-
-    <!-- 시청 이력 토글 -->
-    <div class="history-toggle" onclick="toggleHistory()">
-      <span class="chevron" id="chevron">▶</span>
-      <span>시청 이력 기반 추천 추가하기</span>
-    </div>
-    <div class="history-panel" id="history-panel">
-      <div class="history-label">시청한 강의를 선택하세요 (선택 순서대로 이력 기록)</div>
-      <div class="lecture-list" id="lec-list">
-        <span style="color:var(--muted);font-size:12px">로딩 중...</span>
+  <div class="search-box">
+    <div class="search-label">질의 입력</div>
+    <textarea id="queryInput" rows="2"
+      placeholder="예: 스레드를 자세히 설명해주는 강의 추천해줘"></textarea>
+    <div class="search-footer">
+      <div class="topk-control">
+        <span>결과 수</span>
+        <input type="range" id="topkSlider" min="1" max="10" value="3">
+        <span class="topk-val" id="topkVal">3</span>
       </div>
-      <div class="history-selected" id="selected-label">선택된 강의: 없음</div>
+      <button class="btn-search" id="searchBtn" onclick="doSearch()">
+        <span>추천받기</span>
+        <span>→</span>
+      </button>
     </div>
   </div>
 
-  <div id="status"></div>
-  <div id="results"></div>
+  <div class="examples" id="examples">
+    <span class="ex-chip" onclick="setQuery(this)">스레드 자세히 설명하는 강의</span>
+    <span class="ex-chip" onclick="setQuery(this)">딥러닝 원리 강의 찾아줘</span>
+    <span class="ex-chip" onclick="setQuery(this)">파이썬 기초 다 들었는데 다음은?</span>
+    <span class="ex-chip" onclick="setQuery(this)">백엔드 개발자 취업 준비 커리큘럼</span>
+    <span class="ex-chip" onclick="setQuery(this)">비동기 처리할 때 자꾸 막혀</span>
+    <span class="ex-chip" onclick="setQuery(this)">손익계산서 읽는 법 강의</span>
+  </div>
+
+  <div id="output"></div>
 
 </div>
 
 <script>
-  let allLectures = [];
-  let selectedHistory = [];
+  const API = '';
 
-  // 강의 목록 로드
-  fetch('/api/lectures')
-    .then(r => r.json())
-    .then(data => {
-      allLectures = data.lectures;
-      renderLecList();
-    });
+  const slider = document.getElementById('topkSlider');
+  const topkVal = document.getElementById('topkVal');
+  slider.addEventListener('input', () => { topkVal.textContent = slider.value; });
 
-  function renderLecList() {
-    const container = document.getElementById('lec-list');
-    // 도메인별 그룹 생략, 단순 칩 나열
-    container.innerHTML = allLectures.map(lec => `
-      <div class="lec-chip" data-id="${lec.video_id}" onclick="toggleLec(this, '${lec.video_id}')">
-        ${lec.video_id} · ${lec.title}
-      </div>
-    `).join('');
-  }
-
-  function toggleLec(el, id) {
-    const idx = selectedHistory.indexOf(id);
-    if (idx === -1) {
-      selectedHistory.push(id);
-      el.classList.add('selected');
-    } else {
-      selectedHistory.splice(idx, 1);
-      el.classList.remove('selected');
-    }
-    updateSelectedLabel();
-  }
-
-  function updateSelectedLabel() {
-    const label = document.getElementById('selected-label');
-    if (selectedHistory.length === 0) {
-      label.innerHTML = '선택된 강의: 없음';
-    } else {
-      const names = selectedHistory.map(id => {
-        const lec = allLectures.find(l => l.video_id === id);
-        return `<span>${lec ? lec.title : id}</span>`;
-      });
-      label.innerHTML = `선택된 강의 (${selectedHistory.length}개): ` + names.join(' → ');
-    }
-  }
-
-  function toggleHistory() {
-    const panel = document.getElementById('history-panel');
-    const chevron = document.getElementById('chevron');
-    panel.classList.toggle('open');
-    chevron.classList.toggle('open');
-  }
-
-  // Enter 키 → 검색
-  document.getElementById('query').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); search(); }
+  const input = document.getElementById('queryInput');
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSearch(); }
   });
 
-  async function search() {
-    const query = document.getElementById('query').value.trim();
-    const btn = document.getElementById('search-btn');
-    const status = document.getElementById('status');
-    const results = document.getElementById('results');
+  function setQuery(el) {
+    input.value = el.textContent;
+    input.focus();
+  }
 
-    if (!query && selectedHistory.length === 0) {
-      status.className = 'error';
-      status.textContent = '질의를 입력하거나 시청 이력을 선택하세요.';
-      return;
-    }
+  function pct(v) { return Math.round((v || 0) * 100); }
 
+  function queryTypLabel(t) {
+    return { direct: 'Direct', followup: 'Follow-up', career: 'Career', unknown: 'Unknown' }[t] || t;
+  }
+
+  async function doSearch() {
+    const query = input.value.trim();
+    if (!query) return;
+
+    const btn = document.getElementById('searchBtn');
     btn.disabled = true;
-    status.className = 'loading';
-    status.textContent = query
-      ? `"${query}" 분석 중…`
-      : '시청 이력 기반 추천 계산 중…';
-    results.innerHTML = '';
+
+    const out = document.getElementById('output');
+    out.innerHTML = `<div class="loading"><div class="spinner"></div><span>분석 중...</span></div>`;
 
     try {
-      const res = await fetch('/api/recommend', {
+      const res = await fetch(`${API}/recommend`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, history: selectedHistory, top_k: 5 })
+        body: JSON.stringify({ query, top_k: parseInt(slider.value) }),
       });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `서버 오류 (${res.status})`);
+      }
+
       const data = await res.json();
-
-      if (data.error) {
-        status.className = 'error';
-        status.textContent = data.error;
-        return;
-      }
-
-      status.className = '';
-      if (data.mode === 'query') {
-        const kws = data.results[0]?.detail?.extracted_keywords;
-        status.textContent = kws?.length
-          ? `추출 키워드: ${kws.join(', ')}`
-          : `${data.results.length}개 강의 추천됨`;
-      } else {
-        status.textContent = `이력 기반 추천 ${data.results.length}개`;
-      }
-
-      if (data.results.length === 0) {
-        results.innerHTML = `
-          <div class="empty">
-            <div class="empty-icon">🔍</div>
-            질의와 일치하는 강의를 찾지 못했습니다.
-          </div>`;
-        return;
-      }
-
-      results.innerHTML = data.results.map((r, i) => renderCard(r, i)).join('');
-
+      renderResults(data);
     } catch (e) {
-      status.className = 'error';
-      status.textContent = '서버 오류: ' + e.message;
+      out.innerHTML = `<div class="error-box">⚠ ${e.message}</div>`;
     } finally {
       btn.disabled = false;
     }
   }
 
-  function scoreColor(score) {
-    if (score >= 0.25) return 'var(--score-h)';
-    if (score >= 0.10) return 'var(--score-m)';
-    return 'var(--score-l)';
-  }
+  function renderResults(data) {
+    const out = document.getElementById('output');
+    if (!data.results || data.results.length === 0) {
+      out.innerHTML = `<div class="empty">일치하는 강의를 찾지 못했습니다.</div>`;
+      return;
+    }
 
-  function renderCard(r, i) {
-    const rankClass = i === 0 ? 'rank-1' : i === 1 ? 'rank-2' : 'rank-n';
-    const color = scoreColor(r.score);
-    const kws = (r.keywords || []).map(k => `<span class="kw-tag">${k}</span>`).join('');
+    // 분석 뱃지 — 첫 번째 결과에서 추출
+    const d = data.results[0].score_detail;
+    const focusBadge = ''; // focus_concept은 응답에 포함 안 됨 (추후 추가 가능)
 
-    const detail = r.detail || {};
-    const detailLines = Object.entries(detail)
-      .filter(([k]) => !['extracted_keywords'].includes(k))
-      .map(([k, v]) => {
-        const val = typeof v === 'number' ? v.toFixed(4) : JSON.stringify(v);
-        return `${k.padEnd(20)} ${val}`;
-      }).join('\\n');
+    const analysisBar = `
+      <div class="analysis-bar">
+        <div class="badge type"><span class="key">유형</span><span class="val">${queryTypLabel(d.query_type)}</span></div>
+        ${d.domain_score > 0 ? `<div class="badge domain"><span class="key">도메인</span><span class="val">일치</span></div>` : ''}
+        ${d.depth_score > 0 ? `<div class="badge focus"><span class="key">깊이</span><span class="val">${pct(d.depth_score)}%</span></div>` : ''}
+        ${d.context_penalty ? `<div class="badge"><span class="key">맥락</span><span class="val">억제 적용</span></div>` : ''}
+      </div>`;
 
-    const detailId = 'detail-' + i;
+    const cards = data.results.map((r, i) => {
+      const sd = r.score_detail;
+      const depthTag = sd.depth_score > 0.1
+        ? `<span class="depth-tag">◈ 깊이 +${pct(sd.depth_score)}%</span>` : '';
 
-    return `
-      <div class="result-card" style="animation-delay:${i * 60}ms">
-        <div class="card-top">
-          <div class="rank-badge ${rankClass}">${i + 1}</div>
-          <div class="card-meta">
-            <div class="card-title">${r.title}</div>
-            <div class="card-sub">
-              <span>${r.instructor}</span>
-              <span class="dot">·</span>
+      return `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-rank">#${i + 1}</div>
+          <div class="card-title-wrap">
+            <div class="card-title">${r.title}${depthTag}</div>
+            <div class="card-meta">
               <span>${r.domain}</span>
               <span class="dot">·</span>
+              <span>${r.instructor || '강사 미상'}</span>
+              <span class="dot">·</span>
               <span>${r.video_id}</span>
-              ${r.difficulty !== 'unclassified' ? `<span class="dot">·</span><span>${r.difficulty}</span>` : ''}
             </div>
           </div>
-          <div class="score-pill" style="color:${color};border-color:${color}">
-            ${Math.min(r.score * 100, 100).toFixed(1)}%
+          <div class="card-score">
+            <div class="score-num">${pct(r.score)}</div>
+            <div class="score-label">/ 100</div>
           </div>
         </div>
 
-        <div class="card-reason">${r.reason}</div>
-        <div class="card-summary">${r.summary}</div>
-        <div class="kw-row">${kws}</div>
+        <div class="card-reason">💡 ${r.reason}</div>
 
-        ${detailLines ? `
-          <div class="detail-toggle" onclick="toggleDetail('${detailId}')">
-            ▶ 점수 상세 보기
+        <div class="card-summary">${r.summary ? r.summary.slice(0, 120) + (r.summary.length > 120 ? '…' : '') : '요약 없음'}</div>
+
+        <div class="score-bars">
+          <div class="bar-item">
+            <div class="bar-label"><span>키워드</span><span>${pct(sd.keyword_score)}%</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${pct(sd.keyword_score)}%"></div></div>
           </div>
-          <pre class="detail-body" id="${detailId}">${detailLines}</pre>
-        ` : ''}
-      </div>
-    `;
-  }
+          <div class="bar-item">
+            <div class="bar-label"><span>제목</span><span>${pct(sd.title_score)}%</span></div>
+            <div class="bar-track"><div class="bar-fill green" style="width:${pct(sd.title_score)}%"></div></div>
+          </div>
+          <div class="bar-item">
+            <div class="bar-label"><span>요약</span><span>${pct(sd.summary_score)}%</span></div>
+            <div class="bar-track"><div class="bar-fill yellow" style="width:${pct(sd.summary_score)}%"></div></div>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
 
-  function toggleDetail(id) {
-    const el = document.getElementById(id);
-    el.classList.toggle('open');
-    const toggle = el.previousElementSibling;
-    if (el.classList.contains('open')) {
-      toggle.textContent = '▼ 점수 상세 닫기';
-    } else {
-      toggle.textContent = '▶ 점수 상세 보기';
-    }
+    out.innerHTML = `
+      <div class="section-title">추천 결과 ${data.results.length}건</div>
+      ${analysisBar}
+      <div class="results">${cards}</div>`;
   }
 </script>
 </body>
 </html>
+
 """
 
-# ============================================================================
-#  실행
-# ============================================================================
-
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=args.port, log_level="info")
+    import uvicorn
+    uvicorn.run("recommender_web:app", host="0.0.0.0", port=8002, reload=True)

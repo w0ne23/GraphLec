@@ -13,6 +13,7 @@ json_to_graph_triples.py — fused.json → 그래프 Parquet
 """
 
 import os
+import re
 import json
 import logging
 import time
@@ -41,7 +42,7 @@ class Config:
     fused_path:  Path = field(default=None)
     output_triples_parquet: Path = field(default=None)
 
-    google_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_API_KEY_2', ''))
+    google_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_API_KEY_1', ''))
     gemini_model:   str = "models/gemini-2.5-flash"
     lecture_title:  str = "강의"
 
@@ -161,8 +162,7 @@ EXTRACTION_PROMPT = """
     {{
       "from": "출발 엔티티명",
       "to": "도착 엔티티명",
-      "type": "관계 타입",
-      "evidence": "근거 문장"
+      "type": "관계 타입"
     }}
   ],
   "mentions": {{
@@ -189,6 +189,9 @@ EXTRACTION_PROMPT = """
 - 슬라이드 레이블(코드 번호, 그림 번호), 교육 메타 표현("다음 슬라이드", "예제") 제외
 - 수량 제한 없음: 강의에 등장하는 모든 의미있는 엔티티 추출
 - 자기 자신과의 관계 제외
+- 상위 개념의 구성 요소·기능·하위 항목은 반드시 개별 엔티티로 분리해서 추출
+  예) "마의 효능: 위벽 보호, 소화 촉진" → 기능(X), 위벽 보호(O), 소화 촉진(O) 각각 별도 엔티티
+- 목록·열거 형태로 나오는 항목들은 전부 개별 엔티티로 추출
 
 관계 타입 (아래 16가지만 사용; 다른 문자열 금지):
 is_a, part_of, instance_of, has_attribute,
@@ -200,9 +203,9 @@ solves, optimizes,
 implements, replaces
 
 각 관계 의미 (방향: from → to):
-- is_a: from은 to의 한 종류·범주·유형이다.
-- part_of: from은 to의 구성 요소·부분·하위 단위다.
-- instance_of: from은 to의 구체적 사례·실례·표본이다. (분류 관점이면 is_a와 둘 중 하나만; 애매하면 instance_of 우선)
+- is_a: from은 to의 한 종류·범주·유형이다. (from=하위, to=상위)
+- part_of: from은 to의 구성 요소·부분·하위 단위다. (from=부분, to=전체)
+- instance_of: from은 to의 구체적 사례·실례·표본이다. (from=사례, to=범주)
 - has_attribute: from은 속성·특성·조건으로 to를 갖는다 (정의·성질·전제).
 - prerequisite_of: from을 이해·다루기 전에 to가 필요하다 (선행 지식).
 - causes: from이 to를 일으키거나 강한 인과로 이끈다 (메커니즘·직접 원인).
@@ -211,7 +214,7 @@ implements, replaces
 - applies: from(이론·규칙·방법)이 to(상황·대상·문제)에 적용된다.
 - compared_to: from과 to가 대조·비교된다.
 - illustrates: from(사례·예)가 to(개념·주장)를 설명·뒷받침한다. (단순 분류가 아닐 때; 분류면 instance_of/is_a)
-- abstracts: from(개념·틀)이 to(현상·사례·세부)를 포괄·일반화한다.
+- abstracts: from(상위·일반 개념)이 to(하위·구체 세부)를 포괄·일반화한다. (from=상위·일반, to=하위·구체)
 - solves: from이 to(문제·과제)를 해결한다.
 - optimizes: from이 to(목표·지표·과정)를 개선·최적화한다.
 - implements: from이 to(명세·아이디어·요구)를 실현·구현한다.
@@ -247,6 +250,48 @@ class TripleCollector:
         self._edge_set.add(key)
         props_str = json.dumps(properties, ensure_ascii=False) if properties else ''
         self.triples.append((subject, predicate, obj, props_str))
+
+    def postprocess_abstracts(self):
+        """
+        abstracts 엣지 방향 후처리.
+
+        abstracts 정의: from(상위·일반) → to(하위·구체)
+        Gemini가 가끔 역전시킴 → concept 노드 out-degree 기반으로 교정.
+
+        교정 기준:
+          - out-degree가 높을수록 다른 노드와 많이 연결된 상위 개념
+          - abstracts 엣지에서 src_degree < tgt_degree 이면 from이 더 구체적 → swap
+          - degree가 같으면 판단 불가 → 그대로 유지
+        """
+        # concept 노드의 out-degree 계산
+        degree: Dict[str, int] = {}
+        for subj, pred, obj, _ in self.triples:
+            if subj.startswith('concept/'):
+                degree[subj] = degree.get(subj, 0) + 1
+
+        corrected: List[Tuple] = []
+        swap_count = 0
+
+        for subj, pred, obj, props in self.triples:
+            if (pred == 'abstracts'
+                    and subj.startswith('concept/')
+                    and obj.startswith('concept/')):
+                src_deg = degree.get(subj, 0)
+                tgt_deg = degree.get(obj, 0)
+                if src_deg < tgt_deg:
+                    # from이 더 구체적 → swap
+                    corrected.append((obj, pred, subj, props))
+                    swap_count += 1
+                    logger.info(
+                        f"  [abstracts 교정] {subj} → {obj} 역전 "
+                        f"(degree: {src_deg} < {tgt_deg})"
+                    )
+                    continue
+            corrected.append((subj, pred, obj, props))
+
+        self.triples = corrected
+        self._edge_set = {(s, p, o) for s, p, o, _ in self.triples}
+        logger.info(f"✓ abstracts 방향 교정 완료: {swap_count}개 역전")
 
     def write_parquet_outputs(self, stem: str, output_dir: Path) -> dict:
         from graph_parquet_export import write_graph_parquet_bundle
@@ -578,13 +623,29 @@ class ConceptLayerBuilder:
 
     def _call_gemini(self, prompt: str) -> Optional[Dict]:
         try:
-            response = self.client.models.generate_content(model=self.cfg.gemini_model, contents=prompt)
+            response = self.client.models.generate_content(
+                model=self.cfg.gemini_model, contents=prompt
+            )
             text = response.text
             if '```json' in text:
                 text = text.split('```json')[1].split('```')[0]
             elif '```' in text:
                 text = text.split('```')[1].split('```')[0]
+
+            # 탭·개행을 제외한 제어 문자 제거 (JSON 파싱 실패 방지)
+            text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
+
             return json.loads(text.strip())
+
+        except json.JSONDecodeError as e:
+            logger.error(f"  ✗ JSON 파싱 실패: {e}")
+            try:
+                logger.error(
+                    f"  ✗ 실패 지점 전후: {response.text[max(0, e.pos-100):e.pos+100]!r}"
+                )
+            except Exception:
+                pass
+            return None
         except Exception as e:
             logger.error(f"  ✗ Gemini 호출 실패: {e}")
             return None
@@ -634,6 +695,10 @@ class GraphPipeline:
         concept_builder.build()
         concept_count = len(collector.triples) - struct_count
         logger.info(f"✓ 개념 트리플: {concept_count}개")
+
+        # ── 후처리: abstracts 방향 교정 ──────────────────────────────────────
+        print('\n[Step 4.5] abstracts 방향 후처리')
+        collector.postprocess_abstracts()
 
         # ── Parquet 출력 (triples + nodes + edges) ───────────────────────────
         print('\n[Step 5] Parquet 출력')
