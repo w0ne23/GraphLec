@@ -451,7 +451,8 @@ def compute_query_similarity(
         query_domain, focus_concept, target, raw_query
     )
 
-    w_k, w_t, w_s, domain_boost_str = INTENT_WEIGHTS.get(query_type, INTENT_WEIGHTS["unknown"])
+    w_k, w_t, w_s, w_d, w_dp = INTENT_WEIGHTS.get(query_type, INTENT_WEIGHTS["unknown"])
+    domain_boost_str = w_d
     frag    = _compute_fragmentation_penalty(target.concept_roles)
     content = max(
         w_k * raw["keyword_score"]
@@ -750,10 +751,13 @@ class Recommender:
             }
             candidates.append((target, detail))
 
+        # ── 점수 기준 내림차순 정렬 ────────────────────────────────
+        candidates.sort(key=lambda x: x[1]["score"], reverse=True)
+
         results = []
         for t, d in candidates:
             if d["score"] < threshold:
-                continue
+                break   # 정렬 후이므로 이후 항목도 모두 미달 → 조기 종료
             results.append(RecommendResult(
                 video_id     = t.video_id,
                 title        = t.title,
@@ -781,7 +785,7 @@ class Recommender:
             print("  ※ 질의와 일치하는 강의를 찾지 못했습니다.")
         else:
             qtype = top[0].score_detail.get("query_type", "direct")
-            w_k, w_t, w_s, _ = INTENT_WEIGHTS.get(qtype, INTENT_WEIGHTS["unknown"])
+            w_k, w_t, w_s, w_d, w_dp = INTENT_WEIGHTS.get(qtype, INTENT_WEIGHTS["unknown"])
             print(f"  ▶ 추천 강의 (Top {len(top)})  [유형: {qtype}]")
             print(f"  가중치: keyword {w_k:.0%}  title {w_t:.0%}  summary {w_s:.0%}")
             print(f"  {'-'*58}")
@@ -839,7 +843,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_k", type=int, default=5,
                         help="추천 결과 수 (기본: 5)")
     parser.add_argument("--min_score", type=float, default=None,
-                        help="추천 최소 점수 0~1 (기본: cfg.MIN_SCORE=0.05). "
+                        help="추천 최소 점수 0~1 (기본: cfg.MIN_SCORE=0.1). "
                              "0 지정 시 필터 없음.")
     args = parser.parse_args()
 
