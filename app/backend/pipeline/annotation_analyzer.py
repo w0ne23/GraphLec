@@ -321,7 +321,7 @@ def analyze_annotation_pair(
     region_bboxes: build_diff_mask()가 반환한 정규화 bbox 리스트.
                    Gemini가 annotation_bbox 할당에 사용.
     """
-    from config import gemini_client as client
+    from .config import gemini_client as client
     log.info(f"  분석 중: slide_{slide_index:03d}_annot_{annot_index:02d} "
              f"(필기 영역 {len(region_bboxes)}개)")
 
@@ -410,7 +410,7 @@ def analyze_annotation_pair(
 # 메인 파이프라인
 # ──────────────────────────────────────────────
 def analyze_all(slides_dir: str, output_path: str, save_masks: bool = False):
-    from config import gemini_client
+    from .config import gemini_client
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -460,7 +460,7 @@ def analyze_all(slides_dir: str, output_path: str, save_masks: bool = False):
 # CLI
 # ──────────────────────────────────────────────
 if __name__ == "__main__":
-    from config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
+    from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
     parser = argparse.ArgumentParser(description="슬라이드 필기 VLM 분석기")
     parser.add_argument("--slides", "-s", default=str(DEFAULT_SLIDES_DIR),
                         help=f"slide_extractor.py 출력 디렉토리 (default: {DEFAULT_SLIDES_DIR})")

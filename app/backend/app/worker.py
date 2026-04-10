@@ -89,7 +89,7 @@ def pipeline_process(job_id, input_path):
         output_dir.mkdir(parents=True, exist_ok=True)
         slides_dir.mkdir(parents=True, exist_ok=True)
         
-        import main as pipeline
+        import pipeline.main as pipeline
         args = pipeline.get_parser().parse_args([
             "--input", str(video_path),
             "--output", str(output_dir),
