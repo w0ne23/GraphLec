@@ -43,7 +43,7 @@ class Config:
 
     def __post_init__(self):
         try:
-            from config import output_paths
+            from .config import output_paths
             paths = output_paths(self.stem, self.output_dir, self.slides_dir)
             if self.audio_path      is None: self.audio_path      = paths["by_slide"]
             if self.classified_path is None: self.classified_path = paths["classified"]

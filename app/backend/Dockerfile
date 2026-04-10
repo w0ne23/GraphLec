@@ -28,7 +28,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # 코드 레이어
 FROM base-deps AS final
 
-COPY *.py ./
+COPY app/backend/pipeline/ ./pipeline/
 COPY app/backend/app/ ./app/
 
 ENV PYTHONPATH=/app
