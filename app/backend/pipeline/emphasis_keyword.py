@@ -233,8 +233,8 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
         return candidate_keywords
     try:
         from google.genai import types
-        from config import gemini_client_2
-        from utils import api_call_with_retry
+        from .config import gemini_client_2
+        from .utils import api_call_with_retry
     except ImportError:
         return candidate_keywords
 
@@ -274,7 +274,7 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
         )
 
     try:
-        from utils import api_call_with_retry
+        from .utils import api_call_with_retry
         response = api_call_with_retry(call_api)
         text = (response.text or "").strip()
         if "```json" in text:

@@ -6,8 +6,8 @@ import json
 
 from google.genai import types
 
-from config import gemini_client_2
-from utils import api_call_with_retry
+from .config import gemini_client_2
+from .utils import api_call_with_retry
 
 
 def correct_segments(segments: list[dict], batch_size: int = 100) -> list[dict]:
