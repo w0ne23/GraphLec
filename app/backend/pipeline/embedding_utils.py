@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv()
 
 RETRY_DELAYS_SEC = [0, 5, 15, 30]
 

@@ -48,7 +48,7 @@ class Config:
 
     def __post_init__(self):
         try:
-            from config import output_paths
+            from .config import output_paths
             paths = output_paths(self.stem, self.output_dir, self.slides_dir)
             if self.fused_path is None: self.fused_path = paths["fused"]
         except ImportError:
@@ -294,7 +294,7 @@ class TripleCollector:
         logger.info(f"✓ abstracts 방향 교정 완료: {swap_count}개 역전")
 
     def write_parquet_outputs(self, stem: str, output_dir: Path) -> dict:
-        from graph_parquet_export import write_graph_parquet_bundle
+        from .graph_parquet_export import write_graph_parquet_bundle
 
         return write_graph_parquet_bundle(self.triples, stem, output_dir)
 

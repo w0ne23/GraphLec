@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import librosa
-from deictics import (
+from .deictics import (
     classify_ambiguous_deictics_with_llm,
     extract_deictics_from_segments,
 )
@@ -121,7 +121,7 @@ def _auto_register_lecture(stem: str) -> None:
         import os
         from dotenv import load_dotenv
 
-        repo_root = Path(__file__).resolve().parent
+        repo_root = Path(__file__).resolve().parents[3]
         web_dir = repo_root / "web"
         if not web_dir.exists():
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
@@ -129,7 +129,7 @@ def _auto_register_lecture(stem: str) -> None:
 
         # main 실행 셸과 web runserver 셸의 설정 불일치를 줄이기 위해
         # 루트 .env를 명시적으로 로드한다.
-        load_dotenv(repo_root / ".env", override=False)
+        load_dotenv(override=False)
         # 로컬 테스트는 SQLite 단일 DB로 통일한다.
         os.environ["USE_SQLITE"] = "1"
 
@@ -176,7 +176,7 @@ def _transcribe_by_slide(
             "silences": [{"start","end","duration"}, ...]   # 영상 절대 시간
         }
     """
-    from transcriber import transcribe_video, transcribe_range
+    from .transcriber import transcribe_video, transcribe_range
 
     if not meta_path or not slide_ranges:
         print("  ℹ️ metadata 없음 → 전체 전사 방식 사용")
@@ -215,7 +215,7 @@ def _transcribe_by_slide(
 # ──────────────────────────────────────────────────────────────
 
 def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
-    from slide_extractor import extract_slides
+    from .slide_extractor import extract_slides
 
     stem = Path(args.input).stem
     meta_path = output_dir / f"{stem}_metadata.json"
@@ -241,8 +241,8 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
 
 def stage1b_audio_analyze(args, output_dir: Path) -> dict:
     """Stage 1B: 오디오 품질 분석 (slide_extractor와 병렬)"""
-    from audio_analyzer import extract_audio_from_video, analyze_audio_features, evaluate_audio_quality
-    from utils import get_video_duration
+    from .audio_analyzer import extract_audio_from_video, analyze_audio_features, evaluate_audio_quality
+    from .utils import get_video_duration
 
     stem = Path(args.input).stem
     audio_quality_path = output_dir / f"{stem}_audio_quality.json"
@@ -281,7 +281,7 @@ def stage1b_audio_analyze(args, output_dir: Path) -> dict:
 
 
 def stage2_textualize(args, slides_dir: Path, output_dir: Path) -> dict:
-    from slide_textualizer import TextualizationPipeline, Config as TextConfig
+    from .slide_textualizer import TextualizationPipeline, Config as TextConfig
 
     stem = Path(args.input).stem
     textualized_path = output_dir / f"{stem}_slide_textualized.json"
@@ -305,7 +305,7 @@ def stage2_textualize(args, slides_dir: Path, output_dir: Path) -> dict:
 
 
 def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
-    from annotation_analyzer import analyze_all
+    from .annotation_analyzer import analyze_all
 
     stem = Path(args.input).stem
     annotation_path = output_dir / f"{stem}_annotation.json"
@@ -328,21 +328,21 @@ def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
 
 
 def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, output_dir: Path) -> dict:
-    from text_processor import correct_segments_dual_with_slide_context
-    from segment_grouper import (
+    from .text_processor import correct_segments_dual_with_slide_context
+    from .segment_grouper import (
         load_slide_ranges,
         group_segments_by_context,
         group_segments_by_slide_and_context,
         expand_group_annotations_to_segments,
     )
-    from audio_analyzer import extract_audio_from_video
-    from emphasis_audio import detect_emphasis_by_std
-    from emphasis_keyword import (
+    from .audio_analyzer import extract_audio_from_video
+    from .emphasis_audio import detect_emphasis_by_std
+    from .emphasis_keyword import (
         detect_emphasis_by_keywords_weighted,
         detect_emphasis_by_topic_keyword_repetition,
         get_topic_keywords_filtered_v2,
     )
-    from emphasis_combiner import combine_emphasis_simple
+    from .emphasis_combiner import combine_emphasis_simple
 
     stem = Path(args.input).stem
     segments_path = output_dir / f"{stem}_segments.json"
@@ -526,7 +526,7 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
 def stage4a_classify(
     args, textualized_path: str, meta_path: str, silences_path: str, output_dir: Path
 ) -> dict:
-    from slide_classifier import classify_slides
+    from .slide_classifier import classify_slides
 
     stem = Path(args.input).stem
     classified_path = output_dir / f"{stem}_slide_classified.json"
@@ -611,7 +611,7 @@ def stage5_fusion(
     audio_result: dict,
     output_dir: Path,
 ) -> dict:
-    from fusion import Config as FusionConfig, run_fusion
+    from .fusion import Config as FusionConfig, run_fusion
 
     stem = Path(args.input).stem
     fused_path = output_dir / f"{stem}_fused.json"
@@ -650,7 +650,7 @@ def stage5_fusion(
 
 
 def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
-    from json_to_graph_triples import Config as TripleConfig, GraphPipeline
+    from .json_to_graph_triples import Config as TripleConfig, GraphPipeline
 
     stem = Path(args.input).stem
     triples_parquet = output_dir / f"{stem}_graph_triples.parquet"
@@ -687,10 +687,10 @@ def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
 
 def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     """fused.json → 청크 임베딩 → Parquet + LanceDB (단일 테이블, stem 필터)."""
-    from lance_ingest import default_lance_root, ingest_stem_to_lance
+    from .lance_ingest import default_lance_root, ingest_stem_to_lance
 
     stem = Path(args.input).stem
-    from config import output_paths
+    from .config import output_paths
 
     paths = output_paths(stem, output_dir, slides_dir)
     fused_path = paths["fused"]
@@ -718,7 +718,7 @@ def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
 
 def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     """Stage 8: 강의 메타데이터 생성."""
-    from generate_metadata import generate_metadata
+    from .generate_metadata import generate_metadata
 
     stem         = Path(args.input).stem
     metadata_dir = Path(getattr(args, "metadata_dir", "metadata"))
@@ -758,7 +758,7 @@ def run_pipeline(args, progress_callback=None):
             except Exception as e:
                 log.warning(f"progress_callback failed for {stage_key}: {e}")
 
-    from config import output_paths, DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
+    from .config import output_paths, DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
 
     stem = Path(args.input).stem
     slides_dir = Path(args.slides)
@@ -893,7 +893,7 @@ def run_pipeline(args, progress_callback=None):
             timings["Stage 6 그래프 트리플"] = r6["elapsed"]
 
             if not getattr(args, "skip_neo4j", False):
-                from neo4j_ingest import stage_neo4j_ingest
+                from .neo4j_ingest import stage_neo4j_ingest
 
                 _banner("Neo4j 적재  —  nodes/edges Parquet → Neo4j")
                 t_neo = time.time()
@@ -979,7 +979,7 @@ def run_pipeline(args, progress_callback=None):
 
 def get_parser():
     
-    from config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
+    from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
 
     parser = argparse.ArgumentParser(
         description="강의 영상 분석 통합 파이프라인",

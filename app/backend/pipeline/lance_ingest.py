@@ -15,7 +15,7 @@ import lancedb
 import numpy as np
 import pandas as pd
 
-from embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, get_genai_client
+from .embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, get_genai_client
 
 CHUNKS_TABLE = "chunks"
 BATCH_SIZE = 16
@@ -26,7 +26,7 @@ def default_lance_root() -> Path:
     if env:
         return Path(env).resolve()
     # 레포 루트 기준 (CWD와 무관)
-    repo_root = Path(__file__).resolve().parent
+    repo_root = Path(__file__).resolve().parents[3]
     return (repo_root / "data" / "lancedb").resolve()
 
 
@@ -158,7 +158,7 @@ def lance_search(
     embedding_model: str = DEFAULT_EMBEDDING_MODEL,
 ) -> pd.DataFrame:
     """질의 벡터로 stem 범위 내 top-k 검색."""
-    from embedding_utils import embed_query
+    from .embedding_utils import embed_query
 
     lance_root = lance_root or default_lance_root()
     if not lance_root.exists():
@@ -190,7 +190,7 @@ if __name__ == "__main__":
     p.add_argument("--lance-root", default=None, type=Path, help="LanceDB 루트 (기본: 레포 data/lancedb)")
     args = p.parse_args()
     try:
-        from config import output_paths
+        from .config import output_paths
     except ImportError:
         output_paths = None  # type: ignore
 
