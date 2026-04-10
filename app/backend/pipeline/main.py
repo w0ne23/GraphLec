@@ -127,8 +127,6 @@ def _auto_register_lecture(stem: str) -> None:
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
             return
 
-        # main 실행 셸과 web runserver 셸의 설정 불일치를 줄이기 위해
-        # 루트 .env를 명시적으로 로드한다.
         load_dotenv(override=False)
         # 로컬 테스트는 SQLite 단일 DB로 통일한다.
         os.environ["USE_SQLITE"] = "1"
