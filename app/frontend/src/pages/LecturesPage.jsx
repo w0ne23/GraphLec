@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { getLectureStatus, listLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
-const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '통합', '요약 생성']
-const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'summarize']
+const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '분석 통합', '그래프/DB', '요약 색인', '메타데이터']
+const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'graph', 'summarize', 'metadata']
 
 const STATUS_MAP = {
   done:       { label: '분석 완료', cls: 'status-done' },
@@ -278,8 +278,8 @@ export default function LecturesPage({ onNavigate }) {
                       <div className="upload-pipe-fill" style={{ 
                         width: lec.status === 'done' ? '100%' : 
                                lec.status === 'error' ? '0%' : 
-                               `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * 20 + 
-                                  (lec.pipeline_stages.some(s => s.status === 'run') ? 10 : 0))}%` 
+                               `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * (100 / STAGE_KEYS.length) + 
+                                  (lec.pipeline_stages.some(s => s.status === 'run') ? (100 / STAGE_KEYS.length) / 2 : 0))}%` 
                       }} />
                     </div>
                     <div className="upload-pipe-stages">
