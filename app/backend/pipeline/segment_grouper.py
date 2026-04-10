@@ -16,8 +16,8 @@ import re
 
 from google.genai import types
 
-from config import gemini_client_2
-from utils import api_call_with_retry
+from .config import gemini_client_2
+from .utils import api_call_with_retry
 
 
 # 문장 종결로 볼 문장부호 (한국어·영어·공백 제거 후 끝)

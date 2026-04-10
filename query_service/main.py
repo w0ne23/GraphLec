@@ -31,7 +31,7 @@ from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-from lance_ingest import default_lance_root, lance_search  # noqa: E402
+from pipeline.lance_ingest import default_lance_root, lance_search  # noqa: E402
 
 from .content_retrieval import EvidenceItem, infer_intents_json, run_enhanced_content_pipeline  # noqa: E402
 from .graph_constants import CONCEPT_SEMANTIC_REL_TYPES  # noqa: E402

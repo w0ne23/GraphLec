@@ -80,7 +80,7 @@ CORE_FREQ_THRESHOLD  = 0.25
 
 def load_fused(stem: str, output_dir: Path) -> dict:
     try:
-        from config import output_paths
+        from .config import output_paths
         paths = output_paths(stem, output_dir, output_dir)
         path  = paths["fused"]
     except ImportError:

@@ -13,8 +13,8 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, embed_query, get_genai_client
-from lance_ingest import default_lance_root, lance_search
+from pipeline.embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, embed_query, get_genai_client
+from pipeline.lance_ingest import default_lance_root, lance_search
 
 from .neo4j_content_queries import run_content_queries
 

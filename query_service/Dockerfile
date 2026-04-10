@@ -14,7 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 ENV PYTHONPATH=/app
 
 COPY query_service/ ./query_service/
-COPY lance_ingest.py .
-COPY embedding_utils.py .
+COPY app/backend/pipeline/lance_ingest.py ./pipeline/lance_ingest.py
+COPY app/backend/pipeline/embedding_utils.py ./pipeline/embedding_utils.py
+RUN touch ./pipeline/__init__.py
 
 CMD ["uvicorn", "query_service.main:app", "--host", "0.0.0.0", "--port", "8001"]

@@ -5,8 +5,8 @@ from typing import Any, Optional
 
 from google.genai import types
 
-from config import gemini_client
-from utils import api_call_with_retry
+from .config import gemini_client
+from .utils import api_call_with_retry
 
 _DEICTICS = {
     "이", "그", "저",
