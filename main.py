@@ -46,7 +46,6 @@ import librosa
 from deictics import (
     classify_ambiguous_deictics_with_llm,
     extract_deictics_from_segments,
-    normalize_word_items,
 )
 
 logging.basicConfig(
@@ -161,76 +160,54 @@ def _auto_register_lecture(stem: str) -> None:
 # 전사 헬퍼
 # ──────────────────────────────────────────────────────────────
 
-def _transcribe_range(
-    video_path: str, start_sec: float, end_sec: float, output_dir: Path, groq_client
-) -> list[dict]:
-    chunk_duration = 600.0
-    if end_sec <= start_sec:
-        return []
-    segments: list[dict] = []
-    total_chunks = max(
-        1, int((end_sec - start_sec) / chunk_duration) + (1 if (end_sec - start_sec) % chunk_duration > 0 else 0)
-    )
-    for i in range(total_chunks):
-        chunk_start = start_sec + i * chunk_duration
-        if chunk_start >= end_sec:
-            break
-        this_dur = min(chunk_duration, end_sec - chunk_start)
-        chunk_path = str(output_dir / f"temp_chunk_{start_sec:.0f}_{i}.wav")
-        subprocess.run([
-            "ffmpeg", "-ss", str(chunk_start), "-t", str(this_dur),
-            "-i", video_path, "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1", "-y", chunk_path,
-        ], capture_output=True)
-        p = Path(chunk_path)
-        if not p.exists() or p.stat().st_size == 0:
-            continue
-        with open(chunk_path, "rb") as f:
-            transcription = groq_client.audio.transcriptions.create(
-                file=(chunk_path, f.read()),
-                model="whisper-large-v3-turbo",
-                language="ko",
-                response_format="verbose_json",
-            )
-        for seg in transcription.segments:
-            words = normalize_word_items(seg.get("words"), chunk_start=chunk_start)
-            segments.append({
-                "start": float(seg["start"]) + chunk_start,
-                "end": float(seg["end"]) + chunk_start,
-                "text": (seg["text"] or "").strip(),
-                "words": words,
-            })
-        p.unlink(missing_ok=True)
-    return segments
-
-
 def _transcribe_by_slide(
     video_path: str,
     duration: float,
     meta_path: Optional[str],
     slide_ranges: list[dict],
     output_dir: Path,
-) -> list[dict]:
-    from transcriber import transcribe_video
-    from config import groq_client
+) -> dict:
+    """
+    슬라이드별 전사 (metadata 있을 때) 또는 전체 전사 (fallback).
+
+    Returns:
+        {
+            "segments": [{"start","end","text","words","slide_index"?}, ...],
+            "silences": [{"start","end","duration"}, ...]   # 영상 절대 시간
+        }
+    """
+    from transcriber import transcribe_video, transcribe_range
 
     if not meta_path or not slide_ranges:
         print("  ℹ️ metadata 없음 → 전체 전사 방식 사용")
         return transcribe_video(video_path, duration, output_dir=output_dir)
 
     all_segments: list[dict] = []
+    all_silences: list[dict] = []
     for r in slide_ranges:
         sidx = r["slide_index"]
         start_sec = float(r["start_sec"])
         end_sec = float(r["end_sec"])
         print(f"    ▶ 슬라이드 {sidx}: {start_sec:.1f}s ~ {end_sec:.1f}s 전사...")
-        segs = _transcribe_range(video_path, start_sec, end_sec, output_dir, groq_client)
-        for seg in segs:
+        result = transcribe_range(video_path, start_sec, end_sec, output_dir)
+        for seg in result.get("segments", []):
             s = seg.copy()
             s["slide_index"] = sidx
             all_segments.append(s)
+        all_silences.extend(result.get("silences", []))
 
     all_segments.sort(key=lambda s: (s.get("start", 0.0), s.get("end", 0.0)))
-    return all_segments
+    # 슬라이드 범위가 겹치는 경우 silences가 중복될 수 있음 → dedup (start, end 기준)
+    seen_sil: set = set()
+    deduped_silences: list[dict] = []
+    for sil in sorted(all_silences, key=lambda x: (x["start"], x["end"])):
+        key = (round(sil["start"], 3), round(sil["end"], 3))
+        if key in seen_sil:
+            continue
+        seen_sil.add(key)
+        deduped_silences.append(sil)
+
+    return {"segments": all_segments, "silences": deduped_silences}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -421,8 +398,10 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
     print("  [3B-1] 슬라이드별 전사...")
     t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-    segments_raw = _transcribe_by_slide(video_path, duration, meta_path, slide_ranges, output_dir)
-    print(f"    ✓ {len(segments_raw)}개 세그먼트  ({time.time()-t0:.1f}초)")
+    transcribe_result = _transcribe_by_slide(video_path, duration, meta_path, slide_ranges, output_dir)
+    segments_raw = transcribe_result.get("segments", [])
+    detected_silences = transcribe_result.get("silences", [])
+    print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
 
     # [3B-2] 텍스트 2단계 교정
     print("  [3B-2] 텍스트 교정...")
@@ -436,22 +415,18 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
     })
     print(f"    ✓ 교정 완료  ({time.time()-t0:.1f}초)")
 
-    # [3B-3] 침묵 구간 추출
-    print("  [3B-3] 침묵 구간 추출...")
+    # [3B-3] 침묵 구간 저장 (transcriber가 ffmpeg silencedetect로 사전 감지)
+    print("  [3B-3] 침묵 구간 저장...")
     MIN_SILENCE_SEC = 0.6
-    silences: list[dict] = []
-    for i in range(len(segments_clean) - 1):
-        cur, nxt = segments_clean[i], segments_clean[i + 1]
-        gap = float(nxt.get("start", 0.0)) - float(cur.get("end", 0.0))
-        if gap >= MIN_SILENCE_SEC:
-            silences.append({
-                "index": len(silences),
-                "start": float(cur.get("end", 0.0)),
-                "end": float(nxt.get("start", 0.0)),
-                "duration": gap,
-                "prev_segment_index": i,
-                "next_segment_index": i + 1,
-            })
+    silences: list[dict] = [
+        {
+            "index": i,
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+            "duration": float(s.get("duration", s["end"] - s["start"])),
+        }
+        for i, s in enumerate(detected_silences)
+    ]
     _save_json(silences_path, {
         "video_path": video_path,
         "total_duration_sec": duration,
