@@ -32,7 +32,7 @@ from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
 logger = logging.getLogger(__name__)
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_dotenv()
 
 _NEO4J_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 

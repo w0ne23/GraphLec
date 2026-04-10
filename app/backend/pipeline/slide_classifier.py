@@ -586,7 +586,7 @@ def classify_slides(
 # ============================================================================ #
 
 def main():
-    from config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
+    from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
 
     parser = argparse.ArgumentParser(description="슬라이드 역할 분류기")
     parser.add_argument(

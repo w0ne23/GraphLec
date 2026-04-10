@@ -350,7 +350,7 @@ class T1Extractor:
 
     def __init__(self, config: Config):
         self.config = config
-        from config import gemini_client
+        from .config import gemini_client
         self.client = gemini_client
         logger.info("✓ Gemini initialized for t1 extraction")
 
@@ -638,7 +638,7 @@ class TextualizationPipeline:
 
 def main():
     import argparse
-    from config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
+    from .config import DEFAULT_SLIDES_DIR, DEFAULT_OUTPUT_DIR
 
     parser = argparse.ArgumentParser(description="슬라이드 시각 정보 텍스트화")
     parser.add_argument("-s", "--slides", default=str(DEFAULT_SLIDES_DIR),

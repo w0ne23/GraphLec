@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-from config import groq_client
+from .config import groq_client
 
 
 # ── 환경변수 ──────────────────────────────────────────────────────
