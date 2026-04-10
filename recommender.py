@@ -58,11 +58,11 @@ class RecommenderConfig:
     # keyword vec 유사도 threshold — 미만이면 기여 0으로 처리
     KW_VEC_THRESHOLD:    float = 0.60
     # depth boost (focus_concept 지정 시에만 활성)
-    W_DEPTH_BOOST:       float = 0.20
+    W_DEPTH_BOOST:       float = 0.30
     # 파편화 패널티 강도 λ
     FRAG_PENALTY_WEIGHT: float = 0.10
     # 추천 최소 점수 — 이 점수 이하인 강의는 추천 결과에서 제외
-    MIN_SCORE:           float = 0.50
+    MIN_SCORE:           float = 0.40
     # 벡터 DB 경로
     DB_DIR:              str   = "lancedb/"
     # domain boost 강도
@@ -167,40 +167,63 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     return float(np.dot(va, vb) / denom)
 
 
-def _direct_match_score(search_text: str, lec: LectureMetadata) -> dict:
+def _direct_match_score(
+    query_keywords:    list[str],
+    inferred_keywords: list[str],
+    lec:               LectureMetadata,
+    inferred_weight:   float = 0.5,
+) -> dict:
     """
-    search_text 토큰을 각 필드에 직접 매칭하여 포함 비율을 반환.
+    원본 질의 키워드 / 추론 키워드를 각 필드에 직접 매칭.
+
+    query_keywords    → 100% 반영 (원본 질의에서 직접 추출)
+    inferred_keywords → inferred_weight 비율 반영 (Gemini 확장, 기본 50%)
 
     keyword 매칭: 완전 일치 또는 토큰이 keyword의 prefix인 경우만 허용
-    (양방향 substring은 "콜" → "프로토콜" 같은 false positive 유발)
     """
-    tokens = set(search_text.split())
-    if not tokens:
+    q_tokens = set(query_keywords)
+    i_tokens = set(inferred_keywords)
+    all_tokens = q_tokens | i_tokens
+    if not all_tokens:
         return {"title": 0.0, "keyword": 0.0, "summary": 0.0}
 
-    # title 직접 매칭
+    # ── title 매칭 ─────────────────────────────────────────────────
     title_words = set(lec.title.split())
-    title_hits  = sum(
-        1 for t in tokens
-        if any(t in w or w in t for w in title_words)
-    )
-    title_match = title_hits / len(tokens)
+    def title_hit(tokens: set) -> float:
+        hits = sum(1 for t in tokens if any(t in w or w in t for w in title_words))
+        return hits / len(tokens) if tokens else 0.0
 
-    # keyword 직접 매칭 — 완전 일치 또는 prefix, 2글자 이상 토큰만
-    total_kw_score   = sum(k["score"] for k in lec.keywords) or 1.0
-    matched_kw_score = sum(
-        k["score"] for k in lec.keywords
-        if any(
-            t == k["keyword"] or k["keyword"].startswith(t)
-            for t in tokens
-            if len(t) > 1
+    title_match = (
+        title_hit(q_tokens) * 1.0 +
+        title_hit(i_tokens) * inferred_weight
+    ) / (1.0 + inferred_weight) if (q_tokens or i_tokens) else 0.0
+
+    # ── keyword 매칭 — 완전 일치 또는 prefix, 2글자 이상 토큰만 ────
+    total_kw_score = sum(k["score"] for k in lec.keywords) or 1.0
+
+    def kw_matched_score(tokens: set) -> float:
+        return sum(
+            k["score"] for k in lec.keywords
+            if any(
+                t == k["keyword"] or k["keyword"].startswith(t)
+                for t in tokens
+                if len(t) > 1
+            )
         )
-    )
-    kw_match = matched_kw_score / total_kw_score
 
-    # summary 직접 매칭
-    summary_hits = sum(1 for t in tokens if t in lec.summary)
-    sum_match    = summary_hits / len(tokens)
+    q_kw  = kw_matched_score(q_tokens)
+    i_kw  = kw_matched_score(i_tokens)
+    kw_match = (q_kw * 1.0 + i_kw * inferred_weight) / (total_kw_score * (1.0 + inferred_weight))
+
+    # ── summary 매칭 ───────────────────────────────────────────────
+    def summary_hit(tokens: set) -> float:
+        hits = sum(1 for t in tokens if t in lec.summary)
+        return hits / len(tokens) if tokens else 0.0
+
+    sum_match = (
+        summary_hit(q_tokens) * 1.0 +
+        summary_hit(i_tokens) * inferred_weight
+    ) / (1.0 + inferred_weight) if (q_tokens or i_tokens) else 0.0
 
     return {"title": title_match, "keyword": kw_match, "summary": sum_match}
 
@@ -289,16 +312,18 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
-) -> tuple[str, Optional[str], Optional[str], Optional[int], Optional[str]]:
+) -> tuple[str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
     """
-    질의 → search_text + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
+    질의 → search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
 
     반환:
-      search_text      : 벡터 검색용 정제 텍스트
-      domain           : available_domains 중 하나, 없으면 None
-      focus_concept    : 깊이를 측정할 핵심 개념, 없으면 None
-      duration_max_sec : 최대 강의 길이(초), 언급 없으면 None
-      difficulty_hint  : "beginner" | "intermediate" | "advanced" | None
+      search_text        : 벡터 임베딩용 전체 텍스트 (query + inferred 합산)
+      query_keywords     : 원본 질의에서 직접 추출한 핵심 용어 (dm 100% 반영)
+      inferred_keywords  : Gemini가 의미 확장한 연관 용어 (dm 50% 반영)
+      domain             : available_domains 중 하나, 없으면 None
+      focus_concept      : 깊이를 측정할 핵심 개념, 없으면 None
+      duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
+      difficulty_hint    : "beginner" | "intermediate" | "advanced" | None
     """
     domain_list  = ", ".join(available_domains)
     keyword_list = ", ".join(available_keywords)
@@ -309,23 +334,26 @@ def analyze_query(
 
 다음 JSON 형식으로만 출력해 (설명 없이):
 {{
-  "search_text": "검색용 핵심 용어들",
+  "query_keywords": ["원본 질의 핵심 용어1", ...],
+  "inferred_keywords": ["확장 연관 용어1", ...],
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
   "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null
 }}
 
-[search_text]:
-- 질의에서 강의 검색에 필요한 핵심 학술·기술 용어만 추출
-- "찾아줘", "알려줘", "강의" 같은 메타 표현과 구어체 제거
-- 의미상 연관된 용어를 함께 나열 (공백 구분)
-- 반드시 최소 3개, 최대 8개의 용어를 포함할 것
-- 질의가 짧거나 단순해도 연관 개념을 보충하여 최소 3개를 채울 것
-- 예) "비동기 처리할 때 막혀" → "비동기 처리 Promise async await 이벤트루프 콜백"
-- 예) "멀티스레드가 어떻게 동작하는지" → "멀티스레딩 동작 원리 스레드 프로세스 동기화 컨텍스트 스위칭"
-- 예) "프로세스 관리 알려주는 강의" → "프로세스 관리 프로세스 생성 PCB 컨텍스트 스위칭 스케줄링"
-- 예) "운영체제 기능 알고 싶어" → "운영체제 기능 커널 시스템 콜 자원 관리"
+[query_keywords]: 원본 질의에서 직접 등장하는 핵심 학술·기술 용어
+- "찾아줘", "알려줘", "강의", "어떻게" 같은 메타·구어체 표현 제외
+- 질의에 명시된 개념만 포함 (1~4개)
+- 예) "가상 메모리 페이징 방식 설명하는 강의" → ["가상 메모리", "페이징"]
+- 예) "TCP와 UDP 차이를 다루는 강의" → ["TCP", "UDP"]
+- 예) "비동기 처리할 때 막혀" → ["비동기"]
+
+[inferred_keywords]: 질의 의도에서 연관성이 높은 확장 용어 (2~6개)
+- query_keywords와 겹치지 않을 것
+- 예) "가상 메모리 페이징" → ["페이지 폴트", "페이지 교체", "TLB", "운영체제"]
+- 예) "TCP UDP 차이" → ["프로토콜", "전송 계층", "3-way 핸드셰이크", "흐름 제어"]
+- 예) "비동기" → ["Promise", "async/await", "이벤트 루프", "콜백"]
 
 [domain]: 반드시 아래 목록 중 하나: {domain_list}
   - 확신할 수 없으면 null
@@ -358,11 +386,15 @@ def analyze_query(
     text   = response.text.strip().replace("```json", "").replace("```", "").strip()
     parsed = json.loads(text)
 
-    search_text      = parsed.get("search_text") or query
-    domain           = parsed.get("domain") or None
-    focus_concept    = parsed.get("focus_concept") or None
-    duration_max_sec = parsed.get("duration_max_sec") or None
-    difficulty_hint  = parsed.get("difficulty_hint") or None
+    query_keywords    = parsed.get("query_keywords", [])
+    inferred_keywords = parsed.get("inferred_keywords", [])
+    domain            = parsed.get("domain") or None
+    focus_concept     = parsed.get("focus_concept") or None
+    duration_max_sec  = parsed.get("duration_max_sec") or None
+    difficulty_hint   = parsed.get("difficulty_hint") or None
+
+    # 벡터 임베딩용 search_text — 전체 합산
+    search_text = " ".join(query_keywords + inferred_keywords) or query
 
     kw_set = set(available_keywords)
     if domain not in available_domains:
@@ -377,7 +409,7 @@ def analyze_query(
     if difficulty_hint not in ("beginner", "intermediate", "advanced"):
         difficulty_hint = None
 
-    return search_text, domain, focus_concept, duration_max_sec, difficulty_hint
+    return search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint
 
 
 # ============================================================================
@@ -451,10 +483,11 @@ class Recommender:
           5. 정렬 + min_score 필터 후 top_k 반환
         """
         print(f"[질의 분석] {query}")
-        search_text, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
+        search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
             query, self._available_domains, self._available_keywords
         )
-        print(f"[검색 텍스트] {search_text}")
+        print(f"[원본 키워드] {query_keywords}")
+        print(f"[확장 키워드] {inferred_keywords}")
         print(f"[추론 도메인] {domain or '미확정'}")
         print(f"[깊이 개념]   {focus_concept or '없음'}")
         print(f"[난이도 힌트] {difficulty_hint or '없음'}")
@@ -502,8 +535,8 @@ class Recommender:
                 self.cfg.W_SUMMARY * sim_summary
             )
 
-            # 직접 토큰 매칭
-            dm       = _direct_match_score(search_text, lec)
+            # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
+            dm       = _direct_match_score(query_keywords, inferred_keywords, lec)
             dm_score = (
                 self.cfg.W_TITLE   * dm["title"]   +
                 self.cfg.W_KEYWORD * dm["keyword"]  +
@@ -514,7 +547,7 @@ class Recommender:
             content_score = min(
                 self.cfg.VEC_BLEND       * vec_score +
                 (1 - self.cfg.VEC_BLEND) * dm_score,
-                0.80
+                0.85
             )
 
             # domain boost 신호
@@ -526,22 +559,40 @@ class Recommender:
             # depth boost 신호
             depth_score = _compute_depth_score(focus_concept, lec) if focus_concept else 0.0
 
-            # 통합 boost — 신호들을 가산 후 한 번만 곱산
-            # total_boost = 1 + (w_domain×domain + w_diff×diff_match + w_depth×depth)
-            # → boost 총량이 자연스럽게 제한됨 (1.0 초과 방지)
-            combined_boost = 1.0 + (
-                self.cfg.W_DOMAIN_BOOST     * domain_score     +
-                self.cfg.W_DIFFICULTY_BOOST * difficulty_match  +
+            # ── 가중합 구조 점수 (total ≤ 1.0 수학적 보장) ──────────────
+            # total = ALPHA × content_score + BETA × boost_signal
+            #   ALPHA = 0.80 : 내용 점수 예산
+            #   BETA  = 0.20 : boost 예산
+            #   boost_signal : domain/difficulty/depth 신호 가중합을 최대값으로 정규화 (0~1)
+            ALPHA = 0.80
+            BETA  = 0.20
+            MAX_BOOST = (
+                self.cfg.W_DOMAIN_BOOST +
+                self.cfg.W_DIFFICULTY_BOOST +
+                self.cfg.W_DEPTH_BOOST
+            )  # 최대 가능 boost 합산값 → 정규화 기준
+            raw_boost = (
+                self.cfg.W_DOMAIN_BOOST     * domain_score    +
+                self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
                 self.cfg.W_DEPTH_BOOST      * depth_score
             )
+            boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0  # 0~1 정규화
 
-            # 파편화 패널티 + 길이 소프트 패널티
-            frag  = _compute_fragmentation_penalty(lec.concept_roles)
-            total = min(max(
-                content_score * combined_boost * duration_score
+            # 파편화 패널티
+            frag = _compute_fragmentation_penalty(lec.concept_roles)
+
+            total = max(
+                ALPHA * content_score * duration_score
+                + BETA * boost_signal
                 - self.cfg.FRAG_PENALTY_WEIGHT * frag,
                 0.0
-            ), 1.0)
+            )
+
+            # dm_keyword == 0 패널티
+            # 키워드 직접 매칭이 전혀 없으면 내용 관련성 없는 강의로 판단
+            # domain/difficulty boost만으로 올라온 false positive 제거
+            if dm["keyword"] == 0:
+                total *= 0.6
 
             detail = {
                 "score":                round(total, 4),
@@ -559,7 +610,7 @@ class Recommender:
                 "domain_score":         round(domain_score, 4),
                 "difficulty_match":     round(difficulty_match, 4),
                 "depth_score":          round(depth_score, 4),
-                "combined_boost":       round(combined_boost, 4),
+                "boost_signal":         round(boost_signal, 4),
                 "duration_score":       round(duration_score, 4),
                 "duration_mismatch":    duration_score < 1.0,
                 "frag_penalty":         round(frag, 4),
@@ -577,7 +628,7 @@ class Recommender:
                   f"{d['sim_title']:>5.3f} {d['sim_keyword']:>5.3f} "
                   f"{d['sim_keyword_filtered']:>6.3f} {d['sim_summary']:>5.3f} "
                   f"{d['vec_score']:>5.3f} {d['dm_score']:>5.3f} "
-                  f"{d['combined_boost']:>6.3f} {d['duration_score']:>5.3f} {d['score']:>7.3f}")
+                  f"{d['boost_signal']:>6.3f} {d['duration_score']:>5.3f} {d['score']:>7.3f}")
 
         # ── min_score 필터 + top_k 반환 ──────────────────────────────
         results = []
