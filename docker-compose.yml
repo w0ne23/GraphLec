@@ -65,8 +65,9 @@ services:
       - LOCAL_STORAGE_DIR=/pipeline/local_storage
     volumes:
       - ./input:/pipeline/input
-      - local_storage:/pipeline/local_storage
+      - ./local_storage:/pipeline/local_storage
       - lance_data:/lance
+      - ./app/backend:/app
     depends_on:
       db:
         condition: service_healthy
@@ -81,6 +82,9 @@ services:
       - "5173:5173"
     environment:
       VITE_API_BASE_URL: http://localhost:8000
+    volumes:
+      - ./app/frontend:/app
+      - /app/node_modules
     depends_on:
       - backend
 
@@ -90,4 +94,3 @@ volumes:
   neo4j_data:
   neo4j_logs:
   lance_data:
-  local_storage:
