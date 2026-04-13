@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Optional
+
+
+def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
+    return f"""당신은 강의 슬라이드에서 눈에 보이는 오타를 찾는 교정자입니다.
+
+중요:
+- 슬라이드 이미지가 원본입니다.
+- 아래 OCR 텍스트는 보조 정보일 뿐이며, 이미지와 다르면 이미지를 우선하세요.
+- 내용의 사실성, 더 좋은 표현, 문체 개선, 디자인 문제는 보고하지 마세요.
+- 애매하면 보고하지 마세요.
+
+대상 슬라이드:
+- 번호: {slide_no}
+- OCR 제목: {title}
+- OCR 본문:
+{slide_text[:3000]}
+
+보고할 것:
+- 이미지에서 명백하게 보이는 한글 오타
+- 영문 철자 오류
+- 숫자/단위 오기
+- 의미를 해치는 띄어쓰기 오류
+
+보고하지 말 것:
+- OCR이 잘못 읽은 텍스트 자체
+- 용어 선택/문체/표현 선호
+- 사실 오류나 개념 오류
+- 줄바꿈, 글자 간격, 디자인 문제
+- 약어, 고유명사, 표기 관례처럼 오타로 단정하기 어려운 것
+
+출력 형식은 JSON만 허용합니다.
+
+```json
+{{
+  "typos": [
+    {{
+      "problematic_text": "슬라이드에 보이는 문제 표현",
+      "corrected_text": "수정 표현",
+      "reason": "왜 오타라고 보는지",
+      "confidence": 0.0
+    }}
+  ]
+}}
+```
+
+지침:
+1. 확신이 0.80 미만이면 출력하지 마세요.
+2. 오타가 없으면 {{"typos": []}}만 출력하세요.
+3. JSON 외 텍스트 금지.
+"""
+
+
+def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict], bool, int, dict]:
+    from . import claim_common as cc
+
+    slide_no = int(slide.get("slide_number", 0) or 0)
+    title = str(slide.get("title", "") or "")
+    slide_text = str(slide.get("slide_text", "") or "")
+
+    img_bytes = None
+    if img_dir:
+        start_path = Path(img_dir) / f"slide_{slide_no:03d}_start.jpg"
+        end_path = Path(img_dir) / f"slide_{slide_no:03d}_end.jpg"
+        img_path = start_path if start_path.exists() else end_path
+        if img_path.exists():
+            img_bytes = img_path.read_bytes()
+
+    prompt = _build_slide_typo_prompt(slide_no, title, slide_text)
+    model = str(cc._resolve_stage_model("recheck") or "").strip()
+    response_format = {"type": "json_object"} if (
+        model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
+    ) else None
+
+    api_calls = 0
+    token_usage = cc._empty_token_usage()
+
+    for attempt in range(cc.VERIFIER_PARSE_RETRIES + 1):
+        text, call_usage = cc._call_llm(
+            prompt,
+            max_tokens=2048,
+            temperature=0.0,
+            image_bytes=img_bytes,
+            thinking_budget=0,
+            response_format=response_format,
+            stage="recheck",
+        )
+        api_calls += 1
+        cc._add_call_usage(token_usage, call_usage)
+        try:
+            payload = json.loads(cc._strip_json_fence((text or "").strip()))
+            raw = payload.get("typos", [])
+            if not isinstance(raw, list):
+                raw = []
+            cleaned = []
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    conf = float(item.get("confidence", 0) or 0)
+                except Exception:
+                    conf = 0.0
+                if conf < 0.80:
+                    continue
+                problematic = str(item.get("problematic_text", "") or "").strip()
+                corrected = str(item.get("corrected_text", "") or "").strip()
+                reason = str(item.get("reason", "") or "").strip()
+                if not problematic or not corrected:
+                    continue
+                cleaned.append({
+                    "slide_number": slide_no,
+                    "slide_title": title,
+                    "problematic_text": problematic,
+                    "corrected_text": corrected,
+                    "reason": reason,
+                    "confidence": conf,
+                })
+            return cleaned, False, api_calls, token_usage
+        except Exception:
+            if attempt < cc.VERIFIER_PARSE_RETRIES:
+                print(f"    ↺ 슬라이드 {slide_no} 오타 JSON 파싱 재시도 ({attempt+1}/{cc.VERIFIER_PARSE_RETRIES})")
+    return [], True, api_calls, token_usage
+
+
+def detect_slide_typos(
+    slides: list[dict],
+    img_dir: Optional[str] = None,
+    max_workers: int = 4,
+) -> tuple[list[dict], int, int, dict]:
+    from . import claim_common as cc
+
+    if not slides:
+        return [], 0, 0, cc._empty_token_usage()
+
+    results: list[dict] = []
+    api_calls = 0
+    failures = 0
+    token_usage = cc._empty_token_usage()
+
+    def process(slide: dict):
+        sn = slide.get("slide_number", "?")
+        print(f"    슬라이드 오타 검사 [{sn}]")
+        return _check_single_slide(slide, img_dir)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(process, slide): slide for slide in slides}
+        for future in as_completed(futures):
+            slide = futures[future]
+            try:
+                typos, parse_failed, calls, usage = future.result()
+                results.extend(typos)
+                api_calls += calls
+                token_usage = cc._merge_token_usage(token_usage, usage)
+                if parse_failed:
+                    failures += 1
+            except Exception:
+                failures += 1
+
+    dedup = {}
+    for typo in results:
+        key = (
+            typo.get("slide_number"),
+            typo.get("problematic_text", "").strip().lower(),
+            typo.get("corrected_text", "").strip().lower(),
+        )
+        prev = dedup.get(key)
+        if prev is None or float(typo.get("confidence", 0) or 0) > float(prev.get("confidence", 0) or 0):
+            dedup[key] = typo
+
+    final = sorted(
+        dedup.values(),
+        key=lambda x: (int(x.get("slide_number", 0) or 0), -float(x.get("confidence", 0) or 0)),
+    )
+    return final, api_calls, failures, token_usage
