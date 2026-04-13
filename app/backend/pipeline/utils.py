@@ -22,6 +22,12 @@ def api_call_with_retry(func, max_retries=5, initial_wait=10):
     raise Exception("API 호출 실패")
 
 
+def is_retryable_api_error(error) -> bool:
+    error_msg = str(error)
+    retry_errors = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
+    return any(code in error_msg for code in retry_errors)
+
+
 def get_video_duration(file_path: str) -> float:
     """영상 길이 추출 (초)"""
     result = subprocess.run([
