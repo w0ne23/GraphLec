@@ -555,7 +555,7 @@ def run_fusion(cfg: Config) -> dict:
         if au_slide:
             for ctx in au_slide["contexts"]:
                 detail   = ctx.get("emphasis", {}).get("detail") or {}
-                stressed = ctx["emphasis"].get("detected", False)
+                stressed = ctx.get("emphasis", {}).get("detected", False)
 
                 fused_segs = []
                 for seg in ctx.get("segments", []):
