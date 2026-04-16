@@ -99,8 +99,9 @@ class Config:
     RESIZE_WIDTH                 = 960
     DECODE_BACKEND               = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
     FFMPEG_HWACCEL               = os.getenv("GRAPHLEC_FFMPEG_HWACCEL", "cuda")
-    EXTRACT_CHUNK_SEC            = float(os.getenv("GRAPHLEC_SLIDE_EXTRACT_CHUNK_SEC", "300"))
-    EXTRACT_CHUNK_OVERLAP_SEC    = float(os.getenv("GRAPHLEC_SLIDE_EXTRACT_CHUNK_OVERLAP_SEC", "3"))
+    # 서버/로컬 공통 정책: 슬라이드 추출은 항상 5분 단위 청크 병렬 처리
+    EXTRACT_CHUNK_SEC            = 300.0
+    EXTRACT_CHUNK_OVERLAP_SEC    = 3.0
     EXTRACT_WORKERS              = int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0"))
 
 
@@ -1122,6 +1123,10 @@ def extract_slides(
 
     specs = _chunk_specs(duration, cfg, requested_workers)
     if not specs:
+        log.info(
+            f"슬라이드 추출 단일 청크 실행: duration={duration:.1f}s <= "
+            f"chunk_sec={cfg.EXTRACT_CHUNK_SEC:.1f}s"
+        )
         return _extract_slides_core(input_path, output_dir, debug=debug, decode_backend=decode_backend)
 
     if requested_workers <= 0:
