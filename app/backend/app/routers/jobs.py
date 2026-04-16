@@ -195,16 +195,30 @@ async def retry_job(job_id: str, db: AsyncSession = Depends(get_db)):
     """Resets an error job back to pending status."""
     try:
         # Check if job exists
-        result = await db.execute(text("SELECT id, status FROM jobs WHERE id = :id"), {"id": job_id})
+        result = await db.execute(
+            text("SELECT id, status, output_dir FROM jobs WHERE id = :id"),
+            {"id": job_id},
+        )
         job = result.mappings().first()
         
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
 
+        # Retry는 기존 산출물을 지우고 처음부터 다시 실행한다.
+        if job["output_dir"]:
+            output_dir = Path(job["output_dir"])
+            if output_dir.exists() and "results" in str(output_dir):
+                shutil.rmtree(output_dir, ignore_errors=True)
+                print(f"--- [API] Cleared output dir for retry: {output_dir} ---")
+
         # Reset status to pending
         await db.execute(text("""
             UPDATE jobs 
-            SET status = 'pending', current_stage = 'Retrying...', error_message = NULL, updated_at = now()
+            SET status = 'pending',
+                current_stage = 'Retrying...',
+                error_message = NULL,
+                output_dir = NULL,
+                updated_at = now()
             WHERE id = :id
         """), {"id": job_id})
         await db.commit()
@@ -359,4 +373,3 @@ async def ask_question(job_id: str, request: Request, db: AsyncSession = Depends
     except httpx.RequestError as e:
         logger.error(f"Failed to connect to query_service: {e}")
         raise HTTPException(status_code=503, detail="Query service is unreachable")
-
