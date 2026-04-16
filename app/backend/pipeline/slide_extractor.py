@@ -33,6 +33,7 @@ import numpy as np
 import imagehash
 import os
 import platform
+import ctypes
 import shutil
 import subprocess
 import tempfile
@@ -200,13 +201,48 @@ def _ffmpeg_hwaccels() -> set[str]:
     return accels
 
 
+def _cuda_runtime_available() -> bool:
+    system = platform.system().lower()
+    if system == "darwin":
+        return False
+
+    nvidia_markers = (
+        "/dev/nvidiactl",
+        "/dev/nvidia0",
+        "/proc/driver/nvidia/version",
+    )
+    if any(Path(marker).exists() for marker in nvidia_markers):
+        return True
+
+    if shutil.which("nvidia-smi") is not None:
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "-L"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0 and (result.stdout or "").strip():
+                return True
+        except Exception:
+            pass
+
+    try:
+        ctypes.CDLL("libcuda.so.1")
+        return True
+    except OSError:
+        return False
+
+
 def _resolve_decode_backend(preferred_backend: str) -> tuple[str, str | None]:
     backend = (preferred_backend or "auto").strip().lower()
     hwaccels = _ffmpeg_hwaccels()
     system = platform.system().lower()
+    cuda_usable = "cuda" in hwaccels and _cuda_runtime_available()
 
     if backend == "ffmpeg-cuda":
-        if "cuda" in hwaccels:
+        if cuda_usable:
             return "ffmpeg", "cuda"
         return "opencv", None
 
@@ -216,7 +252,7 @@ def _resolve_decode_backend(preferred_backend: str) -> tuple[str, str | None]:
         return "opencv", None
 
     if backend == "auto":
-        if "cuda" in hwaccels:
+        if cuda_usable:
             return "ffmpeg", "cuda"
         if system == "darwin" and "videotoolbox" in hwaccels:
             return "ffmpeg", "videotoolbox"

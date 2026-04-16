@@ -126,7 +126,7 @@ def pipeline_process(job_id, input_path):
                     raise
         
         return True, str(output_dir), None
-    except Exception as e:
+    except BaseException as e:
         import traceback
         error_details = traceback.format_exc()
         print(f"--- [Child Process {job_id}] FAILED: {e} ---", flush=True)
@@ -206,7 +206,7 @@ async def worker_loop():
         except asyncio.CancelledError:
             print("--- [Worker] Loop cancelled by shutdown. ---", flush=True)
             break
-        except Exception as e:
+        except BaseException as e:
             print(f"--- [Worker FATAL ERROR in loop]: {e} ---", flush=True)
             await asyncio.sleep(5)
 
