@@ -1127,16 +1127,17 @@ def extract_slides(
     if requested_workers <= 0:
         workers = len(specs)
     else:
-        workers = min(max(1, requested_workers), len(specs))
-
-    if workers <= 1:
-        return _extract_slides_core(input_path, output_dir, debug=debug, decode_backend=decode_backend)
+        # 5분 초과로 청크가 2개 이상 생긴 경우에는 항상 병렬로 처리한다.
+        # 서버 환경에서 잘못된 설정값(예: 1)으로 병렬성이 꺼지는 일을 막는다.
+        workers = min(max(2, requested_workers), len(specs))
 
     out_path = Path(output_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
     log.info(
-        f"슬라이드 추출 청크 병렬 실행: workers={workers}, chunks={len(specs)}"
+        f"슬라이드 추출 청크 병렬 실행: duration={duration:.1f}s, "
+        f"chunk_sec={cfg.EXTRACT_CHUNK_SEC:.1f}s, requested_workers={requested_workers}, "
+        f"workers={workers}, chunks={len(specs)}"
         + (" (auto)" if requested_workers <= 0 else "")
     )
 
