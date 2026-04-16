@@ -96,6 +96,9 @@ class Config:
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
+    # 전역 판정/annotation 감지는 이 해상도로 수행한다.
+    # 후처리 duplicate 판정용 phash_hires보다 더 작은 폭을 사용해도 충분한 경우가 많다.
+    DECISION_RESIZE_WIDTH        = int(os.getenv("GRAPHLEC_SLIDE_DECISION_WIDTH", "768"))
     RESIZE_WIDTH                 = 960
     DECODE_BACKEND               = os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto")
     FFMPEG_HWACCEL               = os.getenv("GRAPHLEC_FFMPEG_HWACCEL", "cuda")
@@ -127,6 +130,14 @@ def compute_phash(frame: np.ndarray) -> imagehash.ImageHash:
     else:
         pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     return imagehash.phash(pil_img)
+
+
+def compute_phash_int(frame: np.ndarray) -> int:
+    return int(str(compute_phash(frame)), 16)
+
+
+def phash_distance_int(a: int, b: int) -> int:
+    return int(a ^ b).bit_count()
 
 
 def compute_phash_hires(frame: np.ndarray) -> imagehash.ImageHash:
@@ -534,30 +545,31 @@ class SlideChangeDetector:
 
     def reset(self, frame: np.ndarray):
         """슬라이드 전환 후 호출: 버퍼·base 초기화"""
-        phash = compute_phash(frame)
+        phash = compute_phash_int(frame)
         self.prev_frame       = frame.copy()
         self.prev_phash       = phash
         self.slide_base_phash = phash
         self.frame_buffer.clear()
         self.frame_buffer.append((frame.copy(), phash))
 
-    def is_slide_change(self, frame: np.ndarray) -> bool:
+    def is_slide_change(self, frame: np.ndarray, curr_phash: int | None = None) -> bool:
         if self.prev_frame is None:
             self.reset(frame)
             return False
 
-        curr_phash = compute_phash(frame)
+        if curr_phash is None:
+            curr_phash = compute_phash_int(frame)
 
         # ── 1. Cut 전환 ────────────────────────────────────────────────
         mse = compute_mse(self.prev_frame, frame)
         if mse >= self.cfg.SLIDE_CHANGE_MSE_THRESHOLD:
-            if (self.prev_phash - curr_phash) >= self.cfg.SLIDE_CHANGE_HASH_THRESHOLD:
+            if phash_distance_int(self.prev_phash, curr_phash) >= self.cfg.SLIDE_CHANGE_HASH_THRESHOLD:
                 self._update(frame, curr_phash)
                 return True
 
         # ── 2. Base 이중 비교 ──────────────────────────────────────────
         if self.slide_base_phash is not None:
-            if (self.slide_base_phash - curr_phash) >= self.cfg.BASE_HASH_THRESHOLD:
+            if phash_distance_int(self.slide_base_phash, curr_phash) >= self.cfg.BASE_HASH_THRESHOLD:
                 if mse >= self.cfg.SLIDE_CHANGE_MSE_THRESHOLD * 0.5:
                     self._update(frame, curr_phash)
                     return True
@@ -566,16 +578,16 @@ class SlideChangeDetector:
         if len(self.frame_buffer) == self.frame_buffer.maxlen:
             oldest_frame, oldest_phash = self.frame_buffer[0]
             if compute_mse(oldest_frame, frame) >= self.cfg.FADE_MSE_THRESHOLD:
-                if (oldest_phash - curr_phash) >= self.cfg.FADE_HASH_THRESHOLD:
+                if phash_distance_int(oldest_phash, curr_phash) >= self.cfg.FADE_HASH_THRESHOLD:
                     self._update(frame, curr_phash)
                     return True
 
         self._update(frame, curr_phash)
         return False
 
-    def _update(self, frame: np.ndarray, phash: imagehash.ImageHash = None):
+    def _update(self, frame: np.ndarray, phash: int | None = None):
         if phash is None:
-            phash = compute_phash(frame)
+            phash = compute_phash_int(frame)
         self.prev_frame = frame.copy()
         self.prev_phash = phash
         self.frame_buffer.append((frame.copy(), phash))
@@ -724,11 +736,16 @@ def _run_slide_decision_pass(
         slide_detector.reset(small)
         annot_detector.reset(base_frame=small)
 
-    for frame_no, timestamp, small in frame_iter:
+    for item in frame_iter:
+        if len(item) >= 4:
+            frame_no, timestamp, small, curr_phash = item[:4]
+        else:
+            frame_no, timestamp, small = item
+            curr_phash = None
         processed_frames += 1
 
         # ── scene 전환 감지 (Cut / Fade / Base 이중 비교) ──────────
-        if first_frame or slide_detector.is_slide_change(small):
+        if first_frame or slide_detector.is_slide_change(small, curr_phash=curr_phash):
             if not first_frame:
                 # 전환 직전 진행 중이던 필기 강제 캡처
                 if annot_detector.state == "WRITING" \
@@ -832,8 +849,9 @@ def _extract_slides_core(
             end_sec,
         )
 
+    decision_width = max(160, min(cfg.DECISION_RESIZE_WIDTH, cfg.RESIZE_WIDTH))
     decision_iter = (
-        (frame_no, timestamp, to_decision_frame(frame, cfg.RESIZE_WIDTH))
+        (frame_no, timestamp, to_decision_frame(frame, decision_width))
         for frame_no, timestamp, frame in frame_iter
     )
     metadata = _run_slide_decision_pass(
@@ -894,14 +912,15 @@ def _extract_sampled_frames_chunk_worker(
     )
 
     sampled_fps = max(1.0, fps / max(1, cfg.PROCESS_EVERY_N_FRAMES))
-    small_height = int(frame_height * (cfg.RESIZE_WIDTH / frame_width))
+    decision_width = max(160, min(cfg.DECISION_RESIZE_WIDTH, cfg.RESIZE_WIDTH))
+    small_height = int(frame_height * (decision_width / frame_width))
     video_filename = "sampled_frames.avi"
     video_path = chunk_path / video_filename
     writer = cv2.VideoWriter(
         str(video_path),
         cv2.VideoWriter_fourcc(*"MJPG"),
         sampled_fps,
-        (cfg.RESIZE_WIDTH, small_height),
+        (decision_width, small_height),
     )
     if not writer.isOpened():
         raise RuntimeError(f"샘플 프레임 비디오를 열 수 없습니다: {video_path}")
@@ -911,11 +930,17 @@ def _extract_sampled_frames_chunk_worker(
     try:
         for frame_no, timestamp, frame in frame_iter:
             processed_frames += 1
-            small = resize_frame(frame, cfg.RESIZE_WIDTH)
+            small = resize_frame(frame, decision_width)
+            decision_small = cv2.GaussianBlur(
+                cv2.cvtColor(small, cv2.COLOR_BGR2GRAY),
+                (3, 3),
+                0,
+            )
             writer.write(small)
             manifest.append({
                 "frame_no": frame_no,
                 "timestamp_sec": round(timestamp, 4),
+                "phash_int": compute_phash_int(decision_small),
             })
     finally:
         writer.release()
@@ -926,6 +951,7 @@ def _extract_sampled_frames_chunk_worker(
         "duration_sec": duration,
         "decode_backend": active_backend,
         "processed_frames": processed_frames,
+        "decision_resize_width": decision_width,
         "video_filename": video_filename,
         "frames": manifest,
     }
@@ -958,10 +984,19 @@ def _ordered_sampled_frames(manifest_paths: list[Path]):
                 if frame_no in seen_frame_nos:
                     continue
                 seen_frame_nos.add(frame_no)
-                yield frame_no, float(item["timestamp_sec"]), cv2.GaussianBlur(
+                decision_frame = cv2.GaussianBlur(
                     cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY),
                     (3, 3),
                     0,
+                )
+                phash_int = item.get("phash_int")
+                if phash_int is None:
+                    phash_int = compute_phash_int(decision_frame)
+                yield (
+                    frame_no,
+                    float(item["timestamp_sec"]),
+                    decision_frame,
+                    int(phash_int),
                 )
         finally:
             cap.release()
@@ -1789,7 +1824,8 @@ def tune_thresholds(input_path: str, sample_sec: float = 30.0):
         frame_no += 1
         if frame_no % cfg.PROCESS_EVERY_N_FRAMES != 0:
             continue
-        small = resize_frame(frame, cfg.RESIZE_WIDTH)
+        decision_width = max(160, min(cfg.DECISION_RESIZE_WIDTH, cfg.RESIZE_WIDTH))
+        small = resize_frame(frame, decision_width)
         if base_small is None:
             base_small = small.copy()
         if prev_small is not None:
