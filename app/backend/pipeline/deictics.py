@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 from google.genai import types
 
-from .config import gemini_client
+from .config import GEMINI_GENERATIVE_MODEL, gemini_client
 from .utils import api_call_with_retry
 
 _DEICTICS = {
@@ -238,7 +238,7 @@ def classify_ambiguous_deictics_with_llm(
 
         def call_api():
             return gemini_client.models.generate_content(
-                model="gemini-3-flash-preview",
+                model=GEMINI_GENERATIVE_MODEL,
                 contents=[types.Part.from_text(text=prompt)],
                 config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=512),
             )

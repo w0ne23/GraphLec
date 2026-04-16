@@ -233,7 +233,7 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
         return candidate_keywords
     try:
         from google.genai import types
-        from .config import gemini_client_2
+        from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
         from .utils import api_call_with_retry
     except ImportError:
         return candidate_keywords
@@ -268,7 +268,7 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
 
     def call_api():
         return gemini_client_2.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=GEMINI_GENERATIVE_MODEL,
             contents=[types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=2048),
         )
