@@ -281,10 +281,72 @@ def flatten_annotations_for_slide(events: list[dict]) -> list[dict]:
     """
     result = []
     for event in events:
-        ts = event.get("timestamp_sec")
+        event_ts = event.get("timestamp_sec")
         for ann in event.get("annotations", []):
-            result.append({**ann, "timestamp_sec": ts})
+            ann_ts = (
+                ann.get("first_seen_timestamp_sec")
+                if ann.get("first_seen_timestamp_sec") is not None
+                else ann.get("timestamp_sec")
+            )
+            result.append({
+                **ann,
+                "timestamp_sec": ann_ts if ann_ts is not None else event_ts,
+            })
     return result
+
+
+def copy_annotation_events(events: list[dict]) -> list[dict]:
+    """fusion 결과에 실을 수 있도록 annotation 이벤트를 그대로 복사."""
+    return json.loads(json.dumps(events))
+
+
+def extract_slide_summary(events: list[dict]) -> str:
+    """annotation 이벤트들에서 첫 번째 유효한 slide_summary를 반환."""
+    for event in events:
+        summary = str(event.get("slide_summary") or "").strip()
+        if summary:
+            return summary
+    return ""
+
+
+def build_annotation_highlights_summary(annotations: list[dict]) -> str:
+    """
+    개별 annotation 목록을 사람이 읽기 쉬운 짧은 요약 문장으로 변환.
+    annotation.json의 slide_summary를 보완하는 구조화 요약이다.
+    """
+    if not annotations:
+        return ""
+
+    targets: list[str] = []
+    target_seen: set[str] = set()
+    type_seen: list[str] = []
+    for ann in annotations:
+        ann_type = str(ann.get("type") or "other").strip()
+        if ann_type and ann_type not in type_seen:
+            type_seen.append(ann_type)
+
+        target = str(
+            ann.get("target_content")
+            or ann.get("handwritten_content")
+            or ""
+        ).strip()
+        if target and target not in target_seen:
+            target_seen.add(target)
+            targets.append(target)
+
+    if targets:
+        preview = ", ".join(targets[:5])
+        if len(targets) > 5:
+            preview += f" 외 {len(targets) - 5}개"
+    else:
+        preview = "명시적 텍스트 대상 없음"
+
+    type_preview = ", ".join(type_seen[:5]) if type_seen else "other"
+    return (
+        f"강조 표시는 총 {len(annotations)}개이며, "
+        f"주요 대상은 {preview}이다. "
+        f"표시 유형은 {type_preview}가 포함된다."
+    )
 
 
 # ============================================================================
@@ -410,8 +472,10 @@ def run_fusion(cfg: Config) -> dict:
 
         # annotation 이벤트 (이 슬라이드에 해당하는 것)
         annot_events   = annot_index.get(slide_num, [])
+        annotation_events = copy_annotation_events(annot_events)
         flat_annots    = flatten_annotations_for_slide(annot_events)
         annot_ts_list  = [a["timestamp_sec"] for a in flat_annots if a.get("timestamp_sec")]
+        slide_summary  = extract_slide_summary(annot_events)
 
         # ── 강조 점수 계산 ───────────────────────────────────────────────────
         visual_score = score_slide_emphasis(cl_slide.get("slide_emphasis", []))
@@ -533,13 +597,22 @@ def run_fusion(cfg: Config) -> dict:
                 "timestamp_sec":   ann.get("timestamp_sec"),
                 "bbox":            ann.get("target_bbox") or ann.get("annotation_bbox"),
             })
+        annotation_highlights_summary = build_annotation_highlights_summary(annotations_summary)
 
         # ── 슬라이드 통합 ────────────────────────────────────────────────────
         fused_slide = {
             "slide_id":     slide_id,
             "slide_number": slide_num,
+            "scene_number": cl_slide.get("scene_number", slide_num),
+            "scene_index": cl_slide.get("scene_number", slide_num),
+            "slide_canonical_number": cl_slide.get("slide_canonical_number", slide_num),
+            "slide_visit_order": cl_slide.get("slide_visit_order", 1),
+            "slide_is_revisit": cl_slide.get("slide_is_revisit", False),
+            "representative_scene_number": cl_slide.get("representative_scene_number", slide_num),
             "title":        cl_slide.get("title", ""),
             "slide_text":   cl_slide.get("t1", ""),
+            "slide_summary": slide_summary,
+            "annotation_highlights_summary": annotation_highlights_summary,
             "role":         cl_slide.get("role"),
             "start_sec":    au_slide["start_sec"] if au_slide else None,
             "end_sec":      au_slide["end_sec"]   if au_slide else None,
@@ -554,6 +627,10 @@ def run_fusion(cfg: Config) -> dict:
 
             "emphasized_keywords": emphasized_keywords,
             "contexts":            fused_contexts,
+            "annotation":         annotation_events,
+            "annotation_events":   annotation_events,
+            "annotation_flat":     flat_annots,
+            "annotations":         flat_annots,
             "annotations_summary": annotations_summary,
         }
 

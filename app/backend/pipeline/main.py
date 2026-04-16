@@ -6,11 +6,11 @@ main.py
 실행 흐름:
   [병렬] Stage 1A: slide_extractor     — 슬라이드 프레임 추출
          Stage 1B: audio_analyzer      — 오디오 품질 분석
-  [직렬] Stage 2 : slide_textualizer   — 슬라이드 텍스트 + 강조 추출
+  [병렬] Stage 2A: slide_textualizer   — 슬라이드 텍스트 + 강조 추출
+         Stage 2B: transcriber         — 전체 전사 (scene 매핑용)
   [병렬] Stage 3A: annotation_analyzer — 필기 강조 분석
-         Stage 3B: 오디오 파이프라인
-                     transcriber       — 슬라이드별 전사 (metadata 필요)
-                     text_processor    — 2-pass 교정 (make_merged 기반) + 침묵/지시어 추출
+         Stage 3B: 오디오 후처리
+                     text_processor    — 2-pass 교정 + 침묵/지시어 추출
                      emphasis          — 오디오 강조 감지
   [병렬] Stage 4A: slide_classifier    — 슬라이드 역할 분류
          Stage 4B: by_slide 구조 저장  — (3B 결과 기반)
@@ -172,7 +172,7 @@ def _transcribe_by_slide(
     output_dir: Path,
 ) -> dict:
     """
-    슬라이드별 전사 (metadata 있을 때) 또는 전체 전사 (fallback).
+    전역 전사 후 scene 시간축에 매핑하기 위한 세그먼트를 생성한다.
 
     Returns:
         {
@@ -180,38 +180,15 @@ def _transcribe_by_slide(
             "silences": [{"start","end","duration"}, ...]   # 영상 절대 시간
         }
     """
-    from .transcriber import transcribe_video, transcribe_range
+    from .transcriber import transcribe_video
 
     if not meta_path or not slide_ranges:
         print("  ℹ️ metadata 없음 → 전체 전사 방식 사용")
         return transcribe_video(video_path, duration, output_dir=output_dir)
 
-    all_segments: list[dict] = []
-    all_silences: list[dict] = []
-    for r in slide_ranges:
-        sidx = r["slide_index"]
-        start_sec = float(r["start_sec"])
-        end_sec = float(r["end_sec"])
-        print(f"    ▶ 슬라이드 {sidx}: {start_sec:.1f}s ~ {end_sec:.1f}s 전사...")
-        result = transcribe_range(video_path, start_sec, end_sec, output_dir)
-        for seg in result.get("segments", []):
-            s = seg.copy()
-            s["slide_index"] = sidx
-            all_segments.append(s)
-        all_silences.extend(result.get("silences", []))
-
-    all_segments.sort(key=lambda s: (s.get("start", 0.0), s.get("end", 0.0)))
-    # 슬라이드 범위가 겹치는 경우 silences가 중복될 수 있음 → dedup (start, end 기준)
-    seen_sil: set = set()
-    deduped_silences: list[dict] = []
-    for sil in sorted(all_silences, key=lambda x: (x["start"], x["end"])):
-        key = (round(sil["start"], 3), round(sil["end"], 3))
-        if key in seen_sil:
-            continue
-        seen_sil.add(key)
-        deduped_silences.append(sil)
-
-    return {"segments": all_segments, "silences": deduped_silences}
+    unique_scenes = len(slide_ranges)
+    print(f"  ℹ️ scene {unique_scenes}개 기준 시간 매핑용 전체 전사 사용")
+    return transcribe_video(video_path, duration, output_dir=output_dir)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -219,13 +196,24 @@ def _transcribe_by_slide(
 # ──────────────────────────────────────────────────────────────
 
 def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
-    from .slide_extractor import extract_slides
+    from .slide_extractor import (
+        build_canonical_slide_annotations,
+        build_scene_slide_map,
+        extract_slides,
+    )
 
     stem = Path(args.input).stem
     meta_path = output_dir / f"{stem}_metadata.json"
+    scene_slide_map_path = output_dir / f"{stem}_scene_slide_map.json"
+    canonical_slide_annotations_path = output_dir / f"{stem}_canonical_slide_annotations.json"
 
     if _is_done(meta_path, "Stage 1A 슬라이드 추출", args.force):
-        return {"meta_path": str(meta_path), "elapsed": 0.0}
+        return {
+            "meta_path": str(meta_path),
+            "scene_slide_map_path": str(scene_slide_map_path),
+            "canonical_slide_annotations_path": str(canonical_slide_annotations_path),
+            "elapsed": 0.0,
+        }
 
     _banner("Stage 1  —  슬라이드 추출  (slide_extractor)")
     t0 = time.time()
@@ -233,14 +221,23 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
         input_path=args.input,
         output_dir=str(slides_dir),
         debug=args.debug,
+        decode_backend=getattr(args, "slide_decode_backend", None),
+        extract_workers=getattr(args, "slide_extract_workers", None),
     )
     elapsed = time.time() - t0
 
     _save_json(meta_path, metadata)
+    _save_json(scene_slide_map_path, build_scene_slide_map(metadata))
+    _save_json(canonical_slide_annotations_path, build_canonical_slide_annotations(metadata))
 
-    slide_count = len({m["slide_index"] for m in metadata})
-    _done(f"슬라이드 {slide_count}개, 프레임 {len(metadata)}개 추출", elapsed)
-    return {"meta_path": str(meta_path), "elapsed": elapsed}
+    scene_count = len({m.get("scene_index", m["slide_index"]) for m in metadata})
+    _done(f"scene {scene_count}개, 프레임 {len(metadata)}개 추출", elapsed)
+    return {
+        "meta_path": str(meta_path),
+        "scene_slide_map_path": str(scene_slide_map_path),
+        "canonical_slide_annotations_path": str(canonical_slide_annotations_path),
+        "elapsed": elapsed,
+    }
 
 
 def stage1b_audio_analyze(args, output_dir: Path) -> dict:
@@ -308,6 +305,35 @@ def stage2_textualize(args, slides_dir: Path, output_dir: Path) -> dict:
     return {"textualized_path": str(textualized_path), "elapsed": elapsed}
 
 
+def stage2b_transcribe(args, meta_path: str, duration: float, output_dir: Path) -> dict:
+    from .segment_grouper import load_slide_ranges
+
+    stem = Path(args.input).stem
+    transcript_raw_path = output_dir / f"{stem}_transcript_raw.json"
+
+    if _is_done(transcript_raw_path, "Stage 2B 전체 전사", args.force):
+        return {"transcript_raw_path": str(transcript_raw_path), "elapsed": 0.0}
+
+    _banner("Stage 2B  —  전체 전사  (Groq Whisper)")
+    t0 = time.time()
+    slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
+    transcribe_result = _transcribe_by_slide(args.input, duration, meta_path, slide_ranges, output_dir)
+    payload = {
+        "video_path": args.input,
+        "segment_count": len(transcribe_result.get("segments", [])),
+        "silence_count": len(transcribe_result.get("silences", [])),
+        "segments": transcribe_result.get("segments", []),
+        "silences": transcribe_result.get("silences", []),
+    }
+    _save_json(transcript_raw_path, payload)
+    elapsed = time.time() - t0
+    _done(
+        f"전체 전사 {payload['segment_count']}개 세그먼트, 무음 {payload['silence_count']}개",
+        elapsed,
+    )
+    return {"transcript_raw_path": str(transcript_raw_path), "elapsed": elapsed}
+
+
 def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
     from .annotation_analyzer import analyze_all
 
@@ -323,6 +349,7 @@ def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
         slides_dir=str(slides_dir),
         output_path=str(annotation_path),
         save_masks=args.masks,
+        per_annot_mode=getattr(args, "per_annot_mode", False),
     )
     elapsed = time.time() - t0
 
@@ -331,7 +358,14 @@ def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
     return {"annotation_path": str(annotation_path), "elapsed": elapsed}
 
 
-def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, output_dir: Path) -> dict:
+def stage3b_audio(
+    args,
+    meta_path: str,
+    textualized_path: str,
+    duration: float,
+    output_dir: Path,
+    transcript_raw_path: Optional[str] = None,
+) -> dict:
     from .text_processor import correct_segments_two_pass
     from .segment_grouper import (
         load_slide_ranges,
@@ -401,14 +435,22 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
         with open(meta_path, "r", encoding="utf-8") as f:
             metadata = json.load(f)
 
-    # [3B-1] 슬라이드별 전사
-    print("  [3B-1] 슬라이드별 전사...")
-    t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-    transcribe_result = _transcribe_by_slide(video_path, duration, meta_path, slide_ranges, output_dir)
-    segments_raw = transcribe_result.get("segments", [])
-    detected_silences = transcribe_result.get("silences", [])
-    print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
+    if transcript_raw_path and Path(transcript_raw_path).is_file():
+        print("  [3B-1] 사전 전사 로드...")
+        t0 = time.time()
+        with open(transcript_raw_path, "r", encoding="utf-8") as f:
+            transcribe_payload = json.load(f)
+        segments_raw = transcribe_payload.get("segments", [])
+        detected_silences = transcribe_payload.get("silences", [])
+        print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개 로드  ({time.time()-t0:.1f}초)")
+    else:
+        print("  [3B-1] 전체 전사 폴백 실행...")
+        t0 = time.time()
+        transcribe_result = _transcribe_by_slide(video_path, duration, meta_path, slide_ranges, output_dir)
+        segments_raw = transcribe_result.get("segments", [])
+        detected_silences = transcribe_result.get("silences", [])
+        print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
 
     # [3B-2] 2-pass 텍스트 교정 (text_processor 내부 엔진)
     print("  [3B-2] 텍스트 교정 (2-pass)...")
@@ -1031,22 +1073,52 @@ def run_pipeline(args, progress_callback=None):
         print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
         print("─" * 70)
 
-        # ── Stage 2 (직렬) ──
-        r2 = stage2_textualize(args, slides_dir, output_dir)
-        textualized_path = r2["textualized_path"]
-        timings["Stage 2 슬라이드 텍스트화"] = r2["elapsed"]
-
-        # ── Stage 3 (병렬 A/B) ──
-        _banner("Stage 3  —  병렬 실행 (annotation + 오디오)")
+        # ── Stage 2 (병렬 A/B) ──
+        _banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
         t_parallel = time.time()
-        audio_result: dict = {}
-        annotation_result: dict = {}
-        
+        transcript_result: dict = {}
+
         notify_stage("stt", "run")
 
         with ThreadPoolExecutor(max_workers=2) as executor:
+            future_2a = executor.submit(stage2_textualize, args, slides_dir, output_dir)
+            future_2b = executor.submit(stage2b_transcribe, args, meta_path, duration, output_dir)
+            for future in as_completed([future_2a, future_2b]):
+                if future is future_2a:
+                    r2 = future.result()
+                    textualized_path = r2["textualized_path"]
+                    timings["Stage 2A 슬라이드 텍스트화"] = r2["elapsed"]
+                else:
+                    transcript_result = future.result()
+                    timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
+
+        timings["Stage 2 병렬 총"] = time.time() - t_parallel
+        notify_stage("stt", "done")
+        print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
+        print("─" * 70)
+
+        # ── Stage 3 (병렬 A/B) ──
+        _banner("Stage 3  —  병렬 실행 (annotation + 오디오 후처리)")
+        t_parallel = time.time()
+        audio_result: dict = {}
+        annotation_result: dict = {}
+
+        transcript_raw_path = transcript_result.get(
+            "transcript_raw_path",
+            str(output_dir / f"{stem}_transcript_raw.json"),
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
             future_a = executor.submit(stage3a_annotation, args, slides_dir, output_dir)
-            future_b = executor.submit(stage3b_audio, args, meta_path, textualized_path, duration, output_dir)
+            future_b = executor.submit(
+                stage3b_audio,
+                args,
+                meta_path,
+                textualized_path,
+                duration,
+                output_dir,
+                transcript_raw_path,
+            )
             for future in as_completed([future_a, future_b]):
                 if future is future_a:
                     annotation_result = future.result()
@@ -1074,9 +1146,7 @@ def run_pipeline(args, progress_callback=None):
                         timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
 
         timings["Stage 3 병렬 총"] = time.time() - t_parallel
-        
-        notify_stage("stt", "done")
-        
+
         print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
         print("─" * 70)
 
@@ -1260,7 +1330,29 @@ def get_parser():
     parser.add_argument("--retries", type=int, default=3,
                         help="Gemini API 재시도 횟수 (default: 3)")
     parser.add_argument("--debug", action="store_true", help="Stage 1 디버그 로그 출력")
+    parser.add_argument(
+        "--slide-decode-backend",
+        choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
+        default=os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto"),
+        help="Stage 1A 프레임 디코드 백엔드 (default: auto)",
+    )
+    parser.add_argument(
+        "--slide-extract-workers",
+        type=int,
+        default=int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0")),
+        help="Stage 1A 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
+    )
     parser.add_argument("--masks", action="store_true", help="Stage 3A diff 마스크 이미지 저장")
+    parser.add_argument(
+        "--per-annot-mode",
+        dest="per_annot_mode",
+        action="store_true",
+        help="Stage 3A를 annot별 개별 호출 방식으로 실행",
+    )
+    parser.add_argument("--legacy-per-annot", dest="per_annot_mode", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--no-batch", dest="per_annot_mode", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--skip-graph-triples", action="store_true",
                         help="Stage 6 그래프 Parquet(triples/nodes/edges) 생성 스킵")
     parser.add_argument(

@@ -39,6 +39,8 @@ from PIL import Image
 
 from google.genai import types
 
+from .config import GEMINI_GENERATIVE_MODEL
+
 try:
     from json_repair import repair_json
     JSON_REPAIR_AVAILABLE = True
@@ -67,7 +69,7 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
-    gemini_model: str = "models/gemini-2.5-flash"
+    gemini_model: str = GEMINI_GENERATIVE_MODEL
     max_retries: int = 3
     retry_delay: float = 5.0
 
@@ -227,18 +229,19 @@ class SlideLoader:
 
     def _load_from_metadata(self, metadata_path: Path) -> List[Dict]:
         """
-        metadata.json 기준으로 슬라이드별 텍스트 추출 대상 이미지 결정.
-        annot이 있으면 마지막 annot, 없으면 base 프레임 사용.
+        metadata.json 기준으로 scene별 텍스트 추출 대상을 결정한다.
+        실제 Gemini 호출은 slide_canonical_number 기준으로 캐시 가능하도록
+        representative scene 정보를 함께 싣는다.
         """
         with open(metadata_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
-        # slide_number 기준으로 base / annot 분류
+        # scene_index 기준으로 base / annot 분류
         base_entries: Dict[int, dict] = {}
         annot_entries: Dict[int, List[dict]] = {}
 
         for entry in metadata:
-            idx = entry.get("slide_index")
+            idx = entry.get("scene_index", entry.get("slide_index"))
             if idx is None:
                 continue
             if entry.get("capture_type") == "base":
@@ -246,46 +249,99 @@ class SlideLoader:
             elif entry.get("capture_type") in ("annot", "annotation"):
                 annot_entries.setdefault(idx, []).append(entry)
 
-        slides = []
-        for slide_num in sorted(base_entries.keys()):
-            base = base_entries[slide_num]
-            annots = annot_entries.get(slide_num, [])
+        scene_records = []
+        for scene_num in sorted(base_entries.keys()):
+            base = base_entries[scene_num]
+            annots = annot_entries.get(scene_num, [])
 
             if annots:
-                # 마지막 annot 프레임 선택 (annot_index 기준)
-                last_annot = max(annots, key=lambda x: x.get("annot_index", 0))
+                last_annot = max(
+                    annots,
+                    key=lambda x: (
+                        int(x.get("annot_index", 0) or 0),
+                        float(x.get("timestamp_sec", 0.0) or 0.0),
+                    ),
+                )
                 target = last_annot
                 source = f"last_annot (annot_index={last_annot.get('annot_index')})"
             else:
                 target = base
                 source = "base"
 
-            image_path = self.slides_dir / target["filename"]
+            canonical = (
+                base.get("slide_canonical_index")
+                or base.get("same_slide_canonical")
+                or scene_num
+            )
+            scene_records.append({
+                "scene_number": scene_num,
+                "slide_number": scene_num,  # 하위 호환
+                "slide_canonical_number": canonical,
+                "slide_visit_order": base.get("slide_visit_order", base.get("same_slide_visit_order", 1)),
+                "slide_is_revisit": bool(base.get("slide_is_revisit", base.get("same_slide_is_revisit", False))),
+                "timestamp": base.get("timestamp_sec", 0.0),
+                "base_entry": base,
+                "target_entry": target,
+                "has_annot": bool(annots),
+                "text_source": source,
+            })
+
+        # 같은 slide family는 가장 정보가 많은 representative scene 하나만 LLM 입력으로 사용
+        canonical_representatives: Dict[int, dict] = {}
+        for record in scene_records:
+            canonical = record["slide_canonical_number"]
+            current = canonical_representatives.get(canonical)
+            score = (
+                1 if record["has_annot"] else 0,
+                float(record["timestamp"]),
+                int(record["scene_number"]),
+            )
+            if current is None or score > current["_rep_score"]:
+                canonical_representatives[canonical] = {
+                    "_rep_score": score,
+                    "scene_number": record["scene_number"],
+                    "target_entry": record["target_entry"],
+                    "base_entry": record["base_entry"],
+                    "text_source": record["text_source"],
+                }
+
+        slides = []
+        for record in scene_records:
+            canonical = record["slide_canonical_number"]
+            rep = canonical_representatives[canonical]
+
+            image_path = self.slides_dir / rep["target_entry"]["filename"]
             if not image_path.exists():
                 logger.warning(f"파일 없음: {image_path}, base로 재시도")
-                image_path = self.slides_dir / base["filename"]
+                image_path = self.slides_dir / rep["base_entry"]["filename"]
                 if not image_path.exists():
                     logger.warning(f"base도 없음: {image_path}, 스킵")
                     continue
-                source = "base (fallback)"
+                record["text_source"] = "base (fallback)"
 
-            base_image_path = self.slides_dir / base["filename"]
+            base_image_path = self.slides_dir / rep["base_entry"]["filename"]
 
             slides.append({
-                "slide_number": slide_num,
-                "timestamp":    base.get("timestamp_sec", 0.0),  # 타임스탬프는 항상 base 기준
-                "image_path":   str(self.slides_dir / base["filename"]),  # 저장 경로는 base 기록
-                "image":        Image.open(image_path).convert("RGB"),
-                "base_image":   Image.open(base_image_path).convert("RGB"),  # 슬라이드 강조 감지용
-                "has_annot":    bool(annots),
-                "text_source":  source,
+                "scene_number":  record["scene_number"],
+                "slide_number":  record["slide_number"],
+                "slide_canonical_number": canonical,
+                "slide_visit_order": record["slide_visit_order"],
+                "slide_is_revisit": record["slide_is_revisit"],
+                "representative_scene_number": rep["scene_number"],
+                "timestamp":      record["timestamp"],  # 타임스탬프는 현재 scene 기준
+                "image_path":     str(image_path),
+                "image":          Image.open(image_path).convert("RGB"),
+                "base_image":     Image.open(base_image_path).convert("RGB"),
+                "has_annot":      record["has_annot"],
+                "text_source":    rep["text_source"],
             })
 
         slides.sort(key=lambda x: x["slide_number"])
         last_annot_count = sum(1 for s in slides if "annot" in s["text_source"])
         logger.info(
-            f"✓ Loaded {len(slides)} slides from metadata.json "
-            f"(last_annot: {last_annot_count}, base: {len(slides)-last_annot_count})"
+            f"✓ Loaded {len(slides)} scenes from metadata.json "
+            f"(unique slides: {len(canonical_representatives)}, "
+            f"last_annot: {last_annot_count}, base: {len(slides)-last_annot_count})"
         )
         return slides
 
@@ -520,12 +576,40 @@ class T1Extractor:
         return slide
 
     def extract_batch(self, slides: List[Dict]) -> List[Dict]:
-        logger.info(f"Extracting t1 from {len(slides)} slides...")
+        unique_slides = len({s.get("slide_canonical_number", s["slide_number"]) for s in slides})
+        logger.info(
+            f"Extracting t1 from {len(slides)} scenes "
+            f"(unique slides: {unique_slides})..."
+        )
 
+        cache: Dict[int, Dict] = {}
         for i, slide in enumerate(slides):
+            cache_key = int(slide.get("slide_canonical_number", slide["slide_number"]))
+            if cache_key in cache:
+                cached = cache[cache_key]
+                slide["title"] = cached["title"]
+                slide["t1"] = cached["t1"]
+                slide["t1_structure"] = cached["t1_structure"]
+                slide["slide_type"] = cached["slide_type"]
+                slide["slide_emphasis"] = list(cached["slide_emphasis"])
+                logger.info(
+                    f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
+                    f"(slide {cache_key}, cached from scene {cached['representative_scene_number']})"
+                )
+                continue
+
             self.extract(slide)
+            cache[cache_key] = {
+                "title": slide["title"],
+                "t1": slide["t1"],
+                "t1_structure": slide["t1_structure"],
+                "slide_type": slide.get("slide_type", "text"),
+                "slide_emphasis": list(slide.get("slide_emphasis", [])),
+                "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
+            }
             logger.info(
-                f"  [{i+1}/{len(slides)}] Slide {slide['slide_number']} "
+                f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
+                f"(slide {cache_key}) "
                 f"[{slide.get('text_source', 'base')}]: "
                 f"t1={len(slide['t1'])} chars, "
                 f"structure={len(slide['t1_structure'])} chars, "
@@ -587,12 +671,18 @@ class TextualizationPipeline:
             "metadata": {
                 "slides_dir":      str(self.config.slides_dir),
                 "processing_time": total_time,
-                "total_slides":    len(slides),
+                "total_scenes":    len(slides),
+                "total_slides":    len({s.get("slide_canonical_number", s["slide_number"]) for s in slides}),
             },
             "slides": [
                 {
                     "slide_id":            s["slide_id"],
+                    "scene_number":        s.get("scene_number", s["slide_number"]),
                     "slide_number":        s["slide_number"],
+                    "slide_canonical_number": s.get("slide_canonical_number", s["slide_number"]),
+                    "slide_visit_order":   s.get("slide_visit_order", 1),
+                    "slide_is_revisit":    s.get("slide_is_revisit", False),
+                    "representative_scene_number": s.get("representative_scene_number", s["slide_number"]),
                     "timestamp":           s["timestamp"],
                     "timestamp_formatted": s["timestamp_formatted"],
                     "image_path":          s["image_path"],
