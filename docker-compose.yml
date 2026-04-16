@@ -49,6 +49,7 @@ services:
     build:
       context: .
       dockerfile: ./app/backend/Dockerfile
+    gpus: all
     ports:
       - "8000:8000"
     environment:
@@ -63,6 +64,10 @@ services:
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
       - LOCAL_STORAGE_DIR=/pipeline/local_storage
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - GRAPHLEC_SLIDE_DECODE_BACKEND=auto
+      - GRAPHLEC_FFMPEG_HWACCEL=cuda
     volumes:
       - ./input:/pipeline/input
       - local_storage:/pipeline/local_storage
