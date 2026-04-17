@@ -1,4 +1,5 @@
 const API_BASE = '/api'
+const RECOMMENDER_BASE = import.meta.env.VITE_RECOMMENDER_API_BASE || '/recommender-api'
 
 export async function uploadLecture({ file, title, category, description }) {
   const formData = new FormData();
@@ -133,4 +134,17 @@ export async function askQa(lectureId, question) {
 
 export async function getQaHistory(lectureId) {
   return [];
+}
+
+export async function recommendLectures(query, topK = 3) {
+  const res = await fetch(`${RECOMMENDER_BASE}/recommend`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, top_k: topK }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Recommend request failed');
+  }
+  return res.json();
 }
