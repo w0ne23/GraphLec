@@ -4,7 +4,7 @@ recommender_web.py
 FastAPI 기반 강의 추천 웹 서버
 
 실행:
-  uvicorn recommender_web:app --port 8002 --reload
+  uvicorn recommender.recommender_web:app --port 8002 --reload
 
 엔드포인트:
   POST /recommend   { "query": "스레드 자세히 설명하는 강의", "top_k": 3 }
@@ -13,6 +13,7 @@ FastAPI 기반 강의 추천 웹 서버
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -20,14 +21,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from recommender import Recommender, RecommenderConfig
+from recommender.recommender import Recommender, RecommenderConfig
 
 
 # ============================================================================
 #  앱 초기화
 # ============================================================================
 
-METADATA_DIR = os.getenv("METADATA_DIR", "metadata/")
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_repo_root() -> Path:
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    here = Path(__file__).resolve()
+    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
+
+
+_REPO_ROOT = _resolve_repo_root()
+METADATA_DIR = os.getenv("METADATA_DIR", str(_BACKEND_ROOT / "metadata"))
+RECOMMENDER_DB_DIR = os.getenv("RECOMMENDER_DB_DIR", str(_REPO_ROOT / "data" / "lancedb"))
 _recommender: Optional[Recommender] = None
 
 
@@ -35,7 +49,10 @@ _recommender: Optional[Recommender] = None
 async def lifespan(app: FastAPI):
     global _recommender
     print(f"[시작] 메타데이터 로드: {METADATA_DIR}")
-    _recommender = Recommender(metadata_dir=METADATA_DIR, config=RecommenderConfig())
+    _recommender = Recommender(
+        metadata_dir=METADATA_DIR,
+        config=RecommenderConfig(DB_DIR=RECOMMENDER_DB_DIR),
+    )
     yield
     print("[종료]")
 
@@ -548,10 +565,6 @@ _HTML = """
     transition: width 0.6s cubic-bezier(.4,0,.2,1);
   }
 
-  .bar-fill.green { background: var(--green); }
-  .bar-fill.yellow { background: var(--yellow); }
-  .bar-fill.purple { background: var(--accent2); }
-
   .depth-tag {
     display: inline-flex;
     align-items: center;
@@ -738,8 +751,8 @@ _HTML = """
 
     const analysisBar = `
       <div class="analysis-bar">
-        ${d.domain_score > 0 ? `<div class="badge domain"><span class="key">도메인</span><span class="val">일치</span></div>` : ''}
         ${d.difficulty_match > 0 ? `<div class="badge"><span class="key">난이도</span><span class="val">일치</span></div>` : ''}
+        ${d.domain_score > 0 ? `<div class="badge domain"><span class="key">도메인</span><span class="val">일치</span></div>` : ''}
         ${d.depth_score > 0 ? `<div class="badge focus"><span class="key">깊이</span><span class="val">${pct(d.depth_score)}%</span></div>` : ''}
         ${d.combined_boost > 1.0 ? `<div class="badge"><span class="key">boost</span><span class="val">+${Math.round((d.combined_boost-1)*100)}%</span></div>` : ''}
       </div>`;
@@ -812,4 +825,4 @@ _HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("recommender_web:app", host="0.0.0.0", port=8002, reload=True)
+    uvicorn.run("recommender.recommender_web:app", host="0.0.0.0", port=8002, reload=True)

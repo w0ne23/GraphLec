@@ -11,20 +11,24 @@ GraphLEC 서버(3개)를 한 번에 실행하는 전용 스크립트.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 
-def _start(cmd: list[str], *, cwd: str) -> subprocess.Popen:
+def _start(cmd: list[str], *, cwd: str, env_overrides: dict[str, str] | None = None) -> subprocess.Popen:
     # stdout/stderr를 리다이렉트하지 않아서, parent 터미널에 로그가 같이 출력되게 둔다.
-    return subprocess.Popen(cmd, cwd=cwd)
+    env = os.environ.copy()
+    if env_overrides:
+        env.update(env_overrides)
+    return subprocess.Popen(cmd, cwd=cwd, env=env)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="GraphLEC 서비스 3개 동시 시작")
-    parser.add_argument("--metadata-dir", default="metadata", help="추천 서비스/메타데이터 디렉토리")
+    parser.add_argument("--metadata-dir", default="app/backend/metadata", help="추천 서비스/메타데이터 디렉토리")
     parser.add_argument("--host", default="127.0.0.1", help="FastAPI host (query_service)")
     parser.add_argument("--query-port", type=int, default=8001, help="query_service port")
     parser.add_argument("--django-port", type=int, default=8000, help="Django port")
@@ -34,7 +38,7 @@ def main() -> None:
     repo_root = Path(__file__).resolve().parent
     web_dir = repo_root / "web"
 
-    cmds: dict[str, tuple[list[str], str]] = {
+    cmds: dict[str, tuple[list[str], str, dict[str, str]]] = {
         "query_service (8001)": (
             [
                 sys.executable,
@@ -47,17 +51,25 @@ def main() -> None:
                 str(args.query_port),
             ],
             str(repo_root),
+            {},
         ),
         "recommender_web (8002)": (
             [
                 sys.executable,
-                str(repo_root / "recommender_web.py"),
-                "--metadata_dir",
-                args.metadata_dir,
+                "-m",
+                "uvicorn",
+                "recommender.recommender_web:app",
+                "--host",
+                args.host,
                 "--port",
                 str(args.reco_port),
+                "--reload",
             ],
-            str(repo_root),
+            str(repo_root / "app" / "backend"),
+            {
+                "METADATA_DIR": str((repo_root / args.metadata_dir).resolve()),
+                "RECOMMENDER_DB_DIR": str((repo_root / "data" / "lancedb").resolve()),
+            },
         ),
         "django (8000)": (
             [
@@ -67,13 +79,14 @@ def main() -> None:
                 str(args.django_port),
             ],
             str(web_dir),
+            {},
         ),
     }
 
     print("서비스 시작 — query_service + Django + recommender_web (병렬)")
     procs: dict[str, subprocess.Popen] = {}
-    for name, (cmd, cwd) in cmds.items():
-        proc = _start(cmd, cwd=cwd)
+    for name, (cmd, cwd, env_overrides) in cmds.items():
+        proc = _start(cmd, cwd=cwd, env_overrides=env_overrides)
         procs[name] = proc
         print(f"▶ {name} PID {proc.pid}")
 

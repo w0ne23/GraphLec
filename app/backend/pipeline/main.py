@@ -55,6 +55,25 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+
+def _resolve_repo_root() -> Path:
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    here = Path(__file__).resolve()
+    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
+
+
+REPO_ROOT = _resolve_repo_root()
+DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
+    "GRAPHLEC_METADATA_DIR",
+    "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
+)
+DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
+    "RECOMMENDER_DB_DIR",
+    "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
+)
+
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -352,10 +371,21 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
     segments_path = output_dir / f"{stem}_segments.json"
     silences_path = output_dir / f"{stem}_silences.json"
     emphasis_path = output_dir / f"{stem}_emphasis.json"
+    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
-    if _is_done(segments_path, "Stage 3B 오디오 파이프라인", args.force):
+    # 세그먼트만 있고 by_slide가 없으면(파일 삭제·불완전 실행) 스킵하면 Stage 4B·5가 깨짐 → 3B 전체 재실행
+    seg_ok = (
+        not args.force
+        and segments_path.exists()
+        and segments_path.stat().st_size > 0
+    )
+    by_slide_ok = by_slide_path.exists() and by_slide_path.stat().st_size > 0
+    if seg_ok and by_slide_ok:
+        print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
+        print(f"     {segments_path}")
+        print(f"     {by_slide_path}")
+        print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
-        by_slide_path = output_dir / f"{stem}_by_slide.json"
         slides_structure = None
         if by_slide_path.exists():
             try:
@@ -384,6 +414,13 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
             "slide_ranges": slide_ranges,
             "duration": duration,
         }
+
+    if seg_ok and not by_slide_ok:
+        print(
+            f"\n  ⚠️  {by_slide_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
+            "Stage 3B 전체를 다시 실행합니다."
+        )
+        print("─" * 70)
 
     video_path = args.input
 
@@ -571,7 +608,16 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
     duration = audio_result.get("duration", 0.0)
 
     if not slides_structure or not slide_ranges:
-        return {}
+        if by_slide_path.exists() and by_slide_path.stat().st_size > 0:
+            return {
+                "by_slide_path": str(by_slide_path),
+                "elapsed": 0.0,
+            }
+        raise FileNotFoundError(
+            f"{by_slide_path} 을(를) 만들 수 없습니다(slides_structure 또는 slide_ranges 없음). "
+            "세그먼트 파일만 있고 by_slide가 비어 있거나 삭제된 경우 "
+            "`python -m pipeline.main --input ... --force` 로 Stage 3B 이후를 다시 실행하세요."
+        )
 
     if _is_done(by_slide_path, "Stage 4B by_slide 저장", args.force):
         return {
@@ -935,7 +981,7 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     from .generate_metadata import generate_metadata
 
     stem         = Path(args.input).stem
-    metadata_dir = Path(getattr(args, "metadata_dir", "metadata"))
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     output_path  = metadata_dir / f"{stem}_metadata.json"
 
     if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
@@ -955,6 +1001,31 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     elapsed = time.time() - t0
     _done("메타데이터 생성", elapsed)
     return {"metadata_path": str(output_path), "elapsed": elapsed}
+
+
+def stage11_build_recommender_index(args) -> dict:
+    """Stage 11: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
+    recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
+    script_path = recommender_dir / "build_index.py"
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
+    db_dir = Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))
+
+    _banner("Stage 11  —  추천 인덱스 생성  (build_index)")
+    t0 = time.time()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--metadata_dir",
+        str(metadata_dir),
+        "--db_dir",
+        str(db_dir),
+    ]
+    subprocess.run(cmd, check=True)
+
+    elapsed = time.time() - t0
+    _done("추천 인덱스 생성", elapsed)
+    return {"elapsed": elapsed, "db_dir": str(db_dir)}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1171,6 +1242,15 @@ def run_pipeline(args, progress_callback=None):
         if "Stage 10 verifier 백그라운드 시작" not in timings:
             timings["Stage 10 verifier 백그라운드 시작"] = 0.0
 
+        # ── Stage 11 (직렬): 추천 인덱스 생성 ──
+        if getattr(args, "skip_recommender_index", False):
+            print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+            print("─" * 70)
+            timings["Stage 11 추천 인덱스 생성"] = 0.0
+        else:
+            r11 = stage11_build_recommender_index(args)
+            timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+
         # ── Lecture 자동 등록 ──
         _auto_register_lecture(stem)
 
@@ -1191,6 +1271,7 @@ def run_pipeline(args, progress_callback=None):
             r6.get("edges_parquet", ""),
             str(output_dir / f"{stem}_chunks_lance.parquet"),
             r8.get("metadata_path", ""),
+            str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
             r9.get("merged_clean_path", str(output_dir / f"{stem}_merged_clean.json")),
             r10.get("log_path", ""),
         ]
@@ -1279,8 +1360,12 @@ def get_parser():
                         help="Stage 8 메타데이터 생성 스킵")
     parser.add_argument("--skip-analyzer", action="store_true",
                         help="Stage 10 verifier 실행 스킵")
-    parser.add_argument("--metadata-dir", dest="metadata_dir", default="metadata",
-                        help="메타데이터 저장 디렉토리 (default: metadata/)")
+    parser.add_argument("--skip-recommender-index", action="store_true",
+                        help="Stage 11 추천 인덱스 생성(build_index) 스킵")
+    parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
+                        help=f"메타데이터 저장 디렉토리 (default: {DEFAULT_RECOMMENDER_METADATA_DIR})")
+    parser.add_argument("--recommender-db-dir", dest="recommender_db_dir", default=DEFAULT_RECOMMENDER_DB_DIR,
+                        help=f"추천 인덱스 LanceDB 경로 (default: {DEFAULT_RECOMMENDER_DB_DIR})")
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
