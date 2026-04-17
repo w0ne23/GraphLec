@@ -22,6 +22,11 @@ export default defineConfig({
         target: 'http://backend:8000',
         changeOrigin: true,
       },
+      '/recommender-api': {
+        target: process.env.VITE_RECOMMENDER_PROXY_TARGET || 'http://127.0.0.1:8002',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/recommender-api/, ''),
+      },
     },
   },
 })

@@ -30,6 +30,7 @@ FROM base-deps AS final
 
 COPY app/backend/pipeline/ ./pipeline/
 COPY app/backend/app/ ./app/
+COPY app/backend/recommender/ ./recommender/
 
 ENV PYTHONPATH=/app
 ENV PIPELINE_ROOT=/app
