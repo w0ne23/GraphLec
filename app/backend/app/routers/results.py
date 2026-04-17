@@ -1,47 +1,46 @@
-from fastapi import APIRouter, Depends, HTTPException
+import logging
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 
 from app.db import get_db
-from app.models import LectureContent
-from app.services.job_service import make_file_url
+from app.services import job_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/results")
 
-@router.get("")
-async def list_lectures(db: AsyncSession = Depends(get_db)):
-    """분석이 완료된 실제 강의 목록 반환"""
-    result = await db.execute(select(LectureContent).order_by(LectureContent.created_at.desc()))
-    lectures = result.scalars().all()
-    
-    return [
-        {
-            "id":          str(l.id),
-            "job_id":      str(l.job_id) if l.job_id else None,
-            "stem":        l.stem,
-            "title":       l.title or l.stem,
-            "category":    l.category or "일반",
-            "description": l.description,
-            "video_url":   make_file_url(l.video_path),
-            "created_at":  l.created_at.isoformat(),
-        }
-        for l in lectures
-    ]
 
-@router.get("/{id}")
-async def get_lecture(id: str, db: AsyncSession = Depends(get_db)):
-    """특정 강의 상세 정보 반환"""
-    result = await db.execute(select(LectureContent).where(LectureContent.id == id))
-    lecture = result.scalar_one_or_none()
-    
-    if not lecture:
+@router.get("")
+async def list_results(db: AsyncSession = Depends(get_db)):
+    """강의 목록 조회 (Lecture ID 기준)"""
+    return await job_service.list_all_results(db)
+
+
+@router.get("/{lecture_id}/timeline")
+async def get_timeline(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """강의 타임라인 데이터 조회"""
+    return await job_service.get_timeline(db, lecture_id)
+
+
+@router.get("/{lecture_id}/graph")
+async def get_knowledge_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """강의 지식 그래프 데이터 조회"""
+    return await job_service.get_knowledge_graph(db, lecture_id)
+
+
+@router.post("/{lecture_id}/query")
+async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """강의 내용 질의응답 (Lecture ID 기준)"""
+    body = await request.json()
+    question = body.get("question")
+    if not question:
+        raise HTTPException(status_code=400, detail="Question is required")
+    return await job_service.ask_question(db, lecture_id, question)
+
+
+@router.get("/{lecture_id}")
+async def get_result_detail(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """특정 강의 상세 정보 조회"""
+    detail = await job_service.get_lecture_detail(db, lecture_id)
+    if not detail:
         raise HTTPException(status_code=404, detail="Lecture not found")
-        
-    return {
-        "id":          str(lecture.id),
-        "stem":        lecture.stem,
-        "title":       lecture.title or lecture.stem,
-        "category":    lecture.category or "일반",
-        "description": lecture.description,
-        "video_url":   make_file_url(lecture.video_path),
-    }
+    return detail

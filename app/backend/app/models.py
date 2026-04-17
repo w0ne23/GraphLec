@@ -16,7 +16,6 @@ class Job(Base):
     id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     status          = Column(String, nullable=False, default="pending")  # pending, running, done, error
     input_path      = Column(Text, nullable=False)
-    output_dir      = Column(Text, nullable=True)
     current_stage   = Column(Text, nullable=True)
     error_message   = Column(Text, nullable=True)
     pipeline_stages = Column(JSONB, nullable=True)
@@ -25,11 +24,11 @@ class Job(Base):
 
 
 class LectureContent(Base):
-    """분석 완료된 실제 강의 콘텐츠 데이터"""
+    """실제 강의 콘텐츠 데이터"""
     __tablename__ = "lectures_content"
 
     id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    job_id      = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True)
+    job_id      = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True)
     stem        = Column(String, unique=True, index=True, nullable=False)
     title       = Column(String, nullable=True)
     category    = Column(String, nullable=True)
@@ -38,5 +37,4 @@ class LectureContent(Base):
     output_dir  = Column(Text, nullable=False)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
-    # 관계 설정
     job = relationship("Job", backref="content")
