@@ -119,6 +119,15 @@ export async function getLectureGraph(lectureId) {
   return res.json();
 }
 
+export async function getLectureVerifier(lectureId) {
+  const res = await fetch(`${API_BASE}/results/${lectureId}/verifier`);
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    throw new Error('Verifier fetch failed');
+  }
+  return res.json();
+}
+
 export async function askQa(lectureId, question) {
   const res = await fetch(`${API_BASE}/results/${lectureId}/query`, {
     method: 'POST',

@@ -4,6 +4,7 @@ import LecturesPage  from './pages/LecturesPage'
 import RecommendPage from './pages/RecommendPage'
 import ReportPage    from './pages/ReportPage'
 import LecturePage   from './pages/LecturePage'
+import VerifierPage  from './pages/VerifierPage'
 import TabBar        from './components/common/TabBar'
 
 const PAGES = ['lectures', 'recommend', 'report']
@@ -20,7 +21,7 @@ function pathToIdx(pathname) {
 
 /** /lectures/:id 여부 — 탭 바를 숨겨야 하는 독립 페이지 */
 function isLectureDetailPage(pathname) {
-  return /^\/lectures\/\w+/.test(pathname) && !pathname.endsWith('/lectures') && pathname !== '/lectures/'
+  return /^\/lectures\/[^/]+(\/verifier)?$/.test(pathname)
 }
 
 function MainLayout() {
@@ -30,6 +31,10 @@ function MainLayout() {
   const handleNavigate = useCallback(({ page, lectureId = null }) => {
     if (page === 'lecture' && lectureId != null) {
       navigate(`/lectures/${lectureId}`)
+      return
+    }
+    if (page === 'verifier' && lectureId != null) {
+      navigate(`/lectures/${lectureId}/verifier`)
       return
     }
     navigate(`/${page}`)
@@ -45,6 +50,7 @@ function MainLayout() {
           <Route path="/"            element={<LecturesPage onNavigate={handleNavigate} />} />
           <Route path="/lectures"    element={<LecturesPage onNavigate={handleNavigate} />} />
           <Route path="/lectures/:id" element={<LecturePage onNavigate={handleNavigate} />} />
+          <Route path="/lectures/:id/verifier" element={<VerifierPage />} />
           <Route path="/recommend"   element={<RecommendPage onNavigate={handleNavigate} />} />
           <Route path="/report"      element={<ReportPage />} />
           {/* 404 fallback */}

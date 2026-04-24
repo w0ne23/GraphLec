@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, get_genai_client
+from .utils import resolve_backend_root
 
 CHUNKS_TABLE = "chunks"
 BATCH_SIZE = 16
@@ -26,7 +27,7 @@ def default_lance_root() -> Path:
     if env:
         return Path(env).resolve()
     # 레포 루트 기준 (CWD와 무관)
-    repo_root = Path(__file__).resolve().parents[3]
+    repo_root = resolve_backend_root()
     return (repo_root / "data" / "lancedb").resolve()
 
 
