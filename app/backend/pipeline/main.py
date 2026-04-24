@@ -48,6 +48,7 @@ from .deictics import (
     classify_ambiguous_deictics_with_llm,
     extract_deictics_from_segments,
 )
+from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,15 +57,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _resolve_repo_root() -> Path:
-    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
-    if env_root:
-        return Path(env_root).resolve()
-    here = Path(__file__).resolve()
-    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
-
-
-REPO_ROOT = _resolve_repo_root()
+REPO_ROOT = resolve_backend_root()
 DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
     "GRAPHLEC_METADATA_DIR",
     "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
@@ -146,8 +139,7 @@ def _auto_register_lecture(stem: str) -> None:
         import os
         from dotenv import load_dotenv
 
-        repo_root = Path(__file__).resolve().parents[3]
-        web_dir = repo_root / "web"
+        web_dir = REPO_ROOT / "web"
         if not web_dir.exists():
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
             return
@@ -870,11 +862,11 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
 
     _banner("Stage 10  —  verifier 백그라운드 실행")
     t0 = time.time()
-    repo_root = Path(__file__).resolve().parents[3]
+    pkg_root = resolve_pipeline_package_root()
     cmd = [
         sys.executable,
         "-m",
-        "app.backend.pipeline.analyzer.run_all",
+        "pipeline.analyzer.run_all",
         merged_clean_path,
         "--output-dir",
         str(analyzer_dir),
@@ -887,7 +879,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         log_fp.flush()
         proc = subprocess.Popen(
             cmd,
-            cwd=str(repo_root),
+            cwd=str(pkg_root),
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
             stderr=subprocess.STDOUT,

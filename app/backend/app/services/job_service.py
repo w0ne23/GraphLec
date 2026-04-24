@@ -332,6 +332,44 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
 
 
+async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """verifier 결과 조회 (Lecture ID 기준)."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("output_dir") or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    output_dir = Path(detail["output_dir"])
+    stem = str(detail["stem"])
+
+    candidate_paths = [
+        output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
+        output_dir / f"{stem}_content_verification.json",
+    ]
+    verifier_path = next((path for path in candidate_paths if path.exists()), None)
+    if not verifier_path:
+        raise HTTPException(status_code=404, detail="Content verification file not found")
+
+    try:
+        with open(verifier_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading content verification: {e}")
+
+    flow = data.get("claim_decision_flow", {}) or {}
+    summary = data.get("claim_decision_flow_summary", {}) or {}
+    final_claims = flow.get("final_confirmed_claims", []) or []
+
+    return {
+        "lecture_id": str(lecture_id),
+        "stem": stem,
+        "verification_path": str(verifier_path),
+        "final_confirmed_claim_count": int(
+            summary.get("final_confirmed_claim_count", len(final_claims))
+        ),
+        "final_confirmed_claims": final_claims,
+    }
+
+
 # ── 기타 유틸 ───────────────────────────────────────────────────────────────
 async def get_graph_info(db: AsyncSession, job_id: str) -> Dict[str, Any]:
     job = await get_job(db, job_id)

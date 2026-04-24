@@ -12,7 +12,15 @@ function tsToSec(ts = '00:00') {
   return m * 60 + s
 }
 
-export default function VideoPlayer({ lecture, scenes = [], currentScene, seekTo, onSceneChange, isMini = false }) {
+export default function VideoPlayer({
+  lecture,
+  scenes = [],
+  currentScene,
+  seekTo,
+  seekToSeconds = null,
+  onSceneChange,
+  isMini = false,
+}) {
   const videoRef = useRef(null)
   const trackRef = useRef(null)
   
@@ -115,6 +123,12 @@ export default function VideoPlayer({ lecture, scenes = [], currentScene, seekTo
     videoRef.current.currentTime = targetSec
     // 점프 시 자동 재생을 원한다면: videoRef.current.play()
   }, [seekTo, scenes])
+
+  useEffect(() => {
+    if (!videoRef.current) return
+    if (!Number.isFinite(seekToSeconds)) return
+    videoRef.current.currentTime = Math.max(0, seekToSeconds)
+  }, [seekToSeconds])
 
   if (!lecture) {
     return (
