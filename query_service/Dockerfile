@@ -17,5 +17,6 @@ COPY query_service/ ./query_service/
 COPY app/backend/pipeline/lance_ingest.py ./pipeline/lance_ingest.py
 COPY app/backend/pipeline/embedding_utils.py ./pipeline/embedding_utils.py
 RUN touch ./pipeline/__init__.py
+COPY app/backend/pipeline/utils.py ./pipeline/utils.py
 
 CMD ["uvicorn", "query_service.main:app", "--host", "0.0.0.0", "--port", "8001"]
