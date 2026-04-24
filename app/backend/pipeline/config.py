@@ -1,0 +1,152 @@
+"""
+config.py
+=========
+API 클라이언트 초기화 및 경로 상수 정의
+
+경로 구조:
+    input/
+        lecture.mp4
+    output_slides/
+        metadata.json
+        slide_0001.jpg
+        ...
+    output/
+        {stem}_slide_textualized.json
+        {stem}_annotation.json
+        {stem}_segments.json
+        {stem}_silences.json
+        {stem}_deictics.json
+        {stem}_deictics_ambiguous.json
+        {stem}_audio_features.json
+        {stem}_audio_quality.json
+        {stem}_emphasis.json
+        {stem}_by_slide.json
+        {stem}_slide_classified.json
+        {stem}_fused.json
+"""
+
+import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+from groq import Groq
+from google import genai
+
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None
+
+load_dotenv()
+
+# ──────────────────────────────────────────────────────────────
+# API 키
+# ──────────────────────────────────────────────────────────────
+
+# 비디오 파이프라인용 (slide_textualizer, annotation_analyzer)
+GEMINI_API_KEY_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+# 오디오 파이프라인용 (text_processor, segment_grouper, emphasis_keyword)
+GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GEMINI_API_KEY_1  # 키 1개만 있을 때 fallback
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+missing_keys: list[str] = []
+if not GEMINI_API_KEY_1:
+    missing_keys.append("GOOGLE_API_KEY_1 (또는 GOOGLE_API_KEY)")
+if not GROQ_API_KEY:
+    missing_keys.append("GROQ_API_KEY")
+
+if missing_keys:
+    print("❌ 필요한 API 키를 환경 변수로 설정해주세요:")
+    for k in missing_keys:
+        print(f"   - {k}")
+    sys.exit(1)
+
+# ──────────────────────────────────────────────────────────────
+# API 클라이언트
+# ──────────────────────────────────────────────────────────────
+
+gemini_client   = genai.Client(api_key=GEMINI_API_KEY_1)  # 비디오 파이프라인용
+gemini_client_2 = genai.Client(api_key=GEMINI_API_KEY_2)  # 오디오 파이프라인용
+groq_client     = Groq(api_key=GROQ_API_KEY)
+openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is not None else None
+anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
+
+# ──────────────────────────────────────────────────────────────
+# 기본 경로 상수 (CLI 인자로 override 가능)
+# ──────────────────────────────────────────────────────────────
+
+DEFAULT_INPUT_DIR  = Path("input")
+DEFAULT_SLIDES_DIR = Path("output_slides")   # metadata.json + 슬라이드 이미지
+DEFAULT_OUTPUT_DIR = Path("output")          # 모든 분석 결과
+
+# ──────────────────────────────────────────────────────────────
+# 파일명 헬퍼
+# ──────────────────────────────────────────────────────────────
+
+def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Path]:
+    """
+    영상 stem과 디렉토리로 모든 출력 경로를 한 번에 반환.
+
+    사용 예:
+        paths = output_paths("lecture", Path("output"), Path("output_slides"))
+        paths["segments"]   # output/lecture_segments.json
+        paths["metadata"]   # output_slides/metadata.json
+    """
+    return {
+        # slides_dir
+        "metadata":            slides_dir / "metadata.json",
+        # output_dir
+        "textualized":         output_dir / f"{stem}_slide_textualized.json",
+        "annotation":          output_dir / f"{stem}_annotation.json",
+        "segments":            output_dir / f"{stem}_segments.json",
+        "silences":            output_dir / f"{stem}_silences.json",
+        "deictics":            output_dir / f"{stem}_deictics.json",
+        "deictics_ambiguous":  output_dir / f"{stem}_deictics_ambiguous.json",
+        "audio_features":      output_dir / f"{stem}_audio_features.json",
+        "audio_quality":       output_dir / f"{stem}_audio_quality.json",
+        "emphasis":            output_dir / f"{stem}_emphasis.json",
+        "by_slide":            output_dir / f"{stem}_by_slide.json",
+        "classified":          output_dir / f"{stem}_slide_classified.json",
+        "fused":               output_dir / f"{stem}_fused.json",
+    }
+
+
+def get_openai_client():
+    return openai_client
+
+
+def get_anthropic_client():
+    return anthropic_client
+
+
+def get_gemini_client_sequence():
+    seq = []
+    if gemini_client_2 is not None:
+        seq.append(("gemini_client_2", gemini_client_2))
+    if gemini_client is not None and gemini_client is not gemini_client_2:
+        seq.append(("gemini_client", gemini_client))
+    return seq
+
+
+def resolve_anthropic_model(model_name: str) -> str:
+    aliases = {
+        "haiku-4.5": "claude-3-5-haiku-latest",
+        "claude-haiku-4.5": "claude-3-5-haiku-latest",
+        "claude-haiku-4-5": "claude-3-5-haiku-latest",
+        "sonnet-4.5": "claude-3-5-sonnet-latest",
+        "claude-sonnet-4.5": "claude-3-5-sonnet-latest",
+        "claude-sonnet-4-5": "claude-3-5-sonnet-latest",
+        "opus-4.5": "claude-3-opus-latest",
+        "claude-opus-4.5": "claude-3-opus-latest",
+        "claude-opus-4-5": "claude-3-opus-latest",
+    }
+    return aliases.get(str(model_name or "").strip(), str(model_name or "").strip())
