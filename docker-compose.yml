@@ -30,6 +30,7 @@ services:
     build:
       context: .
       dockerfile: ./query_service/Dockerfile
+      network: host
     ports:
       - "8001:8001"
     environment:
@@ -49,6 +50,7 @@ services:
     build:
       context: .
       dockerfile: ./app/backend/Dockerfile
+      network: host
     ports:
       - "8000:8000"
     environment:
@@ -82,6 +84,7 @@ services:
     build:
       context: .
       dockerfile: ./app/backend/Dockerfile
+      network: host
     ports:
       - "8002:8002"
     environment:
