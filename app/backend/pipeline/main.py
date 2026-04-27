@@ -146,8 +146,7 @@ def _auto_register_lecture(stem: str) -> None:
         import os
         from dotenv import load_dotenv
 
-        repo_root = Path(__file__).resolve().parents[3]
-        web_dir = repo_root / "web"
+        web_dir = REPO_ROOT / "web"
         if not web_dir.exists():
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
             return
@@ -870,7 +869,6 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
 
     _banner("Stage 10  —  verifier 백그라운드 실행")
     t0 = time.time()
-    repo_root = Path(__file__).resolve().parents[3]
     cmd = [
         sys.executable,
         "-m",
@@ -887,7 +885,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         log_fp.flush()
         proc = subprocess.Popen(
             cmd,
-            cwd=str(repo_root),
+            cwd=str(REPO_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
             stderr=subprocess.STDOUT,
@@ -1326,7 +1324,7 @@ def get_parser():
   python main.py --input input/lecture.mp4 --debug --masks
   python main.py --input input/lecture.mp4 --force
   python main.py --input input/lecture.mp4 --skip-lance-index
-  python main.py --input input/lecture.mp4 --skip-neo4j
+  python main.py --input input/lecture.mp4 --load-neo4j
         """,
     )
     parser.add_argument("--input",  "-i", default="input/lecture.mp4", help="입력 강의 영상 경로 (.mp4)")
@@ -1347,7 +1345,14 @@ def get_parser():
     parser.add_argument(
         "--skip-neo4j",
         action="store_true",
-        help="Stage 6 직후 Neo4j 적재 스킵 (기본은 적재 시도; NEO4J_URI 등 필요)",
+        default=True,
+        help="Stage 6 직후 Neo4j 적재 스킵 (기본: 스킵)",
+    )
+    parser.add_argument(
+        "--load-neo4j",
+        dest="skip_neo4j",
+        action="store_false",
+        help="Stage 6 직후 Neo4j 적재 활성화 (NEO4J_URI 등 필요)",
     )
     parser.add_argument("--skip-lance-index", action="store_true",
                         help="Stage 7 LanceDB+Parquet 인덱스 스킵")

@@ -98,6 +98,7 @@ def pipeline_process(job_id: str, input_path: str):
                         "--input",        str(video_path),
                         "--output",       str(output_dir),
                         "--slides",       str(slides_dir),
+                        "--skip-neo4j",
                         "--metadata-dir", str(output_dir / "metadata"),
                         "--lance-root",   str(output_dir / "lancedb"),
                     ])
