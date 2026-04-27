@@ -28,6 +28,8 @@ from neo4j import GraphDatabase
 from google import genai
 from dotenv import load_dotenv
 
+from .config import GEMINI_GENERATIVE_MODEL
+
 load_dotenv(override=True)
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
@@ -39,7 +41,7 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 print(f"[디버그] NEO4J URI={NEO4J_URI}  USER={NEO4J_USER}  PW={'*'*len(NEO4J_PASSWORD)}")
 
 _client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_1"))
-MODEL   = "gemini-2.5-flash"
+MODEL   = GEMINI_GENERATIVE_MODEL
 
 
 def _sample_uniform(texts: list[str], n: int) -> list[str]:
@@ -701,6 +703,18 @@ def _gemini(prompt: str) -> str:
         contents=prompt,
         config={"temperature": 0.0},
     )
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage="stage8_metadata",
+            provider="google",
+            model=MODEL,
+            response=resp,
+            prompt_chars=len(prompt),
+        )
+    except Exception:
+        pass
     return resp.text.strip()
 
 

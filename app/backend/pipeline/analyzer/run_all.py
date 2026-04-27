@@ -22,9 +22,6 @@ def _base_stem(merged_path: Path) -> str:
 
 
 def _load_verifier():
-    verifier_version = str(os.getenv("VERIFIER_VERSION", "4")).strip().lower()
-    if verifier_version in {"4", "v4", "verifier4"}:
-        return "verifier4", verify_lecture_content, format_verification_report
     return "verifier4", verify_lecture_content, format_verification_report
 
 
@@ -420,32 +417,24 @@ def run_all_analyzers(
     result_json_path = out_dir / f"{base_stem}_content_verification.json"
     report_path = out_dir / f"{base_stem}_content_verification_report.txt"
 
-    cross_model = os.getenv("CROSS_VERIFY_MODEL", "").strip()
-    use_cross = bool(cross_model and os.getenv("OPENAI_API_KEY"))
+    from .cross_pipeline import cross_verify
 
-    if use_cross:
-        from .cross_pipeline import cross_verify
+    primary_model = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    cross_model = os.getenv("CROSS_VERIFY_MODEL", "gpt-5.4").strip() or "gpt-5.4"
+    models = cross_models or [primary_model, cross_model]
+    if len(models) < 2:
+        raise RuntimeError("cross verifier는 최소 2개 모델이 필요합니다.")
+    if any(str(model).startswith(("gpt", "o1", "o3")) for model in models) and not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("cross verifier는 OPENAI_API_KEY가 필요합니다.")
 
-        primary_model = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
-        models = cross_models or [primary_model, cross_model]
-        verification_result = cross_verify(
-            merged_path=str(merged_file),
-            models=models,
-            num_runs=cross_runs,
-            min_rate=cross_min_rate,
-            batch_size=cross_batch_size,
-            env_vars=_collect_env_vars(),
-        )
-    else:
-        _, verify_fn, format_report_fn = _load_verifier()
-        verification_result = verify_fn(
-            merged_path=str(merged_file),
-            current_date=current_date,
-            num_runs=claim_runs,
-            min_detection_rate=claim_min_rate,
-            batch_size=claim_batch_size,
-            max_workers=claim_max_workers,
-        )
+    verification_result = cross_verify(
+        merged_path=str(merged_file),
+        models=models,
+        num_runs=cross_runs,
+        min_rate=cross_min_rate,
+        batch_size=cross_batch_size,
+        env_vars=_collect_env_vars(),
+    )
 
     claims_for_log = verification_result.get("merged_claims")
     if claims_for_log is None:
@@ -462,17 +451,13 @@ def run_all_analyzers(
         encoding="utf-8",
     )
 
-    if not use_cross:
-        _, _, format_report_fn = _load_verifier()
-        report_path.write_text(format_report_fn(verification_result), encoding="utf-8")
-
     return {
         "merged_path": str(merged_file),
         "output_dir": str(out_dir),
         "claim_output": str(result_json_path),
-        "claim_report": str(report_path) if not use_cross else "",
+        "claim_report": "",
         "claim_issue_count": verification_result.get("overall_assessment", {}).get("total_issues", 0),
-        "used_cross": use_cross,
+        "used_cross": True,
     }
 
 
@@ -484,7 +469,12 @@ def main():
     parser.add_argument("--claim-min-rate", type=float, default=0.5)
     parser.add_argument("--claim-batch-size", type=int, default=CLAIM_BATCH_SIZE)
     parser.add_argument("--claim-max-workers", type=int, default=4)
-    parser.add_argument("--cross-models", nargs="+", default=["gemini-2.5-flash", "gpt-5.4"])
+    parser.add_argument(
+        "--cross-models",
+        nargs="+",
+        default=None,
+        help="cross verifier 모델 목록 (기본: VERIFIER_MODEL + CROSS_VERIFY_MODEL)",
+    )
     parser.add_argument("--cross-runs", type=int, default=2)
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
