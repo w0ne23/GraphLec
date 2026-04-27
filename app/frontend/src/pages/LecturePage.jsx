@@ -5,6 +5,8 @@ import VideoPlayer  from '../components/watch/VideoPlayer'
 import LecturePanel from '../components/watch/LecturePanel'
 import ChatPanel    from '../components/chat/ChatPanel'
 
+const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
+
 /**
  * LecturePage — /lectures/:id
  * 좌: VideoPlayer + LecturePanel (가변 너비)
@@ -25,8 +27,20 @@ export default function LecturePage({ onNavigate }) {
   const [isFocusMode,  setIsFocusMode]  = useState(false) // 타임라인 집중 모드 추가
   const isResizing = useRef(false)
 
+  // 채팅 상태를 부모로 끌어올림 (레이아웃 전환 시 컨텍스트 유지)
+  const [chatMessages, setChatMessages] = useState([INIT_MSG])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+
   const toggleChat = () => setIsChatOpen(v => !v)
   const toggleFocusMode = () => setIsFocusMode(v => !v)
+
+  // 강의(id)가 변경될 때만 채팅 상태 초기화
+  useEffect(() => {
+    setChatMessages([INIT_MSG])
+    setChatInput('')
+    setChatLoading(false)
+  }, [id])
 
   const handleMouseDown = useCallback(() => {
     isResizing.current = true
@@ -144,6 +158,12 @@ export default function LecturePage({ onNavigate }) {
                 lecture={lecture}
                 onJumpToScene={handleJumpToScene}
                 mode="sidebar"
+                messages={chatMessages}
+                setMessages={setChatMessages}
+                input={chatInput}
+                setInput={setChatInput}
+                loading={chatLoading}
+                setLoading={setChatLoading}
               />
             </div>
           )}
@@ -159,6 +179,12 @@ export default function LecturePage({ onNavigate }) {
               onJumpToScene={handleJumpToScene}
               onClose={toggleChat}
               mode="sidebar"
+              messages={chatMessages}
+              setMessages={setChatMessages}
+              input={chatInput}
+              setInput={setChatInput}
+              loading={chatLoading}
+              setLoading={setChatLoading}
             />
           </div>
         )}

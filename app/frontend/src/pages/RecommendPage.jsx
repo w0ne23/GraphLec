@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react'
 import RecommendListItem from '../components/recommend/RecommendListItem'
-import { DUMMY_RECOMMEND_ANSWERS } from '../data/dummy'
+import { recommendLectures } from '../lib/api'
 
 const SUGGESTIONS = [
   '선형대수 행렬 강의',
@@ -15,6 +15,7 @@ export default function RecommendPage({ onNavigate }) {
   const [loading,     setLoading]     = useState(false)
   const [results,     setResults]     = useState(null)
   const [searchLabel, setSearchLabel] = useState('')
+  const [error,       setError]       = useState('')
   const inputRef = useRef(null)
 
   async function handleSearch(overrideQuery) {
@@ -25,14 +26,15 @@ export default function RecommendPage({ onNavigate }) {
     setSearchLabel(text)
     setSubmitted(true)   // 클래스 토글 → CSS transition 시작
     setLoading(true)
+    setError('')
     setResults(null)
 
     try {
-      await new Promise(r => setTimeout(r, 700))
-      const keys  = Object.keys(DUMMY_RECOMMEND_ANSWERS)
-      const match = keys.find(k => k.includes(text) || text.includes(k.slice(0, 4)))
-      const res   = DUMMY_RECOMMEND_ANSWERS[match ?? '최근 업로드한 강의를 추천해주세요']
-      setResults(res?.lectures ?? [])
+      const res = await recommendLectures(text, 5)
+      setResults(res?.results ?? [])
+    } catch (e) {
+      setError(String(e.message || e))
+      setResults([])
     } finally {
       setLoading(false)
     }
@@ -43,6 +45,7 @@ export default function RecommendPage({ onNavigate }) {
     setSubmitted(false)
     setQuery('')
     setResults(null)
+    setError('')
     setSearchLabel('')
     setTimeout(() => inputRef.current?.focus(), 350) // transition 끝난 뒤 포커스
   }
@@ -125,9 +128,19 @@ export default function RecommendPage({ onNavigate }) {
               <div className="rec-result-label">
                 <strong>"{searchLabel}"</strong>에 대한 추천 강의 {results.length}개
               </div>
+              {error && (
+                <div className="rec-empty" style={{ paddingTop: 0 }}>
+                  <p className="rec-empty-sub">오류: {error}</p>
+                </div>
+              )}
               <div className="rec-list">
                 {results.map(lec => (
-                  <RecommendListItem key={lec.id} lecture={lec} onPlay={handlePlay} />
+                  <RecommendListItem
+                    key={lec.video_id}
+                    lecture={lec}
+                    onPlay={handlePlay}
+                    queryText={searchLabel}
+                  />
                 ))}
               </div>
             </>

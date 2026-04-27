@@ -193,9 +193,38 @@ EXTRACTION_PROMPT = """
   예) "마의 효능: 위벽 보호, 소화 촉진" → 기능(X), 위벽 보호(O), 소화 촉진(O) 각각 별도 엔티티
 - 목록·열거 형태로 나오는 항목들은 전부 개별 엔티티로 추출
 
-관계 타입 (12가지만 사용):
-is_a, part_of, implements, abstracts, prerequisite_of, uses, calls,
-compared_to, extends, replaces, solves, optimizes
+관계 타입 (아래 16가지만 사용; 다른 문자열 금지):
+is_a, part_of, instance_of, has_attribute,
+prerequisite_of, causes, influences,
+uses, applies,
+compared_to, illustrates,
+abstracts,
+solves, optimizes,
+implements, replaces
+
+각 관계 의미 (방향: from → to):
+- is_a: from은 to의 한 종류·범주·유형이다. (from=하위, to=상위)
+- part_of: from은 to의 구성 요소·부분·하위 단위다. (from=부분, to=전체)
+- instance_of: from은 to의 구체적 사례·실례·표본이다. (from=사례, to=범주)
+- has_attribute: from은 속성·특성·조건으로 to를 갖는다 (정의·성질·전제).
+- prerequisite_of: from을 이해·다루기 전에 to가 필요하다 (선행 지식).
+- causes: from이 to를 일으키거나 강한 인과로 이끈다 (메커니즘·직접 원인).
+- influences: from이 to에 영향을 준다 (causes보다 약하거나 다방향·맥락적 영향).
+- uses: from이 to를 수단·도구·방법·자료로 쓴다.
+- applies: from(이론·규칙·방법)이 to(상황·대상·문제)에 적용된다.
+- compared_to: from과 to가 대조·비교된다.
+- illustrates: from(사례·예)가 to(개념·주장)를 설명·뒷받침한다. (단순 분류가 아닐 때; 분류면 instance_of/is_a)
+- abstracts: from(상위·일반 개념)이 to(하위·구체 세부)를 포괄·일반화한다. (from=상위·일반, to=하위·구체)
+- solves: from이 to(문제·과제)를 해결한다.
+- optimizes: from이 to(목표·지표·과정)를 개선·최적화한다.
+- implements: from이 to(명세·아이디어·요구)를 실현·구현한다.
+- replaces: from이 to를 대체한다.
+
+관계 작성 규칙:
+- 위 16개 외 타입 금지. 애매하면 엣지를 생략한다.
+- causes vs influences: 직접·강한 인과면 causes, 약하거나 상호·맥락적이면 influences.
+- uses vs applies: 도구·자료 활용은 uses; 이론·규칙의 적용은 applies.
+- illustrates 남용 금지: 명백한 예시·사례 설명일 때만.
 
 mentions 작성 규칙:
 - 각 엔티티가 직접 언급·설명·예시로 다뤄지는 모든 source_id 나열

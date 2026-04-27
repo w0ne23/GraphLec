@@ -10,7 +10,7 @@ main.py
   [병렬] Stage 3A: annotation_analyzer — 필기 강조 분석
          Stage 3B: 오디오 파이프라인
                      transcriber       — 슬라이드별 전사 (metadata 필요)
-                     text_processor    — 2단계 교정 + 침묵/지시어 추출
+                     text_processor    — 2-pass 교정 (make_merged 기반) + 침묵/지시어 추출
                      emphasis          — 오디오 강조 감지
   [병렬] Stage 4A: slide_classifier    — 슬라이드 역할 분류
          Stage 4B: by_slide 구조 저장  — (3B 결과 기반)
@@ -33,6 +33,7 @@ except ImportError:
     from backports import lzma  # lzma가 없으면 backports.lzma를 사용
 
 import json
+import os
 import sys
 import time
 import argparse
@@ -47,12 +48,24 @@ from .deictics import (
     classify_ambiguous_deictics_with_llm,
     extract_deictics_from_segments,
 )
+from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
+
+
+REPO_ROOT = resolve_backend_root()
+DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
+    "GRAPHLEC_METADATA_DIR",
+    "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
+)
+DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
+    "RECOMMENDER_DB_DIR",
+    "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
+)
 
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -79,6 +92,11 @@ def _done(label: str, elapsed: float):
 def _save_json(path: Path, data: Any):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _fmt_ts(sec: float) -> str:
+    m, s = int(sec) // 60, int(sec) % 60
+    return f"{m:02d}:{s:02d}"
 
 
 def _is_done(path: Path, label: str, force: bool) -> bool:
@@ -121,8 +139,7 @@ def _auto_register_lecture(stem: str) -> None:
         import os
         from dotenv import load_dotenv
 
-        repo_root = Path(__file__).resolve().parents[3]
-        web_dir = repo_root / "web"
+        web_dir = REPO_ROOT / "web"
         if not web_dir.exists():
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
             return
@@ -326,7 +343,7 @@ def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
 
 
 def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, output_dir: Path) -> dict:
-    from .text_processor import correct_segments_dual_with_slide_context
+    from .text_processor import correct_segments_two_pass
     from .segment_grouper import (
         load_slide_ranges,
         group_segments_by_context,
@@ -346,10 +363,21 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
     segments_path = output_dir / f"{stem}_segments.json"
     silences_path = output_dir / f"{stem}_silences.json"
     emphasis_path = output_dir / f"{stem}_emphasis.json"
+    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
-    if _is_done(segments_path, "Stage 3B 오디오 파이프라인", args.force):
+    # 세그먼트만 있고 by_slide가 없으면(파일 삭제·불완전 실행) 스킵하면 Stage 4B·5가 깨짐 → 3B 전체 재실행
+    seg_ok = (
+        not args.force
+        and segments_path.exists()
+        and segments_path.stat().st_size > 0
+    )
+    by_slide_ok = by_slide_path.exists() and by_slide_path.stat().st_size > 0
+    if seg_ok and by_slide_ok:
+        print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
+        print(f"     {segments_path}")
+        print(f"     {by_slide_path}")
+        print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
-        by_slide_path = output_dir / f"{stem}_by_slide.json"
         slides_structure = None
         if by_slide_path.exists():
             try:
@@ -379,18 +407,28 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
             "duration": duration,
         }
 
+    if seg_ok and not by_slide_ok:
+        print(
+            f"\n  ⚠️  {by_slide_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
+            "Stage 3B 전체를 다시 실행합니다."
+        )
+        print("─" * 70)
+
     video_path = args.input
 
     _banner("Stage 3B  —  오디오 파이프라인")
-    slide_context_by_index: dict[int, dict] = {}
+
+    # 슬라이드 텍스트화 데이터 로드
+    textualized_data: dict = {"slides": []}
     if textualized_path and Path(textualized_path).is_file():
         with open(textualized_path, "r", encoding="utf-8") as f:
-            tex_data = json.load(f)
-        slide_context_by_index = {
-            s["slide_number"]: s
-            for s in tex_data.get("slides", [])
-            if isinstance(s.get("slide_number"), int)
-        }
+            textualized_data = json.load(f)
+
+    # metadata 로드 (슬라이드 occurrence 정보)
+    metadata: list[dict] = []
+    if meta_path and Path(meta_path).is_file():
+        with open(meta_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
 
     # [3B-1] 슬라이드별 전사
     print("  [3B-1] 슬라이드별 전사...")
@@ -401,10 +439,16 @@ def stage3b_audio(args, meta_path: str, textualized_path: str, duration: float, 
     detected_silences = transcribe_result.get("silences", [])
     print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
 
-    # [3B-2] 텍스트 2단계 교정
-    print("  [3B-2] 텍스트 교정...")
+    # [3B-2] 2-pass 텍스트 교정 (text_processor 내부 엔진)
+    print("  [3B-2] 텍스트 교정 (2-pass)...")
     t0 = time.time()
-    segments = correct_segments_dual_with_slide_context(segments_raw, slide_context_by_index)
+    textualized_dir = Path(textualized_path).parent if textualized_path else output_dir
+    segments = correct_segments_two_pass(
+        segments=segments_raw,
+        metadata=metadata,
+        textualized_data=textualized_data,
+        textualized_dir=textualized_dir,
+    )
     segments_clean = [{k: v for k, v in s.items() if k != "words"} for s in segments]
     _save_json(segments_path, {
         "video_path": video_path,
@@ -556,7 +600,16 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
     duration = audio_result.get("duration", 0.0)
 
     if not slides_structure or not slide_ranges:
-        return {}
+        if by_slide_path.exists() and by_slide_path.stat().st_size > 0:
+            return {
+                "by_slide_path": str(by_slide_path),
+                "elapsed": 0.0,
+            }
+        raise FileNotFoundError(
+            f"{by_slide_path} 을(를) 만들 수 없습니다(slides_structure 또는 slide_ranges 없음). "
+            "세그먼트 파일만 있고 by_slide가 비어 있거나 삭제된 경우 "
+            "`python -m pipeline.main --input ... --force` 로 Stage 3B 이후를 다시 실행하세요."
+        )
 
     if _is_done(by_slide_path, "Stage 4B by_slide 저장", args.force):
         return {
@@ -647,6 +700,207 @@ def stage5_fusion(
     return {"fused_path": str(fused_path), "elapsed": elapsed}
 
 
+def stage9_build_analyzer_merged_clean(
+    args,
+    meta_path: str,
+    textualized_path: str,
+    segments_path: str,
+    output_dir: Path,
+    duration: float,
+) -> dict:
+    from .segment_grouper import load_slide_ranges
+    from .text_processor import classify_lecture_domain
+
+    stem = Path(args.input).stem
+    merged_clean_path = output_dir / f"{stem}_merged_clean.json"
+
+    if _is_done(merged_clean_path, "Stage 9A analyzer 입력 생성", args.force):
+        return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
+
+    _banner("Stage 9A  —  analyzer 입력용 merged_clean 생성")
+    t0 = time.time()
+
+    with open(textualized_path, "r", encoding="utf-8") as f:
+        textualized = json.load(f)
+    with open(segments_path, "r", encoding="utf-8") as f:
+        segment_payload = json.load(f)
+    segments = segment_payload.get("segments", [])
+    slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
+
+    slide_meta_by_no = {}
+    for slide in textualized.get("slides", []):
+        slide_no = slide.get("slide_number")
+        if isinstance(slide_no, int):
+            text_parts = []
+            if slide.get("t1"):
+                text_parts.append(str(slide.get("t1")))
+            if slide.get("t1_structure"):
+                text_parts.append(str(slide.get("t1_structure")))
+            slide_meta_by_no[slide_no] = {
+                "title": str(slide.get("title", "") or ""),
+                "slide_text": "\n".join(part for part in text_parts if part),
+            }
+
+    segs_by_slide: dict[int, list[dict]] = {}
+    for seg in segments:
+        slide_no = seg.get("slide_index")
+        if isinstance(slide_no, int):
+            seg_copy = {
+                "start": float(seg.get("start", 0.0) or 0.0),
+                "end": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
+                "text": str(seg.get("text", "") or "").strip(),
+            }
+            segs_by_slide.setdefault(slide_no, []).append(seg_copy)
+
+    slide_titles = [slide_meta_by_no.get(slide_no, {}).get("title", "") for slide_no in sorted(slide_meta_by_no)]
+    transcript_sample = " ".join(str(seg.get("text", "") or "") for seg in segments[:30])
+    domain_info = classify_lecture_domain(slide_titles, transcript_sample)
+
+    slides = []
+    for slide_range in slide_ranges:
+        slide_no = int(slide_range["slide_index"])
+        start_sec = float(slide_range["start_sec"])
+        end_sec = float(slide_range["end_sec"])
+        slide_meta = slide_meta_by_no.get(slide_no, {})
+        transcript_segments = sorted(segs_by_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
+        slide_duration = round(end_sec - start_sec, 1)
+        slides.append({
+            "slide_number": slide_no,
+            "title": slide_meta.get("title", ""),
+            "time_range": f"{_fmt_ts(start_sec)} ~ {_fmt_ts(end_sec)}",
+            "time_range_seconds": [start_sec, end_sec],
+            "total_duration": slide_duration,
+            "occurrences": [{
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+                "duration": slide_duration,
+                "is_dup": False,
+            }],
+            "slide_text": slide_meta.get("slide_text", ""),
+            "transcript_segments": transcript_segments,
+            "transcript": " ".join(str(seg.get("text", "") or "") for seg in transcript_segments).strip(),
+            "segment_count": len(transcript_segments),
+        })
+
+    total_duration = 0.0
+    if slides:
+        total_duration = max(float(slide["time_range_seconds"][1]) for slide in slides)
+    elif segments:
+        total_duration = max(float(seg.get("end", 0.0) or 0.0) for seg in segments)
+    else:
+        total_duration = duration
+
+    result = {
+        "description": "슬라이드+전사 통합 JSON (교정 완료, 검증용)",
+        "domain": domain_info.get("domain", ""),
+        "subdomain": domain_info.get("subdomain", ""),
+        "total_slides": len(slides),
+        "total_transcript_segments": len(segments),
+        "total_duration_formatted": _fmt_ts(total_duration),
+        "slides": slides,
+    }
+    _save_json(merged_clean_path, result)
+
+    elapsed = time.time() - t0
+    _done("analyzer 입력용 merged_clean 생성", elapsed)
+    return {"merged_clean_path": str(merged_clean_path), "elapsed": elapsed}
+
+
+def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dict:
+    from .analyzer.run_all import run_all_analyzers
+
+    stem = Path(args.input).stem
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
+    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
+    cross_model = os.getenv("CROSS_VERIFY_MODEL", "").strip()
+    use_cross = bool(cross_model and os.getenv("OPENAI_API_KEY"))
+
+    if not args.force and claim_output_path.exists() and (use_cross or claim_report_path.exists()):
+        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
+        print(f"     {claim_output_path}")
+        print("─" * 70)
+        return {
+            "claim_output": str(claim_output_path),
+            "claim_report": str(claim_report_path) if claim_report_path.exists() else "",
+            "elapsed": 0.0,
+        }
+
+    _banner("Stage 10  —  verifier 실행")
+    t0 = time.time()
+    result = run_all_analyzers(
+        merged_clean_path,
+        output_dir=str(analyzer_dir),
+    )
+    elapsed = time.time() - t0
+    _done("verifier 실행", elapsed)
+    return {"claim_output": str(claim_output_path), "elapsed": elapsed, **result}
+
+
+def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir: Path) -> dict:
+    stem = Path(args.input).stem
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+    analyzer_dir.mkdir(parents=True, exist_ok=True)
+    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
+    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
+    analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
+    cross_model = os.getenv("CROSS_VERIFY_MODEL", "").strip()
+    use_cross = bool(cross_model and os.getenv("OPENAI_API_KEY"))
+
+    if not args.force and claim_output_path.exists() and (use_cross or claim_report_path.exists()):
+        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
+        print(f"     {claim_output_path}")
+        print("─" * 70)
+        return {
+            "claim_output": str(claim_output_path),
+            "claim_report": str(claim_report_path) if claim_report_path.exists() else "",
+            "log_path": str(analyzer_log_path),
+            "elapsed": 0.0,
+            "pid": None,
+            "spawned": False,
+        }
+
+    _banner("Stage 10  —  verifier 백그라운드 실행")
+    t0 = time.time()
+    pkg_root = resolve_pipeline_package_root()
+    cmd = [
+        sys.executable,
+        "-m",
+        "pipeline.analyzer.run_all",
+        merged_clean_path,
+        "--output-dir",
+        str(analyzer_dir),
+    ]
+
+    with open(analyzer_log_path, "a", encoding="utf-8") as log_fp:
+        log_fp.write(
+            f"\n=== verifier launch {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+        )
+        log_fp.flush()
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(pkg_root),
+            stdin=subprocess.DEVNULL,
+            stdout=log_fp,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+    elapsed = time.time() - t0
+    print(f"\n  ✓ verifier 백그라운드 시작  ({elapsed:.1f}초)")
+    print(f"     PID : {proc.pid}")
+    print(f"     로그: {analyzer_log_path}")
+    print("─" * 70)
+    return {
+        "claim_output": str(claim_output_path),
+        "claim_report": str(claim_report_path),
+        "log_path": str(analyzer_log_path),
+        "elapsed": elapsed,
+        "pid": proc.pid,
+        "spawned": True,
+    }
+
+
 def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
     from .json_to_graph_triples import Config as TripleConfig, GraphPipeline
 
@@ -719,7 +973,7 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     from .generate_metadata import generate_metadata
 
     stem         = Path(args.input).stem
-    metadata_dir = Path(getattr(args, "metadata_dir", "metadata"))
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     output_path  = metadata_dir / f"{stem}_metadata.json"
 
     if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
@@ -740,58 +994,31 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     _done("메타데이터 생성", elapsed)
     return {"metadata_path": str(output_path), "elapsed": elapsed}
 
-<<<<<<< HEAD
-def _start_services(args) -> None:
-    repo_root    = Path(__file__).resolve().parent
-    metadata_dir = str(getattr(args, "metadata_dir", "metadata"))
-    web_dir      = repo_root / "web"
 
-    cmds = {
-        "query_service  (8001)": [
-            sys.executable, "-m", "uvicorn",
-            "query_service.main:app",
-            "--host", "127.0.0.1", "--port", "8001",
-        ],
-        "recommender_web(8002)": [
-            sys.executable, str(repo_root / "recommender_web.py"),
-            "--metadata_dir", metadata_dir,
-            "--port", "8002",
-        ],
-        "django         (8000)": [                          # ← 추가
-            sys.executable, "manage.py", "runserver", "8000",
-        ],
-    }
-    cwd_map = {                                             # ← 추가
-        "django         (8000)": str(web_dir),
-    }
+def stage11_build_recommender_index(args) -> dict:
+    """Stage 11: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
+    recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
+    script_path = recommender_dir / "build_index.py"
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
+    db_dir = Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))
 
-    _banner("서비스 시작  —  Django + query_service + recommender_web (병렬)")
-    procs: dict[str, subprocess.Popen] = {}
-    for name, cmd in cmds.items():
-        cwd = cwd_map.get(name, str(repo_root))
-        proc = subprocess.Popen(cmd, cwd=cwd)
-        procs[name] = proc
-        print(f"  ▶ {name}  PID {proc.pid}")
+    _banner("Stage 11  —  추천 인덱스 생성  (build_index)")
+    t0 = time.time()
 
-    print()
-    print("    강의 질의     → http://127.0.0.1:8000/")   # ← Django가 진입점
-    print("    추천 서비스   → http://127.0.0.1:8002/")
-    print("\n  종료: Ctrl+C")
-    print("─" * 70)
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--metadata_dir",
+        str(metadata_dir),
+        "--db_dir",
+        str(db_dir),
+    ]
+    subprocess.run(cmd, check=True)
 
-    try:
-        while True:
-            time.sleep(5)
-            dead = [n for n, p in procs.items() if p.poll() is not None]
-            if dead:
-                print(f"\n  ⚠️ 비정상 종료: {', '.join(dead)}")
-                break
-    except KeyboardInterrupt:
-        print("\n  서비스 종료 중...")
-        for p in procs.values():
-            p.terminate()
-=======
->>>>>>> f37025c (질의응답 과정 변경)
+    elapsed = time.time() - t0
+    _done("추천 인덱스 생성", elapsed)
+    return {"elapsed": elapsed, "db_dir": str(db_dir)}
+
 
 # ──────────────────────────────────────────────────────────────
 # 메인 파이프라인
@@ -828,6 +1055,9 @@ def run_pipeline(args, progress_callback=None):
         print("  ⚠️  --force: 모든 단계 강제 재실행")
 
     try:
+        r9: dict = {}
+        r10: dict = {}
+
         # ── Stage 1 (병렬 A/B) ──
         _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
         t_parallel = time.time()
@@ -886,6 +1116,25 @@ def run_pipeline(args, progress_callback=None):
                     timings["Stage 3A annotation"] = annotation_result["elapsed"]
                 else:
                     audio_result = future.result()
+                    segments_path = audio_result.get("segments_path", str(paths["segments"]))
+                    r9 = stage9_build_analyzer_merged_clean(
+                        args,
+                        meta_path=meta_path,
+                        textualized_path=textualized_path,
+                        segments_path=segments_path,
+                        output_dir=output_dir,
+                        duration=duration,
+                    )
+                    timings["Stage 9 analyzer 입력 생성"] = r9["elapsed"]
+                    if getattr(args, "skip_analyzer", False):
+                        timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+                    else:
+                        r10 = stage10_spawn_analyzers_subprocess(
+                            args,
+                            merged_clean_path=r9["merged_clean_path"],
+                            output_dir=output_dir,
+                        )
+                        timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
 
         timings["Stage 3 병렬 총"] = time.time() - t_parallel
         
@@ -971,6 +1220,7 @@ def run_pipeline(args, progress_callback=None):
             notify_stage("summarize", "done")
 
         # ── Stage 8 (직렬): 메타데이터 생성 ──  ← 여기 추가
+        r8: dict = {}
         if getattr(args, "skip_metadata", False):
             print("\n  ⏭  Stage 8 메타데이터 생성 — 사용자 옵션으로 스킵")
             print("─" * 70)
@@ -978,6 +1228,20 @@ def run_pipeline(args, progress_callback=None):
         else:
             r8 = stage8_generate_metadata(args, output_dir, slides_dir)
             timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+
+        if not timings.get("Stage 9 analyzer 입력 생성"):
+            timings["Stage 9 analyzer 입력 생성"] = 0.0
+        if "Stage 10 verifier 백그라운드 시작" not in timings:
+            timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+
+        # ── Stage 11 (직렬): 추천 인덱스 생성 ──
+        if getattr(args, "skip_recommender_index", False):
+            print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+            print("─" * 70)
+            timings["Stage 11 추천 인덱스 생성"] = 0.0
+        else:
+            r11 = stage11_build_recommender_index(args)
+            timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
 
         # ── Lecture 자동 등록 ──
         _auto_register_lecture(stem)
@@ -999,13 +1263,25 @@ def run_pipeline(args, progress_callback=None):
             r6.get("edges_parquet", ""),
             str(output_dir / f"{stem}_chunks_lance.parquet"),
             r8.get("metadata_path", ""),
+            str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
+            r9.get("merged_clean_path", str(output_dir / f"{stem}_merged_clean.json")),
+            r10.get("log_path", ""),
         ]
+        for analyzer_path in (
+            r10.get("claim_output", ""),
+            r10.get("claim_report", ""),
+        ):
+            if analyzer_path and Path(analyzer_path).exists():
+                output_files.append(analyzer_path)
         for path_str in output_files:
             if not path_str:
                 continue
             p = Path(path_str)
             print(f"    {'✓' if p.exists() else '✗'}  {p}")
-        print()
+        if r10.get("spawned"):
+            print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
+            print(f"  로그 파일: {r10.get('log_path')}")
+            print()
 
     except Exception as e:
         print(f"\n❌ 파이프라인 오류: {e}")
@@ -1074,22 +1350,22 @@ def get_parser():
     )
     parser.add_argument("--skip-metadata", action="store_true",
                         help="Stage 8 메타데이터 생성 스킵")
-    parser.add_argument("--metadata-dir", dest="metadata_dir", default="metadata",
-                        help="메타데이터 저장 디렉토리 (default: metadata/)")
+    parser.add_argument("--skip-analyzer", action="store_true",
+                        help="Stage 10 verifier 실행 스킵")
+    parser.add_argument("--skip-recommender-index", action="store_true",
+                        help="Stage 11 추천 인덱스 생성(build_index) 스킵")
+    parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
+                        help=f"메타데이터 저장 디렉토리 (default: {DEFAULT_RECOMMENDER_METADATA_DIR})")
+    parser.add_argument("--recommender-db-dir", dest="recommender_db_dir", default=DEFAULT_RECOMMENDER_DB_DIR,
+                        help=f"추천 인덱스 LanceDB 경로 (default: {DEFAULT_RECOMMENDER_DB_DIR})")
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
-<<<<<<< HEAD
-    parser.add_argument("--serve", action="store_true",
-                        help="파이프라인 완료 후 query_service(8001) + recommender_web(8002) 자동 시작")
     
     return parser
 
 def main():
-    args = get_parser.parse_args()
-=======
-    args = parser.parse_args()
->>>>>>> f37025c (질의응답 과정 변경)
+    args = get_parser().parse_args()
 
     if not args.skip_extract and not Path(args.input).exists():
         print(f"❌ 입력 영상 없음: {args.input}")

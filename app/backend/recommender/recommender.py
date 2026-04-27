@@ -17,11 +17,11 @@ recommender.py
 
 CLI 실행:
   python recommender.py --query "메모리 관리 방법 알고 싶어"
-  python recommender.py --metadata_dir metadata/ --query "운영체제란 무엇인가"
+  python recommender.py --metadata_dir app/backend/metadata --query "운영체제란 무엇인가"
 
 모듈로 사용:
-  from recommender import Recommender
-  rec = Recommender("metadata/")
+  from recommender.recommender import Recommender
+  rec = Recommender("app/backend/metadata")
   results = rec.recommend_from_query("프로세스 스케줄링 알고 싶어")
 """
 
@@ -41,6 +41,22 @@ load_dotenv()
 _client        = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_2"))
 GEMINI_MODEL   = "gemini-2.5-flash"
 EMBED_MODEL    = "gemini-embedding-001"
+
+
+def _resolve_repo_root() -> Path:
+    """Resolve project root for both local and container runs."""
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    here = Path(__file__).resolve()
+    # Local path: <repo>/app/backend/recommender/recommender.py
+    # Container path: /app/recommender/recommender.py
+    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
+
+
+_REPO_ROOT     = _resolve_repo_root()
+DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
+DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
 
 
 # ============================================================================
@@ -64,7 +80,7 @@ class RecommenderConfig:
     # 추천 최소 점수 — 이 점수 이하인 강의는 추천 결과에서 제외
     MIN_SCORE:           float = 0.40
     # 벡터 DB 경로
-    DB_DIR:              str   = "lancedb/"
+    DB_DIR:              str   = DEFAULT_DB_DIR
     # domain boost 강도
     W_DOMAIN_BOOST:      float = 0.20
     # difficulty boost 강도 (질의 난이도 힌트 일치 시)
@@ -449,7 +465,7 @@ def _build_reason(detail: dict) -> str:
 # ============================================================================
 
 class Recommender:
-    def __init__(self, metadata_dir: str = "metadata/", config: Optional[RecommenderConfig] = None):
+    def __init__(self, metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
         self.collection          = MetadataCollection(metadata_dir)
         self.cfg                 = config or RecommenderConfig()
         self._available_domains  = self.collection.available_domains()
@@ -709,12 +725,12 @@ if __name__ == "__main__":
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""예시:
   python recommender.py --query "메모리 관리 방법 알고 싶어"
-  python recommender.py --metadata_dir metadata/ --query "운영체제란 무엇인가"
+  python recommender.py --metadata_dir app/backend/metadata --query "운영체제란 무엇인가"
   python recommender.py --query "운영체제 기능 알고 싶어" --min_score 0.1
 """
     )
-    parser.add_argument("--metadata_dir", default="metadata/",
-                        help="메타데이터 디렉토리 (기본: metadata/)")
+    parser.add_argument("--metadata_dir", default=DEFAULT_METADATA_DIR,
+                        help=f"메타데이터 디렉토리 (기본: {DEFAULT_METADATA_DIR})")
     parser.add_argument("--query", default=None,
                         help="자연어 질의 (예: '메모리 관리 알고 싶어')")
     parser.add_argument("--top_k", type=int, default=5,
