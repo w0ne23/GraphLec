@@ -14,6 +14,8 @@ generate_metadata.py — 강의 메타데이터 추출
       --output_dir output --metadata_dir metadata
 """
 
+from __future__ import annotations
+
 import os
 import re
 import json

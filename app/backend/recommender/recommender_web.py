@@ -4,7 +4,7 @@ recommender_web.py
 FastAPI 기반 강의 추천 웹 서버
 
 실행:
-  uvicorn recommender_web:app --port 8002 --reload
+  uvicorn recommender.recommender_web:app --port 8002 --reload
 
 엔드포인트:
   POST /recommend   { "query": "스레드 자세히 설명하는 강의", "top_k": 3 }
@@ -13,6 +13,7 @@ FastAPI 기반 강의 추천 웹 서버
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -20,14 +21,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from recommender import Recommender, RecommenderConfig
+from recommender.recommender import Recommender, RecommenderConfig
 
 
 # ============================================================================
 #  앱 초기화
 # ============================================================================
 
-METADATA_DIR = os.getenv("METADATA_DIR", "metadata/")
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_repo_root() -> Path:
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    here = Path(__file__).resolve()
+    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
+
+
+_REPO_ROOT = _resolve_repo_root()
+METADATA_DIR = os.getenv("METADATA_DIR", str(_BACKEND_ROOT / "metadata"))
+RECOMMENDER_DB_DIR = os.getenv("RECOMMENDER_DB_DIR", str(_REPO_ROOT / "data" / "lancedb"))
 _recommender: Optional[Recommender] = None
 
 
@@ -35,7 +49,10 @@ _recommender: Optional[Recommender] = None
 async def lifespan(app: FastAPI):
     global _recommender
     print(f"[시작] 메타데이터 로드: {METADATA_DIR}")
-    _recommender = Recommender(metadata_dir=METADATA_DIR, config=RecommenderConfig())
+    _recommender = Recommender(
+        metadata_dir=METADATA_DIR,
+        config=RecommenderConfig(DB_DIR=RECOMMENDER_DB_DIR),
+    )
     yield
     print("[종료]")
 
@@ -64,26 +81,32 @@ class RecommendRequest(BaseModel):
 
 
 class ScoreDetail(BaseModel):
-    query_type:      str
-    keyword_score:   float
-    title_score:     float
-    summary_score:   float
-    domain_score:    float
-    domain_boost:    float
-    depth_score:     float
-    depth_boost:     float
-    context_penalty: bool
+    content_pct:       float
+    vec_score:         float
+    dm_score:          float
+    sim_title:         float
+    sim_keyword:       float
+    sim_summary:       float
+    dm_keyword:        float
+    domain_score:      float
+    difficulty_match:  float
+    depth_score:       float
+    combined_boost:    float
+    duration_score:    float
+    duration_mismatch: bool
+    frag_penalty:      float
 
 
 class LectureResult(BaseModel):
-    video_id:     str
-    title:        str
-    domain:       str
-    instructor:   str
-    score:        float
-    reason:       str
-    summary:      str
-    score_detail: ScoreDetail
+    video_id:          str
+    title:             str
+    domain:            str
+    instructor:        str
+    score:             float
+    duration_sec:      float
+    reason:            str
+    summary:           str
+    score_detail:      ScoreDetail
 
 
 class RecommendResponse(BaseModel):
@@ -121,23 +144,29 @@ def recommend(req: RecommendRequest):
         query=req.query,
         results=[
             LectureResult(
-                video_id  = r.video_id,
-                title     = r.title,
-                domain    = r.domain,
-                instructor= r.instructor,
-                score     = r.score,
-                reason    = r.reason,
-                summary   = r.summary,
-                score_detail=ScoreDetail(
-                    query_type      = r.score_detail.get("query_type", ""),
-                    keyword_score   = r.score_detail.get("keyword_score", 0.0),
-                    title_score     = r.score_detail.get("title_score", 0.0),
-                    summary_score   = r.score_detail.get("summary_score", 0.0),
-                    domain_score    = r.score_detail.get("domain_score", 0.0),
-                    domain_boost    = r.score_detail.get("domain_boost", 1.0),
-                    depth_score     = r.score_detail.get("depth_score", 0.0),
-                    depth_boost     = r.score_detail.get("depth_boost", 1.0),
-                    context_penalty = r.score_detail.get("context_penalty", False),
+                video_id     = r.video_id,
+                title        = r.title,
+                domain       = r.domain,
+                instructor   = r.instructor,
+                score        = r.score,
+                duration_sec = r.score_detail.get("duration_sec", 0.0),
+                reason       = r.reason,
+                summary      = r.summary,
+                score_detail = ScoreDetail(
+                    content_pct       = r.score_detail.get("content_pct",       0.0),
+                    vec_score         = r.score_detail.get("vec_score",          0.0),
+                    dm_score          = r.score_detail.get("dm_score",           0.0),
+                    sim_title         = r.score_detail.get("sim_title",          0.0),
+                    sim_keyword       = r.score_detail.get("sim_keyword",        0.0),
+                    sim_summary       = r.score_detail.get("sim_summary",        0.0),
+                    dm_keyword        = r.score_detail.get("dm_keyword",         0.0),
+                    domain_score      = r.score_detail.get("domain_score",       0.0),
+                    difficulty_match  = r.score_detail.get("difficulty_match",   0.0),
+                    depth_score       = r.score_detail.get("depth_score",        0.0),
+                    combined_boost    = r.score_detail.get("combined_boost",     1.0),
+                    duration_score    = r.score_detail.get("duration_score",     1.0),
+                    duration_mismatch = r.score_detail.get("duration_mismatch",  False),
+                    frag_penalty      = r.score_detail.get("frag_penalty",       0.0),
                 ),
             )
             for r in top
@@ -397,6 +426,20 @@ _HTML = """
   .badge.focus .val { color: var(--yellow); }
   .badge.domain .val { color: var(--green); }
 
+  .badge-warn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255,95,87,0.08);
+    border: 1px solid rgba(255,95,87,0.25);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--red);
+    margin-top: 5px;
+  }
+
   /* 결과 카드 */
   .results { display: flex; flex-direction: column; gap: 14px; }
 
@@ -521,10 +564,6 @@ _HTML = """
     background: var(--accent);
     transition: width 0.6s cubic-bezier(.4,0,.2,1);
   }
-
-  .bar-fill.green { background: var(--green); }
-  .bar-fill.yellow { background: var(--yellow); }
-  .bar-fill.purple { background: var(--accent2); }
 
   .depth-tag {
     display: inline-flex;
@@ -708,22 +747,27 @@ _HTML = """
       return;
     }
 
-    // 분석 뱃지 — 첫 번째 결과에서 추출
     const d = data.results[0].score_detail;
-    const focusBadge = ''; // focus_concept은 응답에 포함 안 됨 (추후 추가 가능)
 
     const analysisBar = `
       <div class="analysis-bar">
-        <div class="badge type"><span class="key">유형</span><span class="val">${queryTypLabel(d.query_type)}</span></div>
+        ${d.difficulty_match > 0 ? `<div class="badge"><span class="key">난이도</span><span class="val">일치</span></div>` : ''}
         ${d.domain_score > 0 ? `<div class="badge domain"><span class="key">도메인</span><span class="val">일치</span></div>` : ''}
         ${d.depth_score > 0 ? `<div class="badge focus"><span class="key">깊이</span><span class="val">${pct(d.depth_score)}%</span></div>` : ''}
-        ${d.context_penalty ? `<div class="badge"><span class="key">맥락</span><span class="val">억제 적용</span></div>` : ''}
+        ${d.combined_boost > 1.0 ? `<div class="badge"><span class="key">boost</span><span class="val">+${Math.round((d.combined_boost-1)*100)}%</span></div>` : ''}
       </div>`;
 
     const cards = data.results.map((r, i) => {
       const sd = r.score_detail;
       const depthTag = sd.depth_score > 0.1
         ? `<span class="depth-tag">◈ 깊이 +${pct(sd.depth_score)}%</span>` : '';
+
+      const durationMin = r.duration_sec ? Math.round(r.duration_sec / 60) : null;
+      const durationBadge = sd.duration_mismatch
+        ? `<span class="badge-warn">⚠ 요청 시간 초과 (${durationMin}분)</span>` : '';
+
+      const durationInfo = durationMin
+        ? `<span>· ${durationMin}분</span>` : '';
 
       return `
       <div class="card">
@@ -737,7 +781,9 @@ _HTML = """
               <span>${r.instructor || '강사 미상'}</span>
               <span class="dot">·</span>
               <span>${r.video_id}</span>
+              ${durationInfo}
             </div>
+            ${durationBadge}
           </div>
           <div class="card-score">
             <div class="score-num">${pct(r.score)}</div>
@@ -751,16 +797,16 @@ _HTML = """
 
         <div class="score-bars">
           <div class="bar-item">
-            <div class="bar-label"><span>키워드</span><span>${pct(sd.keyword_score)}%</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:${pct(sd.keyword_score)}%"></div></div>
+            <div class="bar-label"><span>내용 관련도</span><span>${sd.content_pct}%</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${sd.content_pct}%"></div></div>
           </div>
           <div class="bar-item">
-            <div class="bar-label"><span>제목</span><span>${pct(sd.title_score)}%</span></div>
-            <div class="bar-track"><div class="bar-fill green" style="width:${pct(sd.title_score)}%"></div></div>
+            <div class="bar-label"><span>벡터 유사도</span><span>${Math.round(sd.vec_score*100)}%</span></div>
+            <div class="bar-track"><div class="bar-fill green" style="width:${Math.round(sd.vec_score*100)}%"></div></div>
           </div>
           <div class="bar-item">
-            <div class="bar-label"><span>요약</span><span>${pct(sd.summary_score)}%</span></div>
-            <div class="bar-track"><div class="bar-fill yellow" style="width:${pct(sd.summary_score)}%"></div></div>
+            <div class="bar-label"><span>직접 매칭</span><span>${Math.round(sd.dm_keyword*100)}%</span></div>
+            <div class="bar-track"><div class="bar-fill yellow" style="width:${Math.round(sd.dm_keyword*100)}%"></div></div>
           </div>
         </div>
       </div>`;
@@ -779,4 +825,4 @@ _HTML = """
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("recommender_web:app", host="0.0.0.0", port=8002, reload=True)
+    uvicorn.run("recommender.recommender_web:app", host="0.0.0.0", port=8002, reload=True)

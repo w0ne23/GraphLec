@@ -16,6 +16,7 @@ services:
 
   neo4j:
     image: neo4j:5.12
+    restart: unless-stopped
     ports:
       - "7474:7474"
       - "7687:7687"
@@ -25,11 +26,18 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-password123} 'RETURN 1' >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
 
   query_service:
     build:
       context: .
       dockerfile: ./query_service/Dockerfile
+      network: host
     ports:
       - "8001:8001"
     environment:
@@ -43,12 +51,14 @@ services:
     volumes:
       - lance_data:/lance
     depends_on:
-      - neo4j
+      neo4j:
+        condition: service_healthy
 
   backend:
     build:
       context: .
       dockerfile: ./app/backend/Dockerfile
+      network: host
     ports:
       - "8000:8000"
     environment:
@@ -73,17 +83,42 @@ services:
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
       - LOCAL_STORAGE_DIR=/pipeline/local_storage
       - GRAPHLEC_SLIDE_DECODE_BACKEND=auto
+      - GRAPHLEC_METADATA_DIR=/app/metadata
+      - RECOMMENDER_DB_DIR=/lance/lancedb
     volumes:
       - ./input:/pipeline/input
-      - local_storage:/pipeline/local_storage
+      - ./local_storage:/pipeline/local_storage
       - lance_data:/lance
+      - ./app/backend:/app
     depends_on:
       db:
         condition: service_healthy
       neo4j:
-        condition: service_started
+        condition: service_healthy
       query_service:
         condition: service_started
+
+  recommender:
+    build:
+      context: .
+      dockerfile: ./app/backend/Dockerfile
+      network: host
+    ports:
+      - "8002:8002"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
+      - METADATA_DIR=/app/metadata
+      - RECOMMENDER_DB_DIR=/lance/lancedb
+    volumes:
+      - ./app/backend:/app
+      - lance_data:/lance
+    command:
+      - /bin/sh
+      - -lc
+      - python /app/recommender/build_index.py --metadata_dir "$$METADATA_DIR" --db_dir "$$RECOMMENDER_DB_DIR" && uvicorn recommender.recommender_web:app --host 0.0.0.0 --port 8002 --reload
+    depends_on:
+      - backend
 
   frontend:
     build: ./app/frontend
@@ -91,8 +126,13 @@ services:
       - "5173:5173"
     environment:
       VITE_API_BASE_URL: http://localhost:8000
+      VITE_RECOMMENDER_PROXY_TARGET: http://recommender:8002
+    volumes:
+      - ./app/frontend:/app
+      - /app/node_modules
     depends_on:
       - backend
+      - recommender
 
 
 volumes:
@@ -100,4 +140,3 @@ volumes:
   neo4j_data:
   neo4j_logs:
   lance_data:
-  local_storage:

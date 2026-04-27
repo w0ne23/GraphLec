@@ -9,20 +9,21 @@ import { askQa } from '../../lib/api'
  * onJumpToScene  — 타임스탬프 클릭 시 VideoPlayer + SceneList 동기화
  */
 
-const INIT_MSG = {
-  id: 0, role: 'assistant',
-  content: '강의에 대해 질문해보세요.',
-  refs: [],
-}
-
-export default function ChatPanel({ lecture, onJumpToScene, onClose }) {
-  const [messages, setMessages] = useState([INIT_MSG])
-  const [input,    setInput]    = useState('')
-  const [loading,  setLoading]  = useState(false)
+export default function ChatPanel({ 
+  lecture, 
+  onJumpToScene, 
+  onClose,
+  messages,
+  setMessages,
+  input,
+  setInput,
+  loading,
+  setLoading
+}) {
   const bottomRef = useRef(null)
 
-  useEffect(() => { setMessages([INIT_MSG]) }, [lecture?.id])
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, loading])
+
 
   async function send() {
     const question = input.trim()

@@ -45,12 +45,28 @@ from threading import Lock
 from typing import Any, Callable, Optional
 
 import librosa
+from .deictics import (
+    classify_ambiguous_deictics_with_llm,
+    extract_deictics_from_segments,
+)
+from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 log = logging.getLogger(__name__)
+
+
+REPO_ROOT = resolve_backend_root()
+DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
+    "GRAPHLEC_METADATA_DIR",
+    "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
+)
+DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
+    "RECOMMENDER_DB_DIR",
+    "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
+)
 
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -137,8 +153,7 @@ def _auto_register_lecture(stem: str) -> None:
         import os
         from dotenv import load_dotenv
 
-        repo_root = _pipeline_root_dir()
-        web_dir = repo_root / "web"
+        web_dir = REPO_ROOT / "web"
         if not web_dir.exists():
             print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
             return
@@ -411,16 +426,24 @@ def stage3b_audio(
         except Exception:
             return False
 
-    stage3b_cache_ready = (
-        (not args.force)
+    # 세그먼트만 있고 by_slide가 없으면(파일 삭제·불완전 실행) 스킵하면 Stage 4B·5가 깨짐 → 3B 전체 재실행
+    seg_ok = (
+        not args.force
         and segments_path.exists()
-        and silences_path.exists()
-        and emphasis_path.exists()
-        and by_slide_path.exists()
+        and segments_path.stat().st_size > 0
+    )
+    silences_ok = silences_path.exists() and silences_path.stat().st_size > 0
+    emphasis_ok = emphasis_path.exists() and emphasis_path.stat().st_size > 0
+    by_slide_ok = (
+        by_slide_path.exists()
+        and by_slide_path.stat().st_size > 0
         and _by_slide_has_emphasis_schema(by_slide_path)
     )
-
-    if stage3b_cache_ready:
+    if seg_ok and silences_ok and emphasis_ok and by_slide_ok:
+        print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
+        print(f"     {segments_path}")
+        print(f"     {by_slide_path}")
+        print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
         slides_structure = None
         if by_slide_path.exists():
@@ -460,6 +483,13 @@ def stage3b_audio(
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
             f"emphasis={emphasis_path.exists()}, by_slide={by_slide_path.exists()})"
         )
+
+    if seg_ok and not by_slide_ok:
+        print(
+            f"\n  ⚠️  {by_slide_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
+            "Stage 3B 전체를 다시 실행합니다."
+        )
+        print("─" * 70)
 
     video_path = args.input
 
@@ -648,7 +678,24 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
     slide_ranges = audio_result.get("slide_ranges", [])
     duration = audio_result.get("duration", 0.0)
 
+    def _has_emphasis_schema(path: Path) -> bool:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            for slide in payload.get("slides", []):
+                for ctx in slide.get("contexts", []):
+                    if "emphasis" not in ctx:
+                        return False
+            return True
+        except Exception:
+            return False
+
     if not slide_ranges:
+        if by_slide_path.exists() and by_slide_path.stat().st_size > 0 and _has_emphasis_schema(by_slide_path):
+            return {
+                "by_slide_path": str(by_slide_path),
+                "elapsed": 0.0,
+            }
         raise RuntimeError("Stage 4B by_slide 저장 실패: slide_ranges가 비어 있습니다.")
 
     if not slides_structure and annotated_segments:
@@ -669,18 +716,6 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
             "Stage 4B by_slide 저장 실패: slides_structure가 비어 있습니다. "
             "Stage 3B 오디오 후처리 결과를 확인해주세요."
         )
-
-    def _has_emphasis_schema(path: Path) -> bool:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            for slide in payload.get("slides", []):
-                for ctx in slide.get("contexts", []):
-                    if "emphasis" not in ctx:
-                        return False
-            return True
-        except Exception:
-            return False
 
     if _is_done(by_slide_path, "Stage 4B by_slide 저장", args.force):
         if _has_emphasis_schema(by_slide_path):
@@ -1001,12 +1036,12 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
 
     _banner("Stage 10  —  verifier 백그라운드 실행")
     t0 = time.time()
-    repo_root = _pipeline_root_dir()
+    pkg_root = resolve_pipeline_package_root()
     cmd = [
         sys.executable,
         "-u",
         "-m",
-        _analyzer_run_module(),
+        "pipeline.analyzer.run_all",
         merged_clean_path,
         "--output-dir",
         str(analyzer_dir),
@@ -1016,7 +1051,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         log_fp.write(
             f"\n=== verifier launch {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
         )
-        log_fp.write(f"cwd       : {repo_root}\n")
+        log_fp.write(f"cwd       : {pkg_root}\n")
         log_fp.write(f"cmd       : {' '.join(cmd)}\n")
         log_fp.write("mode      : cross_verification (forced)\n")
         log_fp.flush()
@@ -1024,7 +1059,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
-            cwd=str(repo_root),
+            cwd=str(pkg_root),
             env=env,
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
@@ -1120,7 +1155,7 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     from .generate_metadata import generate_metadata
 
     stem         = Path(args.input).stem
-    metadata_dir = Path(getattr(args, "metadata_dir", "metadata"))
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     output_path  = metadata_dir / f"{stem}_metadata.json"
 
     if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
@@ -1140,6 +1175,31 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     elapsed = time.time() - t0
     _done("메타데이터 생성", elapsed)
     return {"metadata_path": str(output_path), "elapsed": elapsed}
+
+
+def stage11_build_recommender_index(args) -> dict:
+    """Stage 11: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
+    recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
+    script_path = recommender_dir / "build_index.py"
+    metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
+    db_dir = Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))
+
+    _banner("Stage 11  —  추천 인덱스 생성  (build_index)")
+    t0 = time.time()
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--metadata_dir",
+        str(metadata_dir),
+        "--db_dir",
+        str(db_dir),
+    ]
+    subprocess.run(cmd, check=True)
+
+    elapsed = time.time() - t0
+    _done("추천 인덱스 생성", elapsed)
+    return {"elapsed": elapsed, "db_dir": str(db_dir)}
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1403,6 +1463,15 @@ def run_pipeline(args, progress_callback=None):
         if "Stage 10 verifier 백그라운드 시작" not in timings:
             timings["Stage 10 verifier 백그라운드 시작"] = 0.0
 
+        # ── Stage 11 (직렬): 추천 인덱스 생성 ──
+        if getattr(args, "skip_recommender_index", False):
+            print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+            print("─" * 70)
+            timings["Stage 11 추천 인덱스 생성"] = 0.0
+        else:
+            r11 = stage11_build_recommender_index(args)
+            timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+
         # ── Lecture 자동 등록 ──
         _auto_register_lecture(stem)
 
@@ -1422,6 +1491,7 @@ def run_pipeline(args, progress_callback=None):
             r6.get("edges_parquet", ""),
             str(output_dir / f"{stem}_chunks_lance.parquet"),
             r8.get("metadata_path", ""),
+            str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
             r9.get("merged_clean_path", str(output_dir / f"{stem}_merged_clean.json")),
             r10.get("log_path", ""),
         ]
@@ -1489,7 +1559,7 @@ def get_parser():
   python main.py --input input/lecture.mp4 --debug --masks
   python main.py --input input/lecture.mp4 --force
   python main.py --input input/lecture.mp4 --skip-lance-index
-  python main.py --input input/lecture.mp4 --skip-neo4j
+  python main.py --input input/lecture.mp4 --load-neo4j
         """,
     )
     parser.add_argument("--input",  "-i", default="input/lecture.mp4", help="입력 강의 영상 경로 (.mp4)")
@@ -1532,7 +1602,14 @@ def get_parser():
     parser.add_argument(
         "--skip-neo4j",
         action="store_true",
-        help="Stage 6 직후 Neo4j 적재 스킵 (기본은 적재 시도; NEO4J_URI 등 필요)",
+        default=True,
+        help="Stage 6 직후 Neo4j 적재 스킵 (기본: 스킵)",
+    )
+    parser.add_argument(
+        "--load-neo4j",
+        dest="skip_neo4j",
+        action="store_false",
+        help="Stage 6 직후 Neo4j 적재 활성화 (NEO4J_URI 등 필요)",
     )
     parser.add_argument("--skip-lance-index", action="store_true",
                         help="Stage 7 LanceDB+Parquet 인덱스 스킵")
@@ -1545,8 +1622,12 @@ def get_parser():
                         help="Stage 8 메타데이터 생성 스킵")
     parser.add_argument("--skip-analyzer", action="store_true",
                         help="Stage 10 verifier 실행 스킵")
-    parser.add_argument("--metadata-dir", dest="metadata_dir", default="metadata",
-                        help="메타데이터 저장 디렉토리 (default: metadata/)")
+    parser.add_argument("--skip-recommender-index", action="store_true",
+                        help="Stage 11 추천 인덱스 생성(build_index) 스킵")
+    parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
+                        help=f"메타데이터 저장 디렉토리 (default: {DEFAULT_RECOMMENDER_METADATA_DIR})")
+    parser.add_argument("--recommender-db-dir", dest="recommender_db_dir", default=DEFAULT_RECOMMENDER_DB_DIR,
+                        help=f"추천 인덱스 LanceDB 경로 (default: {DEFAULT_RECOMMENDER_DB_DIR})")
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
