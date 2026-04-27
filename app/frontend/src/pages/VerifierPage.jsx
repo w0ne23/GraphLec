@@ -3,6 +3,8 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { getLectureDetail, getLectureVerifier } from '../lib/api'
 import VideoPlayer from '../components/watch/VideoPlayer'
 
+const VERIFIER_POLL_MS = 5000
+
 function formatTime(seconds) {
   const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0
   const m = Math.floor(safe / 60)
@@ -16,6 +18,7 @@ export default function VerifierPage() {
 
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [waitingForVerifier, setWaitingForVerifier] = useState(false)
   const [lecture, setLecture] = useState(null)
   const [verifier, setVerifier] = useState(null)
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
@@ -25,19 +28,47 @@ export default function VerifierPage() {
   useEffect(() => {
     if (!id) return
 
-    setLoading(true)
-    setError('')
+    let cancelled = false
+    let timerId = null
+    let firstLoad = true
 
-    Promise.all([getLectureDetail(id), getLectureVerifier(id)])
-      .then(([detail, verifierResult]) => {
+    async function loadVerifier() {
+      if (firstLoad) setLoading(true)
+      setError('')
+
+      try {
+        const [detail, verifierResult] = await Promise.all([
+          getLectureDetail(id),
+          getLectureVerifier(id),
+        ])
+        if (cancelled) return
+
         setLecture(detail)
         setVerifier(verifierResult)
-      })
-      .catch((err) => {
+        setWaitingForVerifier(!verifierResult)
+
+        if (!verifierResult) {
+          timerId = window.setTimeout(loadVerifier, VERIFIER_POLL_MS)
+        }
+      } catch (err) {
+        if (cancelled) return
         console.error('Verifier fetch error:', err)
+        setWaitingForVerifier(false)
         setError(String(err?.message || err))
-      })
-      .finally(() => setLoading(false))
+      } finally {
+        if (firstLoad && !cancelled) {
+          setLoading(false)
+          firstLoad = false
+        }
+      }
+    }
+
+    loadVerifier()
+
+    return () => {
+      cancelled = true
+      if (timerId) window.clearTimeout(timerId)
+    }
   }, [id])
 
   const finalClaims = useMemo(
@@ -68,6 +99,10 @@ export default function VerifierPage() {
         <div className="vf-error">{error}</div>
       </div>
     )
+  }
+
+  if (waitingForVerifier) {
+    return <div className="lp-loading">Verifier 결과 생성 중...</div>
   }
 
   if (!lecture || !verifier) {

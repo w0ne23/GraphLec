@@ -88,16 +88,12 @@ def _setup_worker(root: str, env_vars: dict, model: str):
         if v is not None:
             os.environ[k] = v
 
-    explicit_cross_recheck = str(os.environ.get("VERIFIER_CROSS_RECHECK_MODEL", "") or "").strip()
     explicit_slide_recheck = str(os.environ.get("VERIFIER_SLIDE_RECHECK_MODEL", "") or "").strip()
 
     os.environ["VERIFIER_MODEL"] = model
     os.environ["VERIFIER_CLAIM_EXTRACT_MODEL"] = model
     os.environ["VERIFIER_CLAIM_JUDGE_MODEL"] = model
-    if model.startswith("gemini") and explicit_cross_recheck:
-        os.environ["VERIFIER_CROSS_RECHECK_MODEL"] = explicit_cross_recheck
-    else:
-        os.environ["VERIFIER_CROSS_RECHECK_MODEL"] = model
+    os.environ["VERIFIER_CROSS_RECHECK_MODEL"] = model
     os.environ["VERIFIER_SLIDE_RECHECK_MODEL"] = explicit_slide_recheck or model
     os.environ["VERIFIER_GROUNDING_MODEL"] = model
     os.environ.setdefault("VERIFIER_TEMPERATURE", "0.0")
