@@ -1318,7 +1318,7 @@ def get_parser():
   python main.py --input input/lecture.mp4 --debug --masks
   python main.py --input input/lecture.mp4 --force
   python main.py --input input/lecture.mp4 --skip-lance-index
-  python main.py --input input/lecture.mp4 --skip-neo4j
+  python main.py --input input/lecture.mp4 --load-neo4j
         """,
     )
     parser.add_argument("--input",  "-i", default="input/lecture.mp4", help="입력 강의 영상 경로 (.mp4)")
@@ -1339,7 +1339,14 @@ def get_parser():
     parser.add_argument(
         "--skip-neo4j",
         action="store_true",
-        help="Stage 6 직후 Neo4j 적재 스킵 (기본은 적재 시도; NEO4J_URI 등 필요)",
+        default=True,
+        help="Stage 6 직후 Neo4j 적재 스킵 (기본: 스킵)",
+    )
+    parser.add_argument(
+        "--load-neo4j",
+        dest="skip_neo4j",
+        action="store_false",
+        help="Stage 6 직후 Neo4j 적재 활성화 (NEO4J_URI 등 필요)",
     )
     parser.add_argument("--skip-lance-index", action="store_true",
                         help="Stage 7 LanceDB+Parquet 인덱스 스킵")
