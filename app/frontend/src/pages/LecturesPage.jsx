@@ -317,6 +317,17 @@ export default function LecturesPage({ onNavigate }) {
                     <span className={`upload-status-badge ${st.cls}`}>{st.label}</span>
                   </div>
                   <div className="upload-row-actions">
+                    {lec.status === 'done' && (
+                      <button
+                        className="upload-btn-verifier"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onNavigate?.({ page: 'verifier', lectureId: lec.id })
+                        }}
+                      >
+                        Verifier
+                      </button>
+                    )}
                     {lec.status === 'error' && (
                       <button className="upload-btn-retry" onClick={e => handleRetry(lec.job_id, e)}>재시도</button>
                     )}
