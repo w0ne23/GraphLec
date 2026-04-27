@@ -14,6 +14,11 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const durationLabel = formatDuration(lecture.duration_sec)
   const relatedTags = deriveRelatedTags(lecture, queryText, 4)
 
+  const durationMin = lecture.duration_sec
+    ? Math.round(lecture.duration_sec / 60)
+    : null
+  const durationMismatch = detail.duration_mismatch === true
+
   return (
     <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}`}>
 
@@ -30,7 +35,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
           </div>
         </div>
 
-        {/* 메타: 태그 → 제목+시간 → 강의자·날짜 */}
+        {/* 메타: 태그 → 제목+시간 → 강의자·날짜 → 시간 초과 경고 */}
         <div className="rec-col rec-col-meta">
           {relatedTags.length > 0 && (
             <div className="rec-col-tags">
@@ -49,6 +54,11 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             {lecture.instructor || '강사 미상'}
             {lecture.video_id && ` | ${lecture.video_id}`}
           </div>
+          {durationMismatch && durationMin && (
+            <span className="rec-duration-warn">
+              ⚠ {durationMin}분 · 시간 범위 초과
+            </span>
+          )}
         </div>
 
         {/* 점수 + 토글 */}
