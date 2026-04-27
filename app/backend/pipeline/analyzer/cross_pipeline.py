@@ -118,15 +118,16 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
     total_exclusive = sum(len(v) for v in exclusive.values())
 
     print(f"\n  ── 이슈 분류 (합집합 {total_union}건) ──")
-    for m, r in judge_results.items():
-        print(f"    [{m}]: {len(r['issues'])}건 탐지")
-        agreement_label = "양쪽 모두 탐지" if len(models) == 2 else "모든 모델 1차 탐지"
-        print(f"    {agreement_label}: {len(intersected)}건 → 자동 확정")
-        for m, issues in exclusive.items():
-            if issues:
-                print(f"    [{m}] 단독 {len(issues)}건")
-                for i in issues:
-                    print(f"      • {i.get('claim_text','')[:80]}")
+    for model, result in judge_results.items():
+        print(f"    [{model}]: {len(result['issues'])}건 탐지")
+
+    agreement_label = "양쪽 모두 탐지" if len(models) == 2 else "모든 모델 1차 탐지"
+    print(f"    {agreement_label}: {len(intersected)}건 → 자동 확정")
+    for model, issues in exclusive.items():
+        if issues:
+            print(f"    [{model}] 단독 {len(issues)}건")
+            for issue in issues:
+                print(f"      • {issue.get('claim_text','')[:80]}")
 
     # ── Phase 3: 합집합 전체 → 두 모델 모두 이미지+문맥 crosscheck ──
     cross_recheck_verified = []

@@ -81,6 +81,13 @@ openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
 
 # ──────────────────────────────────────────────────────────────
+# 기본 Gemini 모델 상수
+# ──────────────────────────────────────────────────────────────
+
+GEMINI_GENERATIVE_MODEL = "gemini-2.5-flash"
+GEMINI_GENERATIVE_MODEL_WITH_PREFIX = f"models/{GEMINI_GENERATIVE_MODEL}"
+
+# ──────────────────────────────────────────────────────────────
 # 기본 경로 상수 (CLI 인자로 override 가능)
 # ──────────────────────────────────────────────────────────────
 
