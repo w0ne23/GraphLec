@@ -701,6 +701,18 @@ def _gemini(prompt: str) -> str:
         contents=prompt,
         config={"temperature": 0.0},
     )
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage="stage8_metadata",
+            provider="google",
+            model=MODEL,
+            response=resp,
+            prompt_chars=len(prompt),
+        )
+    except Exception:
+        pass
     return resp.text.strip()
 
 

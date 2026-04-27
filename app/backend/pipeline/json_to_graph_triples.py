@@ -628,6 +628,18 @@ class ConceptLayerBuilder:
             response = self.client.models.generate_content(
                 model=self.cfg.gemini_model, contents=prompt
             )
+            try:
+                from .cost_report import record_model_call
+
+                record_model_call(
+                    stage="stage6_graph_triples",
+                    provider="google",
+                    model=self.cfg.gemini_model,
+                    response=response,
+                    prompt_chars=len(prompt),
+                )
+            except Exception:
+                pass
             text = response.text
             if '```json' in text:
                 text = text.split('```json')[1].split('```')[0]

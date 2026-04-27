@@ -8,13 +8,14 @@ Input:
   - output_slides/ 폴더: slide_extractor.py 출력 디렉토리
     ├── slide_001_base.jpg         ← annot 없을 때 사용
     ├── slide_001_annot_01.jpg
-    ├── slide_001_annot_NN.jpg     ← annot 있을 때 마지막 프레임 사용 (애니메이션 완전 전개)
+    ├── slide_001_build_NN.jpg     ← PPT 애니메이션 clean 전개 상태
+    ├── slide_001_annot_NN.jpg     ← 교수 필기/강조 프레임
     ├── metadata.json
     └── ...
 
-  annot이 있는 슬라이드는 마지막 annot 프레임을 텍스트 추출 기준으로 사용.
-  → PPT 애니메이션으로 나중에 나타나는 텍스트까지 포함하기 위함.
-  → VLM 프롬프트에 손글씨 제외 지시를 포함해 필기가 t1에 섞이지 않도록 처리.
+  build가 있는 슬라이드는 마지막 build 프레임을 텍스트 추출 기준으로 사용.
+  → PPT 애니메이션으로 나중에 나타나는 텍스트까지 포함하되 교수 필기는 제외.
+  legacy metadata처럼 build가 없고 annot만 있으면 마지막 annot 프레임을 사용한다.
 
 Output:
   - slide_textualized.json: 텍스트화 결과
@@ -208,9 +209,10 @@ class SlideLoader:
     slide_extractor.py 출력 디렉토리에서 텍스트 추출 대상 이미지 로드.
 
     선택 전략:
-      - annot 프레임이 있는 슬라이드 → 마지막 annot 프레임 사용
-        (PPT 애니메이션이 완전히 전개된 상태이므로 텍스트가 더 완전함)
-      - annot 프레임이 없는 슬라이드 → base 프레임 사용
+      - build 프레임이 있는 슬라이드 → 마지막 build 프레임 사용
+        (PPT 애니메이션이 완전히 전개된 clean 상태)
+      - build가 없고 annot 프레임만 있는 legacy 슬라이드 → 마지막 annot 프레임 사용
+      - build/annot이 없는 슬라이드 → base 프레임 사용
 
     타임스탬프는 metadata.json에서 읽고, 없으면 파일명 패턴으로 폴백.
     """
@@ -236,8 +238,9 @@ class SlideLoader:
         with open(metadata_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
-        # scene_index 기준으로 base / annot 분류
+        # scene_index 기준으로 base / build / annot 분류
         base_entries: Dict[int, dict] = {}
+        build_entries: Dict[int, List[dict]] = {}
         annot_entries: Dict[int, List[dict]] = {}
 
         for entry in metadata:
@@ -246,15 +249,29 @@ class SlideLoader:
                 continue
             if entry.get("capture_type") == "base":
                 base_entries[idx] = entry
+            elif entry.get("capture_type") == "build":
+                build_entries.setdefault(idx, []).append(entry)
             elif entry.get("capture_type") in ("annot", "annotation"):
                 annot_entries.setdefault(idx, []).append(entry)
 
         scene_records = []
         for scene_num in sorted(base_entries.keys()):
             base = base_entries[scene_num]
+            builds = build_entries.get(scene_num, [])
             annots = annot_entries.get(scene_num, [])
 
-            if annots:
+            if builds:
+                last_build = max(
+                    builds,
+                    key=lambda x: (
+                        int(x.get("build_index", 0) or 0),
+                        float(x.get("timestamp_sec", 0.0) or 0.0),
+                    ),
+                )
+                target = last_build
+                source = f"clean_final (build_index={last_build.get('build_index')})"
+                text_image_has_annot = False
+            elif annots:
                 last_annot = max(
                     annots,
                     key=lambda x: (
@@ -264,9 +281,11 @@ class SlideLoader:
                 )
                 target = last_annot
                 source = f"last_annot (annot_index={last_annot.get('annot_index')})"
+                text_image_has_annot = True
             else:
                 target = base
                 source = "base"
+                text_image_has_annot = False
 
             canonical = (
                 base.get("slide_canonical_index")
@@ -283,6 +302,9 @@ class SlideLoader:
                 "base_entry": base,
                 "target_entry": target,
                 "has_annot": bool(annots),
+                "has_teacher_annotation": bool(annots),
+                "text_image_has_annot": text_image_has_annot,
+                "build_count": len(builds),
                 "text_source": source,
             })
 
@@ -292,7 +314,9 @@ class SlideLoader:
             canonical = record["slide_canonical_number"]
             current = canonical_representatives.get(canonical)
             score = (
-                1 if record["has_annot"] else 0,
+                1 if record["target_entry"].get("capture_type") == "build" else 0,
+                1 if record["text_image_has_annot"] else 0,
+                int(record.get("build_count", 0) or 0),
                 float(record["timestamp"]),
                 int(record["scene_number"]),
             )
@@ -302,6 +326,9 @@ class SlideLoader:
                     "scene_number": record["scene_number"],
                     "target_entry": record["target_entry"],
                     "base_entry": record["base_entry"],
+                    "text_image_has_annot": record["text_image_has_annot"],
+                    "has_teacher_annotation": record["has_teacher_annotation"],
+                    "build_count": record["build_count"],
                     "text_source": record["text_source"],
                 }
 
@@ -333,15 +360,20 @@ class SlideLoader:
                 "image":          Image.open(image_path).convert("RGB"),
                 "base_image":     Image.open(base_image_path).convert("RGB"),
                 "has_annot":      record["has_annot"],
+                "has_teacher_annotation": record["has_teacher_annotation"],
+                "text_image_has_annot": rep["text_image_has_annot"],
+                "build_count":    rep["build_count"],
                 "text_source":    rep["text_source"],
             })
 
         slides.sort(key=lambda x: x["slide_number"])
         last_annot_count = sum(1 for s in slides if "annot" in s["text_source"])
+        build_count = sum(1 for s in slides if "clean_final" in s["text_source"])
         logger.info(
             f"✓ Loaded {len(slides)} scenes from metadata.json "
             f"(unique slides: {len(canonical_representatives)}, "
-            f"last_annot: {last_annot_count}, base: {len(slides)-last_annot_count})"
+            f"clean_final: {build_count}, last_annot: {last_annot_count}, "
+            f"base: {len(slides)-build_count-last_annot_count})"
         )
         return slides
 
@@ -351,15 +383,22 @@ class SlideLoader:
         annot 있으면 마지막 annot, 없으면 base 사용.
         """
         base_pattern  = re.compile(r'slide_(\d+)_base\.(jpg|png)', re.IGNORECASE)
+        build_pattern = re.compile(r'slide_(\d+)_build_(\d+)\.(jpg|png)', re.IGNORECASE)
         annot_pattern = re.compile(r'slide_(\d+)_annot_(\d+)\.(jpg|png)', re.IGNORECASE)
 
         base_files: Dict[int, Path] = {}
+        build_files: Dict[int, List[tuple]] = {}
         annot_files: Dict[int, List[tuple]] = {}  # {slide_num: [(annot_idx, path), ...]}
 
         for file in self.slides_dir.iterdir():
             m = base_pattern.match(file.name)
             if m:
                 base_files[int(m.group(1))] = file
+                continue
+            m = build_pattern.match(file.name)
+            if m:
+                num, idx = int(m.group(1)), int(m.group(2))
+                build_files.setdefault(num, []).append((idx, file))
                 continue
             m = annot_pattern.match(file.name)
             if m:
@@ -369,30 +408,42 @@ class SlideLoader:
         slides = []
         for slide_num in sorted(base_files.keys()):
             base_path = base_files[slide_num]
+            builds = build_files.get(slide_num, [])
             annots = annot_files.get(slide_num, [])
 
-            if annots:
+            if builds:
+                target_path = max(builds, key=lambda x: x[0])[1]
+                source = "clean_final"
+                text_image_has_annot = False
+            elif annots:
                 last_annot_path = max(annots, key=lambda x: x[0])[1]
                 target_path = last_annot_path
                 source = f"last_annot"
+                text_image_has_annot = True
             else:
                 target_path = base_path
                 source = "base"
+                text_image_has_annot = False
 
             slides.append({
                 "slide_number": slide_num,
                 "timestamp":    0.0,
-                "image_path":   str(base_path),
+                "image_path":   str(target_path),
                 "image":        Image.open(target_path).convert("RGB"),
                 "base_image":   Image.open(base_path).convert("RGB"),
                 "has_annot":    bool(annots),
+                "has_teacher_annotation": bool(annots),
+                "text_image_has_annot": text_image_has_annot,
+                "build_count":   len(builds),
                 "text_source":  source,
             })
 
         last_annot_count = sum(1 for s in slides if "annot" in s["text_source"])
+        build_count = sum(1 for s in slides if "clean_final" in s["text_source"])
         logger.info(
             f"✓ Loaded {len(slides)} slides from filenames "
-            f"(last_annot: {last_annot_count}, base: {len(slides)-last_annot_count})"
+            f"(clean_final: {build_count}, last_annot: {last_annot_count}, "
+            f"base: {len(slides)-build_count-last_annot_count})"
         )
         return slides
 
@@ -510,6 +561,19 @@ class T1Extractor:
                         response_mime_type="application/json"
                     )
                 )
+                try:
+                    from .cost_report import record_model_call
+
+                    record_model_call(
+                        stage="stage2a_slide_textualizer",
+                        provider="google",
+                        model=self.config.gemini_model,
+                        response=response,
+                        image_count=2 if base_image is not None else 1,
+                        prompt_chars=len(T1_EXTRACTION_PROMPT_WITH_ANNOT if base_image is not None else T1_EXTRACTION_PROMPT),
+                    )
+                except Exception:
+                    pass
                 return response.text
             except Exception as e:
                 last_exc = e
@@ -528,10 +592,10 @@ class T1Extractor:
         slide.setdefault("t1_structure", "")
         slide.setdefault("slide_emphasis", [])
 
-        # annot 있는 슬라이드: base + last_annot 2장 전달
-        # annot 없는 슬라이드: base만 전달 (이미지가 동일하므로 1장 프롬프트 사용)
-        has_annot  = slide.get("has_annot", False)
-        base_image = slide.get("base_image") if has_annot else None
+        # build/clean_final을 쓰는 슬라이드는 교수 필기가 없으므로 1장 프롬프트 사용.
+        # legacy metadata처럼 텍스트 추출 대상이 annot 이미지일 때만 base + annot 2장 전달.
+        text_image_has_annot = slide.get("text_image_has_annot", slide.get("has_annot", False))
+        base_image = slide.get("base_image") if text_image_has_annot else None
 
         try:
             raw_text = self._call_gemini(slide["image"], base_image=base_image)
@@ -641,7 +705,7 @@ class TextualizationPipeline:
 
         # Stage 1: base 슬라이드 로드
         print("\n" + "-"*70)
-        print("Stage 1: 텍스트 추출 대상 슬라이드 로드 (annot 있으면 last_annot, 없으면 base)")
+        print("Stage 1: 텍스트 추출 대상 슬라이드 로드 (build clean_final 우선, legacy annot fallback)")
         print("-"*70)
 
         slides = SlideLoader(self.config.slides_dir).load()
@@ -692,6 +756,9 @@ class TextualizationPipeline:
                     "slide_type":          s.get("slide_type", "text"),
                     "slide_emphasis":      s.get("slide_emphasis", []),
                     "text_source":         s.get("text_source", "base"),
+                    "has_teacher_annotation": s.get("has_teacher_annotation", s.get("has_annot", False)),
+                    "text_image_has_annot": s.get("text_image_has_annot", False),
+                    "build_count":         s.get("build_count", 0),
                 }
                 for s in slides
             ]
