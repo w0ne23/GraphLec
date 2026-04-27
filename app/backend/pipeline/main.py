@@ -48,6 +48,7 @@ from .deictics import (
     classify_ambiguous_deictics_with_llm,
     extract_deictics_from_segments,
 )
+from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(
     level=logging.INFO,
@@ -56,15 +57,7 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _resolve_repo_root() -> Path:
-    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
-    if env_root:
-        return Path(env_root).resolve()
-    here = Path(__file__).resolve()
-    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
-
-
-REPO_ROOT = _resolve_repo_root()
+REPO_ROOT = resolve_backend_root()
 DEFAULT_RECOMMENDER_METADATA_DIR = os.getenv(
     "GRAPHLEC_METADATA_DIR",
     "/app/metadata" if Path("/app/metadata").exists() else str(REPO_ROOT / "app" / "backend" / "metadata"),
@@ -869,10 +862,11 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
 
     _banner("Stage 10  —  verifier 백그라운드 실행")
     t0 = time.time()
+    pkg_root = resolve_pipeline_package_root()
     cmd = [
         sys.executable,
         "-m",
-        "app.backend.pipeline.analyzer.run_all",
+        "pipeline.analyzer.run_all",
         merged_clean_path,
         "--output-dir",
         str(analyzer_dir),
@@ -885,7 +879,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         log_fp.flush()
         proc = subprocess.Popen(
             cmd,
-            cwd=str(REPO_ROOT),
+            cwd=str(pkg_root),
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
             stderr=subprocess.STDOUT,

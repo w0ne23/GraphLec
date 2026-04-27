@@ -27,6 +27,12 @@ async def get_knowledge_graph(lecture_id: str, db: AsyncSession = Depends(get_db
     return await job_service.get_knowledge_graph(db, lecture_id)
 
 
+@router.get("/{lecture_id}/verifier")
+async def get_content_verification(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """강의 verifier 결과 조회"""
+    return await job_service.get_content_verification(db, lecture_id)
+
+
 @router.post("/{lecture_id}/query")
 async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """강의 내용 질의응답 (Lecture ID 기준)"""
