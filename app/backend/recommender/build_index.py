@@ -11,7 +11,7 @@ build_index.py
 
 실행:
   python build_index.py
-  python build_index.py --metadata_dir metadata/ --db_dir lancedb/
+  python build_index.py --metadata_dir app/backend/metadata --db_dir data/lancedb
 
 파이프라인 위치:
   import_graph.py → generate_metadata.py → build_index.py
@@ -31,6 +31,20 @@ load_dotenv()
 _client    = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_2"))
 MODEL_NAME = "gemini-embedding-001"
 TABLE_NAME = "lectures"
+
+
+def _resolve_repo_root() -> Path:
+    """Resolve project root for both local and container runs."""
+    env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+    here = Path(__file__).resolve()
+    return here.parents[3] if len(here.parents) > 3 else here.parents[1]
+
+
+_REPO_ROOT = _resolve_repo_root()
+DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
+DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
 
 
 def embed_texts(texts: list[str], batch_size: int = 20) -> list[list[float]]:
@@ -70,7 +84,7 @@ def load_metadata(metadata_dir: Path) -> list[dict]:
     return records
 
 
-def build_index(metadata_dir: str = "metadata/", db_dir: str = "lancedb/"):
+def build_index(metadata_dir: str = DEFAULT_METADATA_DIR, db_dir: str = DEFAULT_DB_DIR):
     print(f"[임베딩 모델] {MODEL_NAME}")
     print(f"[메타데이터 로드] {metadata_dir}")
     metas = load_metadata(Path(metadata_dir))
@@ -118,7 +132,7 @@ def build_index(metadata_dir: str = "metadata/", db_dir: str = "lancedb/"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="강의 임베딩 인덱스 구축")
-    parser.add_argument("--metadata_dir", default="metadata/")
-    parser.add_argument("--db_dir",       default="lancedb/")
+    parser.add_argument("--metadata_dir", default=DEFAULT_METADATA_DIR)
+    parser.add_argument("--db_dir",       default=DEFAULT_DB_DIR)
     args = parser.parse_args()
     build_index(args.metadata_dir, args.db_dir)

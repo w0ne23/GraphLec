@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { getLectureStatus, listLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
-const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '통합', '요약 생성']
-const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'summarize']
+const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '분석 통합', '그래프/DB', '요약 색인', '메타데이터']
+const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'graph', 'summarize', 'metadata']
 
 const STATUS_MAP = {
   done:       { label: '분석 완료', cls: 'status-done' },
@@ -34,6 +34,50 @@ export default function LecturesPage({ onNavigate }) {
   const scrollRef  = useRef()   // 페이지 스크롤 컨테이너
   const listRef    = useRef()   // 강의 목록 섹션
   const eventSources = useRef({}) // { job_id: EventSource }
+  const healthTimer  = useRef(null)
+
+  // 서버 다운 감지 시 진행 중인 모든 SSE 연결을 일괄 에러 처리
+  const handleServerDown = () => {
+    console.error('--- [Health] Server down detected ---')
+    const activeIds = Object.keys(eventSources.current)
+    if (activeIds.length === 0) return
+
+    activeIds.forEach(job_id => {
+      eventSources.current[job_id]?.close()
+      delete eventSources.current[job_id]
+    })
+
+    setLectures(prev => prev.map(lec =>
+      (lec.status === 'running' || lec.status === 'pending')
+        ? { ...lec, status: 'error', error_message: '서버와의 연결이 끊어졌습니다.' }
+        : lec
+    ))
+
+    if (healthTimer.current) {
+      clearInterval(healthTimer.current)
+      healthTimer.current = null
+    }
+  }
+
+  // 진행 중인 작업이 있을 때만 헬스체크 폴링 동작
+  const startHealthCheck = () => {
+    if (healthTimer.current) return
+    console.log('--- [Health] Starting health check polling ---')
+    healthTimer.current = setInterval(async () => {
+      if (Object.keys(eventSources.current).length === 0) {
+        clearInterval(healthTimer.current)
+        healthTimer.current = null
+        console.log('--- [Health] No active jobs, stopping health check ---')
+        return
+      }
+      try {
+        const res = await fetch('/api/health')
+        if (!res.ok) throw new Error(`status ${res.status}`)
+      } catch (e) {
+        handleServerDown()
+      }
+    }, 3000)
+  }
 
   // 주기적으로(또는 처음 로드 시) 진행 중인 작업에 대해 SSE 연결을 맺는 함수
   const setupSSEForJob = (job_id) => {
@@ -42,24 +86,35 @@ export default function LecturesPage({ onNavigate }) {
     console.log(`--- [SSE] Connecting to stream for job ${job_id} ---`)
     const eventSource = new EventSource(`/api/jobs/${job_id}/stream`)
     eventSources.current[job_id] = eventSource
+    startHealthCheck() // SSE 연결 시작 시 헬스체크 함께 시작
+
+    let closed = false
+    const closeSSE = () => {
+      if (closed) return
+      closed = true
+      eventSource.close()
+      delete eventSources.current[job_id]
+    }
 
     eventSource.onmessage = (event) => {
+      if (closed) return
       try {
         const data = JSON.parse(event.data)
         if (data.error) {
-           console.error("SSE Error from server:", data.error)
-           eventSource.close()
-           delete eventSources.current[job_id]
-           return
+          console.error("SSE Error from server:", data.error)
+          setLectures(prev => prev.map(lec => 
+             (lec.id === job_id || lec.job_id === job_id) 
+               ? { ...lec, status: 'error', error_message: data.error === 'Job not found' ? '작업을 찾을 수 없습니다. (실패했거나 삭제됨)' : data.error } 
+               : lec
+           ))
+          closeSSE()
+          return
         }
 
-        // 특정 강의 상태 및 상세 단계 업데이트
+        // 특정 강의 상태 및 상세 단계 업데이트 (job_id 기준)
         setLectures(prev => prev.map(lec => {
-          if (lec.id === data.job_id) {
-            // 백엔드에서 전달받은 pipeline_stages 배열을 그대로 사용
+          if (lec.job_id === data.job_id) {
             let stages = data.pipeline_stages
-            
-            // 만약 비어있다면 기본 회색 칩으로 매핑
             if (!stages || stages.length === 0) {
                stages = STAGE_KEYS.map((key) => ({ stage: key, status: 'wait' }))
             }
@@ -78,8 +133,7 @@ export default function LecturesPage({ onNavigate }) {
         // 완료 또는 에러 상태면 연결 종료
         if (data.lecture_status === 'done' || data.lecture_status === 'error') {
            console.log(`--- [SSE] Closing stream for job ${job_id} (Terminal state) ---`)
-           eventSource.close()
-           delete eventSources.current[job_id]
+           closeSSE()
         }
 
       } catch (err) {
@@ -88,9 +142,14 @@ export default function LecturesPage({ onNavigate }) {
     }
 
     eventSource.onerror = (err) => {
+      if (closed) return
       console.error(`--- [SSE] Connection error for job ${job_id}:`, err)
-      eventSource.close()
-      delete eventSources.current[job_id]
+      // SSE 에러 발생 시 즉시 끊고 서버 다운 체크 유도
+      closeSSE()
+      // 단일 작업에 대해 에러 표시
+      setLectures(prev => prev.map(lec => 
+        lec.id === job_id ? { ...lec, status: 'error', error_message: '서버와의 연결이 끊어졌습니다.' } : lec
+      ))
     }
   }
 
@@ -100,7 +159,7 @@ export default function LecturesPage({ onNavigate }) {
       setLectures(data)
       data.forEach(lec => {
         if (lec.status === 'running' || lec.status === 'pending') {
-          setupSSEForJob(lec.id)
+          setupSSEForJob(lec.job_id)
         }
       })
     }).catch(e => setError(String(e.message || e)))
@@ -109,6 +168,7 @@ export default function LecturesPage({ onNavigate }) {
     return () => {
       Object.values(eventSources.current).forEach(source => source.close())
       eventSources.current = {}
+      if (healthTimer.current) clearInterval(healthTimer.current)
     }
   }, [])
 
@@ -128,9 +188,7 @@ export default function LecturesPage({ onNavigate }) {
     try {
       const created   = await uploadLecture({ title: title || file.name, category, description, file })
       setLectures(prev => [{ ...created, status: 'pending', pipeline_stages: [] }, ...prev])
-      
-      // 방금 업로드한 작업에 대해 SSE 스트리밍 연결 시작
-      setupSSEForJob(created.id)
+      setupSSEForJob(created.job_id)
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -138,23 +196,23 @@ export default function LecturesPage({ onNavigate }) {
     }
   }
 
-  async function handleDelete(id, e) {
+  async function handleDelete(jobId, e) {
     e.stopPropagation()
     if (!confirm('이 강의를 삭제하시겠습니까?')) return
     try {
-      await deleteLecture(id)
-      setLectures(prev => prev.filter(l => l.id !== id))
+      await deleteLecture(jobId)
+      setLectures(prev => prev.filter(l => l.job_id !== jobId))
     } catch (err) { alert(`삭제 실패: ${err.message}`) }
   }
 
-  async function handleRetry(id, e) {
+  async function handleRetry(jobId, e) {
     e.stopPropagation()
     if (!confirm('분석을 다시 시도하시겠습니까?')) return
     try {
-      await retryLecture(id)
+      await retryLecture(jobId)
       // 재시도 요청 후 SSE 새로 연결
-      setLectures(prev => prev.map(l => l.id === id ? { ...l, status: 'pending', pipeline_stages: [] } : l))
-      setupSSEForJob(id)
+      setLectures(prev => prev.map(l => l.job_id === jobId ? { ...l, status: 'pending', pipeline_stages: [] } : l))
+      setupSSEForJob(jobId)
     } catch (err) { alert(`재시도 실패: ${err.message}`) }
   }
 
@@ -233,10 +291,9 @@ export default function LecturesPage({ onNavigate }) {
             const st        = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
             const thumbBg   = THUMB_COLOR[lec.category] ?? '#1e2333'
             const thumbIcon = THUMB_ICON[lec.category] ?? '🎬'
-            const isActive  = uploading?.id === lec.id
 
             return (
-              <div key={lec.id}>
+              <div key={lec.job_id}>
                 <div
                   className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`}
                   onClick={() => lec.status === 'done' && onNavigate?.({ page: 'lecture', lectureId: lec.id })}
@@ -260,11 +317,22 @@ export default function LecturesPage({ onNavigate }) {
                     <span className={`upload-status-badge ${st.cls}`}>{st.label}</span>
                   </div>
                   <div className="upload-row-actions">
+                    {lec.status === 'done' && (
+                      <button
+                        className="upload-btn-verifier"
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          onNavigate?.({ page: 'verifier', lectureId: lec.id })
+                        }}
+                      >
+                        Verifier
+                      </button>
+                    )}
                     {lec.status === 'error' && (
-                      <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, e)}>재시도</button>
+                      <button className="upload-btn-retry" onClick={e => handleRetry(lec.job_id, e)}>재시도</button>
                     )}
                     {lec.status !== 'done' && (
-                      <button className="upload-btn-delete" onClick={e => handleDelete(lec.id, e)}>삭제</button>
+                      <button className="upload-btn-delete" onClick={e => handleDelete(lec.job_id, e)}>삭제</button>
                     )}
                     {lec.status === 'done' && <span className="upload-row-arrow">→</span>}
                   </div>
@@ -278,8 +346,8 @@ export default function LecturesPage({ onNavigate }) {
                       <div className="upload-pipe-fill" style={{ 
                         width: lec.status === 'done' ? '100%' : 
                                lec.status === 'error' ? '0%' : 
-                               `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * 20 + 
-                                  (lec.pipeline_stages.some(s => s.status === 'run') ? 10 : 0))}%` 
+                               `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * (100 / STAGE_KEYS.length) + 
+                                  (lec.pipeline_stages.some(s => s.status === 'run') ? (100 / STAGE_KEYS.length) / 2 : 0))}%` 
                       }} />
                     </div>
                     <div className="upload-pipe-stages">

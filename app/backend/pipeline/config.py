@@ -33,6 +33,16 @@ from dotenv import load_dotenv
 from groq import Groq
 from google import genai
 
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
+
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None
+
 load_dotenv()
 
 # ──────────────────────────────────────────────────────────────
@@ -45,6 +55,8 @@ GEMINI_API_KEY_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") 
 GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GEMINI_API_KEY_1  # 키 1개만 있을 때 fallback
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 missing_keys: list[str] = []
 if not GEMINI_API_KEY_1:
@@ -65,6 +77,8 @@ if missing_keys:
 gemini_client   = genai.Client(api_key=GEMINI_API_KEY_1)  # 비디오 파이프라인용
 gemini_client_2 = genai.Client(api_key=GEMINI_API_KEY_2)  # 오디오 파이프라인용
 groq_client     = Groq(api_key=GROQ_API_KEY)
+openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is not None else None
+anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
 
 # ──────────────────────────────────────────────────────────────
 # 기본 경로 상수 (CLI 인자로 override 가능)
@@ -104,3 +118,35 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
         "classified":          output_dir / f"{stem}_slide_classified.json",
         "fused":               output_dir / f"{stem}_fused.json",
     }
+
+
+def get_openai_client():
+    return openai_client
+
+
+def get_anthropic_client():
+    return anthropic_client
+
+
+def get_gemini_client_sequence():
+    seq = []
+    if gemini_client_2 is not None:
+        seq.append(("gemini_client_2", gemini_client_2))
+    if gemini_client is not None and gemini_client is not gemini_client_2:
+        seq.append(("gemini_client", gemini_client))
+    return seq
+
+
+def resolve_anthropic_model(model_name: str) -> str:
+    aliases = {
+        "haiku-4.5": "claude-3-5-haiku-latest",
+        "claude-haiku-4.5": "claude-3-5-haiku-latest",
+        "claude-haiku-4-5": "claude-3-5-haiku-latest",
+        "sonnet-4.5": "claude-3-5-sonnet-latest",
+        "claude-sonnet-4.5": "claude-3-5-sonnet-latest",
+        "claude-sonnet-4-5": "claude-3-5-sonnet-latest",
+        "opus-4.5": "claude-3-opus-latest",
+        "claude-opus-4.5": "claude-3-opus-latest",
+        "claude-opus-4-5": "claude-3-opus-latest",
+    }
+    return aliases.get(str(model_name or "").strip(), str(model_name or "").strip())
