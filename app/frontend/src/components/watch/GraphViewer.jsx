@@ -125,15 +125,28 @@ function GraphViewer({ lectureId }) {
     
     network.on('mousemove', handleMouseMove);
 
+    let fitTimer = null;
     network.once('afterDrawing', () => {
+      if (!networkRef.current) return;
       network.moveTo({ scale: 0.15, position: { x: 0, y: 0 }, animation: false });
-      setTimeout(() => { network?.fit({ animation: { duration: 1000 } }); }, 500);
+      fitTimer = setTimeout(() => { 
+        if (networkRef.current) networkRef.current.fit({ animation: { duration: 1000 } }); 
+      }, 500);
     });
 
-    let fitInterval = setInterval(() => { network?.fit(); }, 500);
-    setTimeout(() => clearInterval(fitInterval), 3500);
+    let fitInterval = setInterval(() => { 
+      if (networkRef.current) networkRef.current.fit(); 
+    }, 500);
+    
+    let clearIntervalTimer = setTimeout(() => {
+      clearInterval(fitInterval);
+    }, 3500);
 
     return () => {
+      if (fitTimer) clearTimeout(fitTimer);
+      if (fitInterval) clearInterval(fitInterval);
+      if (clearIntervalTimer) clearTimeout(clearIntervalTimer);
+      
       if (networkRef.current) {
         networkRef.current.destroy();
         networkRef.current = null;

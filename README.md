@@ -38,7 +38,7 @@ GraphLec은 강의 영상에서 시각적 정보(슬라이드)와 청각적 정�
     ├─ [병렬] Stage 4A 슬라이드 분류 · Stage 4B by_slide 저장
     ├─ Stage 5 퓨전 → {stem}_fused.json
     ├─ Stage 6 그래프 트리플 → Parquet (triples / nodes / edges)
-    ├─ Neo4j 적재 (기본) — nodes/edges Parquet → Neo4j (`--skip-neo4j`로 생략 가능)
+    ├─ Neo4j 적재 (옵션) — nodes/edges Parquet → Neo4j (`--load-neo4j`로 활성화)
     └─ Stage 7 Lance 인덱스 → Parquet 백업 + LanceDB
 
 질의: Neo4j(구조/내용) + Lance 보조·재순위(내용형) + Gemini (query_service) ← Django 프록시
@@ -70,9 +70,9 @@ GPU용 PyTorch가 필요하면 `requirements.txt` 상단 주석의 CUDA 인덱�
 
 질의 서비스(`query_service`)는 `GOOGLE_API_KEY_2`·`GOOGLE_API_KEY`·`GEMINI_API_KEY` 등으로 Gemini를 찾습니다. LanceDB 경로는 `GRAPHLEC_LANCE_ROOT`(미설정 시 저장소 루트의 `data/lancedb`).
 
-**Neo4j 적재(Stage 6 직후, 기본 실행)**  
-`main.py`는 Stage 6 이후 Parquet를 Neo4j에 올립니다. Neo4j 서버가 없거나 당분간 쓰지 않을 때는 실행 시 **`--skip-neo4j`** 를 주면 됩니다 (Parquet 생성은 그대로).  
-연결 실패 시 파이프라인은 **오류로 중단**됩니다.
+**Neo4j 적재(Stage 6 직후, 기본 비활성화)**  
+`main.py`는 기본적으로 Stage 6 이후 Neo4j 적재를 건너뜁니다. Neo4j까지 올리고 싶다면 실행 시 **`--load-neo4j`** 를 지정하세요 (Parquet 생성은 그대로).  
+`--load-neo4j`를 사용했는데 연결 실패하면 파이프라인은 **오류로 중단**됩니다.
 
 #### Neo4j 설치·실행 (로컬, 둘 중 하나면 됨)
 
@@ -138,7 +138,8 @@ python main.py --input input/lecture.mp4 --output output --slides output_slides
 - `--skip-extract`: 이미 슬라이드가 있을 때 Stage 1A 추출 생략
 - `--force`: 기존 출력이 있어도 강제 재실행
 - `--skip-graph-triples`: Stage 6(그래프 Parquet) 생략
-- `--skip-neo4j`: Stage 6 직후 Neo4j 적재 생략 (`NEO4J_*` 없이 파이프라인만 돌릴 때)
+- `--skip-neo4j`: Stage 6 직후 Neo4j 적재 생략 (기본값)
+- `--load-neo4j`: Stage 6 직후 Neo4j 적재 활성화 (`NEO4J_*` 필요)
 - `--skip-lance-index`: Stage 7(Lance 인덱스) 생략
 - `--lance-root`: LanceDB 경로(기본: 환경변수 또는 `data/lancedb`)
 - `--debug`, `--masks`: Stage 1 디버그 / Stage 3A 마스크 저장
