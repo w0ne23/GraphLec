@@ -1,14 +1,14 @@
 """
 annotation_analyzer.py
 =======================
-slide_extractor.py의 출력(base + annot 프레임 쌍)을 받아
+    slide_extractor.py의 출력(clean final + annot 프레임 쌍)을 받아
 각 필기/강조가 어떤 콘텐츠를 타겟하는지 Gemini Vision으로 분석합니다.
 
 Input : output_slides/ (slide_extractor.py 출력 디렉토리)
 Output: output/annotation_analysis.json
 
 분석 흐름:
-  1. base + annot 이미지 쌍 구성
+  1. clean final + annot 이미지 쌍 구성
   2. pixel diff로 필기 영역 마스크 생성
   3. Gemini에게 (base, annot, mask) 세 장 전달 → 구조화 JSON 반환
   4. 결과를 knowledge graph Stage 1 (t1_structure) 형식과 호환되도록 저장
@@ -42,6 +42,7 @@ logging.getLogger("google.genai").setLevel(logging.WARNING)
 from .config import GEMINI_GENERATIVE_MODEL
 
 VLM_MODEL = os.getenv("ANNOTATION_VLM_MODEL", GEMINI_GENERATIVE_MODEL)
+ANNOTATION_THINKING_BUDGET = int(os.getenv("ANNOTATION_THINKING_BUDGET", "512"))
 
 
 def _sanitize_raw(raw: str) -> str:
@@ -216,10 +217,25 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
             full_path = str(slides_path / entry["filename"])
             capture_type = entry.get("capture_type")
             annot_idx = int(entry.get("annot_index", 0) or 0)
-            if capture_type == "base" or annot_idx == 0:
+            if capture_type == "base":
                 if pair["base_path"] is None:
                     pair["base_path"] = full_path
+                pair["original_base_path"] = full_path
                 last_path_by_scene[scene_idx] = full_path
+                continue
+
+            if capture_type == "build":
+                # PPT 애니메이션으로 전개된 clean content state.
+                # 교수 필기 분석의 기준 이미지는 최초 base가 아니라 마지막 build여야 한다.
+                pair["base_path"] = full_path
+                pair["clean_base_path"] = full_path
+                last_path_by_scene[scene_idx] = full_path
+                continue
+
+            if capture_type not in ("annot", "annotation"):
+                if annot_idx == 0 and pair["base_path"] is None:
+                    pair["base_path"] = full_path
+                    last_path_by_scene[scene_idx] = full_path
                 continue
 
             prev_path = last_path_by_scene.get(scene_idx)
@@ -255,10 +271,13 @@ def _load_pairs_by_filename(slides_path: Path) -> list[dict]:
     pairs = []
     for base in bases:
         idx = int(base.name.split("_")[1])
+        builds = sorted(slides_path.glob(f"slide_{idx:03d}_build_*.jpg"))
         annots = sorted(slides_path.glob(f"slide_{idx:03d}_annot_*.jpg"))
+        clean_base = builds[-1] if builds else base
         pairs.append({
             "slide_index": idx,
-            "base_path": str(base),
+            "base_path": str(clean_base),
+            "original_base_path": str(base),
             "annot_paths": [str(a) for a in annots],
         })
     return pairs
@@ -610,6 +629,19 @@ def _call_visual_json_model(
                     max_completion_tokens=max_output_tokens,
                     response_format={"type": "json_object"},
                 )
+                try:
+                    from .cost_report import record_model_call
+
+                    record_model_call(
+                        stage="stage3a_annotation_analyzer",
+                        provider="openai",
+                        model=model,
+                        response=response,
+                        image_count=len(image_bytes_list),
+                        prompt_chars=len(prompt),
+                    )
+                except Exception:
+                    pass
                 return (response.choices[0].message.content or "").strip()
             except Exception as e:
                 last_error = e
@@ -647,8 +679,24 @@ def _call_visual_json_model(
         config=types.GenerateContentConfig(
             temperature=0.0,
             max_output_tokens=max_output_tokens,
+            thinking_config=types.ThinkingConfig(
+                thinking_budget=ANNOTATION_THINKING_BUDGET
+            ),
         )
     )
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage="stage3a_annotation_analyzer",
+            provider="google",
+            model=model,
+            response=response,
+            image_count=len(image_bytes_list),
+            prompt_chars=len(prompt),
+        )
+    except Exception:
+        pass
     return (response.text or "").strip()
 
 

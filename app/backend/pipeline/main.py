@@ -10,7 +10,7 @@ main.py
          Stage 2B: transcriber         — 전체 전사 (scene 매핑용)
   [병렬] Stage 3A: annotation_analyzer — 필기 강조 분석
          Stage 3B: 오디오 후처리
-                     text_processor    — 2-pass 교정 + 침묵/지시어 추출
+                     text_processor    — 2-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
   [병렬] Stage 4A: slide_classifier    — 슬라이드 역할 분류
          Stage 4B: by_slide 구조 저장  — (3B 결과 기반)
@@ -45,10 +45,6 @@ from threading import Lock
 from typing import Any, Callable, Optional
 
 import librosa
-from .deictics import (
-    classify_ambiguous_deictics_with_llm,
-    extract_deictics_from_segments,
-)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -401,7 +397,6 @@ def stage3b_audio(
     segments_path = output_dir / f"{stem}_segments.json"
     silences_path = output_dir / f"{stem}_silences.json"
     emphasis_path = output_dir / f"{stem}_emphasis.json"
-    deictics_path = output_dir / f"{stem}_deictics.json"
     by_slide_path = output_dir / f"{stem}_by_slide.json"
 
     def _by_slide_has_emphasis_schema(path: Path) -> bool:
@@ -420,7 +415,6 @@ def stage3b_audio(
         (not args.force)
         and segments_path.exists()
         and silences_path.exists()
-        and deictics_path.exists()
         and emphasis_path.exists()
         and by_slide_path.exists()
         and _by_slide_has_emphasis_schema(by_slide_path)
@@ -453,7 +447,6 @@ def stage3b_audio(
         return {
             "segments_path": str(segments_path),
             "silences_path": str(silences_path),
-            "deictics_path": str(deictics_path),
             "emphasis_path": str(emphasis_path),
             "annotated_segments": annotated_segments,
             "annotated_groups": [],
@@ -465,8 +458,7 @@ def stage3b_audio(
         log.warning(
             "Stage 3B 캐시가 불완전하여 재실행합니다 "
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
-            f"deictics={deictics_path.exists()}, emphasis={emphasis_path.exists()}, "
-            f"by_slide={by_slide_path.exists()})"
+            f"emphasis={emphasis_path.exists()}, by_slide={by_slide_path.exists()})"
         )
 
     video_path = args.input
@@ -548,20 +540,8 @@ def stage3b_audio(
     })
     print(f"    ✓ 침묵 {len(silences)}개")
 
-    # [3B-4] 지시어 추출
-    print("  [3B-4] 지시어 추출...")
-    deictics_report = extract_deictics_from_segments(segments, text_field="text_corrected")
-    deictics_report["video_path"] = video_path
-    _save_json(output_dir / f"{stem}_deictics.json", deictics_report)
-    ambiguous_report = classify_ambiguous_deictics_with_llm(
-        segments_clean, deictics_report, threshold=0.6, context_window=2
-    )
-    ambiguous_report["video_path"] = video_path
-    _save_json(output_dir / f"{stem}_deictics_ambiguous.json", ambiguous_report)
-    print(f"    ✓ 지시어 {deictics_report['deictic_total_count']}개, 애매 {ambiguous_report['ambiguous_count']}개")
-
-    # [3B-5] 오디오 강조 감지
-    print("  [3B-5] 오디오 강조 감지...")
+    # [3B-4] 오디오 강조 감지
+    print("  [3B-4] 오디오 강조 감지...")
     t0 = time.time()
     audio_path_temp = str(output_dir / "temp_analysis_audio.wav")
     extract_audio_from_video(video_path, audio_path_temp)
@@ -623,7 +603,6 @@ def stage3b_audio(
     return {
         "segments_path": str(segments_path),
         "silences_path": str(silences_path),
-        "deictics_path": str(deictics_path),
         "emphasis_path": str(emphasis_path),
         "annotated_segments": annotated_segments,
         "annotated_groups": annotated_groups,
@@ -966,16 +945,14 @@ def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dic
     analyzer_dir = output_dir / f"{stem}_analyzer"
     claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
     claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
-    cross_model = os.getenv("CROSS_VERIFY_MODEL", "").strip()
-    use_cross = bool(cross_model and os.getenv("OPENAI_API_KEY"))
 
-    if not args.force and claim_output_path.exists() and (use_cross or claim_report_path.exists()):
+    if not args.force and _claim_output_is_cross_verification(claim_output_path):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
         return {
             "claim_output": str(claim_output_path),
-            "claim_report": str(claim_report_path) if claim_report_path.exists() else "",
+            "claim_report": "",
             "elapsed": 0.0,
         }
 
@@ -990,6 +967,17 @@ def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dic
     return {"claim_output": str(claim_output_path), "elapsed": elapsed, **result}
 
 
+def _claim_output_is_cross_verification(claim_output_path: Path) -> bool:
+    if not claim_output_path.exists():
+        return False
+    try:
+        with open(claim_output_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return False
+    return payload.get("mode") == "cross_verification"
+
+
 def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
@@ -997,16 +985,14 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
     claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
     analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
-    cross_model = os.getenv("CROSS_VERIFY_MODEL", "").strip()
-    use_cross = bool(cross_model and os.getenv("OPENAI_API_KEY"))
 
-    if not args.force and claim_output_path.exists() and (use_cross or claim_report_path.exists()):
+    if not args.force and _claim_output_is_cross_verification(claim_output_path):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
         return {
             "claim_output": str(claim_output_path),
-            "claim_report": str(claim_report_path) if claim_report_path.exists() else "",
+            "claim_report": "",
             "log_path": str(analyzer_log_path),
             "elapsed": 0.0,
             "pid": None,
@@ -1018,6 +1004,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     repo_root = _pipeline_root_dir()
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         _analyzer_run_module(),
         merged_clean_path,
@@ -1029,10 +1016,16 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         log_fp.write(
             f"\n=== verifier launch {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
         )
+        log_fp.write(f"cwd       : {repo_root}\n")
+        log_fp.write(f"cmd       : {' '.join(cmd)}\n")
+        log_fp.write("mode      : cross_verification (forced)\n")
         log_fp.flush()
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
         proc = subprocess.Popen(
             cmd,
             cwd=str(repo_root),
+            env=env,
             stdin=subprocess.DEVNULL,
             stdout=log_fp,
             stderr=subprocess.STDOUT,
@@ -1042,11 +1035,12 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     elapsed = time.time() - t0
     print(f"\n  ✓ verifier 백그라운드 시작  ({elapsed:.1f}초)")
     print(f"     PID : {proc.pid}")
+    print("     mode: cross_verification (forced)")
     print(f"     로그: {analyzer_log_path}")
     print("─" * 70)
     return {
         "claim_output": str(claim_output_path),
-        "claim_report": str(claim_report_path),
+        "claim_report": "",
         "log_path": str(analyzer_log_path),
         "elapsed": elapsed,
         "pid": proc.pid,
@@ -1172,6 +1166,13 @@ def run_pipeline(args, progress_callback=None):
     slides_dir.mkdir(parents=True, exist_ok=True)
 
     paths = output_paths(stem, output_dir, slides_dir)
+    try:
+        from .cost_report import configure as configure_cost_report, reset as reset_cost_report
+
+        reset_cost_report()
+        configure_cost_report(stem=stem, output_dir=output_dir)
+    except Exception as e:
+        log.warning(f"cost_report 초기화 실패: {e}")
 
     print("\n" + "═" * 70)
     print("  강의 영상 분석 통합 파이프라인")
@@ -1410,7 +1411,6 @@ def run_pipeline(args, progress_callback=None):
         output_files = [
             audio_result.get("segments_path", ""),
             audio_result.get("silences_path", ""),
-            audio_result.get("deictics_path", ""),
             audio_result.get("emphasis_path", ""),
             annotation_path,
             textualized_path,
@@ -1446,6 +1446,19 @@ def run_pipeline(args, progress_callback=None):
         raise
 
     finally:
+        try:
+            from .cost_report import write_report
+
+            cost_report_path = write_report(
+                stem=stem,
+                output_dir=output_dir,
+                timings=timings,
+                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
+            )
+            print(f"\n  ✓ 비용 리포트 저장: {cost_report_path}")
+        except Exception as e:
+            print(f"\n  ⚠️ 비용 리포트 저장 실패: {e}")
+
         # 성공/실패 무관하게 항상 타이밍 출력
         total_elapsed = time.time() - total_start
         print("\n" + "═" * 70)

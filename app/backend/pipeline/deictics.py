@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from collections import Counter
 from typing import Any, Optional
@@ -48,6 +49,9 @@ _PARTICLE_SUFFIXES = (
     "을", "를", "은", "는", "이", "가", "도", "만", "요",
 )
 
+_DEICTICS_LLM_BATCH_SIZE = max(1, int(os.getenv("DEICTICS_LLM_BATCH_SIZE", "12")))
+_DEICTICS_THINKING_BUDGET = int(os.getenv("DEICTICS_THINKING_BUDGET", "0"))
+
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
@@ -72,6 +76,43 @@ def _tokenize_for_deictics(text: str) -> list[str]:
         return []
     t = re.sub(r"[^\w\s\u3131-\uD7A3]", " ", t)
     return [x for x in t.split() if x]
+
+
+def _extract_json_block(text: str) -> str:
+    txt = (text or "").strip()
+    if "```json" in txt:
+        return txt.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```" in txt and txt.count("```") >= 2:
+        return txt.split("```", 1)[1].split("```", 1)[0].strip()
+    return txt
+
+
+def _parse_batched_deictics_response(text: str) -> dict[int, dict[str, Any]]:
+    txt = _extract_json_block(text)
+    if not txt:
+        return {}
+
+    data = json.loads(txt)
+    if isinstance(data, dict):
+        items = data.get("results")
+        if not isinstance(items, list):
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    else:
+        return {}
+
+    out: dict[int, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("item_id")
+        try:
+            idx = int(item_id)
+        except Exception:
+            continue
+        out[idx] = item
+    return out
 
 
 def normalize_word_items(words: Any, chunk_start: float = 0.0) -> list[dict]:
@@ -189,6 +230,7 @@ def classify_ambiguous_deictics_with_llm(
     checked = 0
     excluded_count = 0
     ambiguous_items: list[dict] = []
+    llm_candidates: list[dict[str, Any]] = []
 
     for occ in occurrences:
         seg_idx = int(occ.get("segment_index", -1))
@@ -225,51 +267,105 @@ def classify_ambiguous_deictics_with_llm(
             txt = (segments[i].get("text_corrected") or segments[i].get("text") or "").strip()
             context_lines.append(f"[{i}] ({marker}) {txt}")
 
-        prompt = f"""강의 전사에서 지시어가 무엇을 가리키는지 판정하세요.
+        llm_candidates.append({
+            "item_id": len(llm_candidates),
+            "deictic": deictic,
+            "surface": occ.get("surface"),
+            "segment_index": seg_idx,
+            "segment_start": _safe_float(occ.get("segment_start"), 0.0),
+            "segment_end": _safe_float(occ.get("segment_end"), 0.0),
+            "deictic_time": deictic_time,
+            "context_lines": context_lines,
+        })
 
-지시어: {occ.get("deictic")}  표면형: {occ.get("surface")}
-세그먼트: {seg_idx} / 시간: {deictic_time:.3f}초
+    for batch_start in range(0, len(llm_candidates), _DEICTICS_LLM_BATCH_SIZE):
+        batch = llm_candidates[batch_start : batch_start + _DEICTICS_LLM_BATCH_SIZE]
+        batch_blocks = []
+        for item in batch:
+            batch_blocks.append(
+                "\n".join(
+                    [
+                        f"[ITEM {item['item_id']}]",
+                        f"지시어: {item['deictic']}  표면형: {item['surface']}",
+                        f"세그먼트: {item['segment_index']} / 시간: {item['deictic_time']:.3f}초",
+                        "주변 문맥:",
+                        *item["context_lines"],
+                    ]
+                )
+            )
 
-주변 문맥:
-{chr(10).join(context_lines)}
+        prompt = f"""강의 전사에서 각 지시어가 무엇을 가리키는지 판정하세요.
 
-출력 JSON만:
-{{"inferred_target": "그림|표|수식|코드|슬라이드|화면|내용|예시|기타|null", "confidence": 0.0, "reason": "한 줄 설명"}}"""
+가능한 inferred_target 값:
+그림|표|수식|코드|슬라이드|화면|내용|예시|기타|null
+
+아래 ITEM들을 각각 판정하고, 모든 ITEM에 대해 JSON 배열만 출력하세요.
+각 원소는 반드시 다음 키를 포함하세요:
+item_id, inferred_target, confidence, reason
+
+confidence는 0.0~1.0 숫자입니다.
+근거가 약하면 inferred_target은 null로 두세요.
+
+{chr(10).join(batch_blocks)}
+
+출력 JSON 예시:
+[
+  {{"item_id": 0, "inferred_target": "슬라이드", "confidence": 0.82, "reason": "슬라이드 전체를 가리킴"}},
+  {{"item_id": 1, "inferred_target": null, "confidence": 0.15, "reason": "문맥상 대상 불명확"}}
+]"""
 
         def call_api():
+            config_kwargs: dict[str, Any] = {
+                "temperature": 0.1,
+                "max_output_tokens": max(512, 160 * len(batch)),
+            }
+            if _DEICTICS_THINKING_BUDGET >= 0:
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_budget=_DEICTICS_THINKING_BUDGET
+                )
             return gemini_client.models.generate_content(
                 model=GEMINI_GENERATIVE_MODEL,
                 contents=[types.Part.from_text(text=prompt)],
-                config=types.GenerateContentConfig(temperature=0.1, max_output_tokens=512),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
 
-        inferred_target, confidence, reason = None, 0.0, "LLM 판정 실패"
+        parsed_items: dict[int, dict[str, Any]] = {}
         try:
             resp = api_call_with_retry(call_api)
-            txt = (resp.text or "").strip()
-            if "```json" in txt:
-                txt = txt.split("```json")[1].split("```")[0].strip()
-            elif "```" in txt and txt.count("```") >= 2:
-                txt = txt.split("```")[1].split("```")[0].strip()
-            data = json.loads(txt)
+            try:
+                from .cost_report import record_model_call
+
+                record_model_call(
+                    stage="stage3b_deictics",
+                    provider="google",
+                    model=GEMINI_GENERATIVE_MODEL,
+                    response=resp,
+                    prompt_chars=len(prompt),
+                )
+            except Exception:
+                pass
+            parsed_items = _parse_batched_deictics_response(resp.text or "")
+        except Exception:
+            parsed_items = {}
+
+        for item in batch:
+            data = parsed_items.get(item["item_id"], {})
             inferred_target = data.get("inferred_target")
             confidence = _safe_float(data.get("confidence"), 0.0)
-            reason = str(data.get("reason") or "").strip() or "사유 없음"
-        except Exception:
-            pass
-
-        if (inferred_target in (None, "null", "")) or (confidence < threshold):
-            ambiguous_items.append({
-                "deictic": deictic, "surface": occ.get("surface"),
-                "segment_index": seg_idx,
-                "segment_start": _safe_float(occ.get("segment_start"), 0.0),
-                "segment_end": _safe_float(occ.get("segment_end"), 0.0),
-                "deictic_time": deictic_time,
-                "llm_used": True,
-                "inferred_target": None if inferred_target in (None, "null", "") else inferred_target,
-                "confidence": confidence,
-                "reason": reason,
-            })
+            reason = str(data.get("reason") or "").strip() or "LLM 판정 실패"
+            if (inferred_target in (None, "null", "")) or (confidence < threshold):
+                ambiguous_items.append({
+                    "deictic": item["deictic"],
+                    "surface": item["surface"],
+                    "segment_index": item["segment_index"],
+                    "segment_start": item["segment_start"],
+                    "segment_end": item["segment_end"],
+                    "deictic_time": item["deictic_time"],
+                    "llm_used": True,
+                    "inferred_target": None if inferred_target in (None, "null", "") else inferred_target,
+                    "confidence": confidence,
+                    "reason": reason,
+                })
 
     return {
         "description": "대상 추론 confidence가 낮은 지시어 목록",

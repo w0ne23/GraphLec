@@ -13,14 +13,14 @@ Input : input/lecture.mp4
 Output: output_slides/
         ├── slide_001_base.jpg      # 슬라이드 최초 등장 프레임
         ├── slide_001_annot_01.jpg  # 필기 안정화 캡처
-        ├── slide_002_base.jpg      # 전환 or PPT 애니메이션(새 콘텐츠) → 새 base
+        ├── slide_002_build_01.jpg  # PPT 애니메이션으로 추가된 clean content state
         └── ...
 
 슬라이드 idx가 증가하는 경우:
   1. Cut 전환 (직전 프레임 대비 급격한 MSE + phash 변화)
   2. Fade 전환 (sliding window 내 oldest ↔ current 누적 변화)
   3. Slide base 이중 비교 (필기로 오염된 prev_frame 대신 클린한 base phash 비교)
-  4. PPT 애니메이션 (슬라이드 내 대규모 콘텐츠 변화 → 새 base로 분리)
+  4. PPT 애니메이션 (슬라이드 내 대규모 콘텐츠 변화 → build로 저장, 새 scene 승격 금지)
 
 Usage:
     python slide_extractor.py --input input/lecture.mp4 --output output_slides/
@@ -85,14 +85,25 @@ class Config:
     ANNOT_CUMULATIVE_RATIO       = 0.0005  # base 대비 0.05% 이상 변화 → 필기 시작
     ANNOT_INSTANT_RATIO          = 0.0001  # 직전 프레임 대비 변화 → 펜 움직임 여부
 
-    # ── PPT 애니메이션 감지 (새 텍스트/이미지 등장 → 새 base) ─────────
-    # 안정화 완료 시 새 slide_idx + base 파일로 저장
+    # ── PPT 애니메이션 감지 (새 텍스트/이미지 등장 → build) ────────────
+    # 안정화 완료 시 같은 slide_idx의 build 파일로 저장한다.
+    # 애니메이션을 새 scene/base로 승격하면 downstream에서 중간 상태가
+    # 별도 슬라이드처럼 처리되므로 금지한다.
     # 튜닝: --tune 모드에서 누적 diff p99 이상 값 참고
     ANIM_CUMULATIVE_RATIO        = 0.05   # base 대비 5% 이상 변화 → 애니메이션
 
     # ── 안정화 판단 ──────────────────────────────────────────────────
     STABILITY_WINDOW_SEC         = 0.7
     MIN_ANNOT_DURATION_SEC       = 0.2
+    # slide_change는 감지 즉시 저장하지 않고, 화면이 안정된 뒤 base로 확정한다.
+    # 전환/스크롤/3D 애니메이션 중간 프레임이 0.1초 단위 base로 폭발하는 것을 막는다.
+    SCENE_STABILITY_SEC          = float(os.getenv("GRAPHLEC_SCENE_STABILITY_SEC", "1.0"))
+    SCENE_STABILITY_MSE_THRESHOLD = float(
+        os.getenv("GRAPHLEC_SCENE_STABILITY_MSE_THRESHOLD", "80")
+    )
+    SCENE_STABILITY_HASH_THRESHOLD = int(
+        os.getenv("GRAPHLEC_SCENE_STABILITY_HASH_THRESHOLD", "4")
+    )
 
     # ── 처리 성능 ────────────────────────────────────────────────────
     PROCESS_EVERY_N_FRAMES       = 2
@@ -106,6 +117,9 @@ class Config:
     EXTRACT_CHUNK_SEC            = 300.0
     EXTRACT_CHUNK_OVERLAP_SEC    = 3.0
     EXTRACT_WORKERS              = int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0"))
+    ANIMATION_EDGE_PRESERVE_THRESHOLD = float(
+        os.getenv("GRAPHLEC_ANIMATION_EDGE_PRESERVE_THRESHOLD", "0.82")
+    )
 
 
 # ──────────────────────────────────────────────
@@ -168,6 +182,51 @@ def count_changed_pixels(frame_a: np.ndarray, frame_b: np.ndarray, threshold: in
     else:
         max_diff = np.max(diff, axis=2)
     return np.sum(max_diff > threshold) / max_diff.size
+
+
+def _edge_mask(frame: np.ndarray) -> np.ndarray:
+    """슬라이드의 기존 콘텐츠가 보존되는지 보기 위한 lightweight edge mask."""
+    gray = frame if frame.ndim == 2 else cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    kernel = np.ones((3, 3), np.uint8)
+    return cv2.dilate(edges, kernel, iterations=1) > 0
+
+
+def edge_preservation_ratio(reference: np.ndarray, frame: np.ndarray) -> float:
+    """
+    reference에 있던 텍스트/도형 edge가 frame에서도 얼마나 남아 있는지 계산한다.
+
+    PPT 애니메이션은 기존 콘텐츠가 대부분 남고 새 요소가 추가되는 additive 변화가 많다.
+    반대로 진짜 슬라이드 전환은 기존 edge가 많이 사라진다.
+    """
+    ref_edges = _edge_mask(reference)
+    ref_count = int(ref_edges.sum())
+    if ref_count <= 0:
+        return 0.0
+
+    frame_edges = _edge_mask(frame)
+    kernel = np.ones((5, 5), np.uint8)
+    frame_edges_dilated = cv2.dilate(frame_edges.astype(np.uint8), kernel, iterations=1) > 0
+    return float(np.logical_and(ref_edges, frame_edges_dilated).sum() / ref_count)
+
+
+def is_probable_animation_build(reference: np.ndarray | None, frame: np.ndarray, cfg: Config) -> bool:
+    """
+    slide_change 후보 중 additive PPT animation으로 보이는 경우를 걸러낸다.
+
+    기존 콘텐츠 edge가 충분히 보존되어 있으면 새 슬라이드가 아니라 같은 슬라이드의
+    build step으로 처리한다. 이 필터는 보수적으로 동작하며, 애매한 경우에는
+    기존 slide_change 판단을 유지한다.
+    """
+    if reference is None:
+        return False
+
+    changed_ratio = count_changed_pixels(reference, frame, cfg.ANNOT_DIFF_THRESHOLD)
+    if changed_ratio < cfg.ANNOT_CUMULATIVE_RATIO:
+        return False
+
+    preserved = edge_preservation_ratio(reference, frame)
+    return preserved >= cfg.ANIMATION_EDGE_PRESERVE_THRESHOLD
 
 
 def to_decision_frame(frame: np.ndarray, width: int) -> np.ndarray:
@@ -605,14 +664,14 @@ class AnnotationStabilityDetector:
 
       대규모 변화 (ratio ≥ ANIM_RATIO)
         → PPT 애니메이션 → NEW_BASE
-          → main loop에서 슬라이드 전환과 동일하게 처리 (새 slide_idx + base 저장)
+          → main loop에서 같은 slide_idx의 build로 저장
 
     상태 머신:
       STABLE    → (ratio ≥ ANIM_RATIO)  → ANIMATING
                → (ratio ≥ ANNOT_RATIO) → WRITING
       WRITING   → (안정화) → CAPTURE_ANNOT → STABLE (base 갱신)
       WRITING   → (ratio가 ANIM_RATIO 초과) → ANIMATING 격상
-      ANIMATING → (안정화) → NEW_BASE       → (main loop이 reset 호출)
+      ANIMATING → (안정화) → NEW_BASE       → build 저장 후 clean 기준 reset
     """
     def __init__(self, cfg: Config, fps: float):
         self.cfg = cfg
@@ -638,7 +697,7 @@ class AnnotationStabilityDetector:
         """
         반환값:
           "CAPTURE_ANNOT"  - 필기 안정화 완료 → annot_XX 저장
-          "NEW_BASE"       - 애니메이션 안정화 완료 → 새 slide_idx + base 저장
+          "NEW_BASE"       - 애니메이션 안정화 완료 → 같은 slide_idx의 build 저장
           "NONE"
         """
         if self.base_frame is None or self.prev_frame is None:
@@ -720,21 +779,172 @@ def _run_slide_decision_pass(
 
     slide_idx   = 0
     annot_idx   = 0
+    build_idx   = 0
     processed_frames = 0
     first_frame = True
     metadata    = []
+    pending_scene_candidate = None
+    scene_stability_frames = max(
+        2,
+        int(cfg.SCENE_STABILITY_SEC * fps / cfg.PROCESS_EVERY_N_FRAMES),
+    )
     progress_interval = max(1, int((duration * fps / cfg.PROCESS_EVERY_N_FRAMES) / 20)) if duration > 0 else 500
 
-    def register_new_base(frame_no, small, timestamp, reason):
-        """scene 전환 or PPT 애니메이션 → 새 scene(base) 메타 저장 공통 처리"""
-        nonlocal slide_idx, annot_idx
+    def register_new_base(frame_no, small, timestamp, reason, extra: dict | None = None):
+        """진짜 scene 전환 → 새 scene(base) 메타 저장 공통 처리."""
+        nonlocal slide_idx, annot_idx, build_idx
         slide_idx += 1
         annot_idx  = 0
+        build_idx  = 0
         fname = f"slide_{slide_idx:03d}_base.jpg"
-        metadata.append(_meta(fname, slide_idx, timestamp, "base", annot_index=0, frame_no=frame_no))
+        item = _meta(fname, slide_idx, timestamp, "base", annot_index=0, frame_no=frame_no)
+        if extra:
+            item.update(extra)
+        metadata.append(item)
         log.info(f"[씬 {slide_idx}] base ({reason}) @ {timestamp:.2f}s")
         slide_detector.reset(small)
         annot_detector.reset(base_frame=small)
+
+    def force_capture_pending_writing(frame_no, timestamp):
+        nonlocal annot_idx
+        if annot_detector.state == "WRITING" \
+                and annot_detector.writing_count >= annot_detector.min_annot_frames:
+            annot_idx += 1
+            fname = f"slide_{slide_idx:03d}_annot_{annot_idx:02d}.jpg"
+            capture_frame_no = annot_detector.get_capture_frame_no(frame_no)
+            capture_ts = annot_detector.get_capture_timestamp(timestamp)
+            metadata.append(
+                _meta(
+                    fname,
+                    slide_idx,
+                    capture_ts,
+                    "annotation",
+                    annot_index=annot_idx,
+                    frame_no=capture_frame_no,
+                )
+            )
+            log.info(f"  [강제 캡처] {fname} @ {capture_ts:.2f}s")
+
+    def register_build_frame(frame_no, small, timestamp, reason):
+        """PPT 애니메이션으로 전개된 clean content state를 같은 scene의 build로 저장."""
+        nonlocal build_idx
+        if slide_idx <= 0:
+            return
+        build_idx += 1
+        fname = f"slide_{slide_idx:03d}_build_{build_idx:02d}.jpg"
+        metadata.append(
+            _meta(
+                fname,
+                slide_idx,
+                timestamp,
+                "build",
+                annot_index=0,
+                build_index=build_idx,
+                frame_no=frame_no,
+            )
+        )
+        log.info(f"  [빌드 완료] {fname} ({reason}) @ {timestamp:.2f}s")
+        # 이후 필기/전환 판정은 애니메이션이 전개된 clean state를 기준으로 한다.
+        slide_detector.reset(small)
+        annot_detector.reset(base_frame=small)
+
+    def _stable_against_candidate(candidate: dict, small: np.ndarray, curr_phash: int | None):
+        if curr_phash is None:
+            curr_phash = compute_phash_int(small)
+        mse = compute_mse(candidate["frame"], small)
+        hash_dist = phash_distance_int(candidate["phash"], curr_phash)
+        is_stable = (
+            mse <= cfg.SCENE_STABILITY_MSE_THRESHOLD
+            or hash_dist <= cfg.SCENE_STABILITY_HASH_THRESHOLD
+        )
+        return is_stable, mse, hash_dist, curr_phash
+
+    def _start_pending_scene(frame_no, timestamp, small, curr_phash: int | None, reason: str):
+        nonlocal pending_scene_candidate
+        if curr_phash is None:
+            curr_phash = compute_phash_int(small)
+        pending_scene_candidate = {
+            "group_start_frame_no": frame_no,
+            "group_start_timestamp": timestamp,
+            "frame_no": frame_no,
+            "timestamp": timestamp,
+            "frame": small.copy(),
+            "phash": curr_phash,
+            "reason": reason,
+            "stable_count": 1,
+            "updates": 0,
+            "suppressed_candidates": 0,
+            "last_mse": None,
+            "last_hash_dist": None,
+        }
+        log.info(f"  [전환 후보] base 확정 보류 ({reason}) @ {timestamp:.2f}s")
+
+    def _confirm_pending_scene(frame_no, timestamp, small, confirmed: bool, reason: str):
+        nonlocal pending_scene_candidate
+        candidate = pending_scene_candidate
+        if candidate is None:
+            return
+        force_capture_pending_writing(frame_no, timestamp)
+        extra = {
+            "scene_stability_confirmed": bool(confirmed),
+            "scene_stability_reason": reason,
+            "scene_stability_required_frames": int(scene_stability_frames),
+            "scene_stability_observed_frames": int(candidate.get("stable_count", 0) or 0),
+            "scene_stability_confirmed_at_sec": round(float(timestamp), 2),
+            "transition_candidate_start_sec": round(float(candidate["group_start_timestamp"]), 2),
+            "transition_suppressed_candidates": int(candidate.get("suppressed_candidates", 0) or 0),
+            "transition_candidate_updates": int(candidate.get("updates", 0) or 0),
+        }
+        # 이미지/frame_no는 안정화된 프레임을 쓰되, scene 시작 시각은 최초 후보 시각으로 둔다.
+        # downstream 전사 정렬에서 슬라이드 시작이 안정화 대기 시간만큼 밀리지 않게 하기 위함이다.
+        register_new_base(
+            frame_no,
+            small,
+            float(candidate["group_start_timestamp"]),
+            reason,
+            extra=extra,
+        )
+        pending_scene_candidate = None
+
+    def _update_pending_scene(frame_no, timestamp, small, curr_phash: int | None) -> bool:
+        """전환 후보가 충분히 안정됐으면 base를 확정하고 True를 반환한다."""
+        nonlocal pending_scene_candidate
+        candidate = pending_scene_candidate
+        if candidate is None:
+            return False
+
+        is_stable, mse, hash_dist, curr_phash = _stable_against_candidate(candidate, small, curr_phash)
+        candidate["last_mse"] = round(float(mse), 3)
+        candidate["last_hash_dist"] = int(hash_dist)
+
+        if is_stable:
+            candidate["stable_count"] += 1
+            if candidate["stable_count"] >= scene_stability_frames:
+                _confirm_pending_scene(
+                    frame_no,
+                    timestamp,
+                    small,
+                    confirmed=True,
+                    reason="slide_change_stabilized",
+                )
+                return True
+            return False
+
+        # 아직 화면이 움직이는 중이면 중간 후보는 버리고 최신 후보로 교체한다.
+        candidate["suppressed_candidates"] += 1
+        candidate["updates"] += 1
+        candidate["frame_no"] = frame_no
+        candidate["timestamp"] = timestamp
+        candidate["frame"] = small.copy()
+        candidate["phash"] = curr_phash
+        candidate["stable_count"] = 1
+        if candidate["suppressed_candidates"] <= 3 or candidate["suppressed_candidates"] % 10 == 0:
+            log.info(
+                "  [전환 후보 갱신] unstable frame suppress "
+                f"(count={candidate['suppressed_candidates']}, mse={mse:.1f}, hash={hash_dist}) "
+                f"@ {timestamp:.2f}s"
+            )
+        return False
 
     for item in frame_iter:
         if len(item) >= 4:
@@ -745,29 +955,38 @@ def _run_slide_decision_pass(
         processed_frames += 1
 
         # ── scene 전환 감지 (Cut / Fade / Base 이중 비교) ──────────
-        if first_frame or slide_detector.is_slide_change(small, curr_phash=curr_phash):
-            if not first_frame:
-                # 전환 직전 진행 중이던 필기 강제 캡처
-                if annot_detector.state == "WRITING" \
-                        and annot_detector.writing_count >= annot_detector.min_annot_frames:
-                    annot_idx += 1
-                    fname = f"slide_{slide_idx:03d}_annot_{annot_idx:02d}.jpg"
-                    capture_frame_no = annot_detector.get_capture_frame_no(frame_no)
-                    capture_ts = annot_detector.get_capture_timestamp(timestamp)
-                    metadata.append(
-                        _meta(
-                            fname,
-                            slide_idx,
-                            capture_ts,
-                            "annotation",
-                            annot_index=annot_idx,
-                            frame_no=capture_frame_no,
-                        )
-                    )
-                    log.info(f"  [강제 캡처] {fname} @ {capture_ts:.2f}s")
+        slide_change_detected = first_frame or slide_detector.is_slide_change(small, curr_phash=curr_phash)
+        if pending_scene_candidate is not None:
+            _update_pending_scene(frame_no, timestamp, small, curr_phash)
+            if debug and frame_no % (int(fps) * 10) == 0:
+                log.debug(f"  처리 중: {timestamp:.1f}s / {duration:.1f}s")
+            elif processed_frames % progress_interval == 0:
+                ratio = min(100.0, (timestamp / duration) * 100.0) if duration > 0 else 0.0
+                log.info(
+                    f"  [전역 판정 진행] sampled_frames={processed_frames}, "
+                    f"time={timestamp:.1f}s/{duration:.1f}s ({ratio:.1f}%)"
+                )
+            continue
 
+        if (
+            slide_change_detected
+            and not first_frame
+            and is_probable_animation_build(annot_detector.base_frame, small, cfg)
+        ):
+            preserved = edge_preservation_ratio(annot_detector.base_frame, small)
+            changed = count_changed_pixels(annot_detector.base_frame, small, cfg.ANNOT_DIFF_THRESHOLD)
+            log.info(
+                "  [전환 후보 보류] additive animation으로 판단 "
+                f"(changed={changed:.4f}, edge_preserve={preserved:.3f})"
+            )
+            slide_change_detected = False
+
+        if slide_change_detected:
             first_frame = False
-            register_new_base(frame_no, small, timestamp, "slide_change")
+            if slide_idx <= 0:
+                register_new_base(frame_no, small, timestamp, "first_frame")
+            else:
+                _start_pending_scene(frame_no, timestamp, small, curr_phash, "slide_change")
             continue
 
         # ── 필기 / 애니메이션 감지 ──────────────────────────────────
@@ -791,9 +1010,10 @@ def _run_slide_decision_pass(
             log.info(f"  [필기 완료] {fname} @ {capture_ts:.2f}s")
 
         elif event == "NEW_BASE":
-            # PPT 애니메이션으로 새 콘텐츠 등장 → 새 scene/base로 처리
+            # PPT 애니메이션으로 새 콘텐츠 등장 → 같은 scene의 build로 처리
             capture_frame_no = annot_detector.get_capture_frame_no(frame_no)
-            register_new_base(capture_frame_no, small, timestamp, "animation_base")
+            capture_ts = annot_detector.get_capture_timestamp(timestamp)
+            register_build_frame(capture_frame_no, small, capture_ts, "animation_build")
 
         if debug and frame_no % (int(fps) * 10) == 0:
             log.debug(f"  처리 중: {timestamp:.1f}s / {duration:.1f}s")
@@ -803,6 +1023,20 @@ def _run_slide_decision_pass(
                 f"  [전역 판정 진행] sampled_frames={processed_frames}, "
                 f"time={timestamp:.1f}s/{duration:.1f}s ({ratio:.1f}%)"
             )
+
+    if pending_scene_candidate is not None:
+        candidate = pending_scene_candidate
+        log.warning(
+            "  [전환 후보 flush] 영상 종료까지 안정화되지 않아 마지막 후보를 base로 확정 "
+            f"@ {candidate['timestamp']:.2f}s"
+        )
+        _confirm_pending_scene(
+            candidate["frame_no"],
+            candidate["timestamp"],
+            candidate["frame"],
+            confirmed=False,
+            reason="slide_change_unstable_flush",
+        )
 
     log.info(f"  처리 프레임={processed_frames}")
     return metadata
@@ -864,6 +1098,7 @@ def _extract_slides_core(
 
     _materialize_metadata_frames(input_path, out_path, metadata)
     metadata = add_slide_time_ranges(metadata, duration)
+    metadata = mark_clean_final_frames(metadata)
     metadata = mark_visual_duplicates(metadata, out_path, cfg)
     metadata = finalize_scene_slide_metadata(metadata)
     log_scene_slide_summary(metadata)
@@ -1086,15 +1321,29 @@ def _copy_merged_groups(merged_groups: list[list[dict]], out_path: Path) -> list
     metadata: list[dict] = []
     for new_slide_idx, group in enumerate(merged_groups, start=1):
         annot_idx = 0
+        build_idx = 0
         for item in sorted(group, key=lambda x: (x["timestamp_sec"], 0 if x["capture_type"] == "base" else 1)):
             capture_type = item["capture_type"]
             if capture_type == "base":
                 fname = f"slide_{new_slide_idx:03d}_base.jpg"
+            elif capture_type == "build":
+                build_idx += 1
+                fname = f"slide_{new_slide_idx:03d}_build_{build_idx:02d}.jpg"
             else:
                 annot_idx += 1
                 fname = f"slide_{new_slide_idx:03d}_annot_{annot_idx:02d}.jpg"
             shutil.copy2(_item_source_path(item), out_path / fname)
-            metadata.append(_meta(fname, new_slide_idx, item["timestamp_sec"], capture_type))
+            metadata.append(
+                _meta(
+                    fname,
+                    new_slide_idx,
+                    item["timestamp_sec"],
+                    capture_type,
+                    annot_index=annot_idx if capture_type == "annotation" else 0,
+                    build_index=build_idx if capture_type == "build" else 0,
+                    frame_no=item.get("frame_no"),
+                )
+            )
     return metadata
 
 
@@ -1254,6 +1503,7 @@ def extract_slides(
 
         _materialize_metadata_frames(input_path, out_path, metadata)
         metadata = add_slide_time_ranges(metadata, duration)
+        metadata = mark_clean_final_frames(metadata)
         metadata = mark_visual_duplicates(metadata, out_path, cfg)
         metadata = finalize_scene_slide_metadata(metadata)
         log_scene_slide_summary(metadata)
@@ -1311,6 +1561,7 @@ def _meta(
     timestamp: float,
     capture_type: str,
     annot_index: int = 0,
+    build_index: int = 0,
     frame_no: int | None = None,
 ) -> dict:
     return {
@@ -1319,8 +1570,9 @@ def _meta(
         "scene_index":   slide_idx,
         "timestamp_sec": round(timestamp, 2),
         "annot_index":   int(annot_index),
+        "build_index":   int(build_index),
         "frame_no":      int(frame_no) if frame_no is not None else None,
-        "capture_type":  capture_type,  # base | annotation
+        "capture_type":  capture_type,  # base | build | annotation
     }
 
 
@@ -1364,17 +1616,50 @@ def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
     return metadata
 
 
+def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
+    """
+    scene별 clean final frame을 표시한다.
+
+    clean final은 교수 필기/강조가 들어가기 전, PPT 애니메이션이 모두 전개된
+    가장 마지막 clean content state다. build가 있으면 마지막 build, 없으면 base다.
+    downstream OCR/textualizer/annotation analyzer는 이 프레임을 원본 슬라이드 기준으로 사용한다.
+    """
+    from collections import defaultdict
+
+    by_scene: dict[int, list[dict]] = defaultdict(list)
+    for item in metadata:
+        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+
+    for _, items in by_scene.items():
+        base = next((x for x in items if x.get("capture_type") == "base"), items[0])
+        builds = sorted(
+            [x for x in items if x.get("capture_type") == "build"],
+            key=lambda x: (
+                int(x.get("build_index", 0) or 0),
+                float(x.get("timestamp_sec", 0.0) or 0.0),
+            ),
+        )
+        clean = builds[-1] if builds else base
+        for item in items:
+            item["scene_build_count"] = len(builds)
+            item["clean_final_filename"] = clean.get("filename")
+            item["clean_final_capture_type"] = clean.get("capture_type")
+            item["is_clean_final"] = item is clean
+
+    return metadata
+
+
 # ──────────────────────────────────────────────
 # 후처리: 같은 slide(재등장/애니메이션 계열) 그룹 표시
 # ──────────────────────────────────────────────
 def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     """
-    모든 슬라이드의 대표 프레임(base + last_annot)을 풀에 쌓고
+    모든 슬라이드의 대표 프레임(base + clean_final + last_annot)을 풀에 쌓고
     전체 쌍(all-pairs)을 비교하여 같은 슬라이드 그룹을 표시한다.
 
     프레임 풀 구성:
-      - 각 slide_index 별로 base 프레임 + last_annot 프레임(있으면) 수집
-      - 레이블: "base{idx}" / "annot{idx}"
+      - 각 slide_index 별로 base 프레임 + clean_final(build 또는 base) + last_annot 프레임(있으면) 수집
+      - 레이블: "base{idx}" / "clean{idx}" / "annot{idx}"
 
     비교:
       - 풀 내 모든 쌍을 phash(256비트) 비교
@@ -1396,10 +1681,13 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
         base_list  = [f for f in frames if f["capture_type"] == "base"]
+        clean_list = [f for f in frames if f.get("is_clean_final")]
         annot_list = [f for f in frames if f["capture_type"] == "annotation"]
 
         if base_list:
             pool[f"base{idx}"] = (idx, base_list[0]["filename"])
+        if clean_list and clean_list[0].get("filename") != (base_list[0].get("filename") if base_list else None):
+            pool[f"clean{idx}"] = (idx, clean_list[0]["filename"])
         if annot_list:
             pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"])
 
@@ -1683,6 +1971,9 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
             "scene_annotation_start_index": int(base.get("scene_annotation_start_index", 0) or 0),
             "scene_annotation_end_index": int(base.get("scene_annotation_end_index", 0) or 0),
             "base_filename": base.get("filename"),
+            "clean_final_filename": base.get("clean_final_filename", base.get("filename")),
+            "clean_final_capture_type": base.get("clean_final_capture_type", "base"),
+            "scene_build_count": int(base.get("scene_build_count", 0) or 0),
         })
 
     unique_slides = sorted({row["slide_canonical_index"] for row in mappings})
@@ -1735,6 +2026,13 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
         for items in scene_groups:
             base = next((x for x in items if x.get("capture_type") == "base"), items[0])
             scene_idx = int(base.get("scene_index", base.get("slide_index", 0)) or 0)
+            builds = sorted(
+                [x for x in items if x.get("capture_type") == "build"],
+                key=lambda x: (
+                    int(x.get("build_index", 0) or 0),
+                    float(x.get("timestamp_sec", 0.0) or 0.0),
+                ),
+            )
             annots = sorted(
                 [x for x in items if x.get("capture_type") == "annotation"],
                 key=lambda x: (
@@ -1752,9 +2050,25 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
                 "scene_start_formatted": _fmt_hms(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0)))),
                 "scene_end_formatted": _fmt_hms(base.get("scene_end_sec", base.get("slide_end_sec", base.get("timestamp_sec", 0.0)))),
                 "base_filename": base.get("filename"),
+                "clean_final_filename": base.get("clean_final_filename", base.get("filename")),
+                "clean_final_capture_type": base.get("clean_final_capture_type", "base"),
+                "scene_build_count": int(base.get("scene_build_count", 0) or 0),
                 "scene_annotation_count": len(annots),
                 "scene_annotation_start_index": int(base.get("scene_annotation_start_index", 0) or 0),
                 "scene_annotation_end_index": int(base.get("scene_annotation_end_index", 0) or 0),
+                "builds": [
+                    {
+                        "filename": build.get("filename"),
+                        "scene_index": scene_idx,
+                        "slide_number": slide_number,
+                        "slide_canonical_index": slide_idx,
+                        "timestamp_sec": float(build.get("timestamp_sec", 0.0) or 0.0),
+                        "timestamp_formatted": _fmt_hms(build.get("timestamp_sec", 0.0)),
+                        "build_index": int(build.get("build_index", 0) or 0),
+                        "is_clean_final": bool(build.get("is_clean_final", False)),
+                    }
+                    for build in builds
+                ],
                 "annotations": [],
             }
 

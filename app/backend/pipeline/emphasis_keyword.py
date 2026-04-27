@@ -276,6 +276,18 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
     try:
         from .utils import api_call_with_retry
         response = api_call_with_retry(call_api)
+        try:
+            from .cost_report import record_model_call
+
+            record_model_call(
+                stage="stage3b_emphasis_keyword",
+                provider="google",
+                model=GEMINI_GENERATIVE_MODEL,
+                response=response,
+                prompt_chars=len(prompt),
+            )
+        except Exception:
+            pass
         text = (response.text or "").strip()
         if "```json" in text:
             text = text.split("```json")[1].split("```")[0].strip()

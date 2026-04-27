@@ -55,12 +55,23 @@ def _get_client() -> genai.Client:
     return _override_client
 
 
-def _add_usage(response) -> None:
+def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
     usage = getattr(response, "usage_metadata", None)
     if usage:
         _token_usage["input"] += getattr(usage, "prompt_token_count", 0) or 0
         _token_usage["output"] += getattr(usage, "candidates_token_count", 0) or 0
     _token_usage["calls"] += 1
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage=stage,
+            provider="google",
+            model=GEMINI_MODEL,
+            response=response,
+        )
+    except Exception:
+        pass
 
 
 def api_call_with_retry(func, max_retries: int = 5, initial_wait: int = 10):
@@ -149,7 +160,7 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_domain")
         raw = (response.text or "").strip()
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
@@ -432,7 +443,7 @@ def _correct_batch_pass1(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_pass1")
         local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass1 오류 무시] {exc}")
@@ -516,7 +527,7 @@ def _correct_batch_pass2(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_pass2")
         local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")
