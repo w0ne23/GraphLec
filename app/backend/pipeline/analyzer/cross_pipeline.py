@@ -8,7 +8,7 @@
 
 사용법:
     python -m analyzer.cross_pipeline <merged_clean.json>
-    python -m analyzer.cross_pipeline <merged_clean.json> --models gemini-3-flash-preview gpt-5.4
+    python -m analyzer.cross_pipeline <merged_clean.json> --models gemini-2.5-flash gpt-5.4
     python -m analyzer.cross_pipeline <merged_clean.json> --mode independent
 """
 
