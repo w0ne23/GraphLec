@@ -19,8 +19,16 @@ export async function uploadLecture({ file, title, category, description }) {
   }
   
   const data = await res.json();
-  // upload 직후에는 lecture_id가 없으므로 job_id를 반환하며 일치시켜줍니다.
-  return { id: data.job_id, job_id: data.job_id, status: 'pending' };
+  const lectureId = data.lecture_id || data.id || data.job_id;
+  return {
+    id: lectureId,
+    job_id: data.job_id,
+    lecture_id: data.lecture_id || lectureId,
+    title,
+    category,
+    description,
+    status: 'pending',
+  };
 }
 
 export async function getLectureStatus(jobId) {

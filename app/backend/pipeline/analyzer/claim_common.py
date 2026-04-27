@@ -35,19 +35,24 @@ def _default_judge_model(base_model: str) -> str:
 
 
 def _resolve_stage_model(stage: str) -> str:
-    base = VERIFIER_MODEL
-    strong = VERIFIER_CLAIM_JUDGE_MODEL or _default_judge_model(base)
+    base = os.getenv("VERIFIER_MODEL", VERIFIER_MODEL).strip() or VERIFIER_MODEL
+    extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
+    judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
+    cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
+    slide_recheck_model = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", VERIFIER_SLIDE_RECHECK_MODEL).strip()
+    grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
+    strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
-        return VERIFIER_CLAIM_EXTRACT_MODEL or base
+        return extract_model or base
     if stage == "judge":
         return strong
     if stage == "cross_recheck":
-        return VERIFIER_CROSS_RECHECK_MODEL or strong
+        return cross_recheck_model or strong
     if stage == "recheck":
-        return VERIFIER_SLIDE_RECHECK_MODEL or strong
+        return slide_recheck_model or strong
     if stage == "grounding":
-        return VERIFIER_GROUNDING_MODEL or strong
+        return grounding_model or strong
     return base
 
 

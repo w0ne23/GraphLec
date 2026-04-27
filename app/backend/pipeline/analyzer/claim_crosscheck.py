@@ -1,7 +1,58 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
+
+
+def _parse_crosscheck_payload(text: str) -> dict:
+    from . import claim_common as cv
+
+    cleaned = cv._strip_json_fence((text or "").strip())
+    candidates = [cleaned]
+    obj = cv._extract_first_json_object(cleaned)
+    if obj and obj not in candidates:
+        candidates.append(obj)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
+        for payload_text in (candidate, fixed):
+            try:
+                payload = json.loads(payload_text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return payload
+
+    verdict = cv._extract_json_like_string_field(cleaned, "verdict").lower().strip()
+    if verdict not in _CROSSCHECK_VERDICTS:
+        m = re.search(
+            r"['\"]?verdict['\"]?\s*:\s*['\"]?(agree|disagree|inconclusive)['\"]?",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            verdict = m.group(1).lower()
+
+    reason = cv._extract_json_like_string_field(cleaned, "reason")
+    if not reason:
+        m = re.search(
+            r"['\"]?reason['\"]?\s*:\s*['\"]?(.+?)(?:['\"]?\s*[,}]|\n|$)",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            reason = re.sub(r"\s+", " ", m.group(1)).strip()
+
+    if verdict in _CROSSCHECK_VERDICTS:
+        return {"verdict": verdict, "reason": reason}
+
+    raise ValueError("crosscheck_response_parse_failed")
+
 
 def _build_slide_transcript_block(slides: list[dict], slide_number: int) -> str:
     slide_text = ""
@@ -117,23 +168,35 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
 응답 (JSON만):
 {{"verdict": "agree" | "disagree" | "inconclusive", "reason": "짧은 사유"}}"""
 
-    try:
-        text, call_usage = cv._call_llm(
-            prompt,
-            max_tokens=512,
-            thinking_budget=1024,
-            stage="cross_recheck",
-        )
-        payload = json.loads(cv._strip_json_fence(text.strip()))
-        token_usage = cv._empty_token_usage()
-        cv._add_call_usage(token_usage, call_usage)
-        verdict = str(payload.get("verdict", "") or "").lower().strip()
-        reason = str(payload.get("reason", "") or "").strip()
-        if verdict not in {"agree", "disagree", "inconclusive"}:
-            return "inconclusive", f"알 수 없는 verdict: {verdict}", token_usage
-        return verdict, reason, token_usage
-    except Exception as e:
-        return "inconclusive", f"교차 재검증 실패: {e}", cv._empty_token_usage()
+    model = str(cv._resolve_stage_model("cross_recheck") or "").strip()
+    response_format = {"type": "json_object"} if (
+        model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
+    ) else None
+
+    token_usage = cv._empty_token_usage()
+    last_error = None
+    for attempt in range(cv.VERIFIER_PARSE_RETRIES + 1):
+        try:
+            text, call_usage = cv._call_llm(
+                prompt,
+                max_tokens=512,
+                thinking_budget=1024,
+                response_format=response_format,
+                stage="cross_recheck",
+            )
+            cv._add_call_usage(token_usage, call_usage)
+            payload = _parse_crosscheck_payload(text)
+            verdict = str(payload.get("verdict", "") or "").lower().strip()
+            reason = str(payload.get("reason", "") or "").strip()
+            if verdict not in _CROSSCHECK_VERDICTS:
+                return "inconclusive", f"알 수 없는 verdict: {verdict}", token_usage
+            return verdict, reason, token_usage
+        except Exception as e:
+            last_error = e
+            if attempt < cv.VERIFIER_PARSE_RETRIES:
+                print(f"    ↺ 교차 재검증 JSON 파싱 재시도 ({attempt+1}/{cv.VERIFIER_PARSE_RETRIES})")
+
+    return "inconclusive", f"교차 재검증 실패: {last_error}", token_usage
 
 
 def _build_slide_recheck_prompt(
