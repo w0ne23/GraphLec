@@ -141,6 +141,40 @@ export async function askQa(lectureId, question) {
   return res.json();
 }
 
+async function postGraphLifecycle(lectureId, action, sessionId) {
+  const res = await fetch(`${API_BASE}/results/${lectureId}/graph/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Graph ${action} failed`);
+  }
+  return res.json();
+}
+
+export async function enterLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'enter', sessionId);
+}
+
+export async function heartbeatLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'heartbeat', sessionId);
+}
+
+export async function leaveLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'leave', sessionId);
+}
+
+export async function getLectureGraphSessionStatus(lectureId) {
+  const res = await fetch(`${API_BASE}/results/${lectureId}/graph/status`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Graph status fetch failed');
+  }
+  return res.json();
+}
+
 export async function getQaHistory(lectureId) {
   return [];
 }

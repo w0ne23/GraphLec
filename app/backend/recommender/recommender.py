@@ -78,7 +78,7 @@ class RecommenderConfig:
     # 파편화 패널티 강도 λ
     FRAG_PENALTY_WEIGHT: float = 0.10
     # 추천 최소 점수 — 이 점수 이하인 강의는 추천 결과에서 제외
-    MIN_SCORE:           float = 0.40
+    MIN_SCORE:           float = 0.30
     # 벡터 DB 경로
     DB_DIR:              str   = DEFAULT_DB_DIR
     # domain boost 강도
