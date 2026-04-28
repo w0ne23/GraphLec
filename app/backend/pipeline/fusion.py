@@ -540,6 +540,7 @@ def run_fusion(cfg: Config) -> dict:
             "slide_number": slide_num,
             "title":        cl_slide.get("title", ""),
             "slide_text":   cl_slide.get("t1", ""),
+            "slide_type":   cl_slide.get("slide_type", "text"),  # "text" | "image_only" | "mixed"
             "role":         cl_slide.get("role"),
             "start_sec":    au_slide["start_sec"] if au_slide else None,
             "end_sec":      au_slide["end_sec"]   if au_slide else None,
