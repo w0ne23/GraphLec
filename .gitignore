@@ -54,6 +54,9 @@ web/staticfiles/
 # LanceDB 로컬 데이터
 data/lancedb/
 
+# Microsoft GraphRAG 로컬 workspace / cache / index 산출물
+graphrag_workspaces/
+
 # ── Jupyter ───────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb
