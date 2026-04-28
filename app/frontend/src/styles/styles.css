@@ -1733,6 +1733,8 @@ img { display: block; max-width: 100%; }
 .rec-item:first-child { border-top: 1px solid var(--b1); }
 .rec-item:hover { background: var(--hover); }
 .rec-item--expanded { background: var(--panel); }
+.rec-item--related { border-left: 3px solid #fcd34d; }
+.rec-item--background { border-left-color: var(--b2); }
 
 /* 메인 행: 썸네일 | 메타 | 점수+토글 */
 .rec-item-main {
@@ -1789,6 +1791,24 @@ img { display: block; max-width: 100%; }
   font-size: 22px; font-weight: 800; line-height: 1;
   color: #3dad3d;
 }
+.rec-overall-score--related { color: #d97706; }
+.rec-overall-score--background { color: var(--t3); }
+.rec-tier-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 500;
+  background-color: #fef3c7;
+  color: #92400e;
+  border: 1px solid #fcd34d;
+  white-space: nowrap;
+}
+.rec-tier-badge--background {
+  background-color: var(--card);
+  color: var(--t3);
+  border-color: var(--b2);
+}
 .rec-toggle-btn {
   font-size: 11px; color: var(--t3); background: none; border: none;
   padding: 0; white-space: nowrap; transition: color .14s;
@@ -1799,6 +1819,20 @@ img { display: block; max-width: 100%; }
 .rec-item-details { border-top: 1px solid var(--b1); background: var(--card); }
 .rec-details-content { padding: 16px; }
 .rec-details-title { font-size: 12px; font-weight: 700; color: var(--t2); margin-bottom: 12px; }
+.rec-related-notice {
+  font-size: 13px;
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.rec-related-notice--background {
+  color: var(--t2);
+  background-color: var(--card);
+  border-color: var(--b1);
+}
 
 .rec-scores-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
 .rec-score-row   { display: flex; align-items: center; gap: 10px; }
