@@ -684,11 +684,17 @@ class Recommender:
         self._available_domains  = self.collection.available_domains()
         self._available_keywords = self.collection.available_keywords()
         # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지)
-        print("[LanceDB 레코드 로드 중...]")
-        db               = lancedb.connect(self.cfg.DB_DIR)
-        table            = db.open_table("lectures")
-        self._index_rows = table.to_arrow().to_pylist()
-        print(f"  → {len(self._index_rows)}개 레코드 로드\n")
+        db = lancedb.connect(self.cfg.DB_DIR)
+        # 테이블 없으면 빈 인덱스로 시작
+        if "lectures" in db.table_names():
+            print("[LanceDB 레코드 로드 중...]")
+            table            = db.open_table("lectures")
+            self._index_rows = table.to_arrow().to_pylist()
+            print(f"  → {len(self._index_rows)}개 레코드 로드\n")
+        else:
+            print("[Recommender] LanceDB 테이블 없음, 빈 인덱스로 시작\n")
+            self._index_rows = []
+
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
 
