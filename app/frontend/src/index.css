@@ -1560,6 +1560,101 @@ img { display: block; max-width: 100%; }
   border: 1px solid rgba(234, 140, 58, 0.25);
 }
 
+/* 간접 관련 배지 — 점수 바로 아래 amber 계열 pill */
+.rec-tier-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 500;
+  background-color: #fef3c7;  /* amber-100 */
+  color: #92400e;             /* amber-800 */
+  border: 1px solid #fcd34d; /* amber-300 */
+  white-space: nowrap;
+}
+
+.rec-tier-badge--background {
+  background-color: var(--card);
+  color: var(--t3);
+  border-color: var(--b2);
+}
+
+/* 다크모드 대응 */
+@media (prefers-color-scheme: dark) {
+  .rec-tier-badge {
+    background-color: #451a03;
+    color: #fcd34d;
+    border-color: #78350f;
+  }
+}
+
+/* 간접 관련 아이템 — 점수 숫자 색상을 amber로 */
+.rec-overall-score--related {
+  color: #d97706; /* amber-600 */
+}
+
+.rec-overall-score--background {
+  color: var(--t3);
+}
+
+@media (prefers-color-scheme: dark) {
+  .rec-overall-score--related {
+    color: #fbbf24; /* amber-400 */
+  }
+}
+
+/* 간접 관련 아이템 — 좌측 보더로 구분 */
+.rec-item--related {
+  border-left: 3px solid #fcd34d;
+}
+
+.rec-item--background {
+  border-left-color: var(--b2);
+}
+
+@media (prefers-color-scheme: dark) {
+  .rec-item--related {
+    border-left-color: #78350f;
+  }
+}
+
+/* 확장 시 간접 관련 안내 문구 */
+.rec-related-notice {
+  font-size: 13px;
+  color: #92400e;
+  background-color: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+
+.rec-related-notice--background {
+  color: var(--t2);
+  background-color: var(--card);
+  border-color: var(--b1);
+}
+
+@media (prefers-color-scheme: dark) {
+  .rec-related-notice {
+    color: #fcd34d;
+    background-color: #1c1100;
+    border-color: #78350f;
+  }
+
+  .rec-tier-badge--background {
+    background-color: var(--card);
+    color: var(--t3);
+    border-color: var(--b2);
+  }
+
+  .rec-related-notice--background {
+    color: var(--t2);
+    background-color: var(--card);
+    border-color: var(--b1);
+  }
+}
+
 
 /* ============================================================
    PAGE — LecturePage (lp-*)
