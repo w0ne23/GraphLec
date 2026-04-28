@@ -611,6 +611,7 @@ def run_fusion(cfg: Config) -> dict:
             "representative_scene_number": cl_slide.get("representative_scene_number", slide_num),
             "title":        cl_slide.get("title", ""),
             "slide_text":   cl_slide.get("t1", ""),
+            "slide_type":   cl_slide.get("slide_type", "text"),  # "text" | "image_only" | "mixed"
             "slide_summary": slide_summary,
             "annotation_highlights_summary": annotation_highlights_summary,
             "role":         cl_slide.get("role"),

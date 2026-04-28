@@ -169,6 +169,55 @@ def collect_emphasized(fused: dict) -> dict[str, float]:
     return scores
 
 
+def collect_pedagogy(fused: dict) -> dict:
+    """
+    슬라이드 타입 분포로 강의 전달 방식(pedagogy) 메타데이터 추출.
+
+    slide_type 기준:
+      - image_only : 이미지·다이어그램만 있는 슬라이드 (시각 자료 전용)
+      - mixed      : 텍스트 + 이미지 혼합 (절반 기여)
+      - text       : 텍스트만 있는 슬라이드
+
+    visual_ratio 계산:
+      (image_only 수 + mixed 수 × 0.5) / 전체 슬라이드 수
+
+    style_tags:
+      visual_ratio ≥ 0.5 → "diagram-heavy"
+      visual_ratio ≥ 0.3 → "visual-supported"
+      그 외              → 태그 없음
+    """
+    slides = [
+        s for s in fused.get("slides", [])
+        if s.get("role") != "objectives"  # 학습목표 슬라이드 제외
+    ]
+    total = len(slides)
+    if total == 0:
+        return {"visual_ratio": 0.0, "style_tags": []}
+
+    image_only_count = sum(1 for s in slides if s.get("slide_type") == "image_only")
+    mixed_count      = sum(1 for s in slides if s.get("slide_type") == "mixed")
+
+    # image_only는 전체 기여, mixed는 절반 기여
+    visual_ratio = round((image_only_count + mixed_count * 0.5) / total, 3)
+
+    style_tags: list[str] = []
+    if visual_ratio >= 0.5:
+        style_tags.append("diagram-heavy")
+    elif visual_ratio >= 0.3:
+        style_tags.append("visual-supported")
+
+    print(
+        f"[디버그] pedagogy: visual_ratio={visual_ratio:.3f} "
+        f"(image_only={image_only_count}, mixed={mixed_count}, total={total}) "
+        f"tags={style_tags}"
+    )
+
+    return {
+        "visual_ratio": visual_ratio,
+        "style_tags":   style_tags,
+    }
+
+
 def collect_slide_role_freq(
     fused: dict,
     all_names: set[str],
@@ -799,6 +848,7 @@ def generate_metadata(
     duration_sec = get_duration(fused)
     slide_texts, transcript_texts, core_slide_texts, core_trans_texts = collect_texts(fused)
     emphasized   = collect_emphasized(fused)
+    pedagogy     = collect_pedagogy(fused)
 
     # objectives 슬라이드는 요약/키워드 연산과 독립적으로 별도 수집
     learning_objectives = collect_learning_objectives(fused)
@@ -868,6 +918,7 @@ def generate_metadata(
         "keywords":            keywords,
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
+        "pedagogy":            pedagogy,
     }
 
     # 저장
