@@ -48,6 +48,25 @@ def _embed_with_retry(
                 contents=contents,
                 config=types.EmbedContentConfig(task_type=task_type),
             )
+            try:
+                from .cost_report import record_model_call
+
+                item_count = len(contents) if isinstance(contents, Sequence) and not isinstance(contents, str) else 1
+                prompt_chars = (
+                    sum(len(str(x)) for x in contents)
+                    if isinstance(contents, Sequence) and not isinstance(contents, str)
+                    else len(str(contents))
+                )
+                record_model_call(
+                    stage="stage7_lance_embedding" if task_type == "RETRIEVAL_DOCUMENT" else "embedding_query",
+                    provider="google",
+                    model=model,
+                    response=r,
+                    item_count=item_count,
+                    prompt_chars=prompt_chars,
+                )
+            except Exception:
+                pass
             return [list(e.values) for e in r.embeddings]
         except Exception as e:
             last_err = e

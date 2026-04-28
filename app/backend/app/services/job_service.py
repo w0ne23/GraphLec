@@ -3,23 +3,27 @@ import shutil
 import logging
 import json
 import hashlib
+import uuid
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 import httpx
 from pathlib import Path
 from typing import Optional, List, Any, Dict
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from neo4j import GraphDatabase
 
-from app.models import Job, LectureContent
+from app.models import Job, LectureContent, GraphSession
+from pipeline.neo4j_ingest import ingest_parquet_to_neo4j
 
 logger = logging.getLogger(__name__)
 
 # ── 경로 설정 ────────────────────────────────────────────────────────────────
 PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
+GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 
 
 # ── Neo4j ────────────────────────────────────────────────────────────────────
@@ -30,6 +34,126 @@ def get_neo4j_driver():
     if not all([uri, user, pw]):
         return None
     return GraphDatabase.driver(uri, auth=(user, pw))
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _session_expired(cutoff: datetime):
+    return and_(
+        GraphSession.ended_at.is_(None),
+        GraphSession.last_heartbeat_at < cutoff,
+    )
+
+
+async def _cleanup_stale_sessions(db: AsyncSession, stem: str) -> int:
+    cutoff = _utcnow() - timedelta(seconds=GRAPH_SESSION_TTL_SEC)
+    q = select(GraphSession).where(
+        GraphSession.stem == stem,
+        _session_expired(cutoff),
+    )
+    res = await db.execute(q)
+    rows = res.scalars().all()
+    for row in rows:
+        row.ended_at = _utcnow()
+    if rows:
+        await db.commit()
+    return len(rows)
+
+
+async def _active_session_count(db: AsyncSession, stem: str) -> int:
+    await _cleanup_stale_sessions(db, stem)
+    q = select(GraphSession).where(
+        GraphSession.stem == stem,
+        GraphSession.ended_at.is_(None),
+    )
+    res = await db.execute(q)
+    return len(res.scalars().all())
+
+
+async def _touch_or_create_graph_session(
+    db: AsyncSession,
+    *,
+    lecture_id,
+    stem: str,
+    session_id: str,
+    now: datetime,
+) -> None:
+    """
+    (lecture_id, session_id) 세션을 upsert처럼 갱신한다.
+    - 기존 중복 행이 있으면 최신 1개만 활성 유지하고 나머지는 ended 처리
+    """
+    q = (
+        select(GraphSession)
+        .where(
+            GraphSession.lecture_id == lecture_id,
+            GraphSession.session_id == session_id,
+        )
+        .order_by(GraphSession.created_at.desc(), GraphSession.id.desc())
+    )
+    res = await db.execute(q)
+    rows = res.scalars().all()
+
+    if not rows:
+        db.add(
+            GraphSession(
+                lecture_id=lecture_id,
+                stem=stem,
+                session_id=session_id,
+                last_heartbeat_at=now,
+                ended_at=None,
+            )
+        )
+        return
+
+    primary = rows[0]
+    primary.last_heartbeat_at = now
+    primary.ended_at = None
+    for extra in rows[1:]:
+        extra.ended_at = now
+
+
+def _is_stem_loaded(stem: str) -> bool:
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
+    try:
+        with driver.session() as session:
+            record = session.run(
+                "MATCH (n {stem: $stem}) RETURN count(n) AS count",
+                stem=stem,
+            ).single()
+            return bool(record and int(record["count"] or 0) > 0)
+    finally:
+        driver.close()
+
+
+def _unload_stem_from_neo4j(stem: str) -> None:
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
+    try:
+        with driver.session() as session:
+            session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
+    finally:
+        driver.close()
+
+
+def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
+    if _is_stem_loaded(stem):
+        return {"loaded_now": False}
+    try:
+        ingest_result = ingest_parquet_to_neo4j(stem=stem, output_dir=Path(output_dir))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Neo4j 적재 실패: {e}")
+    return {
+        "loaded_now": True,
+        "node_count": ingest_result.get("node_count", 0),
+        "edge_count": ingest_result.get("edge_count", 0),
+    }
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
@@ -129,9 +253,16 @@ async def retry_job(db: AsyncSession, job_id: str) -> bool:
     job = await get_job(db, job_id)
     if not job:
         return False
+    result = await db.execute(select(LectureContent).where(LectureContent.job_id == job_id))
+    content = result.scalar_one_or_none()
+    if content and content.output_dir:
+        output_dir = Path(content.output_dir)
+        if output_dir.exists() and "results" in output_dir.as_posix():
+            shutil.rmtree(output_dir, ignore_errors=True)
+            logger.info("Cleared output dir for retry: %s", output_dir)
     job.status          = "pending"
     job.error_message   = None
-    job.current_stage   = None
+    job.current_stage   = "Retrying..."
     job.pipeline_stages = []
     await db.commit()
     return True
@@ -218,6 +349,119 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     }
 
 
+async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[LectureContent]:
+    try:
+        lec_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+    result = await db.execute(select(LectureContent).where(LectureContent.id == lec_uuid))
+    return result.scalar_one_or_none()
+
+
+async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
+    content = await _get_lecture_content(db, lecture_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+
+    stem = str(content.stem)
+    output_dir = str(content.output_dir)
+    now = _utcnow()
+
+    await _cleanup_stale_sessions(db, stem)
+    await _touch_or_create_graph_session(
+        db,
+        lecture_id=content.id,
+        stem=stem,
+        session_id=session_id,
+        now=now,
+    )
+    await db.commit()
+
+    load_info = _ensure_stem_loaded(stem, output_dir)
+    active_count = await _active_session_count(db, stem)
+    return {
+        "lecture_id": str(content.id),
+        "stem": stem,
+        "session_id": session_id,
+        "active_sessions": active_count,
+        "loaded": True,
+        **load_info,
+    }
+
+
+async def graph_heartbeat(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
+    content = await _get_lecture_content(db, lecture_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    stem = str(content.stem)
+    now = _utcnow()
+
+    await _touch_or_create_graph_session(
+        db,
+        lecture_id=content.id,
+        stem=stem,
+        session_id=session_id,
+        now=now,
+    )
+    await db.commit()
+
+    return {
+        "lecture_id": str(content.id),
+        "stem": stem,
+        "session_id": session_id,
+        "active_sessions": await _active_session_count(db, stem),
+    }
+
+
+async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
+    content = await _get_lecture_content(db, lecture_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    stem = str(content.stem)
+
+    q = select(GraphSession).where(
+        GraphSession.lecture_id == content.id,
+        GraphSession.session_id == session_id,
+        GraphSession.ended_at.is_(None),
+    )
+    res = await db.execute(q)
+    rows = res.scalars().all()
+    if rows:
+        now = _utcnow()
+        for row in rows:
+            row.ended_at = now
+        await db.commit()
+
+    active_count = await _active_session_count(db, stem)
+    unloaded_now = False
+    if active_count == 0 and _is_stem_loaded(stem):
+        _unload_stem_from_neo4j(stem)
+        unloaded_now = True
+
+    return {
+        "lecture_id": str(content.id),
+        "stem": stem,
+        "session_id": session_id,
+        "active_sessions": active_count,
+        "unloaded_now": unloaded_now,
+        "loaded": _is_stem_loaded(stem),
+    }
+
+
+async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    content = await _get_lecture_content(db, lecture_id)
+    if not content:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    stem = str(content.stem)
+    return {
+        "lecture_id": str(content.id),
+        "stem": stem,
+        "loaded": _is_stem_loaded(stem),
+        "active_sessions": await _active_session_count(db, stem),
+        "session_ttl_sec": GRAPH_SESSION_TTL_SEC,
+    }
+
+
 async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict[str, Any]:
     """질의응답 (Lecture ID 기준)"""
     result = await db.execute(select(LectureContent).where(LectureContent.id == lecture_id))
@@ -227,6 +471,7 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
 
     stem      = content.stem
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
+    _ensure_stem_loaded(stem, content.output_dir)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:

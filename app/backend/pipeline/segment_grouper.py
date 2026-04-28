@@ -16,7 +16,7 @@ import re
 
 from google.genai import types
 
-from .config import gemini_client_2
+from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 from .utils import api_call_with_retry
 
 
@@ -85,7 +85,7 @@ def decide_semantic_merges(groups: list[dict]) -> set[int]:
 
     def call_api():
         return gemini_client_2.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=GEMINI_GENERATIVE_MODEL,
             contents=[types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(
                 temperature=0.1,
@@ -169,7 +169,7 @@ def decide_merge_pair(current_text: str, next_text: str, max_chars: int = 400) -
 
     def call_api():
         return gemini_client_2.models.generate_content(
-            model="gemini-3-flash-preview",
+            model=GEMINI_GENERATIVE_MODEL,
             contents=[types.Part.from_text(text=prompt)],
             config=types.GenerateContentConfig(
                 temperature=0.1,
@@ -403,20 +403,21 @@ def expand_group_annotations_to_segments(
 def load_slide_ranges(metadata_path: str, duration_sec: float) -> list[dict]:
     """
     metadata.json에서 슬라이드별 시간 구간 계산.
-    같은 slide_index의 base(annot_index=0)가 한 슬라이드 시작.
+    같은 scene_index의 base(annot_index=0)가 한 scene 시작.
     반환: [ {"slide_index": 1, "start_sec": 0.07, "end_sec": 46.73}, ... ]
     """
     with open(metadata_path, "r", encoding="utf-8") as f:
         items = json.load(f)
     bases = [x for x in items if x.get("annot_index") == 0 or x.get("capture_type") == "base"]
-    bases = sorted(bases, key=lambda x: (x["slide_index"], x["timestamp_sec"]))
+    bases = sorted(bases, key=lambda x: (x.get("scene_index", x["slide_index"]), x["timestamp_sec"]))
     seen = set()
     unique_bases = []
     for b in bases:
-        if b["slide_index"] in seen:
+        scene_idx = b.get("scene_index", b["slide_index"])
+        if scene_idx in seen:
             continue
-        seen.add(b["slide_index"])
-        unique_bases.append({"slide_index": b["slide_index"], "timestamp_sec": b["timestamp_sec"]})
+        seen.add(scene_idx)
+        unique_bases.append({"slide_index": scene_idx, "timestamp_sec": b["timestamp_sec"]})
     unique_bases.sort(key=lambda x: x["timestamp_sec"])
     ranges = []
     for i, b in enumerate(unique_bases):
@@ -553,5 +554,3 @@ def group_segments_by_slide_and_context(
         })
 
     return groups_flat, slides_structure
-
-
