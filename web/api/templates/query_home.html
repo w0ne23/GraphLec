@@ -204,6 +204,62 @@
     const csrfToken = "{{ csrf_token }}";
     const netQuery = { ref: null };
     const netFull = { ref: null };
+    const graphSessionId = (window.crypto && window.crypto.randomUUID)
+      ? window.crypto.randomUUID()
+      : ("sess-" + Date.now() + "-" + Math.random().toString(36).slice(2));
+    let currentLectureId = null;
+    let heartbeatTimer = null;
+
+    function graphLifecycleUrl(lectureId, action) {
+      return "/results/" + Number(lectureId) + "/graph/" + action;
+    }
+
+    async function postGraphLifecycle(lectureId, action) {
+      const r = await fetch(graphLifecycleUrl(lectureId, action), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRFToken": csrfToken,
+        },
+        body: JSON.stringify({ session_id: graphSessionId }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(data.detail || ("HTTP " + r.status));
+      }
+      return data;
+    }
+
+    async function enterLectureGraph(lectureId) {
+      if (!lectureId) return;
+      await postGraphLifecycle(lectureId, "enter");
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      heartbeatTimer = setInterval(async () => {
+        if (!currentLectureId) return;
+        try {
+          await postGraphLifecycle(currentLectureId, "heartbeat");
+        } catch (e) {
+          // heartbeat 실패는 UI를 막지 않고 다음 주기에 재시도
+        }
+      }, 25000);
+    }
+
+    async function leaveLectureGraph(lectureId) {
+      if (!lectureId) return;
+      try {
+        await postGraphLifecycle(lectureId, "leave");
+      } catch (e) {
+        // leave 실패는 TTL 정리 로직으로 보완
+      } finally {
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+          heartbeatTimer = null;
+        }
+      }
+    }
 
     function setAnswer(text) {
       const el = document.getElementById("answer");
@@ -466,6 +522,46 @@
         btn.disabled = false;
       }
     };
+
+    document.getElementById("lecture").addEventListener("change", async (e) => {
+      const nextLectureId = e.target.value || null;
+      const status = document.getElementById("status");
+      try {
+        if (currentLectureId && currentLectureId !== nextLectureId) {
+          await leaveLectureGraph(currentLectureId);
+        }
+        currentLectureId = nextLectureId;
+        if (currentLectureId) {
+          status.textContent = "그래프 로드 준비 중…";
+          await enterLectureGraph(currentLectureId);
+          status.textContent = "";
+        }
+      } catch (err) {
+        status.innerHTML = '<span class="err">' + String(err) + "</span>";
+      }
+    });
+
+    // 초기 진입 시 선택된 강의 graph session 시작
+    (async () => {
+      const selected = document.getElementById("lecture").value || null;
+      currentLectureId = selected;
+      if (!currentLectureId) return;
+      try {
+        await enterLectureGraph(currentLectureId);
+      } catch (e) {
+        // 초기 로딩 실패 시에도 페이지는 계속 사용 가능 (질의 시점 로드 백업 존재)
+      }
+    })();
+
+    // 탭 종료 시 leave 시도 (실패해도 서버 TTL로 정리됨)
+    window.addEventListener("beforeunload", () => {
+      if (!currentLectureId || !navigator.sendBeacon) return;
+      const url = graphLifecycleUrl(currentLectureId, "leave");
+      const payload = JSON.stringify({ session_id: graphSessionId });
+      const blob = new Blob([payload], { type: "application/json" });
+      navigator.sendBeacon(url, blob);
+    });
+
   </script>
 </body>
 </html>
