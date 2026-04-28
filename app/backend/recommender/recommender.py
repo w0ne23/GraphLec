@@ -136,9 +136,13 @@ class MetadataCollection:
         self._load(Path(metadata_dir))
 
     def _load(self, directory: Path):
+        if not directory.exists():
+            print(f"[Recommender] 메타데이터 디렉토리 없음, 빈 컬렉션으로 시작: {directory}")
+            return
         files = list(directory.glob("*_metadata.json"))
         if not files:
-            raise FileNotFoundError(f"메타데이터 파일 없음: {directory}")
+            print(f"[Recommender] 메타데이터 파일 없음, 빈 컬렉션으로 시작: {directory}")
+            return
         for path in files:
             with open(path, encoding="utf-8") as f:
                 raw = json.load(f)
