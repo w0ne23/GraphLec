@@ -30,12 +30,6 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
-from .graphrag_neo4j_ingest import (
-    delete_custom_concept_layer_tx,
-    find_graphrag_output_dir,
-    load_graphrag_layer_tx,
-)
-
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -128,7 +122,6 @@ def ingest_parquet_to_neo4j(
     skipped_concept_nodes = 0
     skipped_concept_edges = 0
     labels_seen: set[str] = set()
-    graphrag_counts: dict[str, int] = {}
 
     try:
         try:
@@ -221,23 +214,6 @@ def ingest_parquet_to_neo4j(
         with driver.session() as session:
             session.execute_write(work)
 
-            graphrag_dir = find_graphrag_output_dir(stem, output_dir)
-            if graphrag_dir:
-                graphrag_counts = session.execute_write(
-                    lambda tx: (
-                        delete_custom_concept_layer_tx(tx, stem),
-                        load_graphrag_layer_tx(tx, stem, graphrag_dir),
-                    )[1]
-                )
-                logger.info(
-                    "GraphRAG 개념 그래프 적재 완료 stem=%s dir=%s counts=%s",
-                    stem,
-                    graphrag_dir,
-                    graphrag_counts,
-                )
-            else:
-                logger.info("GraphRAG output 없음: stem=%s output_dir=%s", stem, output_dir)
-
             cn = session.run(
                 "MATCH (n {stem: $stem}) RETURN count(n) AS c",
                 stem=stem,
@@ -280,7 +256,6 @@ def ingest_parquet_to_neo4j(
         "edge_count": c_rels,
         "skipped_concept_nodes": skipped_concept_nodes,
         "skipped_concept_edges": skipped_concept_edges,
-        "graphrag": graphrag_counts,
         "elapsed_sec": elapsed,
         "uri": uri,
     }
