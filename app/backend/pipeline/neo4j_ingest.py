@@ -30,11 +30,18 @@ from dotenv import load_dotenv
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
 
+from .graphrag_neo4j_ingest import (
+    delete_custom_concept_layer_tx,
+    find_graphrag_output_dir,
+    load_graphrag_layer_tx,
+)
+
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 _NEO4J_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CUSTOM_CONCEPT_LABELS = {"Concept"}
 
 
 def _require_identifier(name: str, kind: str) -> str:
@@ -118,7 +125,10 @@ def ingest_parquet_to_neo4j(
     driver = GraphDatabase.driver(uri, auth=(user, password))
     c_nodes = 0
     c_rels = 0
+    skipped_concept_nodes = 0
+    skipped_concept_edges = 0
     labels_seen: set[str] = set()
+    graphrag_counts: dict[str, int] = {}
 
     try:
         try:
@@ -129,8 +139,15 @@ def ingest_parquet_to_neo4j(
             ) from e
 
         def work(tx) -> None:
-            nonlocal labels_seen
+            nonlocal labels_seen, skipped_concept_nodes, skipped_concept_edges
             _delete_stem(tx, stem)
+
+            concept_node_ids: set[str] = set()
+            for _, row in ndf.iterrows():
+                node_id = str(row.get("node_id", "")).strip()
+                label = str(row.get("label", "")).strip()
+                if node_id and label in _CUSTOM_CONCEPT_LABELS:
+                    concept_node_ids.add(node_id)
 
             by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for _, row in ndf.iterrows():
@@ -145,6 +162,9 @@ def ingest_parquet_to_neo4j(
                 label = str(row.get("label", "")).strip()
                 if not label:
                     raise ValueError(f"노드 {node_id!r} 에 label 이 없습니다.")
+                if label in _CUSTOM_CONCEPT_LABELS:
+                    skipped_concept_nodes += 1
+                    continue
                 _require_identifier(label, "라벨")
                 labels_seen.add(label)
 
@@ -172,6 +192,9 @@ def ingest_parquet_to_neo4j(
                 rel_type = str(row.get("rel_type", "")).strip()
                 if not src or not tgt or not rel_type:
                     continue
+                if src in concept_node_ids or tgt in concept_node_ids:
+                    skipped_concept_edges += 1
+                    continue
                 row_stem = str(row.get("stem", stem)).strip() or stem
                 if row_stem != stem:
                     raise ValueError(
@@ -197,6 +220,23 @@ def ingest_parquet_to_neo4j(
 
         with driver.session() as session:
             session.execute_write(work)
+
+            graphrag_dir = find_graphrag_output_dir(stem, output_dir)
+            if graphrag_dir:
+                graphrag_counts = session.execute_write(
+                    lambda tx: (
+                        delete_custom_concept_layer_tx(tx, stem),
+                        load_graphrag_layer_tx(tx, stem, graphrag_dir),
+                    )[1]
+                )
+                logger.info(
+                    "GraphRAG 개념 그래프 적재 완료 stem=%s dir=%s counts=%s",
+                    stem,
+                    graphrag_dir,
+                    graphrag_counts,
+                )
+            else:
+                logger.info("GraphRAG output 없음: stem=%s output_dir=%s", stem, output_dir)
 
             cn = session.run(
                 "MATCH (n {stem: $stem}) RETURN count(n) AS c",
@@ -238,6 +278,9 @@ def ingest_parquet_to_neo4j(
         "stem": stem,
         "node_count": c_nodes,
         "edge_count": c_rels,
+        "skipped_concept_nodes": skipped_concept_nodes,
+        "skipped_concept_edges": skipped_concept_edges,
+        "graphrag": graphrag_counts,
         "elapsed_sec": elapsed,
         "uri": uri,
     }
