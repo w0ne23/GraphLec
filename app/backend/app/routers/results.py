@@ -27,6 +27,18 @@ async def get_knowledge_graph(lecture_id: str, db: AsyncSession = Depends(get_db
     return await job_service.get_knowledge_graph(db, lecture_id)
 
 
+@router.post("/{lecture_id}/graph/graphrag/ingest")
+async def ingest_graphrag_concept_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """GraphRAG 개념 그래프를 기존 Neo4j 강의 그래프에 적재"""
+    return await job_service.ingest_graphrag_concept_graph(db, lecture_id)
+
+
+@router.get("/{lecture_id}/graph/graphrag/status")
+async def get_graphrag_ingest_status(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """GraphRAG 개념 그래프 Neo4j 적재 상태 조회"""
+    return await job_service.get_graphrag_ingest_status(db, lecture_id)
+
+
 @router.get("/{lecture_id}/verifier")
 async def get_content_verification(lecture_id: str, db: AsyncSession = Depends(get_db)):
     """강의 verifier 결과 조회"""

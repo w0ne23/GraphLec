@@ -34,8 +34,6 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 from pipeline.lance_ingest import default_lance_root, lance_search  # noqa: E402
 
 from .content_retrieval import EvidenceItem, infer_intents_json, run_enhanced_content_pipeline  # noqa: E402
-from .graph_constants import CONCEPT_SEMANTIC_REL_TYPES  # noqa: E402
-
 app = FastAPI(title="GraphLEC Query Service", version="0.3.0")
 
 app.add_middleware(
@@ -54,36 +52,40 @@ NEO4J_URI = os.getenv("NEO4J_URI", "").strip()
 NEO4J_USER = os.getenv("NEO4J_USER", "").strip()
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
-_CONCEPT_REL_CYPHER_ALT = "|".join(CONCEPT_SEMANTIC_REL_TYPES)
-
-GRAPH_SCHEMA = f"""
+GRAPH_SCHEMA = """
 노드 타입과 주요 프로퍼티:
 - Video          : id, stem, title
 - Slides         : id, stem
 - Scenes         : id, stem
 - Slide          : id, stem, slide_number, title, slide_text, role, start_sec, end_sec, emphasis_total
+- Domain         : id, stem, name, subdomain
 - Scene          : id, stem, slide_id, context_index, start, end, stressed
 - Segment        : id, stem, start, end, text, stressed
 - AnnotationEmphasis : id, stem, type, target_content, score, confidence, timestamp_sec
-- Concept        : id, stem, name
+- GraphRAGEntity : id, stem, title, type, description, degree, frequency
+- GraphRAGTextUnit : id, stem, text, n_tokens
+- GraphRAGCommunity : id, stem, title, summary, rank, size
 
 관계 (방향 중요):
 - (Video)-[:HAS_SLIDES]->(Slides)
 - (Video)-[:HAS_SCENES]->(Scenes)
+- (Video)-[:HAS_DOMAIN]->(Domain)
 - (Slides)-[:CONTAINS]->(Slide)
 - (Scenes)-[:CONTAINS]->(Scene)
 - (Slide)-[:HAS_SCENE]->(Scene)
 - (Scene)-[:HAS_SEGMENT]->(Segment)
 - (Slide)-[:HAS_ANNOTATION]->(AnnotationEmphasis)
 - (Segment)-[:REFERS_TO]->(AnnotationEmphasis)
-- (Segment)-[:MENTIONS]->(Concept)
-- (Slide)-[:APPEARS_IN]->(Concept)
-- (Concept)-[:{_CONCEPT_REL_CYPHER_ALT}]->(Concept)
+- (GraphRAGEntity)-[:GRAPHRAG_RELATES_TO]->(GraphRAGEntity)
+- (GraphRAGEntity)-[:GRAPHRAG_SUPPORTED_BY]->(GraphRAGTextUnit)
+- (GraphRAGTextUnit)-[:GRAPHRAG_MENTIONS_SLIDE]->(Slide)
+- (GraphRAGEntity)-[:GRAPHRAG_APPEARS_IN]->(Slide)
+- (GraphRAGCommunity)-[:GRAPHRAG_HAS_ENTITY]->(GraphRAGEntity)
 
 금지 패턴:
+- Concept 라벨은 사용하지 않는다. 개념 레이어는 GraphRAGEntity가 담당한다.
 - (Segment)-[:APPEARS_IN]->(...)
 - (...)-[:MENTIONS]->(Slide)
-- (Concept)-[:APPEARS_IN]->(Slide)
 
 모든 노드 패턴에는 반드시 {{stem: $stem}} 를 포함한다. 쿼리 실행 시 stem 파라미터가 전달된다.
 """
@@ -397,7 +399,7 @@ def _collect_ids_from_content(structured: dict[str, list[dict[str, Any]]]) -> se
 
 def _collect_ids_from_raw_rows(rows: list[dict[str, Any]]) -> set[str]:
     ids: set[str] = set()
-    id_like = re.compile(r"^(slide_|segment/|concept/|annotation/)")
+    id_like = re.compile(r"^(slide_|segment/|annotation/|graphrag/)")
 
     def walk(v: Any) -> None:
         if isinstance(v, str) and id_like.match(v):
@@ -467,43 +469,32 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
 
     def add_node(nid: str, label: str, ntype: str, title: str = "") -> None:
         if nid and nid not in nodes:
+            color_map = {
+                "GraphRAGEntity": "#FF6B6B",
+                "GraphRAGCommunity": "#FF9F43",
+                "Slide": "#4ECDC4",
+                "Segment": "#45B7D1",
+            }
             nodes[nid] = {
                 "id": nid,
                 "label": (label or nid)[:30],
-                "color": "#FF6B6B" if ntype == "Concept" else "#4ECDC4",
+                "color": color_map.get(ntype, "#4ECDC4"),
                 "title": title[:300],
                 "type": ntype,
             }
 
-    for r in structured.get("sub_concepts", []):
-        sid, cid = str(r.get("sub_id", "")), str(r.get("concept_id", ""))
-        if sid:
-            add_node(sid, str(r.get("sub_concept", sid)), "Concept")
-        if cid:
-            add_node(cid, str(r.get("parent_concept", cid)), "Concept")
-        if sid and cid:
-            edges.append({"from": sid, "to": cid, "label": "concept_rel"})
-
     for r in structured.get("segments", []):
-        slid, segid, cid = (
-            str(r.get("slide_id", "")),
-            str(r.get("segment_id", "")),
-            str(r.get("concept_id", "")),
-        )
+        slid = str(r.get("slide_id", ""))
+        segid = str(r.get("segment_id", ""))
         if slid:
             add_node(slid, f"S{r.get('slide_number')}", "Slide", str(r.get("segment_text", ""))[:200])
         if segid:
             add_node(segid, "seg", "Segment", str(r.get("segment_text", ""))[:200])
-        if cid:
-            add_node(cid, str(r.get("concept", cid)), "Concept")
         if slid and segid:
             edges.append({"from": slid, "to": segid, "label": "HAS_SEGMENT"})
-        if segid and cid:
-            edges.append({"from": segid, "to": cid, "label": "MENTIONS"})
 
     for r in structured.get("slides", []):
         slid = str(r.get("slide_id", ""))
-        cid = str(r.get("concept_id", ""))
         if slid:
             add_node(
                 slid,
@@ -511,10 +502,30 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
                 "Slide",
                 str(r.get("slide_text", ""))[:200],
             )
-        if cid:
-            add_node(cid, "", "Concept")
-        if slid and cid:
-            edges.append({"from": slid, "to": cid, "label": "APPEARS_IN"})
+
+    for r in structured.get("graphrag_entities", []):
+        eid = str(r.get("graphrag_entity_id", ""))
+        if eid:
+            add_node(
+                eid,
+                str(r.get("graphrag_title", eid)),
+                "GraphRAGEntity",
+                str(r.get("graphrag_description", ""))[:300],
+            )
+        for sid, sn in zip(r.get("slide_ids") or [], r.get("slide_numbers") or []):
+            sid = str(sid or "")
+            if sid:
+                add_node(sid, f"S{sn}", "Slide")
+                edges.append({"from": eid, "to": sid, "label": "GRAPHRAG_APPEARS_IN"})
+
+    for r in structured.get("graphrag_relationships", []):
+        sid, tid = str(r.get("src_id", "")), str(r.get("tgt_id", ""))
+        if sid:
+            add_node(sid, str(r.get("src_title", sid)), "GraphRAGEntity")
+        if tid:
+            add_node(tid, str(r.get("tgt_title", tid)), "GraphRAGEntity")
+        if sid and tid:
+            edges.append({"from": sid, "to": tid, "label": "GRAPHRAG_RELATES_TO"})
 
     return {"nodes": list(nodes.values()), "edges": edges}
 
@@ -522,7 +533,7 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
 def _graph_from_structural_rows(rows: list[dict[str, Any]]) -> dict:
     """LLM Cypher 결과가 다양해 완전한 그래프는 어렵고, 노드 id 문자열만 수집."""
     nodes: dict[str, dict] = {}
-    id_like = re.compile(r"^(slide_|segment/|concept/|annotation/)")
+    id_like = re.compile(r"^(slide_|segment/|annotation/|graphrag/)")
 
     def add_from_val(v: Any) -> None:
         if isinstance(v, str) and id_like.match(v) and v not in nodes:

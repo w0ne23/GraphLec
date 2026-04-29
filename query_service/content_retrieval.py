@@ -97,7 +97,7 @@ def infer_intents_json(question: str, call_gemini_raw: Callable[[str, str], str]
 @dataclass
 class EvidenceItem:
     uid: str
-    kind: str  # slide_text, slide_concept, segment, sub_concept, lance_strict, lance_soft
+    kind: str  # slide_text, slide_concept, segment, sub_concept, graphrag_*, lance_*
     text: str
     row: Optional[dict[str, Any]] = None
     lance_score: Optional[float] = None
@@ -156,6 +156,43 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             if text:
                 items.append(EvidenceItem(uid=uid, kind="slide_text", text=text, row=r))
 
+    for r in structured.get("graphrag_entities", []):
+        eid = str(r.get("graphrag_entity_id", ""))
+        title = str(r.get("graphrag_title", "") or "")
+        desc = str(r.get("graphrag_description", "") or "")
+        gtype = str(r.get("graphrag_type", "") or "")
+        slides = [x for x in (r.get("slide_numbers") or []) if x not in (None, "")]
+        concepts = [x for x in (r.get("concept_names") or []) if x]
+        uid = f"gre:{eid}"
+        if uid in seen or not (title or desc):
+            continue
+        seen.add(uid)
+        meta = []
+        if gtype:
+            meta.append(f"유형: {gtype}")
+        if concepts:
+            meta.append("기존 개념 연결: " + ", ".join(str(x) for x in concepts[:4]))
+        if slides:
+            meta.append("관련 슬라이드: " + ", ".join(str(x) for x in slides[:6]))
+        text = f"{title}\n{desc}".strip()
+        if meta:
+            text += "\n" + " / ".join(meta)
+        items.append(EvidenceItem(uid=uid, kind="graphrag_entity", text=text, row=r))
+
+    for r in structured.get("graphrag_relationships", []):
+        sid, tid = str(r.get("src_id", "")), str(r.get("tgt_id", ""))
+        src = str(r.get("src_title", "") or "")
+        tgt = str(r.get("tgt_title", "") or "")
+        desc = str(r.get("rel_description", "") or "")
+        uid = f"grr:{sid}:{tid}:{desc[:40]}"
+        if uid in seen or not (src or tgt or desc):
+            continue
+        seen.add(uid)
+        text = f"{src} —(GraphRAG 관계)→ {tgt}"
+        if desc:
+            text += f"\n{desc}"
+        items.append(EvidenceItem(uid=uid, kind="graphrag_relationship", text=text, row=r))
+
     return items
 
 
@@ -165,6 +202,24 @@ def _collect_ids(structured: dict[str, list[dict[str, Any]]]) -> set[str]:
         for r in structured.get(key, []):
             for fld in ("sub_id", "concept_id", "slide_id", "segment_id"):
                 v = r.get(fld)
+                if v:
+                    ids.add(str(v).strip())
+    for r in structured.get("graphrag_entities", []):
+        for fld in ("graphrag_entity_id",):
+            v = r.get(fld)
+            if v:
+                ids.add(str(v).strip())
+        for fld in ("concept_ids", "slide_ids"):
+            for v in r.get(fld) or []:
+                if v:
+                    ids.add(str(v).strip())
+    for r in structured.get("graphrag_relationships", []):
+        for fld in ("src_id", "tgt_id"):
+            v = r.get(fld)
+            if v:
+                ids.add(str(v).strip())
+        for fld in ("src_concept_ids", "tgt_concept_ids"):
+            for v in r.get(fld) or []:
                 if v:
                     ids.add(str(v).strip())
     return {x for x in ids if x}
@@ -314,11 +369,22 @@ def build_sectioned_context(
     for it in items:
         buckets.setdefault(it.kind, []).append(it)
 
-    order = ["sub_concept", "slide_text", "slide_concept", "segment", "lance_strict", "lance_soft"]
+    order = [
+        "graphrag_entity",
+        "graphrag_relationship",
+        "sub_concept",
+        "slide_text",
+        "slide_concept",
+        "segment",
+        "lance_strict",
+        "lance_soft",
+    ]
     for bk in order:
         for it in buckets.get(bk, []):
             tag = {
                 "sub_concept": "개념 관계",
+                "graphrag_entity": "GraphRAG 개념",
+                "graphrag_relationship": "GraphRAG 개념 관계",
                 "slide_text": "슬라이드 본문",
                 "slide_concept": "슬라이드-개념",
                 "segment": "음성 구간",

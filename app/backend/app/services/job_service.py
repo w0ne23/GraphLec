@@ -14,6 +14,12 @@ from fastapi import HTTPException
 from neo4j import GraphDatabase
 
 from app.models import Job, LectureContent
+from pipeline.graphrag_neo4j_ingest import (
+    delete_custom_concept_layer_tx,
+    delete_graphrag_layer_tx,
+    find_graphrag_output_dir,
+    load_graphrag_layer_tx,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -330,6 +336,101 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
+
+
+async def ingest_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """기존 구조 그래프는 보존하고 GraphRAG 개념 그래프만 Neo4j에 적재/갱신한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("output_dir") or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    output_dir = Path(detail["output_dir"])
+    graphrag_dir = find_graphrag_output_dir(
+        stem,
+        output_dir,
+        aliases=[_str_cell(detail.get("title"))],
+    )
+    if not graphrag_dir:
+        raise HTTPException(status_code=404, detail="GraphRAG output not found")
+
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+    try:
+        with driver.session() as session:
+            counts = session.execute_write(
+                lambda tx: (
+                    delete_custom_concept_layer_tx(tx, stem),
+                    delete_graphrag_layer_tx(tx, stem),
+                    load_graphrag_layer_tx(tx, stem, graphrag_dir),
+                )[2]
+            )
+            summary = session.run(
+                """
+                MATCH (n {stem: $stem})
+                OPTIONAL MATCH (n)-[r]->(m {stem: $stem})
+                RETURN count(DISTINCT n) AS node_count, count(DISTINCT r) AS edge_count
+                """,
+                stem=stem,
+            ).single()
+    finally:
+        driver.close()
+
+    return {
+        "status": "loaded",
+        "lecture_id": lecture_id,
+        "stem": stem,
+        "graphrag_output_dir": str(graphrag_dir),
+        "loaded": counts,
+        "node_count": int(summary["node_count"]) if summary else 0,
+        "edge_count": int(summary["edge_count"]) if summary else 0,
+    }
+
+
+async def get_graphrag_ingest_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """Neo4j에 적재된 GraphRAG 개념 그래프 상태를 확인한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+    try:
+        with driver.session() as session:
+            record = session.run(
+                """
+                MATCH (e:GraphRAGEntity {stem: $stem})
+                OPTIONAL MATCH (e)-[s:GRAPHRAG_APPEARS_IN]->(:Slide {stem: $stem})
+                OPTIONAL MATCH (:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(:GraphRAGEntity {stem: $stem})
+                OPTIONAL MATCH (c:Concept {stem: $stem})
+                RETURN count(DISTINCT e) AS entities,
+                       count(DISTINCT r) AS relationships,
+                       count(DISTINCT s) AS slide_links,
+                       count(DISTINCT c) AS custom_concepts
+                """,
+                stem=stem,
+            ).single()
+    finally:
+        driver.close()
+
+    graphrag_dir = find_graphrag_output_dir(
+        stem,
+        Path(detail["output_dir"]) if detail.get("output_dir") else None,
+        aliases=[_str_cell(detail.get("title"))],
+    )
+    return {
+        "stem": stem,
+        "graphrag_output_dir": str(graphrag_dir) if graphrag_dir else None,
+        "entities": int(record["entities"]) if record else 0,
+        "relationships": int(record["relationships"]) if record else 0,
+        "slide_links": int(record["slide_links"]) if record else 0,
+        "custom_concepts": int(record["custom_concepts"]) if record else 0,
+    }
 
 
 async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
