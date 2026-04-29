@@ -138,6 +138,8 @@ def recommend(req: RecommendRequest):
         raise HTTPException(status_code=503, detail="추천 엔진 초기화 중")
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="query가 비어 있습니다")
+    if not _recommender.collection.lectures:
+        return RecommendResponse(query=req.query, results=[])
 
     results = _recommender.recommend_from_query(req.query, top_k=req.top_k)
     top     = [r for r in results if r.score > 0][: req.top_k]
