@@ -16,6 +16,8 @@ from typing import Any
 import pandas as pd
 
 _SLIDE_ID_RE = re.compile(r"slide_\d{3,}")
+_SEGMENT_ID_RE = re.compile(r"graphlec_seg:(segment/\d+)")
+_STRUCTURAL_ENTITY_RE = re.compile(r"^(slide[_ ]?\d+|chapter\s*\d+)$", re.IGNORECASE)
 
 
 def _repo_root() -> Path:
@@ -149,6 +151,10 @@ def _extract_slide_ids(text: Any) -> list[str]:
     return sorted(set(_SLIDE_ID_RE.findall(_str_cell(text))))
 
 
+def _extract_segment_ids(text: Any) -> list[str]:
+    return sorted(set(_SEGMENT_ID_RE.findall(_str_cell(text))))
+
+
 def delete_graphrag_layer_tx(tx, stem: str) -> None:
     """Remove only GraphRAG nodes/relationships for a stem, preserving GraphLec graph."""
     tx.run(
@@ -184,16 +190,21 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
     entity_by_title: dict[str, str] = {}
     entity_text_units: list[dict[str, str]] = []
     entity_slides: set[tuple[str, str]] = set()
+    entity_segments: set[tuple[str, str]] = set()
 
     text_unit_slide_map: dict[str, list[str]] = {}
+    text_unit_segment_map: dict[str, list[str]] = {}
     text_unit_rows: list[dict[str, Any]] = []
     for _, row in text_units.iterrows():
         gr_id = _str_cell(row.get("id")).strip()
         if not gr_id:
             continue
         node_id = f"graphrag/text_unit/{gr_id}"
-        slide_ids = _extract_slide_ids(row.get("text"))
+        raw_text = row.get("text")
+        slide_ids = _extract_slide_ids(raw_text)
+        segment_ids = _extract_segment_ids(raw_text)
         text_unit_slide_map[gr_id] = slide_ids
+        text_unit_segment_map[gr_id] = segment_ids
         text_unit_rows.append(
             _json_props(
                 {
@@ -201,12 +212,13 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
                     "stem": stem,
                     "graphrag_id": gr_id,
                     "human_readable_id": _str_cell(row.get("human_readable_id")),
-                    "text": _str_cell(row.get("text"))[:12000],
+                    "text": _str_cell(raw_text)[:12000],
                     "n_tokens": _int_cell(row.get("n_tokens")),
                     "document_id": _str_cell(row.get("document_id")),
                     "entity_ids": _list_cell(row.get("entity_ids")),
                     "relationship_ids": _list_cell(row.get("relationship_ids")),
                     "slide_ids": slide_ids,
+                    "segment_ids": segment_ids,
                     "source": "microsoft_graphrag",
                 }
             )
@@ -217,14 +229,24 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
         title = _str_cell(row.get("title")).strip()
         if not gr_id or not title:
             continue
+        if _STRUCTURAL_ENTITY_RE.match(title):
+            continue
         node_id = f"graphrag/entity/{gr_id}"
         title_norm = _norm_title(title)
         entity_by_title.setdefault(title_norm, node_id)
         tu_ids = _list_cell(row.get("text_unit_ids"))
+        entity_slide_ids: list[str] = []
+        entity_segment_ids: list[str] = []
         for tu_id in tu_ids:
             entity_text_units.append({"entity_id": node_id, "text_unit_id": f"graphrag/text_unit/{tu_id}"})
             for slide_id in text_unit_slide_map.get(tu_id, []):
                 entity_slides.add((node_id, slide_id))
+                if slide_id not in entity_slide_ids:
+                    entity_slide_ids.append(slide_id)
+            for seg_id in text_unit_segment_map.get(tu_id, []):
+                entity_segments.add((node_id, seg_id))
+                if seg_id not in entity_segment_ids:
+                    entity_segment_ids.append(seg_id)
         entity_rows.append(
             _json_props(
                 {
@@ -238,6 +260,8 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
                     "type": _str_cell(row.get("type")),
                     "description": _str_cell(row.get("description"))[:12000],
                     "text_unit_ids": tu_ids,
+                    "slide_ids": sorted(entity_slide_ids),
+                    "segment_ids": sorted(entity_segment_ids),
                     "frequency": _int_cell(row.get("frequency")),
                     "degree": _int_cell(row.get("degree")),
                     "source": "microsoft_graphrag",
@@ -296,6 +320,46 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
         """,
         stem=stem,
         rows=[{"entity_id": e, "slide_id": s} for e, s in sorted(entity_slides)],
+    )
+
+    text_unit_segments = [
+        {"text_unit_id": f"graphrag/text_unit/{tu_id}", "segment_id": seg_id}
+        for tu_id, seg_ids in text_unit_segment_map.items()
+        for seg_id in seg_ids
+    ]
+    if text_unit_segments:
+        tx.run(
+            """
+            UNWIND $rows AS row
+            MATCH (tu:GraphRAGTextUnit {stem: $stem, id: row.text_unit_id})
+            MATCH (seg:Segment {stem: $stem, id: row.segment_id})
+            MERGE (tu)-[:GRAPHRAG_MENTIONS_SEGMENT]->(seg)
+            """,
+            stem=stem,
+            rows=text_unit_segments,
+        )
+
+    if entity_segments:
+        tx.run(
+            """
+            UNWIND $rows AS row
+            MATCH (e:GraphRAGEntity {stem: $stem, id: row.entity_id})
+            MATCH (seg:Segment {stem: $stem, id: row.segment_id})
+            MERGE (e)-[:GRAPHRAG_MENTIONED_IN_SEGMENT]->(seg)
+            """,
+            stem=stem,
+            rows=[{"entity_id": e, "segment_id": s} for e, s in sorted(entity_segments)],
+        )
+
+    tx.run(
+        """
+        MATCH (e:GraphRAGEntity {stem: $stem})
+        MATCH (a:AnnotationEmphasis {stem: $stem})
+        WHERE (a.target_content IS NOT NULL AND toLower(a.target_content) CONTAINS toLower(e.title))
+           OR (a.handwritten_content IS NOT NULL AND toLower(a.handwritten_content) CONTAINS toLower(e.title))
+        MERGE (e)-[:GRAPHRAG_HIGHLIGHTED_IN]->(a)
+        """,
+        stem=stem,
     )
 
     rel_rows: list[dict[str, Any]] = []
@@ -398,5 +462,7 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
         "entity_text_unit_links": len(entity_text_units),
         "text_unit_slide_links": len(text_unit_slides),
         "entity_slide_links": len(entity_slides),
+        "text_unit_segment_links": len(text_unit_segments),
+        "entity_segment_links": len(entity_segments),
         "community_entity_links": len(community_entities),
     }

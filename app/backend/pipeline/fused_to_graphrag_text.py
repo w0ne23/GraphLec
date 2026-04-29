@@ -66,19 +66,25 @@ def _keyword_score(entry: dict[str, Any]) -> float:
 
 def _iter_context_texts(slide: dict[str, Any]) -> Iterable[str]:
     for ctx in slide.get("contexts") or []:
-        text = _clean_text(ctx.get("text"))
-        if text:
-            yield text
-            continue
-
-        # Older or partially fused files may miss `contexts[].text`.
-        segment_texts = [
-            _clean_inline(seg.get("text"))
-            for seg in (ctx.get("segments") or [])
-            if _clean_inline(seg.get("text"))
-        ]
-        if segment_texts:
-            yield " ".join(segment_texts)
+        segments = [s for s in (ctx.get("segments") or []) if _clean_inline(s.get("text"))]
+        if segments and any(s.get("segment_id") for s in segments):
+            # embed segment IDs for structural graph linking at ingest time
+            parts = []
+            for seg in segments:
+                seg_id = _clean_inline(seg.get("segment_id"))
+                text = _clean_inline(seg.get("text"))
+                if seg_id:
+                    parts.append(f"[graphlec_seg:{seg_id}] {text}")
+                else:
+                    parts.append(text)
+            if parts:
+                yield " ".join(parts)
+        else:
+            text = _clean_text(ctx.get("text"))
+            if text:
+                yield text
+            elif segments:
+                yield " ".join(_clean_inline(s.get("text")) for s in segments)
 
 
 def _format_keywords(
@@ -163,17 +169,17 @@ def slide_to_block(
     lines = [f"## {heading_label}"]
 
     if include_metadata:
-        meta_parts = []
+        tag_parts = []
         if slide_id:
-            meta_parts.append(f"구조 그래프의 슬라이드 식별자는 {slide_id}입니다")
+            tag_parts.append(f"id={slide_id}")
         if start and end:
-            meta_parts.append(f"강의 시간 범위는 {start}부터 {end}까지입니다")
+            tag_parts.append(f"time={start}~{end}")
         elif start:
-            meta_parts.append(f"강의 시작 시점은 {start}입니다")
+            tag_parts.append(f"time={start}")
         if role:
-            meta_parts.append(f"슬라이드 역할은 {role}입니다")
-        if meta_parts:
-            lines.append(". ".join(meta_parts) + ".")
+            tag_parts.append(f"role={role}")
+        if tag_parts:
+            lines.append("[graphlec:" + " | ".join(tag_parts) + "]")
 
     if title:
         lines.append(f"제목: {title}.")

@@ -332,7 +332,7 @@ class Preprocessor:
             for ctx in slide.get('contexts', []):
                 scene_id = f"{sid}/scene/{ctx['context_index']:02d}"
                 for seg in ctx.get('segments', []):
-                    seg_id = f'segment/{seg_idx:04d}'
+                    seg_id = seg.get('segment_id') or f'segment/{seg_idx:04d}'
                     self.segment_data[seg_id] = {
                         **seg,
                         'slide_id':      sid,
