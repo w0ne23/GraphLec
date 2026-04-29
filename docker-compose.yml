@@ -43,6 +43,15 @@ services:
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
     volumes:
       - lance_data:/lance
+      - ./query_service:/app/query_service
+    command:
+      - uvicorn
+      - query_service.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
     depends_on:
       - neo4j
 

@@ -480,6 +480,10 @@ img { display: block; max-width: 100%; }
   font-size: 13px;
   line-height: 1.5;
   color: var(--t1);
+  white-space: pre-line;
+}
+.chat-answer-text {
+  white-space: pre-wrap;
 }
 
 /* 타임스탬프 ref 버튼 */
@@ -493,6 +497,10 @@ img { display: block; max-width: 100%; }
   color: var(--blue);
   cursor: pointer;
   transition: all .14s;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .chat-ref-btn:hover   { background: var(--blue); color: #fff; }
 .chat-ref-btn:disabled { opacity: .4; cursor: default; }

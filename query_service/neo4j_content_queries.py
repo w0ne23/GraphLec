@@ -44,7 +44,8 @@ GR_REL_LIM = int(os.getenv("GRAPHLEC_GRAPHRAG_REL_LIMIT", str(_NEO_LIM["graphrag
 
 
 def _relevance_score(text: str, keywords: list[str]) -> int:
-    return sum(1 for kw in keywords if kw in text)
+    t = text.lower()
+    return sum(1 for kw in keywords if kw.lower() in t)
 
 
 def run_content_queries(
@@ -59,27 +60,36 @@ def run_content_queries(
 
     q_slide_text = f"""
     MATCH (slide:Slide {{stem: $stem}})
-    WHERE toLower(coalesce(slide.slide_text,'')) CONTAINS toLower($kw)
+    WITH slide, toLower(coalesce(slide.title,'') + ' ' + coalesce(slide.slide_text,'')) AS haystack
+    WITH slide, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
+    WHERE haystack CONTAINS toLower($kw)
     RETURN slide.slide_number AS slide_number, coalesce(slide.id,'') AS slide_id,
-           slide.title AS title, slide.slide_text AS slide_text
-    ORDER BY slide.slide_number LIMIT {SLIDE_LIM}
+           slide.title AS title, slide.slide_text AS slide_text,
+           slide.start_sec AS start_sec, slide.end_sec AS end_sec,
+           size(hits) AS relevance
+    ORDER BY relevance DESC, slide.slide_number LIMIT {SLIDE_LIM}
     """
     q_seg_text = f"""
     MATCH (slide:Slide {{stem: $stem}})-[:HAS_SCENE]->(scene:Scene {{stem: $stem}})
           -[:HAS_SEGMENT]->(seg:Segment {{stem: $stem}})
-    WHERE toLower(coalesce(seg.text,'')) CONTAINS toLower($kw)
+    WITH slide, seg, toLower(coalesce(slide.title,'') + ' ' + coalesce(seg.text,'')) AS haystack
+    WITH slide, seg, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
+    WHERE haystack CONTAINS toLower($kw)
     RETURN coalesce(seg.text,'') AS segment_text, seg.start AS start, seg.end AS end,
            slide.slide_number AS slide_number,
-           coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id
-    ORDER BY seg.start LIMIT {SEG_LIM}
+           coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id,
+           size(hits) AS relevance
+    ORDER BY relevance DESC, seg.start LIMIT {SEG_LIM}
     """
     q_graphrag_entity = f"""
     MATCH (ge:GraphRAGEntity {{stem: $stem}})
-    WHERE toLower(
+    WITH ge, toLower(
         coalesce(ge.title, '') + ' ' +
         coalesce(ge.description, '') + ' ' +
         coalesce(ge.type, '')
-    ) CONTAINS toLower($kw)
+    ) AS haystack
+    WITH ge, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
+    WHERE haystack CONTAINS toLower($kw)
     OPTIONAL MATCH (ge)-[:GRAPHRAG_APPEARS_IN]->(slide:Slide {{stem: $stem}})
     RETURN coalesce(ge.id, '') AS graphrag_entity_id,
            ge.title AS graphrag_title,
@@ -90,17 +100,20 @@ def run_content_queries(
            [] AS concept_ids,
            [] AS concept_names,
            collect(DISTINCT slide.slide_number) AS slide_numbers,
-           collect(DISTINCT coalesce(slide.id, '')) AS slide_ids
-    ORDER BY coalesce(ge.degree, 0) DESC, coalesce(ge.frequency, 0) DESC
+           collect(DISTINCT coalesce(slide.id, '')) AS slide_ids,
+           size(hits) AS relevance
+    ORDER BY relevance DESC, coalesce(ge.degree, 0) DESC, coalesce(ge.frequency, 0) DESC
     LIMIT {GR_ENTITY_LIM}
     """
     q_graphrag_rel = f"""
     MATCH (src:GraphRAGEntity {{stem: $stem}})-[r:GRAPHRAG_RELATES_TO]->(tgt:GraphRAGEntity {{stem: $stem}})
-    WHERE toLower(
+    WITH src, r, tgt, toLower(
         coalesce(src.title, '') + ' ' +
         coalesce(tgt.title, '') + ' ' +
         coalesce(r.description, '')
-    ) CONTAINS toLower($kw)
+    ) AS haystack
+    WITH src, r, tgt, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
+    WHERE haystack CONTAINS toLower($kw)
     RETURN coalesce(src.id, '') AS src_id,
            src.title AS src_title,
            coalesce(tgt.id, '') AS tgt_id,
@@ -109,8 +122,9 @@ def run_content_queries(
            r.weight AS weight,
            r.combined_degree AS combined_degree,
            [] AS src_concept_ids,
-           [] AS tgt_concept_ids
-    ORDER BY coalesce(r.weight, 0) DESC, coalesce(r.combined_degree, 0) DESC
+           [] AS tgt_concept_ids,
+           size(hits) AS relevance
+    ORDER BY relevance DESC, coalesce(r.weight, 0) DESC, coalesce(r.combined_degree, 0) DESC
     LIMIT {GR_REL_LIM}
     """
 
@@ -121,7 +135,7 @@ def run_content_queries(
             ("graphrag_entities", q_graphrag_entity, False),
             ("graphrag_relationships", q_graphrag_rel, False),
         ):
-            params: dict[str, Any] = {"stem": stem, "kw": kw}
+            params: dict[str, Any] = {"stem": stem, "kw": kw, "keywords": keywords}
             for row in _run_cypher_dicts(session, q, params):
                 raw_all.append(row)
                 if key == "segments":
@@ -149,13 +163,17 @@ def run_content_queries(
 
     if results.get("segments"):
         results["segments"].sort(
-            key=lambda r: _relevance_score(str(r.get("segment_text", "")), keywords),
+            key=lambda r: (
+                int(r.get("relevance") or 0),
+                _relevance_score(str(r.get("segment_text", "")), keywords),
+            ),
             reverse=True,
         )
     if results.get("slides"):
         results["slides"].sort(
-            key=lambda r: _relevance_score(
-                str(r.get("slide_text", "")) + str(r.get("title", "")), keywords
+            key=lambda r: (
+                int(r.get("relevance") or 0),
+                _relevance_score(str(r.get("slide_text", "")) + str(r.get("title", "")), keywords),
             ),
             reverse=True,
         )
