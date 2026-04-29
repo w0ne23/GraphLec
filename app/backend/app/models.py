@@ -35,6 +35,7 @@ class LectureContent(Base):
     description = Column(Text, nullable=True)
     video_path  = Column(Text, nullable=False)
     output_dir  = Column(Text, nullable=False)
+    graphrag_workspace = Column(Text, nullable=True)
     created_at  = Column(DateTime(timezone=True), server_default=func.now())
 
     job = relationship("Job", backref="content")

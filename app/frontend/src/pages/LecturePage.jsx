@@ -1,11 +1,33 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { getLectureDetail, getLectureTimeline } from '../lib/api'
+import {
+  activateLectureGraphRag,
+  getLectureDetail,
+  getLectureTimeline,
+  unloadLectureGraphRag,
+} from '../lib/api'
 import VideoPlayer  from '../components/watch/VideoPlayer'
 import LecturePanel from '../components/watch/LecturePanel'
 import ChatPanel    from '../components/chat/ChatPanel'
 
 const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
+const graphRagUnloadTimers = new Map()
+
+function cancelScheduledGraphRagUnload(lectureId) {
+  const timer = graphRagUnloadTimers.get(lectureId)
+  if (!timer) return
+  window.clearTimeout(timer)
+  graphRagUnloadTimers.delete(lectureId)
+}
+
+function scheduleGraphRagUnload(lectureId) {
+  cancelScheduledGraphRagUnload(lectureId)
+  const timer = window.setTimeout(() => {
+    graphRagUnloadTimers.delete(lectureId)
+    unloadLectureGraphRag(lectureId)
+  }, 600)
+  graphRagUnloadTimers.set(lectureId, timer)
+}
 
 /**
  * LecturePage — /lectures/:id
@@ -94,6 +116,19 @@ export default function LecturePage({ onNavigate }) {
         setLecture(null)
       })
       .finally(() => setLoading(false))
+  }, [id])
+
+  useEffect(() => {
+    if (!id) return undefined
+
+    cancelScheduledGraphRagUnload(id)
+    activateLectureGraphRag(id).catch((err) => {
+      console.warn('GraphRAG activate skipped:', err)
+    })
+
+    return () => {
+      scheduleGraphRagUnload(id)
+    }
   }, [id])
 
   const scenes      = lecture?.scenes ?? []

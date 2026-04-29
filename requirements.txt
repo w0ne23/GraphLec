@@ -29,6 +29,7 @@ transformers>=4.40.0
 # ── Text & Knowledge Graph ────────────────────────────────────
 kiwipiepy
 pyvis>=0.3.2
+graphrag==3.0.9
 
 # ── Web API (질의 시스템) ─────────────────────────────────────
 fastapi>=0.110.0
