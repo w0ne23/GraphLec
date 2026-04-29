@@ -119,12 +119,14 @@ ANSWER_SYSTEM_PROMPT = """
 - 특정 요구에 해당하는 근거가 없으면 그 한 가지만 짧게 밝힌다.
 
 [답변 스타일]
-1. 직접 답변을 먼저 한다. 길이는 질문에 맞게 조절한다.
-2. 출처는 괄호로 짧게: (슬라이드 N), (약 t초). 근거에 없으면 억지로 쓰지 않는다.
-3. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례를 넣고, 없으면 없다고 말한다.
-4. 결과를 표·목록으로 그대로 나열하지 않고 문단으로 통합한다.
-5. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
-6. 한국어로 답한다.
+1. 질문에 직접 필요한 내용만 답한다. 근거가 많아도 전부 나열하지 말고 핵심만 추린다.
+2. 기본 답변은 1문장 요약 + 최대 4개 항목으로 작성한다. 각 항목은 한 문장으로 짧게 쓴다.
+3. 사용자가 "자세히", "구체적으로", "전부", "비교표"처럼 확장을 요청한 경우에만 더 길게 답한다.
+4. 출처는 답변 끝에 한 번만 짧게 묶어 쓴다. 예: 출처: 슬라이드 34, 약 120초.
+5. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
+6. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 없다고 말한다.
+7. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
+8. 한국어로 답한다.
 """
 
 
@@ -174,6 +176,20 @@ class GraphEvidenceResponse(BaseModel):
     keywords: list[str]
     evidence: list[GraphEvidence]
     count: int
+
+
+def _to_float_or_none(v: Any) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int_or_none(v: Any) -> Optional[int]:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 STRUCTURAL_KEYWORDS = [
@@ -321,7 +337,11 @@ def _call_gemini_answer(context: str, question: str) -> str:
             r = client.models.generate_content(
                 model=GEMINI_ANSWER_MODEL,
                 contents=contents,
-                config={"system_instruction": ANSWER_SYSTEM_PROMPT},
+                config={
+                    "system_instruction": ANSWER_SYSTEM_PROMPT,
+                    "temperature": 0.2,
+                    "max_output_tokens": 2048,
+                },
             )
             return (r.text or "").strip()
         except Exception as e:
@@ -331,6 +351,115 @@ def _call_gemini_answer(context: str, question: str) -> str:
                 raise
     assert last_err is not None
     raise last_err
+
+
+def _dedupe_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _clean_answer_text(text: str) -> str:
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"\([^()]*GraphRAG[^()]*\)", "", text)
+    text = re.sub(r"\(음성 발췌\)", "", text)
+    text = re.sub(r"\s*,\s*(?=[),])", "", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip()
+
+
+def _first_sentence(text: str, max_chars: int = 95) -> str:
+    text = _clean_answer_text(text)
+    if not text:
+        return ""
+    m = re.search(r"(.+?[.!?。]|.+?입니다\.|.+?합니다\.|.+?합니다)", text)
+    sent = (m.group(1) if m else text).strip()
+    if len(sent) <= max_chars:
+        return sent
+    return sent[:max_chars].rsplit(" ", 1)[0].rstrip(" ,.") + "."
+
+
+def _source_labels_from_chunks(chunks: list[RetrievedChunk]) -> list[str]:
+    labels: list[str] = []
+    for c in chunks:
+        if c.slide_number is not None:
+            labels.append(f"슬라이드 {c.slide_number}")
+        if c.start_sec is not None:
+            labels.append(f"약 {c.start_sec:.0f}초")
+    return _dedupe_preserve_order(labels)
+
+
+def _format_time_label(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _format_source_block(sources: list[str]) -> str:
+    slides: list[str] = []
+    times: list[str] = []
+    for src in sources:
+        slide_match = re.search(r"슬라이드\s*(\d+)", src)
+        if slide_match:
+            slides.append(slide_match.group(1))
+            continue
+        sec_match = re.search(r"약\s*(\d+(?:\.\d+)?)초", src)
+        if sec_match:
+            times.append(_format_time_label(float(sec_match.group(1))))
+
+    lines = ["출처"]
+    if slides:
+        lines.append(f"- 슬라이드: {', '.join(_dedupe_preserve_order(slides)[:3])}")
+    if times:
+        lines.append(f"- 시간: {', '.join(_dedupe_preserve_order(times)[:3])}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def _concise_bullet_body(title: str, body: str) -> str:
+    t = title.replace(" ", "")
+    if "프로세스" in t or "스레드" in t:
+        return "프로그램 실행과 스케줄링을 관리합니다."
+    if "메모리" in t:
+        return "메모리를 할당하고 보호합니다."
+    if "파일" in t or "저장" in t:
+        return "파일과 저장장치를 관리합니다."
+    if "입출력" in t or "장치" in t:
+        return "하드웨어 장치 입출력을 관리합니다."
+    if "네트워크" in t:
+        return "네트워크 입출력을 관리합니다."
+    if "보안" in t or "계정" in t:
+        return "사용자 계정과 시스템 보안을 관리합니다."
+    if "오류" in t:
+        return "오류를 탐지하고 대응합니다."
+    return _first_sentence(body, max_chars=45)
+
+
+def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedChunk]] = None) -> str:
+    """Clean presentation-only noise without truncating or summarizing model content."""
+    raw = answer.strip()
+    if not raw:
+        return raw
+
+    sources = _source_labels_from_chunks(chunks or [])
+    if not sources:
+        sources = _dedupe_preserve_order(re.findall(r"슬라이드\s*\d+|약\s*\d+(?:\.\d+)?초", raw))
+    cleaned = _clean_answer_text(raw)
+    cleaned = cleaned.replace("**", "")
+
+    cleaned = re.sub(r"\s+[*-]\s+([^:：\n]{1,40})[:：]\s*", r"\n- \1: ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
+
+    source_block = _format_source_block(sources)
+    if source_block:
+        cleaned += f"\n\n{source_block}"
+    return cleaned.strip()
 
 
 def generate_cypher(question: str, stem: str, intent_hint: str = "") -> str:
@@ -580,11 +709,9 @@ def _rows_to_chunks(df) -> list[RetrievedChunk]:
 
 
 def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[RetrievedChunk]:
-    """선택된 근거 중 Lance 계열만 API용 청크로."""
+    """LLM 컨텍스트에 실제로 선택된 근거를 API 출처 청크로 변환한다."""
     out: list[RetrievedChunk] = []
     for it in items:
-        if not it.kind.startswith("lance"):
-            continue
         cid = it.uid
         if cid.startswith("lance:"):
             cid = cid[6:]
@@ -592,9 +719,9 @@ def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[
             RetrievedChunk(
                 chunk_id=cid[:500],
                 stem=stem,
-                chunk_type=it.chunk_type,
+                chunk_type=it.chunk_type or it.kind,
                 text=it.text[:2000],
-                score=it.lance_score,
+                score=it.retrieval_score if it.retrieval_score is not None else it.lance_score,
                 slide_number=it.slide_number,
                 start_sec=it.start_sec,
                 end_sec=it.end_sec,
@@ -604,17 +731,47 @@ def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[
     return out
 
 
+def _structural_rows_to_retrieved_chunks(stem: str, rows: list[dict[str, Any]]) -> list[RetrievedChunk]:
+    out: list[RetrievedChunk] = []
+    for i, row in enumerate(rows[:20], start=1):
+        start_val = row.get("start") if row.get("start") is not None else row.get("start_sec")
+        end_val = row.get("end") if row.get("end") is not None else row.get("end_sec")
+        start = _to_float_or_none(start_val)
+        end = _to_float_or_none(end_val)
+        slide_number = _to_int_or_none(row.get("slide_number"))
+        label = row.get("text") or row.get("title") or row.get("name")
+        text = str(label).strip() if label else json.dumps(row, ensure_ascii=False, default=str)
+        out.append(
+            RetrievedChunk(
+                chunk_id=f"structural:{i}",
+                stem=stem,
+                chunk_type="structural_row",
+                text=text[:2000],
+                slide_number=slide_number,
+                start_sec=start,
+                end_sec=end if end is not None else start,
+            )
+        )
+    return out
+
+
 def _chunks_to_timestamps(chunks: list[RetrievedChunk]) -> list[dict]:
     ts: list[dict] = []
+    seen: set[tuple[float, float, str]] = set()
     for c in chunks:
         if c.start_sec is None:
             continue
         label = (c.text or "")[:50]
+        end = c.end_sec if c.end_sec is not None else c.start_sec
+        key = (round(c.start_sec, 2), round(end, 2), label)
+        if key in seen:
+            continue
+        seen.add(key)
         ts.append(
             {
                 "label": label,
                 "start": c.start_sec,
-                "end": c.end_sec if c.end_sec is not None else c.start_sec,
+                "end": end,
             }
         )
     return ts[:20]
@@ -777,6 +934,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     timestamps: list[dict] = []
     graph: dict = {"nodes": [], "edges": []}
     selected_items: list[EvidenceItem] = []
+    raw_rows: list[dict[str, Any]] = []
 
     try:
         with driver.session() as session:
@@ -815,13 +973,15 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     finally:
         driver.close()
 
+    retrieved_chunks: list[RetrievedChunk] = []
     supporting_chunks: list[RetrievedChunk] = []
     if q_type == "content":
         try:
-            supporting_chunks = _evidence_to_retrieved_chunks(stem, selected_items)
+            retrieved_chunks = _evidence_to_retrieved_chunks(stem, selected_items)
         except Exception:
-            supporting_chunks = []
+            retrieved_chunks = []
     else:
+        retrieved_chunks = _structural_rows_to_retrieved_chunks(stem, raw_rows)
         try:
             lance_root = default_lance_root()
             if lance_root.exists() and allowed_ids:
@@ -837,6 +997,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
                         allowed_node_ids=allowed_ids,
                         max_items=4,
                     )
+                    retrieved_chunks.extend(supporting_chunks)
         except Exception:
             supporting_chunks = []
 
@@ -849,10 +1010,11 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         answer = _call_gemini_answer(context, question)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
+    answer = _compact_answer(answer, question, retrieved_chunks)
 
     return QueryResponse(
         answer=answer,
-        timestamps=_chunks_to_timestamps(supporting_chunks) if supporting_chunks else timestamps,
+        timestamps=_chunks_to_timestamps(retrieved_chunks) or timestamps,
         graph=graph,
-        retrieved_chunks=supporting_chunks,
+        retrieved_chunks=retrieved_chunks,
     )

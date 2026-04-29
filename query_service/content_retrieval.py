@@ -106,6 +106,21 @@ class EvidenceItem:
     slide_number: Optional[int] = None
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
+    retrieval_score: Optional[float] = None
+
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(v: Any) -> Optional[int]:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[EvidenceItem]:
@@ -132,7 +147,18 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             continue
         seen.add(uid)
         text = f"{st} (개념: {co})" if co else st
-        items.append(EvidenceItem(uid=uid, kind="segment", text=text, row=r))
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="segment",
+                text=text,
+                row=r,
+                chunk_type="segment",
+                slide_number=_to_int(r.get("slide_number")),
+                start_sec=_to_float(r.get("start")),
+                end_sec=_to_float(r.get("end")),
+            )
+        )
 
     for r in structured.get("slides", []):
         sn = r.get("slide_number")
@@ -146,7 +172,18 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             seen.add(uid)
             text = f"슬라이드 {sn} {tit}\n{body}".strip()
             if text:
-                items.append(EvidenceItem(uid=uid, kind="slide_concept", text=text, row=r))
+                items.append(
+                    EvidenceItem(
+                        uid=uid,
+                        kind="slide_concept",
+                        text=text,
+                        row=r,
+                        chunk_type="slide",
+                        slide_number=_to_int(sn),
+                        start_sec=_to_float(r.get("start_sec")),
+                        end_sec=_to_float(r.get("end_sec")),
+                    )
+                )
         else:
             uid = f"slt:{r.get('slide_id')}"
             if uid in seen:
@@ -154,7 +191,18 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             seen.add(uid)
             text = f"슬라이드 {sn} {tit}\n{body}".strip()
             if text:
-                items.append(EvidenceItem(uid=uid, kind="slide_text", text=text, row=r))
+                items.append(
+                    EvidenceItem(
+                        uid=uid,
+                        kind="slide_text",
+                        text=text,
+                        row=r,
+                        chunk_type="slide",
+                        slide_number=_to_int(sn),
+                        start_sec=_to_float(r.get("start_sec")),
+                        end_sec=_to_float(r.get("end_sec")),
+                    )
+                )
 
     for r in structured.get("graphrag_entities", []):
         eid = str(r.get("graphrag_entity_id", ""))
@@ -177,7 +225,17 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         text = f"{title}\n{desc}".strip()
         if meta:
             text += "\n" + " / ".join(meta)
-        items.append(EvidenceItem(uid=uid, kind="graphrag_entity", text=text, row=r))
+        first_slide = next((_to_int(x) for x in slides if _to_int(x) is not None), None)
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="graphrag_entity",
+                text=text,
+                row=r,
+                chunk_type="graphrag_entity",
+                slide_number=first_slide,
+            )
+        )
 
     for r in structured.get("graphrag_relationships", []):
         sid, tid = str(r.get("src_id", "")), str(r.get("tgt_id", ""))
@@ -191,7 +249,15 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         text = f"{src} —(GraphRAG 관계)→ {tgt}"
         if desc:
             text += f"\n{desc}"
-        items.append(EvidenceItem(uid=uid, kind="graphrag_relationship", text=text, row=r))
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="graphrag_relationship",
+                text=text,
+                row=r,
+                chunk_type="graphrag_relationship",
+            )
+        )
 
     return items
 
@@ -279,6 +345,10 @@ def _mmr(
         selected.append(best_i)
         pool.remove(best_i)
     return selected
+
+
+def _is_media_evidence(it: EvidenceItem) -> bool:
+    return it.kind in {"segment", "slide_text", "slide_concept"} or it.start_sec is not None
 
 
 def _distance_to_score(dist: Optional[float]) -> float:
@@ -499,6 +569,7 @@ def run_enhanced_content_pipeline(
             ip *= 0.72
         kw = _kw_score(all_items[i].text, keywords)
         combined[i] = sw * sim_to_q[i] + iw * ip + kw_w * kw
+        it.retrieval_score = float(combined[i])
 
     order = list(np.argsort(-combined))
     mmr_k = int(lim.get("mmr_pick_k", 18))
@@ -506,6 +577,13 @@ def run_enhanced_content_pipeline(
     lambda_mmr = float(mmr_cfg.get("lambda_example_heavy", 0.62)) if ex_w > 0.45 else float(mmr_cfg.get("lambda_default", 0.78))
     picked_idx = _mmr(order, sim_to_q, sim_all, min(mmr_k, len(all_items)), lambda_mmr)
     selected = [all_items[i] for i in picked_idx]
+    selected_uids = {it.uid for it in selected}
+    if not any(_is_media_evidence(it) for it in selected):
+        for i in order:
+            candidate = all_items[i]
+            if _is_media_evidence(candidate) and candidate.uid not in selected_uids:
+                selected.append(candidate)
+                break
 
     max_c = int(lim.get("max_context_chars_per_item", 900))
     context = build_sectioned_context(question, intent_weights, selected, max_c)

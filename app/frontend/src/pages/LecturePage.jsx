@@ -22,6 +22,7 @@ export default function LecturePage({ onNavigate }) {
   const [loading,      setLoading]      = useState(false)
   const [currentScene, setCurrentScene] = useState(0)
   const [seekTo,       setSeekTo]       = useState(null)
+  const [seekToSeconds, setSeekToSeconds] = useState(null)
   const [chatWidth,    setChatWidth]    = useState(300)
   const [isChatOpen,   setIsChatOpen]   = useState(true)
   const [isFocusMode,  setIsFocusMode]  = useState(false) // 타임라인 집중 모드 추가
@@ -40,6 +41,7 @@ export default function LecturePage({ onNavigate }) {
     setChatMessages([INIT_MSG])
     setChatInput('')
     setChatLoading(false)
+    setSeekToSeconds(null)
   }, [id])
 
   const handleMouseDown = useCallback(() => {
@@ -97,9 +99,14 @@ export default function LecturePage({ onNavigate }) {
   const scenes      = lecture?.scenes ?? []
   const chatContext = { type: 'watch', lecture_id: id }
 
-  function handleJumpToScene(idx) {
-    setCurrentScene(idx)
-    setSeekTo({ index: idx, time: Date.now() })
+  function handleJumpToScene(idx, seconds = null) {
+    if (Number.isInteger(idx) && idx >= 0) {
+      setCurrentScene(idx)
+      setSeekTo({ index: idx, time: Date.now() })
+    }
+    if (Number.isFinite(Number(seconds))) {
+      setSeekToSeconds({ seconds: Number(seconds), time: Date.now() })
+    }
   }
 
   if (loading) return <div className="lp-loading">불러오는 중...</div>
@@ -140,6 +147,7 @@ export default function LecturePage({ onNavigate }) {
               scenes={scenes}
               currentScene={currentScene}
               seekTo={seekTo}
+              seekToSeconds={seekToSeconds}
               onSceneChange={setCurrentScene}
               isMini={isFocusMode}
             />
