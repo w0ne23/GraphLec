@@ -318,7 +318,8 @@ class Preprocessor:
         self.slide_map:    Dict[str, Dict] = {}
         self.segment_data: Dict[str, Dict] = {}  # segment/NNNN → dict
         self.annot_data:   Dict[str, Dict] = {}  # annotation/NNNN → dict
-        self.scene_data:   Dict[str, Dict] = {}  # slide_id/scene/NN → dict
+        self.scene_data:   Dict[str, Dict] = {}  # slide_id/scene → dict (1 per slide)
+        self.context_data: Dict[str, Dict] = {}  # slide_id/context/NN → dict
         self._build()
 
     def _build(self):
@@ -329,26 +330,38 @@ class Preprocessor:
             sid = slide['slide_id']
             self.slide_map[sid] = slide
 
+            # Scene: 슬라이드 등장 구간 (1 per slide)
+            scene_id = f"{sid}/scene"
+            self.scene_data[scene_id] = {
+                'slide_id': sid,
+                'start':    slide.get('start_sec'),
+                'end':      slide.get('end_sec'),
+            }
+
             for ctx in slide.get('contexts', []):
-                scene_id = f"{sid}/scene/{ctx['context_index']:02d}"
+                context_id = f"{sid}/context/{ctx['context_index']:02d}"
                 for seg in ctx.get('segments', []):
                     seg_id = seg.get('segment_id') or f'segment/{seg_idx:04d}'
                     self.segment_data[seg_id] = {
                         **seg,
                         'slide_id':      sid,
                         'scene_id':      scene_id,
+                        'context_id':    context_id,
                         'context_index': ctx['context_index'],
                     }
                     seg_idx += 1
 
             for ctx in slide.get('contexts', []):
-                scene_id = f"{sid}/scene/{ctx['context_index']:02d}"
-                self.scene_data[scene_id] = {
+                context_id = f"{sid}/context/{ctx['context_index']:02d}"
+                scene_id = f"{sid}/scene"
+                self.context_data[context_id] = {
                     'slide_id':      sid,
+                    'scene_id':      scene_id,
                     'context_index': ctx['context_index'],
                     'start':         ctx.get('start'),
                     'end':           ctx.get('end'),
                     'stressed':      ctx.get('stressed', False),
+                    'text':          ctx.get('text', ''),
                 }
 
             for ann in slide.get('annotations_summary', []):
@@ -407,15 +420,11 @@ class StructureLayerBuilder:
 
     def _build_root(self):
         self.c.add(self.vid, 'type', 'Video', {'title': self.cfg.lecture_title, 'stem': self.cfg.stem})
-        self.c.add(self.vid, 'HAS_SLIDES', f'{self.vid}/slides')
-        self.c.add(f'{self.vid}/slides', 'type', 'Slides')
-        self.c.add(self.vid, 'HAS_SCENES', f'{self.vid}/scenes')
-        self.c.add(f'{self.vid}/scenes', 'type', 'Scenes')
 
     def _build_slides(self):
         for slide in self.pre.slides:
             sid = slide['slide_id']
-            self.c.add(f'{self.vid}/slides', 'CONTAINS', sid)
+            self.c.add(self.vid, 'HAS_SLIDE', sid)
             self.c.add(sid, 'type', 'Slide', {
                 'slide_number':  slide.get('slide_number'),
                 'title':         slide.get('title', ''),
@@ -427,26 +436,35 @@ class StructureLayerBuilder:
             })
 
     def _build_scenes(self):
-        """context 단위 Scene 노드 생성"""
+        """Scene 노드 생성 (슬라이드 등장 구간, 1 per Slide)"""
         for scene_id, data in self.pre.scene_data.items():
-            self.c.add(f'{self.vid}/scenes', 'CONTAINS', scene_id)
             self.c.add(data['slide_id'], 'HAS_SCENE', scene_id)
             self.c.add(scene_id, 'type', 'Scene', {
+                'slide_id': data['slide_id'],
+                'start':    data['start'],
+                'end':      data['end'],
+            })
+        """Context 노드 생성 (발화 문맥 묶음, Scene 내부)"""
+        for context_id, data in self.pre.context_data.items():
+            self.c.add(data['scene_id'], 'HAS_CONTEXT', context_id)
+            self.c.add(context_id, 'type', 'Context', {
                 'slide_id':      data['slide_id'],
+                'scene_id':      data['scene_id'],
                 'context_index': data['context_index'],
                 'start':         data['start'],
                 'end':           data['end'],
                 'stressed':      data['stressed'],
+                'text':          data['text'],
             })
 
     def _build_segments(self):
-        """segment → Segment 노드 + Scene에 HAS_SEGMENT 연결"""
+        """segment → Segment 노드 + Context에 HAS_SEGMENT 연결"""
         for seg_id, data in self.pre.segment_data.items():
-            self.c.add(data['scene_id'], 'HAS_SEGMENT', seg_id)
+            self.c.add(data['context_id'], 'HAS_SEGMENT', seg_id)
             self.c.add(seg_id, 'type', 'Segment', {
-                'start':   data['start'],
-                'end':     data['end'],
-                'text':    data['text'],
+                'start':    data['start'],
+                'end':      data['end'],
+                'text':     data['text'],
                 'stressed': data.get('stressed', False),
             })
 

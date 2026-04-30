@@ -19,22 +19,21 @@ from pipeline.graphrag_neo4j_ingest import (
     find_graphrag_output_dir,
     load_graphrag_layer_tx,
 )
+from pipeline.graphrag_emphasis import compute_keyword_match
 from pipeline.neo4j_ingest import ingest_parquet_to_neo4j
 
 logger = logging.getLogger(__name__)
 _RUNTIME_GRAPH_LABELS = {
     "AnnotationEmphasis",
-    "Concept",
     "ConceptGraph",
+    "Context",
     "Domain",
     "GraphRAGCommunity",
     "GraphRAGEntity",
     "GraphRAGTextUnit",
     "Scene",
-    "Scenes",
     "Segment",
     "Slide",
-    "Slides",
     "Video",
 }
 
@@ -504,6 +503,10 @@ async def ingest_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Di
                         load_graphrag_layer_tx(tx, stem, graphrag_dir),
                     )[1]
                 )
+                fused_path = output_dir / f"{stem}_fused.json"
+                if fused_path.is_file():
+                    emphasis_counts = compute_keyword_match(session, stem, fused_path)
+                    graphrag_counts.update(emphasis_counts)
                 summary = _stem_graph_counts(session, stem)
         finally:
             driver.close()
