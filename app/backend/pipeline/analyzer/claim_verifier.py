@@ -3,7 +3,41 @@ from __future__ import annotations
 import json
 
 
-def _build_judge_prompt(claims: list[dict], current_date: str, hint: dict) -> str:
+def _build_claim_context_block(claim: dict, utterances: list[dict], slide_ctx: dict) -> str:
+    from . import claim_common as cv
+
+    uid = str(claim.get("utterance_id", "") or "")
+    idx = next((i for i, u in enumerate(utterances) if str(u.get("utterance_id", "") or "") == uid), -1)
+    target = utterances[idx] if idx >= 0 else {}
+    slide_number = int(target.get("slide_number", 0) or 0)
+    slide = slide_ctx.get(slide_number, {})
+    slide_title = slide.get("title", f"슬라이드 {slide_number}") if slide_number else "슬라이드 알 수 없음"
+    time_range = slide.get("time_range", "")
+
+    if idx >= 0:
+        local = utterances[max(0, idx - 3):idx + 4]
+    else:
+        local = []
+    local_lines = []
+    for u in local:
+        prefix = "현재" if str(u.get("utterance_id", "") or "") == uid else "문맥"
+        local_lines.append(f"   - {prefix}: {cv._format_utterance_for_prompt(u)}")
+    local_text = "\n".join(local_lines) if local_lines else "   (발화 문맥 없음)"
+
+    return (
+        f"[강의 문맥]\n"
+        f"   슬라이드: {slide_title} ({time_range})\n"
+        f"   주변 발화:\n{local_text}"
+    )
+
+
+def _build_judge_prompt(
+    claims: list[dict],
+    utterances: list[dict],
+    current_date: str,
+    hint: dict,
+    slide_ctx: dict,
+) -> str:
     claim_lines = []
     for i, c in enumerate(claims, 1):
         approx = " [근사치]" if c.get("is_approximate") else ""
@@ -12,7 +46,8 @@ def _build_judge_prompt(claims: list[dict], current_date: str, hint: dict) -> st
             f"{i}. [{c['utterance_id']}] ({c.get('claim_type', '?')}){approx}\n"
             f"   원문: {c.get('claim_text', '')}\n"
             f"   해소: {resolved}\n"
-            f"   검증 질문: {c.get('verification_question', '')}"
+            f"   검증 질문: {c.get('verification_question', '')}\n"
+            f"{_build_claim_context_block(c, utterances, slide_ctx)}"
         )
 
     return f"""당신은 강의 발화의 정오를 판정하는 전문가입니다.
@@ -21,6 +56,7 @@ def _build_judge_prompt(claims: list[dict], current_date: str, hint: dict) -> st
 도메인 참고: {hint.get('outdated_guidance', '')}
 
 아래는 강의 발화에서 추출된 사실 주장(claim) 목록입니다.
+각 claim에는 빠른 1차 판정을 위한 주변 발화 문맥이 함께 제공됩니다.
 
 판정 대상 claim 목록:
 {chr(10).join(claim_lines)}
@@ -39,6 +75,11 @@ def _build_judge_prompt(claims: list[dict], current_date: str, hint: dict) -> st
 ### 해석 원칙
 
 다음 경우는 매우 신중하게 판단하세요:
+
+0. **강의 문맥 우선**
+   판정은 반드시 제공된 주변 발화 안에서 학생이 실제로 이해할 명제를 기준으로 하세요.
+   claim의 해소 문장이 과도하게 일반화되어 보이면, 원문 발화와 주변 문맥의 범위로 다시 좁혀 해석하세요.
+   슬라이드 세부 내용까지 확인해야만 판단 가능한 경우는 이 단계에서 확정 오류로 보고하지 마세요.
 
 1. **복잡한 현상의 배경 설명**
    여러 원인 중 하나를 대표 축으로 설명하는 경우, "유일한 원인", "전적으로", "오직"처럼
@@ -69,6 +110,7 @@ def _build_judge_prompt(claims: list[dict], current_date: str, hint: dict) -> st
 - 교육적 단순화로 세부사항을 생략했지만 핵심 결론은 맞는 경우
 - [근사치] claim의 반올림/소수점 차이
 - 반박 근거가 강의 범위 밖의 고급 개념/예외뿐인 경우
+- 입문 강의의 계층 구조 설명을 펌웨어, DMA, 하이퍼바이저, 장치 내부 컨트롤러 같은 고급 예외만으로 반박하는 경우
 - 관례·컨벤션을 소개하는 발화 ("반드시 ~합니다"라도 해당 도메인 표준 관례면 오류 아님)
 - 라이브러리/프레임워크의 실제 동작과 일치하는 발화
 - 강의용 표현과 코드 변수명 차이 (풀네임으로 부르는 것은 오류 아님)
@@ -120,7 +162,7 @@ def _judge_claims(
     if not claims:
         return [], False, 0, cv._empty_token_usage()
 
-    prompt = _build_judge_prompt(claims, current_date, hint)
+    prompt = _build_judge_prompt(claims, utterances, current_date, hint, slide_ctx)
     api_calls = 0
     token_usage = cv._empty_token_usage()
 
@@ -222,7 +264,7 @@ def judge_claims_only(
     current_date: str,
     hint: dict,
     slide_ctx: dict,
-    num_runs: int = 3,
+    num_runs: int = 1,
     min_detection_rate: float = 0.5,
 ) -> tuple[list[dict], int, dict]:
     """2단계만 실행: claim 판정. (이슈 리스트, api_calls) 반환."""

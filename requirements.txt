@@ -21,6 +21,7 @@ json-repair
 google-generativeai>=0.8.0
 google-genai>=0.8.0
 groq
+openai>=1.0.0
 
 # ── ML & Vision ───────────────────────────────────────────────
 torch>=2.0.0
