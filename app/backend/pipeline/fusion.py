@@ -7,7 +7,7 @@ fusion.py — 멀티모달 강의 데이터 통합
   - annotation.json       : 강사 필기 annotation 이벤트
 
 출력:
-  - fused.json : 슬라이드 단위 통합 텍스트 + 강조 점수 + 지시어 매핑
+  - fused.json : 슬라이드 단위 통합 텍스트 + 강조 점수
 
 사용법:
   python fusion.py
@@ -134,7 +134,6 @@ ANNOT_CONFIDENCE_MULT: dict[str, float] = {
 DEICTIC_PATTERNS = re.compile(
     r'(?<!\w)(이것|이거|이것들|이게|저것|저거|저게|여기|저기|이쪽|저쪽|이 부분|저 부분|이 내용|이 개념)(?!\w)'
 )
-
 
 # ============================================================================
 #  점수 계산 함수
@@ -356,7 +355,7 @@ def build_annotation_highlights_summary(annotations: list[dict]) -> str:
 def find_deictic_target(
     seg_start: float,
     seg_text: str,
-    slide_annotations: list[dict],  # flatten_annotations_for_slide 결과
+    slide_annotations: list[dict],
     cfg: Config,
 ) -> Optional[dict]:
     """
@@ -368,7 +367,7 @@ def find_deictic_target(
     if not slide_annotations:
         return None
 
-    t_low  = seg_start - cfg.DEICTIC_WINDOW_BEFORE_SEC
+    t_low = seg_start - cfg.DEICTIC_WINDOW_BEFORE_SEC
     t_high = seg_start + cfg.DEICTIC_WINDOW_AFTER_SEC
 
     candidates = [
@@ -379,15 +378,14 @@ def find_deictic_target(
     if not candidates:
         return None
 
-    # 시간적으로 가장 가까운 annotation 선택
     closest = min(candidates, key=lambda a: abs(a["timestamp_sec"] - seg_start))
 
     return {
-        "target_content":   closest.get("target_content"),
-        "annotation_type":  closest.get("type"),
-        "bbox":             closest.get("target_bbox") or closest.get("annotation_bbox"),
-        "timestamp_sec":    closest.get("timestamp_sec"),
-        "confidence":       closest.get("confidence"),
+        "target_content": closest.get("target_content"),
+        "annotation_type": closest.get("type"),
+        "bbox": closest.get("target_bbox") or closest.get("annotation_bbox"),
+        "timestamp_sec": closest.get("timestamp_sec"),
+        "confidence": closest.get("confidence"),
     }
 
 

@@ -10,7 +10,7 @@ import httpx
 from pathlib import Path
 from typing import Optional, List, Any, Dict
 
-from sqlalchemy import select, delete, and_
+from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from neo4j import GraphDatabase
@@ -324,14 +324,12 @@ async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
 
 
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict[str, Any]]:
-    """강의 상세 정보 조회 (Lecture ID 기준)"""
-    query = (
-        select(Job, LectureContent)
-        .join(LectureContent, Job.id == LectureContent.job_id)
-        .where(LectureContent.id == lecture_id)
-    )
-    result = await db.execute(query)
-    row = result.unique().one_or_none()
+    """강의 상세 정보 조회.
+
+    프론트가 업로드 직후 job_id를 들고 있는 경우가 있어 LectureContent.id,
+    Job.id, LectureContent.job_id, stem을 모두 허용한다.
+    """
+    row = await _get_lecture_row(db, lecture_id)
     if not row:
         return None
     job, content = row[0], row[1]
@@ -349,12 +347,44 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     }
 
 
-async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[LectureContent]:
+def _content_identifier_conditions(identifier: str):
+    raw = str(identifier)
+    conditions = [LectureContent.stem == raw]
     try:
-        lec_uuid = uuid.UUID(str(lecture_id))
+        ident_uuid = uuid.UUID(raw)
     except (ValueError, TypeError):
-        return None
-    result = await db.execute(select(LectureContent).where(LectureContent.id == lec_uuid))
+        return conditions
+    conditions.extend([
+        LectureContent.id == ident_uuid,
+        LectureContent.job_id == ident_uuid,
+    ])
+    return conditions
+
+
+def _row_identifier_conditions(identifier: str):
+    conditions = _content_identifier_conditions(identifier)
+    try:
+        ident_uuid = uuid.UUID(str(identifier))
+    except (ValueError, TypeError):
+        return conditions
+    conditions.append(Job.id == ident_uuid)
+    return conditions
+
+
+async def _get_lecture_row(db: AsyncSession, lecture_id: str):
+    query = (
+        select(Job, LectureContent)
+        .join(LectureContent, Job.id == LectureContent.job_id)
+        .where(or_(*_row_identifier_conditions(lecture_id)))
+    )
+    result = await db.execute(query)
+    return result.unique().one_or_none()
+
+
+async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[LectureContent]:
+    result = await db.execute(
+        select(LectureContent).where(or_(*_content_identifier_conditions(lecture_id)))
+    )
     return result.scalar_one_or_none()
 
 
@@ -464,8 +494,7 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
 
 async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict[str, Any]:
     """질의응답 (Lecture ID 기준)"""
-    result = await db.execute(select(LectureContent).where(LectureContent.id == lecture_id))
-    content = result.scalar_one_or_none()
+    content = await _get_lecture_content(db, lecture_id)
     if not content:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
@@ -605,7 +634,7 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
     final_claims = flow.get("final_confirmed_claims", []) or []
 
     return {
-        "lecture_id": str(lecture_id),
+        "lecture_id": str(detail["id"]),
         "stem": stem,
         "verification_path": str(verifier_path),
         "final_confirmed_claim_count": int(
