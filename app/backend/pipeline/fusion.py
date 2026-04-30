@@ -66,6 +66,8 @@ class Config:
 
     # 시간 윈도우
     TIME_WINDOW_SEC:          float = 20.0  # 강조 합산용 annotation ↔ audio 매칭
+    DEICTIC_WINDOW_BEFORE_SEC: float = 5.0  # 지시어 발화 기준 이전
+    DEICTIC_WINDOW_AFTER_SEC:  float = 2.0  # 지시어 발화 기준 이후
 
     # 키워드 필터
     MIN_KEYWORD_LEN: int = 2
@@ -127,6 +129,11 @@ ANNOT_CONFIDENCE_MULT: dict[str, float] = {
     "medium": 0.7,
     "low":    0.4,
 }
+
+# 지시어 패턴
+DEICTIC_PATTERNS = re.compile(
+    r'(?<!\w)(이것|이거|이것들|이게|저것|저거|저게|여기|저기|이쪽|저쪽|이 부분|저 부분|이 내용|이 개념)(?!\w)'
+)
 
 # ============================================================================
 #  점수 계산 함수
@@ -340,6 +347,48 @@ def build_annotation_highlights_summary(annotations: list[dict]) -> str:
         f"표시 유형은 {type_preview}가 포함된다."
     )
 
+
+# ============================================================================
+#  지시어 매칭
+# ============================================================================
+
+def find_deictic_target(
+    seg_start: float,
+    seg_text: str,
+    slide_annotations: list[dict],
+    cfg: Config,
+) -> Optional[dict]:
+    """
+    segment 텍스트에 지시어가 있으면, 발화 시점 기준 윈도우 내 annotation 중
+    가장 가까운 것을 지시 대상으로 반환.
+    """
+    if not DEICTIC_PATTERNS.search(seg_text):
+        return None
+    if not slide_annotations:
+        return None
+
+    t_low = seg_start - cfg.DEICTIC_WINDOW_BEFORE_SEC
+    t_high = seg_start + cfg.DEICTIC_WINDOW_AFTER_SEC
+
+    candidates = [
+        ann for ann in slide_annotations
+        if ann.get("timestamp_sec") is not None
+        and t_low <= ann["timestamp_sec"] <= t_high
+    ]
+    if not candidates:
+        return None
+
+    closest = min(candidates, key=lambda a: abs(a["timestamp_sec"] - seg_start))
+
+    return {
+        "target_content": closest.get("target_content"),
+        "annotation_type": closest.get("type"),
+        "bbox": closest.get("target_bbox") or closest.get("annotation_bbox"),
+        "timestamp_sec": closest.get("timestamp_sec"),
+        "confidence": closest.get("confidence"),
+    }
+
+
 # ============================================================================
 #  both_bonus 계산
 # ============================================================================
@@ -499,7 +548,7 @@ def run_fusion(cfg: Config) -> dict:
             audio_kws, visual_kws, annot_kws, slide_text_kws, cfg
         )
 
-        # ── contexts + segments ──────────────────────────────────────────────
+        # ── contexts + segments (지시어 매칭 포함) ──────────────────────────
         fused_contexts = []
         if au_slide:
             for ctx in au_slide["contexts"]:
@@ -508,11 +557,15 @@ def run_fusion(cfg: Config) -> dict:
 
                 fused_segs = []
                 for seg in ctx.get("segments", []):
+                    deictic_target = find_deictic_target(
+                        seg["start"], seg["text"], flat_annots, cfg
+                    )
                     fused_segs.append({
                         "start":          seg["start"],
                         "end":            seg["end"],
                         "text":           seg["text"],
                         "stressed":       stressed,  # context 단위 플래그를 segment에 상속
+                        "deictic_target": deictic_target,
                     })
 
                 fused_contexts.append({
@@ -599,6 +652,8 @@ def run_fusion(cfg: Config) -> dict:
                 "W_ANNOT":                    cfg.W_ANNOT,
                 "BOTH_BONUS":                 cfg.BOTH_BONUS,
                 "TIME_WINDOW_SEC":            cfg.TIME_WINDOW_SEC,
+                "DEICTIC_WINDOW_BEFORE_SEC":  cfg.DEICTIC_WINDOW_BEFORE_SEC,
+                "DEICTIC_WINDOW_AFTER_SEC":   cfg.DEICTIC_WINDOW_AFTER_SEC,
             },
         },
         "slides": fused_slides,
@@ -650,12 +705,20 @@ def main():
 
     elapsed = time.time() - start
     total_kw = sum(len(s["emphasized_keywords"]) for s in output["slides"])
+    total_deictic = sum(
+        1
+        for s in output["slides"]
+        for ctx in s["contexts"]
+        for seg in ctx["segments"]
+        if seg.get("deictic_target")
+    )
 
     print("\n" + "="*60)
     print("✅ 완료")
     print("="*60)
     print(f"  슬라이드       : {output['metadata']['total_slides']}개")
     print(f"  강조 키워드    : {total_kw}개")
+    print(f"  지시어 매칭    : {total_deictic}개")
     print(f"  처리 시간      : {elapsed:.2f}초")
     print(f"  출력 파일      : {cfg.output_path}")
 
