@@ -37,7 +37,7 @@ dist/
 build/
 .eggs/
 lib/
-!requirements.txt
+!**/requirements.txt
 
 # ── 가상환경 ──────────────────────────────────────────────────
 venv/
