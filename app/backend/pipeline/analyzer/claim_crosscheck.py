@@ -5,6 +5,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
+_CROSSCHECK_PARSE_RETRIES = 1
 
 
 def _parse_crosscheck_payload(text: str) -> dict:
@@ -20,13 +21,38 @@ def _parse_crosscheck_payload(text: str) -> dict:
         if not candidate:
             continue
         fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
-        for payload_text in (candidate, fixed):
+        compact = re.sub(r"\s+", " ", fixed).strip()
+        for payload_text in (candidate, fixed, compact):
             try:
                 payload = json.loads(payload_text)
             except json.JSONDecodeError:
                 continue
             if isinstance(payload, dict):
-                return payload
+                verdict = str(payload.get("verdict", "") or "").lower().strip()
+                reason = str(payload.get("reason", "") or "").strip()
+                if verdict in _CROSSCHECK_VERDICTS:
+                    return {"verdict": verdict, "reason": reason}
+
+        # 흔한 비표준 응답 형태 복구:
+        # {verdict: agree, reason: "..."} / {'verdict':'agree', ...}
+        relaxed = fixed
+        relaxed = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', relaxed)
+        relaxed = re.sub(
+            r'("verdict"\s*:\s*)(agree|disagree|inconclusive)(\s*[,}])',
+            lambda m: f'{m.group(1)}"{m.group(2)}"{m.group(3)}',
+            relaxed,
+            flags=re.IGNORECASE,
+        )
+        relaxed = relaxed.replace("'", '"')
+        try:
+            payload = json.loads(relaxed)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            verdict = str(payload.get("verdict", "") or "").lower().strip()
+            reason = str(payload.get("reason", "") or "").strip()
+            if verdict in _CROSSCHECK_VERDICTS:
+                return {"verdict": verdict, "reason": reason}
 
     verdict = cv._extract_json_like_string_field(cleaned, "verdict").lower().strip()
     if verdict not in _CROSSCHECK_VERDICTS:
@@ -37,6 +63,20 @@ def _parse_crosscheck_payload(text: str) -> dict:
         )
         if m:
             verdict = m.group(1).lower()
+    if verdict not in _CROSSCHECK_VERDICTS:
+        m = re.search(
+            r"['\"]?verdict['\"]?\s*:\s*['\"]?(agr|dis|incon)",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            prefix = m.group(1).lower()
+            if prefix.startswith("agr"):
+                verdict = "agree"
+            elif prefix.startswith("dis"):
+                verdict = "disagree"
+            elif prefix.startswith("incon"):
+                verdict = "inconclusive"
 
     reason = cv._extract_json_like_string_field(cleaned, "reason")
     if not reason:
@@ -66,24 +106,12 @@ def _build_slide_transcript_block(slides: list[dict], slide_number: int) -> str:
             start = float(seg.get("start", 0) or 0)
             corr = str(seg.get("text", "") or "").strip()
             orig = str(seg.get("text_original", "") or "").strip()
-            candidate = str(seg.get("text_corrected_candidate", "") or "").strip()
             status = str(seg.get("correction_status", "") or "").strip()
-            risk = str(seg.get("correction_risk", "") or "").strip()
-            reason = str(seg.get("correction_reason", "") or "").strip()
             text = corr or orig
             if not text:
                 continue
-            if status == "candidate_only" and candidate:
-                details = []
-                if risk:
-                    details.append(f"risk={risk}")
-                if reason:
-                    details.append(f"reason={reason}")
-                detail_text = ", ".join(details) if details else "candidate_only"
-                transcript_lines.append(
-                    f"  [{start:.1f}s] 발화 원문: {orig or text} | "
-                    f"교정 후보(미적용): {candidate} | 전사 불확실성: {detail_text}"
-                )
+            if status == "candidate_only":
+                transcript_lines.append(f"  [{start:.1f}s] {orig or text}")
             elif corr and orig and corr != orig:
                 transcript_lines.append(f"  [{start:.1f}s] 교정: {corr} | 원문: {orig}")
             else:
@@ -159,14 +187,23 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
 ## 판정 기준
 - 학생이 이 발화를 따라했을 때 실제로 틀린 지식을 갖게 되는가?
 - 슬라이드 텍스트와 발화가 직접적으로 모순되는가?
+- claim이나 문제 제기가 발화 원문보다 넓게 일반화되었다면, 발화 원문과 주변 문맥의 범위로 다시 좁혀 판단하세요.
+- 슬라이드가 같은 교육적 단순화를 명시하고 있고 발화가 이를 설명하는 경우, 강의 범위 밖의 고급 예외만으로 오류로 보지 마세요.
+- 입문 강의의 운영체제 계층 구조 설명을 펌웨어, DMA, 하이퍼바이저, 장치 내부 컨트롤러 같은 예외만으로 반박하지 마세요.
 - 대상 발화가 예시 문장("예를 들어", "이에 해당합니다")이면, 반드시 바로 앞뒤 정의 문장과 연결해서 해석하세요.
 - 슬라이드 텍스트에 표, 수식, 데이터가 포함되어 있으면 직접 계산하여 발화와 비교하세요.
 
 위 기준 중 하나라도 YES면 "agree", 모두 NO면 "disagree"로 답하세요.
 확신이 부족하거나 응답 형식을 지키기 어렵다면 "inconclusive"를 선택하세요.
 
-응답 (JSON만):
-{{"verdict": "agree" | "disagree" | "inconclusive", "reason": "짧은 사유"}}"""
+응답 규칙:
+- 반드시 JSON object 하나만 출력
+- markdown/code fence 금지
+- 키는 verdict, reason 두 개만 사용
+- verdict 값은 agree / disagree / inconclusive 중 하나만 사용
+
+응답 예시:
+{{"verdict":"agree","reason":"슬라이드와 발화가 직접 모순됨"}}"""
 
     model = str(cv._resolve_stage_model("cross_recheck") or "").strip()
     response_format = {"type": "json_object"} if (
@@ -175,11 +212,11 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
 
     token_usage = cv._empty_token_usage()
     last_error = None
-    for attempt in range(cv.VERIFIER_PARSE_RETRIES + 1):
+    for attempt in range(_CROSSCHECK_PARSE_RETRIES + 1):
         try:
             text, call_usage = cv._call_llm(
                 prompt,
-                max_tokens=512,
+                max_tokens=1024,
                 thinking_budget=1024,
                 response_format=response_format,
                 stage="cross_recheck",
@@ -193,8 +230,8 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
             return verdict, reason, token_usage
         except Exception as e:
             last_error = e
-            if attempt < cv.VERIFIER_PARSE_RETRIES:
-                print(f"    ↺ 교차 재검증 JSON 파싱 재시도 ({attempt+1}/{cv.VERIFIER_PARSE_RETRIES})")
+            if attempt < _CROSSCHECK_PARSE_RETRIES:
+                print(f"    ↺ 교차 재검증 JSON 파싱 재시도 ({attempt+1}/{_CROSSCHECK_PARSE_RETRIES})")
 
     return "inconclusive", f"교차 재검증 실패: {last_error}", token_usage
 
@@ -253,6 +290,7 @@ def _build_slide_recheck_prompt(
 1. **슬라이드의 정확한 조건 확인**
    슬라이드에 있는 코드/수식/다이어그램의 구체적 조건을 정확히 확인하세요.
    발화가 슬라이드의 특정 상황을 설명하는 것이면, 그 상황에서 발화가 맞는지 판단하세요.
+   claim 또는 이전 단계의 지적이 발화 원문보다 넓게 일반화되었다면, 발화 원문과 주변 문맥의 범위로 다시 좁혀 판단하세요.
    예: 슬라이드의 코드에 특정 키워드가 없는 상태라면, "이 기능을 사용할 수 없다"는 맞는 설명일 수 있음
    예: 슬라이드의 수식에 특정 전제 조건이 있다면, 발화가 그 전제 하에서 설명하는 것일 수 있음
    **슬라이드에 수치 테이블/데이터가 있으면 직접 계산하여 발화와 비교하세요.**
@@ -281,6 +319,7 @@ def _build_slide_recheck_prompt(
      "오직", "전적으로", "유일한 원인", "~만으로", "반드시 이것 때문이다" 같은 배타적 단정이 없다면
      기본적으로 설명적 요약으로 해석하세요.
    - 단지 더 포괄적이고 더 정확한 보충 설명이 가능하다는 이유만으로 이슈를 유지하지 마세요.
+   - 슬라이드가 같은 교육적 단순화를 명시하고 발화가 그 슬라이드를 설명하는 경우, 고급 예외만으로 이슈를 유지하지 마세요.
 
 6. **학파/이론/관점 소개 구간 처리**
    - 슬라이드나 직전 발화가 특정 학파, 이론, 관점, 설명틀을 소개하고 있다면,
@@ -295,13 +334,6 @@ def _build_slide_recheck_prompt(
    - 이 경우 발화의 일반적 표현이 슬라이드의 구체 정보와 양립 가능하면 이슈를 유지하지 마세요.
    - "더 구체적으로 말할 수 있었다", "세부 종명을 다 말하지 않았다", "예시를 하나만 말하지 않았다"는 이유만으로는 factual_error가 아닙니다.
    - 일반적 표현이 잘못된 상위 범주이거나, 슬라이드의 구체 대상을 배제하거나, 직접 모순될 때만 이슈를 유지하세요.
-
-8. **전사 불확실성(candidate_only) 재판단**
-   - 전사 전문에 "교정 후보(미적용)"이 표시된 줄은 원문과 후보가 충돌하지만 자동 교정이 승인되지 않은 경우입니다.
-   - 이때 교정 후보를 확정된 정답처럼 취급하지 마세요.
-   - 이슈가 오직 미적용 후보를 정답으로 가정해야만 성립한다면, 보수적으로 기각하세요.
-   - 반대로 원문 자체가 잘못된 기호, 키워드, 숫자, 제약조건, 방향성을 직접 말하고 있고
-     후보가 high risk / failed_surface_safety 로 보류된 경우라면, 원문 기준 오류 유지가 가능합니다.
 
 결론:
 - 슬라이드 전체 맥락을 봐도 여전히 틀리면 → "valid": true

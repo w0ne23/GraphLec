@@ -15,8 +15,6 @@ API 클라이언트 초기화 및 경로 상수 정의
         {stem}_annotation.json
         {stem}_segments.json
         {stem}_silences.json
-        {stem}_deictics.json
-        {stem}_deictics_ambiguous.json
         {stem}_audio_features.json
         {stem}_audio_quality.json
         {stem}_emphasis.json
@@ -80,6 +78,11 @@ groq_client     = Groq(api_key=GROQ_API_KEY)
 openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is not None else None
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
 
+_openai_client_key = OPENAI_API_KEY or ""
+_anthropic_client_key = ANTHROPIC_API_KEY or ""
+_gemini_client_key_1 = GEMINI_API_KEY_1 or ""
+_gemini_client_key_2 = GEMINI_API_KEY_2 or ""
+
 # ──────────────────────────────────────────────────────────────
 # 기본 Gemini 모델 상수
 # ──────────────────────────────────────────────────────────────
@@ -116,8 +119,6 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
         "annotation":          output_dir / f"{stem}_annotation.json",
         "segments":            output_dir / f"{stem}_segments.json",
         "silences":            output_dir / f"{stem}_silences.json",
-        "deictics":            output_dir / f"{stem}_deictics.json",
-        "deictics_ambiguous":  output_dir / f"{stem}_deictics_ambiguous.json",
         "audio_features":      output_dir / f"{stem}_audio_features.json",
         "audio_quality":       output_dir / f"{stem}_audio_quality.json",
         "emphasis":            output_dir / f"{stem}_emphasis.json",
@@ -128,14 +129,33 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
 
 
 def get_openai_client():
+    global openai_client, _openai_client_key
+    current_key = os.getenv("OPENAI_API_KEY") or ""
+    if current_key != _openai_client_key:
+        _openai_client_key = current_key
+        openai_client = OpenAI(api_key=current_key) if current_key and OpenAI is not None else None
     return openai_client
 
 
 def get_anthropic_client():
+    global anthropic_client, _anthropic_client_key
+    current_key = os.getenv("ANTHROPIC_API_KEY") or ""
+    if current_key != _anthropic_client_key:
+        _anthropic_client_key = current_key
+        anthropic_client = Anthropic(api_key=current_key) if current_key and Anthropic is not None else None
     return anthropic_client
 
 
 def get_gemini_client_sequence():
+    global gemini_client, gemini_client_2, _gemini_client_key_1, _gemini_client_key_2
+    current_key_1 = os.getenv("GOOGLE_API_KEY_1") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY") or ""
+    current_key_2 = os.getenv("GOOGLE_API_KEY_2") or current_key_1
+    if current_key_1 != _gemini_client_key_1:
+        _gemini_client_key_1 = current_key_1
+        gemini_client = genai.Client(api_key=current_key_1) if current_key_1 else None
+    if current_key_2 != _gemini_client_key_2:
+        _gemini_client_key_2 = current_key_2
+        gemini_client_2 = genai.Client(api_key=current_key_2) if current_key_2 else None
     seq = []
     if gemini_client_2 is not None:
         seq.append(("gemini_client_2", gemini_client_2))

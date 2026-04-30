@@ -45,10 +45,6 @@ from threading import Lock
 from typing import Any, Callable, Optional
 
 import librosa
-from .deictics import (
-    classify_ambiguous_deictics_with_llm,
-    extract_deictics_from_segments,
-)
 from .utils import resolve_backend_root, resolve_pipeline_package_root
 
 logging.basicConfig(

@@ -854,33 +854,14 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
     return ctx
 
 
-def _has_unapplied_candidate(u: dict) -> bool:
-    return bool(
-        str(u.get("correction_status", "") or "").strip() == "candidate_only"
-        and str(u.get("text_corrected_candidate", "") or "").strip()
-    )
-
-
 def _format_utterance_for_prompt(u: dict) -> str:
     uid = u["utterance_id"]
     ts = f"{u['start_time']:.1f}s"
     corr = str(u.get("text_corrected", "") or "").strip()
     orig = str(u.get("text_original", "") or "").strip()
-    candidate = str(u.get("text_corrected_candidate", "") or "").strip()
-    risk = str(u.get("correction_risk", "") or "").strip()
-    reason = str(u.get("correction_reason", "") or "").strip()
 
-    if _has_unapplied_candidate(u):
-        details = []
-        if risk:
-            details.append(f"risk={risk}")
-        if reason:
-            details.append(f"reason={reason}")
-        detail_text = ", ".join(details) if details else "candidate_only"
-        return (
-            f"{uid} | {ts} | 발화 원문: {orig or u.get('text', '')} | "
-            f"교정 후보(미적용): {candidate} | 전사 불확실성: {detail_text}"
-        )
+    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
+        return f"{uid} | {ts} | {orig or u.get('text', '')}"
 
     if corr and orig and corr != orig:
         return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"

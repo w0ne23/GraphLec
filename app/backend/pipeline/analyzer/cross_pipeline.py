@@ -3,7 +3,7 @@
 
 1단계 claim 추출 → gemini-2.5-flash 단일 추출
 2단계 claim 판정 → 다중 모델 후보 합집합
-3단계 이미지 교차검증 → 각 모델이 합집합 이슈를 재판정
+3단계 텍스트+문맥 교차검증 → 각 모델이 합집합 이슈를 재판정
 4단계 grounding → 통과한 이슈만 primary 모델로 재검증
 
 사용법:
@@ -18,7 +18,7 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from .cross_merge import _issue_match_key, rebuild_claim_batches, union_claims, union_issues
+from .cross_merge import _cluster_contextual_issues, _issue_match_key, rebuild_claim_batches, union_claims, union_issues
 from .cross_utils import (
     CLAIM_EXTRACT_MODEL,
     _ROOT,
@@ -40,8 +40,15 @@ from .cross_workers import (
 
 # ── 교차 검증 메인 ────────────────────────────────────────
 
-def cross_verify(merged_path: str, models: list[str], num_runs: int,
-                 min_rate: float, batch_size: int, env_vars: dict) -> dict:
+def cross_verify(
+    merged_path: str,
+    models: list[str],
+    num_runs: int,
+    min_rate: float,
+    batch_size: int,
+    env_vars: dict,
+    judge_batch_size: int | None = None,
+) -> dict:
     root = str(_ROOT)
 
     # ── Phase 1: claim 추출 (단일 모델) ──
@@ -82,7 +89,7 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
             seen_uids.add(uid)
             unique_utts.append(u)
 
-    merged_batches = rebuild_claim_batches(merged_claims, unique_utts, batch_size)
+    merged_batches = rebuild_claim_batches(merged_claims, unique_utts, judge_batch_size or batch_size)
 
     # ── Phase 2: claim 판정 (병렬) ──
     print(f"\n{'='*60}")
@@ -129,14 +136,14 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
             for issue in issues:
                 print(f"      • {issue.get('claim_text','')[:80]}")
 
-    # ── Phase 3: 합집합 전체 → 두 모델 모두 이미지+문맥 crosscheck ──
+    # ── Phase 3: 합집합 전체 → 두 모델 모두 텍스트+문맥 crosscheck ──
     cross_recheck_verified = []
     cross_recheck_rejected = []
     cross_recheck_inconclusive = []
     cross_recheck_usage_per_model = {m: _empty_token_usage() for m in models}
     if total_union > 0 and len(models) >= 2:
         print(f"\n{'='*60}")
-        print(f"  Phase 3: 이미지 교차검증 — 합집합 {total_union}건을 두 모델이 재검증")
+        print(f"  Phase 3: 텍스트+문맥 교차검증 — 합집합 {total_union}건을 두 모델이 재검증")
         print(f"{'='*60}")
 
         recheck_args = [(unioned, merged_path, m, root, env_vars) for m in models]
@@ -181,7 +188,7 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
                 cross_recheck_verified.append(issue)
             else:
                 issue["cross_recheck"] = None if any_inconclusive else False
-                issue["rejection_stage"] = "이미지 교차검증"
+                issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = " / ".join(reasons)
                 if any_inconclusive:
                     cross_recheck_inconclusive.append(issue)
@@ -189,11 +196,12 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
                     cross_recheck_rejected.append(issue)
 
         if cross_recheck_verified:
-            print(f"\n    ✅ 이미지 교차검증 통과: {len(cross_recheck_verified)}건")
+            cross_recheck_verified = _cluster_contextual_issues(cross_recheck_verified)
+            print(f"\n    ✅ 텍스트+문맥 교차검증 통과: {len(cross_recheck_verified)}건")
         if cross_recheck_rejected:
-            print(f"    ❌ 이미지 교차검증 거부: {len(cross_recheck_rejected)}건")
+            print(f"    ❌ 텍스트+문맥 교차검증 거부: {len(cross_recheck_rejected)}건")
         if cross_recheck_inconclusive:
-            print(f"    ⚠️ 이미지 교차검증 불확실: {len(cross_recheck_inconclusive)}건")
+            print(f"    ⚠️ 텍스트+문맥 교차검증 불확실: {len(cross_recheck_inconclusive)}건")
 
     all_confirmed = cross_recheck_verified
 
@@ -287,9 +295,11 @@ def cross_verify(merged_path: str, models: list[str], num_runs: int,
 
     # ── 로그 기록 ──
     try:
-        from eval.verification_logger import log_cross_result
+        from .verification_logger import log_cross_result
         video_name = Path(merged_path).stem.replace("_merged_clean", "").replace("_merged", "")
         log_cross_result(video_name, result, judge_results)
+    except ImportError:
+        pass
     except Exception as e:
         print(f"  ⚠️ 로그 기록 실패: {e}")
 
@@ -337,8 +347,8 @@ def print_cross_result(result: dict):
     print(f"    이슈 합집합: {issue_union}건")
     print(f"    ├─ {agreement_label}: {inter}건")
     print(f"    ├─ 단독 1차 탐지: {exclusive}건")
-    print(f"    ├─ 이미지 교차검증 통과: {xr}건")
-    print(f"    ├─ 이미지 교차검증 불확실: {xi}건")
+    print(f"    ├─ 텍스트+문맥 교차검증 통과: {xr}건")
+    print(f"    ├─ 텍스트+문맥 교차검증 불확실: {xi}건")
     print(f"    └─ 확정 이슈 (grounding 진입): {confirmed}건")
 
     sf = result.get("slide_recheck_failures", 0)
@@ -375,18 +385,18 @@ def print_cross_result(result: dict):
     grounding_rejected = result.get("grounding_rejected_issues", [])
 
     if crosscheck_rejected:
-        print(f"\n  ❌ 이미지 교차검증 기각: {len(crosscheck_rejected)}건")
+        print(f"\n  ❌ 텍스트+문맥 교차검증 기각: {len(crosscheck_rejected)}건")
         for i, issue in enumerate(crosscheck_rejected):
-            reason = issue.get("rejection_reason", "이미지 교차검증에서 유지되지 않음")
+            reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 유지되지 않음")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
 
     if crosscheck_inconclusive:
-        print(f"\n  ⚠️ 이미지 교차검증 불확실: {len(crosscheck_inconclusive)}건")
+        print(f"\n  ⚠️ 텍스트+문맥 교차검증 불확실: {len(crosscheck_inconclusive)}건")
         for i, issue in enumerate(crosscheck_inconclusive):
-            reason = issue.get("rejection_reason", "이미지 교차검증에서 확정 판단 실패")
+            reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 확정 판단 실패")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
@@ -424,7 +434,7 @@ def main():
                         help="판정/검증에 사용할 모델 (기본: gemini-2.5-flash gpt-5.4)")
     parser.add_argument("--mode", choices=["cross", "independent"], default="cross",
                         help="cross=교차검증(기본), independent=독립비교")
-    parser.add_argument("--num-runs", type=int, default=2)
+    parser.add_argument("--num-runs", type=int, default=1, help="1차 judge 반복 횟수 (기본 1)")
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--output", default=None)
