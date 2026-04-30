@@ -139,48 +139,6 @@ def _format_emphasis_reason(ann: dict) -> dict:
     }
 
 
-def _auto_register_lecture(stem: str) -> None:
-    """
-    파이프라인 성공 후 web Lecture 테이블에 stem을 자동 등록한다.
-    - 이미 있으면 유지
-    - 없으면 title=stem 으로 생성
-    """
-    try:
-        import os
-        from dotenv import load_dotenv
-
-        web_dir = REPO_ROOT / "web"
-        if not web_dir.exists():
-            print("\n  ⚠️ Lecture 자동 등록 스킵: web 디렉터리를 찾을 수 없습니다.")
-            return
-
-        load_dotenv(override=False)
-        # 로컬 테스트는 SQLite 단일 DB로 통일한다.
-        os.environ["USE_SQLITE"] = "1"
-
-        if str(web_dir) not in sys.path:
-            sys.path.insert(0, str(web_dir))
-
-        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "graphlec_site.settings")
-
-        import django  # noqa: PLC0415
-
-        django.setup()
-
-        from lectures.models import Lecture  # noqa: PLC0415
-
-        lec, created = Lecture.objects.get_or_create(
-            stem=stem,
-            defaults={"title": stem},
-        )
-        status = "생성" if created else "기존 유지"
-        print(f"\n  ✓ Lecture 자동 등록: {lec.stem} ({status}, db=sqlite)")
-        print("─" * 70)
-    except Exception as e:
-        print(f"\n  ⚠️ Lecture 자동 등록 실패(분석 결과는 정상 생성): {e}")
-        print("─" * 70)
-
-
 # ──────────────────────────────────────────────────────────────
 # 전사 헬퍼
 # ──────────────────────────────────────────────────────────────
@@ -1467,9 +1425,6 @@ def run_pipeline(args, progress_callback=None):
         else:
             r11 = stage11_build_recommender_index(args)
             timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
-
-        # ── Lecture 자동 등록 ──
-        _auto_register_lecture(stem)
 
         # ── 생성된 파일 목록 ──
         print("\n  생성된 파일:")
