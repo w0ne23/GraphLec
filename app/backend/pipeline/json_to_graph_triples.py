@@ -20,7 +20,6 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
-from collections import defaultdict
 from google import genai
 from dotenv import load_dotenv
 
@@ -404,7 +403,6 @@ class StructureLayerBuilder:
         self._build_scenes()
         self._build_segments()
         self._build_annotations()
-        self._build_deictic_links()
         logger.info("✓ 구조 레이어 완료")
 
     def _build_root(self):
@@ -468,29 +466,6 @@ class StructureLayerBuilder:
             if data.get('handwritten_content'):
                 props['handwritten_content'] = data['handwritten_content']
             self.c.add(ann_id, 'type', 'AnnotationEmphasis', props)
-
-    def _build_deictic_links(self):
-        """deictic_target이 있는 segment → 대상 annotation에 REFERS_TO 엣지"""
-        # annotation target_content → ann_id 역인덱스 (slide 범위 내)
-        slide_annot_index: Dict[str, Dict[str, str]] = defaultdict(dict)
-        for ann_id, data in self.pre.annot_data.items():
-            tc = data.get('target_content', '')
-            if tc:
-                slide_annot_index[data['slide_id']][tc] = ann_id
-
-        for seg_id, data in self.pre.segment_data.items():
-            dt = data.get('deictic_target')
-            if not dt:
-                continue
-            tc    = dt.get('target_content', '')
-            s_id  = data['slide_id']
-            ann_id = slide_annot_index.get(s_id, {}).get(tc)
-            if ann_id:
-                self.c.add(seg_id, 'REFERS_TO', ann_id, {
-                    'deictic_type': dt.get('annotation_type'),
-                    'confidence':   dt.get('confidence'),
-                })
-
 
 # ============================================================================
 #  개념 레이어 빌더 (Gemini)

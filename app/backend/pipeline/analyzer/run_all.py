@@ -43,17 +43,108 @@ def _token_overlap(a: str, b: str) -> float:
     return len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
 
 
+def _classify_pedagogical_issue(issue: dict) -> dict:
+    """Professor-facing category: wrong vs ambiguous vs needs clarification."""
+    text = " ".join(
+        str(issue.get(key, "") or "")
+        for key in ("claim_text", "issue", "correct_info", "explanation", "grounding_reason")
+    )
+    normalized = _normalize_claim_text(text)
+    issue_desc = str(issue.get("issue", "") or "")
+
+    category = "incorrect"
+    label = "틀린 설명"
+    rationale = "학생이 그대로 받아들이면 객관적으로 틀린 지식이 될 수 있습니다."
+
+    ambiguity_markers = (
+        "오해",
+        "혼동",
+        "애매",
+        "동일",
+        "동일시",
+        "주어",
+        "말실수",
+        "표현",
+        "들릴",
+        "소지",
+        "가능성",
+    )
+    clarification_markers = (
+        "구분",
+        "보충",
+        "명확",
+        "상주",
+        "실행 상태",
+        "적재 상태",
+        "설명",
+        "단순화",
+    )
+
+    needs_clarification = any(marker in normalized for marker in clarification_markers)
+    is_ambiguous = any(marker in normalized for marker in ambiguity_markers)
+
+    if is_ambiguous:
+        category = "ambiguous"
+        label = "애매한 표현"
+        rationale = "표현 자체가 학생에게 다른 의미로 들리거나 개념 혼동을 만들 수 있습니다."
+    if needs_clarification:
+        category = "needs_clarification"
+        label = "보충 설명 필요"
+        rationale = "핵심 설명은 대체로 맞지만, 구분이나 보충 설명이 없으면 학생이 애매하게 받아들일 수 있습니다."
+    if issue.get("type") == "outdated":
+        category = "incorrect"
+        label = "현행성 오류"
+        rationale = "현재 기준으로 유효하지 않은 정보를 현재 사실처럼 전달할 수 있습니다."
+    if "직접 모순" in issue_desc or "반대" in issue_desc:
+        category = "incorrect"
+        label = "틀린 설명"
+        rationale = "슬라이드나 객관적 사실과 직접 충돌할 가능성이 큽니다."
+
+    return {
+        "pedagogical_type": category,
+        "pedagogical_label": label,
+        "pedagogical_rationale": rationale,
+        "issue_category": category,
+        "issue_category_label": label,
+        "issue_category_reason": rationale,
+    }
+
+
+def _build_utterance_context(utterances: list[dict], uid: str, radius: int = 2) -> dict:
+    idx = next((i for i, u in enumerate(utterances) if str(u.get("utterance_id", "") or "") == uid), -1)
+    if idx < 0:
+        return {"target": None, "before": [], "after": [], "window": []}
+
+    def pack(u: dict) -> dict:
+        return {
+            "utterance_id": str(u.get("utterance_id", "") or ""),
+            "slide_number": u.get("slide_number"),
+            "start_time": u.get("start_time"),
+            "end_time": u.get("end_time"),
+            "text": u.get("text", ""),
+        }
+
+    before = [pack(u) for u in utterances[max(0, idx - radius):idx]]
+    target = pack(utterances[idx])
+    after = [pack(u) for u in utterances[idx + 1:idx + radius + 1]]
+    return {"target": target, "before": before, "after": after, "window": before + [target] + after}
+
+
 def _build_utterance_lookup(merged_path: Path) -> dict[str, dict]:
     ctx = prepare_verification(str(merged_path))
-    return {
+    utterances = ctx.get("utterances", [])
+    lookup = {
         str(u.get("utterance_id", "") or ""): {
             "slide_number": u.get("slide_number"),
             "start_time": u.get("start_time"),
             "end_time": u.get("end_time"),
             "text": u.get("text", ""),
         }
-        for u in ctx.get("utterances", [])
+        for u in utterances
     }
+    for uid in list(lookup):
+        lookup[uid]["utterance_context"] = _build_utterance_context(utterances, uid)
+    return lookup
 
 
 def _build_claim_candidates(claims: list[dict]) -> dict[str, list[dict]]:
@@ -157,8 +248,16 @@ def _claim_record_from_issue(
             "correct_info": issue.get("correct_info", ""),
             "severity": issue.get("severity", ""),
             "confidence": issue.get("confidence", 0),
+            **_classify_pedagogical_issue(issue),
         }
     )
+    if utt := utterance_lookup.get(record["utterance_id"], {}):
+        if utt.get("utterance_context"):
+            record["utterance_context"] = utt["utterance_context"]
+            record["context_text"] = "\n".join(
+                f"{item.get('utterance_id')} [{float(item.get('start_time') or 0):.1f}s] {item.get('text', '')}"
+                for item in utt["utterance_context"].get("window", [])
+            )
     rejection_reason = (
         issue.get("rejection_reason")
         or issue.get("grounding_reason")
@@ -198,6 +297,25 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
 
     claim_lookup = {_claim_key(c): c for c in claims}
     claim_candidates = _build_claim_candidates(claims)
+
+    for issue_list_key in (
+        "issues",
+        "crosscheck_rejected_issues",
+        "crosscheck_inconclusive_issues",
+        "slide_rejected_issues",
+        "grounding_rejected_issues",
+        "rejected_issues",
+    ):
+        for issue in result.get(issue_list_key, []) or []:
+            issue.update(_classify_pedagogical_issue(issue))
+            uid = str(issue.get("utterance_id", "") or "")
+            utt = utterance_lookup.get(uid, {})
+            if utt.get("utterance_context"):
+                issue["utterance_context"] = utt["utterance_context"]
+                issue["context_text"] = "\n".join(
+                    f"{item.get('utterance_id')} [{float(item.get('start_time') or 0):.1f}s] {item.get('text', '')}"
+                    for item in utt["utterance_context"].get("window", [])
+                )
 
     raw_final_confirmed = _dedupe_records([
         _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "final_confirmed")
@@ -264,10 +382,15 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         for records in final_rejected_lists
         for record in records
     }
+    category_breakdown: dict[str, int] = {}
+    for record in final_confirmed:
+        key = str(record.get("issue_category") or record.get("pedagogical_type") or "uncategorized")
+        category_breakdown[key] = category_breakdown.get(key, 0) + 1
 
     result["claim_decision_flow_summary"] = {
         "extracted_claim_count": len(claims),
         "final_confirmed_claim_count": len(final_confirmed),
+        "final_confirmed_issue_category_breakdown": category_breakdown,
         "crosscheck_rejected_claim_count": len(crosscheck_rejected),
         "crosscheck_inconclusive_claim_count": len(crosscheck_inconclusive),
         "slide_rejected_claim_count": len(slide_rejected),
@@ -286,6 +409,12 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             "label": "crosscheck로 최종 확정된 claim",
             "key": "final_confirmed_claims",
             "count": len(final_confirmed),
+        },
+        {
+            "label": "최종 확정 이슈 유형별 수",
+            "key": "final_confirmed_issue_category_breakdown",
+            "count": len(final_confirmed),
+            "breakdown": category_breakdown,
         },
         {
             "label": "crosscheck에서 기각된 claim",
@@ -396,12 +525,12 @@ def run_all_analyzers(
     merged_path: str,
     *,
     output_dir: str | None = None,
-    claim_runs: int = 2,
+    claim_runs: int = 1,
     claim_min_rate: float = 0.5,
     claim_batch_size: int = CLAIM_BATCH_SIZE,
     claim_max_workers: int = 4,
     cross_models: list[str] | None = None,
-    cross_runs: int = 2,
+    cross_runs: int = 1,
     cross_min_rate: float = 0.5,
     cross_batch_size: int = 20,
     current_date: str | None = None,
@@ -432,7 +561,8 @@ def run_all_analyzers(
         models=models,
         num_runs=cross_runs,
         min_rate=cross_min_rate,
-        batch_size=cross_batch_size,
+        batch_size=claim_batch_size,
+        judge_batch_size=cross_batch_size,
         env_vars=_collect_env_vars(),
     )
 
@@ -465,7 +595,7 @@ def main():
     parser = argparse.ArgumentParser(description="merged_clean 입력 기준 verifier 실행")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--output-dir", default=None, help="결과 저장 디렉토리 (기본: merged 파일 폴더)")
-    parser.add_argument("--claim-runs", type=int, default=2)
+    parser.add_argument("--claim-runs", type=int, default=1)
     parser.add_argument("--claim-min-rate", type=float, default=0.5)
     parser.add_argument("--claim-batch-size", type=int, default=CLAIM_BATCH_SIZE)
     parser.add_argument("--claim-max-workers", type=int, default=4)
@@ -475,7 +605,14 @@ def main():
         default=None,
         help="cross verifier 모델 목록 (기본: VERIFIER_MODEL + CROSS_VERIFY_MODEL)",
     )
-    parser.add_argument("--cross-runs", type=int, default=2)
+    parser.add_argument(
+        "--cross-runs",
+        "--judge-runs",
+        dest="cross_runs",
+        type=int,
+        default=1,
+        help="1차 judge 반복 횟수 (기본 1). crosscheck의 2는 두 모델 검증을 의미함",
+    )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")

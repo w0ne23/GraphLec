@@ -64,14 +64,14 @@ def judge_worker(args_tuple):
 
 
 def cross_recheck_worker(args_tuple):
-    """합집합 전체 이슈를 각 모델이 이미지+문맥으로 재검증."""
+    """합집합 전체 이슈를 각 모델이 텍스트+문맥으로 재검증."""
     try:
         issues, merged_path, model, root, env_vars = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
         ctx = cv.prepare_verification(merged_path)
-        print(f"\n  [{model}] 이미지 교차검증: {len(issues)}건 확인 중...", flush=True)
+        print(f"\n  [{model}] 텍스트+문맥 교차검증: {len(issues)}건 확인 중...", flush=True)
         resolved_model = cv._resolve_stage_model("cross_recheck")
 
         token_usage = _empty_token_usage()
@@ -85,7 +85,7 @@ def cross_recheck_worker(args_tuple):
                 "resolved_model": resolved_model,
             }
 
-        print(f"  [{model}] 이미지 교차검증 완료", flush=True)
+        print(f"  [{model}] 텍스트+문맥 교차검증 완료", flush=True)
         return {
             "model": model,
             "verdicts": verdicts,
@@ -96,7 +96,7 @@ def cross_recheck_worker(args_tuple):
 
 
 def stages_3_4_worker(args_tuple):
-    """primary 모델로 4단계(grounding) 실행."""
+    """primary 모델로 grounding 실행."""
     try:
         merged_path, model, issues, root, env_vars = args_tuple
         _setup_worker(root, env_vars, model)
@@ -104,12 +104,15 @@ def stages_3_4_worker(args_tuple):
 
         ctx = cv.prepare_verification(merged_path)
         hint = ctx["hint"]
+        slide_ctx = ctx["slide_ctx"]
+        slides = ctx["slides"]
         token_usage = _empty_token_usage()
 
+        slide_rejected = []
         grounding_rejected = []
         if issues:
             verified, g_rejected, g_calls, g_failures, grounding_token_usage = cv._ground_verify_all_issues(
-                issues, hint
+                issues, hint, slide_ctx, slides
             )
             grounding_rejected = g_rejected
             issues = verified
@@ -117,7 +120,7 @@ def stages_3_4_worker(args_tuple):
 
         return {
             "issues": issues,
-            "slide_rejected": [],
+            "slide_rejected": slide_rejected,
             "grounding_rejected": grounding_rejected,
             "token_usage": token_usage,
         }
