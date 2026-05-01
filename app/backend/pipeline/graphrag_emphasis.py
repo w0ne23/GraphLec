@@ -3,13 +3,15 @@ graphrag_emphasis.py
 GraphLec 멀티모달 강조 신호를 GraphRAGEntity에 boost 가중치로 저장.
 
 구현 순서:
-  Step 1: keyword_match — entity title vs emphasized_keywords (전체 score)
+  Step 1: keyword_match — entity title vs slide_text_score 기반 키워드 (순수 텍스트 신호)
   Step 2: visual_match + annotation_match
-    2a. visual_match     — visual_score 기반 키워드 매칭 (시각 강조 신호)
-    2b. annotation_match — AnnotationEmphasis target/handwritten 매칭
-  Step 3: audio_segment_match — stressed segment 연결
-  Step 4: local boost 정규화 및 final_weight 저장
-  Step 5: relation_boost — GRAPHRAG_RELATES_TO 엣지에 endpoint final_weight 기반 가중치 부여
+    2a. visual_match     — visual_score 기반 키워드 매칭 (시각 채널 독립 신호)
+    2b. annotation_match — AnnotationEmphasis target/handwritten 직접 매칭
+  Step 3: audio_segment_match — stressed segment 비율 기반 (stressed_count / total)
+  Step 4: local boost 정규화 및 final_weight 저장 (breakdown + raw 포함)
+  Step 5: relation_boost — GRAPHRAG_RELATES_TO 엣지에 endpoint boost 기반 가중치 부여
+  [미구현] Slide/Scene/Context 단위 분리 — 스키마 확정 후 별도 처리
+  [보류]   global boost — 추후 별도 배치
 """
 
 from __future__ import annotations
@@ -27,22 +29,33 @@ _EMPHASIS_WEIGHTS = {
 }
 _TOTAL_WEIGHT = sum(_EMPHASIS_WEIGHTS.values())  # 4.5
 
-_SCORE_FIELDS = (
-    "score",
-    "audio_score",
-    "visual_score",
-    "annotation_score",
-    "slide_text_score",
-)
+# audio_match: total_segments가 이 값보다 작으면 분모를 고정해 소수 세그먼트 비율 팽창 방지
+_MIN_SEGMENT_DENOM = 3
 
 
-def _kw_score(entry: dict[str, Any]) -> float:
-    if "score" in entry:
+def _kw_text_score(entry: dict[str, Any]) -> float:
+    """
+    텍스트 채널 신호만 반환 — audio/visual/annotation 중복 집계 방지.
+    우선순위:
+      1. slide_text_score 있으면 그 값 사용 (sub-score와 무관한 독립 텍스트 신호)
+      2. slide_text_score 없고 sub-score(audio/visual/annotation)도 없으면 raw score 사용
+      3. slide_text_score 없고 sub-score 있으면 0 반환 (해당 채널이 Step 2/3에서 처리)
+    """
+    sts = entry.get("slide_text_score")
+    if sts is not None:
         try:
-            return float(entry["score"])
+            return float(sts)
         except (TypeError, ValueError):
             return 0.0
-    return sum(float(entry.get(f) or 0) for f in _SCORE_FIELDS if f != "score")
+    has_sub = any(
+        entry.get(f) for f in ("audio_score", "visual_score", "annotation_score")
+    )
+    if has_sub:
+        return 0.0
+    try:
+        return float(entry.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _norm(text: Any) -> str:
@@ -62,8 +75,10 @@ def _parse_json_list(value: Any) -> list[str]:
     return []
 
 
+# ── Step 1 ───────────────────────────────────────────────────────────────────
+
 def _build_slide_keyword_map(fused: dict[str, Any]) -> dict[str, list[tuple[str, float]]]:
-    """slide_id -> [(keyword_norm, score)]"""
+    """slide_id -> [(keyword_norm, slide_text_score)]"""
     result: dict[str, list[tuple[str, float]]] = {}
     for slide in fused.get("slides") or []:
         sid = str(slide.get("slide_id") or "").strip()
@@ -74,7 +89,10 @@ def _build_slide_keyword_map(fused: dict[str, Any]) -> dict[str, list[tuple[str,
             text = (kw.get("keyword") or kw.get("text") or kw.get("name") or "").strip()
             if not text:
                 continue
-            kws.append((_norm(text), _kw_score(kw)))
+            score = _kw_text_score(kw)
+            if score <= 0:
+                continue
+            kws.append((_norm(text), score))
         if kws:
             result[sid] = kws
     return result
@@ -86,8 +104,9 @@ def compute_keyword_match(
     fused_path: Path,
 ) -> dict[str, Any]:
     """
-    Step 1: entity title/description vs slide emphasized_keywords.
-    Writes emphasis_keyword_match property to GraphRAGEntity nodes.
+    Step 1: entity title/description vs slide_text_score 기반 키워드.
+    순수 텍스트 신호만 사용해 audio/visual/annotation 채널과 중복 방지.
+    Writes emphasis_keyword_match to GraphRAGEntity nodes.
     """
     with fused_path.open(encoding="utf-8") as f:
         fused = json.load(f)
@@ -119,8 +138,8 @@ def compute_keyword_match(
                     matched_kws.add(kw_norm)
 
         updates.append({
-            "id": rec["id"],
-            "keyword_match": round(kw_total, 4),
+            "id":               rec["id"],
+            "keyword_match":    round(kw_total, 4),
             "matched_keywords": sorted(matched_kws),
         })
 
@@ -128,7 +147,7 @@ def compute_keyword_match(
         """
         UNWIND $rows AS row
         MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
-        SET e.emphasis_keyword_match = row.keyword_match,
+        SET e.emphasis_keyword_match    = row.keyword_match,
             e.emphasis_matched_keywords = row.matched_keywords
         """,
         stem=stem,
@@ -138,7 +157,7 @@ def compute_keyword_match(
     nonzero = sum(1 for u in updates if u["keyword_match"] > 0)
     return {
         "keyword_match_entities": len(updates),
-        "keyword_match_nonzero": nonzero,
+        "keyword_match_nonzero":  nonzero,
     }
 
 
@@ -175,7 +194,7 @@ def compute_visual_match(
 ) -> dict[str, Any]:
     """
     Step 2a: entity title/description vs visual_score keywords.
-    슬라이드 텍스트·필기 등 시각 채널에서 강조된 키워드만 사용.
+    시각 채널(슬라이드 텍스트·필기·하이라이트)에서 강조된 키워드만 사용.
     Writes emphasis_visual_match to GraphRAGEntity nodes.
     """
     with fused_path.open(encoding="utf-8") as f:
@@ -206,8 +225,8 @@ def compute_visual_match(
                     matched_kws.add(kw_norm)
 
         updates.append({
-            "id": rec["id"],
-            "visual_match": round(visual_total, 4),
+            "id":               rec["id"],
+            "visual_match":     round(visual_total, 4),
             "matched_keywords": sorted(matched_kws),
         })
 
@@ -215,7 +234,7 @@ def compute_visual_match(
         """
         UNWIND $rows AS row
         MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
-        SET e.emphasis_visual_match = row.visual_match,
+        SET e.emphasis_visual_match    = row.visual_match,
             e.emphasis_visual_keywords = row.matched_keywords
         """,
         stem=stem,
@@ -225,7 +244,7 @@ def compute_visual_match(
     nonzero = sum(1 for u in updates if u["visual_match"] > 0)
     return {
         "visual_match_entities": len(updates),
-        "visual_match_nonzero": nonzero,
+        "visual_match_nonzero":  nonzero,
     }
 
 
@@ -244,9 +263,9 @@ def compute_annotation_match(
         """
         MATCH (s:Slide {stem: $stem})-[:HAS_ANNOTATION]->(a:AnnotationEmphasis)
         RETURN s.id AS slide_id,
-               a.target_content AS target,
+               a.target_content      AS target,
                a.handwritten_content AS handwritten,
-               a.score AS score
+               a.score               AS score
         """,
         stem=stem,
     ).data()
@@ -289,7 +308,7 @@ def compute_annotation_match(
                     ann_total += score
 
         updates.append({
-            "id": rec["id"],
+            "id":               rec["id"],
             "annotation_match": round(ann_total, 4),
         })
 
@@ -306,7 +325,7 @@ def compute_annotation_match(
     nonzero = sum(1 for u in updates if u["annotation_match"] > 0)
     return {
         "annotation_match_entities": len(updates),
-        "annotation_match_nonzero": nonzero,
+        "annotation_match_nonzero":  nonzero,
     }
 
 
@@ -318,9 +337,11 @@ def compute_audio_segment_match(
 ) -> dict[str, Any]:
     """
     Step 3: entity와 GRAPHRAG_MENTIONED_IN_SEGMENT로 연결된 Segment 중
-    segment.stressed=true 이거나 그 부모 Context.stressed=true 인 것의 수를 집계.
-    강의자가 음성으로 강조한 구간에 언급된 엔티티에 오디오 boost 부여.
-    Writes emphasis_audio_match to GraphRAGEntity nodes.
+    segment.stressed=true 이거나 그 부모 Context.stressed=true 인 비율을 집계.
+
+    audio_match = stressed_count / max(total_segments, _MIN_SEGMENT_DENOM)
+      - _MIN_SEGMENT_DENOM: 세그먼트 수 적은 entity의 비율 팽창 방지
+    Writes emphasis_audio_match, emphasis_audio_stressed_count, emphasis_audio_total_segments.
     """
     records = session.run(
         """
@@ -338,20 +359,24 @@ def compute_audio_segment_match(
         stem=stem,
     ).data()
 
-    updates = [
-        {
-            "id": rec["id"],
-            "audio_match": rec["stressed_count"],
-            "total_segments": rec["total_segments"],
-        }
-        for rec in records
-    ]
+    updates: list[dict[str, Any]] = []
+    for rec in records:
+        stressed = rec["stressed_count"]
+        total = rec["total_segments"]
+        ratio = round(stressed / max(total, _MIN_SEGMENT_DENOM), 4)
+        updates.append({
+            "id":             rec["id"],
+            "audio_match":    ratio,
+            "stressed_count": stressed,
+            "total_segments": total,
+        })
 
     session.run(
         """
         UNWIND $rows AS row
         MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
-        SET e.emphasis_audio_match = row.audio_match,
+        SET e.emphasis_audio_match          = row.audio_match,
+            e.emphasis_audio_stressed_count = row.stressed_count,
             e.emphasis_audio_total_segments = row.total_segments
         """,
         stem=stem,
@@ -361,7 +386,7 @@ def compute_audio_segment_match(
     nonzero = sum(1 for u in updates if u["audio_match"] > 0)
     return {
         "audio_match_entities": len(updates),
-        "audio_match_nonzero": nonzero,
+        "audio_match_nonzero":  nonzero,
     }
 
 
@@ -375,21 +400,29 @@ def compute_final_weight(
     Step 4: 강의 내 로컬 정규화 → emphasis_boost_local → final_weight 저장.
 
     각 신호를 강의 최댓값으로 나눠 [0, 1] 정규화 후 가중 평균:
-      emphasis_boost_local = (w_kw*norm_kw + w_vis*norm_vis + w_ann*norm_ann + w_aud*norm_aud)
-                             / total_weight  →  [0, 1]
+      emphasis_boost_local = Σ(weight_i * norm_i) / total_weight  →  [0, 1]
 
-    final_weight = degree * (1 + emphasis_boost_local)
-      - degree: GraphRAG 그래프 내 연결 수 (기본 중요도)
-      - 1 + boost: 멀티모달 강조 신호로 degree를 증폭
+    graphrag_importance = degree  (GraphRAG 구조적 중요도 base)
+    final_weight = graphrag_importance * (1 + emphasis_boost_local)
+
+    저장 프로퍼티:
+      graphrag_importance       — degree 기반 GraphRAG 구조 중요도
+      emphasis_raw              — 정규화 전 신호값 JSON string {kw, vis, ann, aud}
+      emphasis_boost_breakdown  — 채널별 가중 기여도 JSON string {keyword, visual, annotation, audio}
+      emphasis_sources          — 비-zero 기여 채널 목록 (Neo4j list property, Cypher IN 조회 가능)
+      emphasis_boost_local      — 최종 combined boost [0, 1]
+      emphasis_boost_global     — null 초기화 (추후 별도 배치로 주입; 배치 구현 시
+                                  이 SET을 제거하고 COALESCE 또는 외부 주입 방식으로 교체)
+      final_weight              — graphrag_importance * (1 + boost)
     """
     records = session.run(
         """
         MATCH (e:GraphRAGEntity {stem: $stem})
         RETURN e.id AS id,
-               COALESCE(e.emphasis_keyword_match, 0.0)    AS kw,
-               COALESCE(e.emphasis_visual_match, 0.0)     AS vis,
+               COALESCE(e.emphasis_keyword_match,    0.0) AS kw,
+               COALESCE(e.emphasis_visual_match,     0.0) AS vis,
                COALESCE(e.emphasis_annotation_match, 0.0) AS ann,
-               COALESCE(e.emphasis_audio_match, 0)        AS aud,
+               COALESCE(e.emphasis_audio_match,      0.0) AS aud,
                COALESCE(e.degree, 1)                      AS degree
         """,
         stem=stem,
@@ -401,29 +434,48 @@ def compute_final_weight(
     max_kw  = max((r["kw"]  for r in records), default=0.0) or 1.0
     max_vis = max((r["vis"] for r in records), default=0.0) or 1.0
     max_ann = max((r["ann"] for r in records), default=0.0) or 1.0
-    max_aud = max((r["aud"] for r in records), default=0.0) or 1.0
+    # audio는 이미 [0, 1] 비율 — 재정규화 없이 절대 강조 강도 보존
+    max_aud = 1.0
 
+    w = _EMPHASIS_WEIGHTS
     updates: list[dict[str, Any]] = []
     for rec in records:
-        boost = (
-            _EMPHASIS_WEIGHTS["keyword"]    * (rec["kw"]  / max_kw)
-            + _EMPHASIS_WEIGHTS["visual"]     * (rec["vis"] / max_vis)
-            + _EMPHASIS_WEIGHTS["annotation"] * (rec["ann"] / max_ann)
-            + _EMPHASIS_WEIGHTS["audio"]      * (rec["aud"] / max_aud)
-        ) / _TOTAL_WEIGHT
+        breakdown = {
+            "keyword":    round(w["keyword"]    * (rec["kw"]  / max_kw)  / _TOTAL_WEIGHT, 4),
+            "visual":     round(w["visual"]     * (rec["vis"] / max_vis) / _TOTAL_WEIGHT, 4),
+            "annotation": round(w["annotation"] * (rec["ann"] / max_ann) / _TOTAL_WEIGHT, 4),
+            "audio":      round(w["audio"]      * (rec["aud"] / max_aud) / _TOTAL_WEIGHT, 4),
+        }
+        boost = round(sum(breakdown.values()), 4)
+        graphrag_importance = int(rec["degree"])
 
         updates.append({
-            "id":           rec["id"],
-            "boost":        round(boost, 4),
-            "final_weight": round(rec["degree"] * (1.0 + boost), 4),
+            "id":                  rec["id"],
+            "graphrag_importance": graphrag_importance,
+            "raw":                 json.dumps(
+                                       {"kw":  round(rec["kw"],  4),
+                                        "vis": round(rec["vis"], 4),
+                                        "ann": round(rec["ann"], 4),
+                                        "aud": round(rec["aud"], 4)},
+                                       ensure_ascii=False,
+                                   ),
+            "breakdown":           json.dumps(breakdown, ensure_ascii=False),
+            "sources":             [ch for ch, v in breakdown.items() if v > 0],
+            "boost":               boost,
+            "final_weight":        round(graphrag_importance * (1.0 + boost), 4),
         })
 
     session.run(
         """
         UNWIND $rows AS row
         MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
-        SET e.emphasis_boost_local = row.boost,
-            e.final_weight         = row.final_weight
+        SET e.graphrag_importance      = row.graphrag_importance,
+            e.emphasis_raw             = row.raw,
+            e.emphasis_boost_breakdown = row.breakdown,
+            e.emphasis_sources         = row.sources,
+            e.emphasis_boost_local     = row.boost,
+            e.emphasis_boost_global    = null,
+            e.final_weight             = row.final_weight
         """,
         stem=stem,
         rows=updates,
@@ -445,15 +497,22 @@ def compute_relation_boost(
     """
     Step 5: GRAPHRAG_RELATES_TO 엣지에 endpoint_boost 저장 (마지막 단계).
 
-    emphasis_edge_weight = sqrt(src.final_weight * tgt.final_weight)
-      - 기하평균: 양 끝 entity가 모두 강조돼야 높은 값
-      - 원본 weight는 보존하고 emphasis_edge_weight를 별도 프로퍼티로 추가
+    endpoint_boost = 0.7 * max(src_boost, tgt_boost) + 0.3 * min(src_boost, tgt_boost)
+      - 한쪽 핵심 개념에 연결된 관계도 중요하다고 보는 강의 맥락 반영
+    emphasis_edge_weight = r.weight * (1 + endpoint_boost)
+      - 원본 weight 보존, emphasis_edge_weight를 별도 프로퍼티로 추가
     """
     result = session.run(
         """
         MATCH (src:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(tgt:GraphRAGEntity {stem: $stem})
-        WHERE src.final_weight IS NOT NULL AND tgt.final_weight IS NOT NULL
-        SET r.emphasis_edge_weight = round(sqrt(src.final_weight * tgt.final_weight), 4)
+        WHERE src.emphasis_boost_local IS NOT NULL AND tgt.emphasis_boost_local IS NOT NULL
+        WITH r,
+             CASE WHEN src.emphasis_boost_local >= tgt.emphasis_boost_local
+                  THEN src.emphasis_boost_local ELSE tgt.emphasis_boost_local END AS max_b,
+             CASE WHEN src.emphasis_boost_local <= tgt.emphasis_boost_local
+                  THEN src.emphasis_boost_local ELSE tgt.emphasis_boost_local END AS min_b,
+             COALESCE(r.weight, 1.0) AS base_w
+        SET r.emphasis_edge_weight = round(base_w * (1 + 0.7 * max_b + 0.3 * min_b), 4)
         RETURN count(r) AS updated
         """,
         stem=stem,
