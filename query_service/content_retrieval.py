@@ -123,6 +123,14 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
+def _first_number(values: Any) -> Optional[float]:
+    if not isinstance(values, list):
+        return _to_float(values)
+    nums = [_to_float(v) for v in values]
+    nums = [v for v in nums if v is not None]
+    return min(nums) if nums else None
+
+
 def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     seen: set[str] = set()
@@ -211,6 +219,7 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         gtype = str(r.get("graphrag_type", "") or "")
         slides = [x for x in (r.get("slide_numbers") or []) if x not in (None, "")]
         concepts = [x for x in (r.get("concept_names") or []) if x]
+        scene_ids = [str(x) for x in (r.get("scene_ids") or []) if x]
         uid = f"gre:{eid}"
         if uid in seen or not (title or desc):
             continue
@@ -234,6 +243,9 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
                 row=r,
                 chunk_type="graphrag_entity",
                 slide_number=first_slide,
+                start_sec=_first_number(r.get("scene_start_secs")),
+                end_sec=_first_number(r.get("scene_end_secs")),
+                linked_node_id=scene_ids[0] if scene_ids else eid,
             )
         )
 
@@ -275,7 +287,7 @@ def _collect_ids(structured: dict[str, list[dict[str, Any]]]) -> set[str]:
             v = r.get(fld)
             if v:
                 ids.add(str(v).strip())
-        for fld in ("concept_ids", "slide_ids"):
+        for fld in ("concept_ids", "slide_ids", "scene_ids"):
             for v in r.get(fld) or []:
                 if v:
                     ids.add(str(v).strip())

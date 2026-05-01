@@ -55,11 +55,10 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 GRAPH_SCHEMA = """
 노드 타입과 주요 프로퍼티:
 - Video          : id, stem, title
-- Slides         : id, stem
-- Scenes         : id, stem
-- Slide          : id, stem, slide_number, title, slide_text, role, start_sec, end_sec, emphasis_total
+- Slide          : id, stem, slide_number, title, slide_text
 - Domain         : id, stem, name, subdomain
-- Scene          : id, stem, slide_id, context_index, start, end, stressed
+- Scene          : id, stem, source_slide_id, slide_number, start_sec, end_sec, role, emphasis_total
+- Context        : id, stem, slide_id, scene_id, context_index, start, end, stressed, text
 - Segment        : id, stem, start, end, text, stressed
 - AnnotationEmphasis : id, stem, type, target_content, score, confidence, timestamp_sec
 - GraphRAGEntity : id, stem, title, type, description, degree, frequency
@@ -67,19 +66,20 @@ GRAPH_SCHEMA = """
 - GraphRAGCommunity : id, stem, title, summary, rank, size
 
 관계 (방향 중요):
-- (Video)-[:HAS_SLIDES]->(Slides)
-- (Video)-[:HAS_SCENES]->(Scenes)
+- (Video)-[:HAS_SCENE]->(Scene)
 - (Video)-[:HAS_DOMAIN]->(Domain)
-- (Slides)-[:CONTAINS]->(Slide)
-- (Scenes)-[:CONTAINS]->(Scene)
-- (Slide)-[:HAS_SCENE]->(Scene)
-- (Scene)-[:HAS_SEGMENT]->(Segment)
-- (Slide)-[:HAS_ANNOTATION]->(AnnotationEmphasis)
+- (Video)-[:HAS_SLIDE]->(Slide)
+- (Scene)-[:USES_SLIDE]->(Slide)
+- (Scene)-[:HAS_CONTEXT]->(Context)
+- (Context)-[:HAS_SEGMENT]->(Segment)
+- (Scene)-[:HAS_ANNOTATION]->(AnnotationEmphasis)
 - (Segment)-[:REFERS_TO]->(AnnotationEmphasis)
 - (GraphRAGEntity)-[:GRAPHRAG_RELATES_TO]->(GraphRAGEntity)
 - (GraphRAGEntity)-[:GRAPHRAG_SUPPORTED_BY]->(GraphRAGTextUnit)
 - (GraphRAGTextUnit)-[:GRAPHRAG_MENTIONS_SLIDE]->(Slide)
+- (GraphRAGTextUnit)-[:GRAPHRAG_MENTIONS_SCENE]->(Scene)
 - (GraphRAGEntity)-[:GRAPHRAG_APPEARS_IN]->(Slide)
+- (GraphRAGEntity)-[:GRAPHRAG_APPEARS_IN_SCENE]->(Scene)
 - (GraphRAGCommunity)-[:GRAPHRAG_HAS_ENTITY]->(GraphRAGEntity)
 
 금지 패턴:
@@ -102,7 +102,7 @@ CYPHER_SYSTEM_PROMPT = f"""
 3. 파라미터는 $stem 만 외부에서 넣는다. 사용자 입력 문자열을 쿼리 문자열에 직접 이어붙이지 않는다. 검색은 $needle 등 추가 파라미터를 쓸 수 있다.
 4. Cypher만 출력한다. 코드 블록(```cypher ... ```) 안에 작성한다.
 5. RETURN에 필요한 필드만 명시한다. LIMIT는 30 이하로 둔다.
-6. 타임스탬프가 필요하면 Segment.start, Segment.end, Scene.start, Scene.end, Slide.start_sec 등을 활용한다.
+6. 타임스탬프가 필요하면 Segment.start/end 또는 Scene.start_sec/end_sec을 활용한다. Slide에는 시간 정보가 없다.
 """
 
 ANSWER_SYSTEM_PROMPT = """
@@ -602,6 +602,8 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
                 "GraphRAGEntity": "#FF6B6B",
                 "GraphRAGCommunity": "#FF9F43",
                 "Slide": "#4ECDC4",
+                "Scene": "#A29BFE",
+                "Context": "#81ECEC",
                 "Segment": "#45B7D1",
             }
             nodes[nid] = {
@@ -614,13 +616,23 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
 
     for r in structured.get("segments", []):
         slid = str(r.get("slide_id", ""))
+        scene_id = str(r.get("scene_id", ""))
+        ctx_id = str(r.get("context_id", ""))
         segid = str(r.get("segment_id", ""))
         if slid:
             add_node(slid, f"S{r.get('slide_number')}", "Slide", str(r.get("segment_text", ""))[:200])
+        if scene_id:
+            add_node(scene_id, "scene", "Scene", str(r.get("segment_text", ""))[:200])
+        if ctx_id:
+            add_node(ctx_id, "ctx", "Context", str(r.get("segment_text", ""))[:200])
         if segid:
             add_node(segid, "seg", "Segment", str(r.get("segment_text", ""))[:200])
-        if slid and segid:
-            edges.append({"from": slid, "to": segid, "label": "HAS_SEGMENT"})
+        if scene_id and slid:
+            edges.append({"from": scene_id, "to": slid, "label": "USES_SLIDE"})
+        if scene_id and ctx_id:
+            edges.append({"from": scene_id, "to": ctx_id, "label": "HAS_CONTEXT"})
+        if ctx_id and segid:
+            edges.append({"from": ctx_id, "to": segid, "label": "HAS_SEGMENT"})
 
     for r in structured.get("slides", []):
         slid = str(r.get("slide_id", ""))
@@ -646,6 +658,11 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
             if sid:
                 add_node(sid, f"S{sn}", "Slide")
                 edges.append({"from": eid, "to": sid, "label": "GRAPHRAG_APPEARS_IN"})
+        for scene_id in r.get("scene_ids") or []:
+            scene_id = str(scene_id or "")
+            if scene_id:
+                add_node(scene_id, "scene", "Scene")
+                edges.append({"from": eid, "to": scene_id, "label": "GRAPHRAG_APPEARS_IN_SCENE"})
 
     for r in structured.get("graphrag_relationships", []):
         sid, tid = str(r.get("src_id", "")), str(r.get("tgt_id", ""))

@@ -2,7 +2,8 @@
 Microsoft GraphRAG parquet output -> Neo4j concept layer.
 
 This loader keeps GraphRAG output in the same lecture stem namespace as the
-GraphLec structural graph and adds bridge edges back to Slide nodes.
+GraphLec structural graph and adds bridge edges back to Slide, Scene, and
+Segment nodes.
 """
 
 from __future__ import annotations
@@ -314,9 +315,29 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
     tx.run(
         """
         UNWIND $rows AS row
+        MATCH (tu:GraphRAGTextUnit {stem: $stem, id: row.text_unit_id})
+        MATCH (sc:Scene {stem: $stem, source_slide_id: row.slide_id})
+        MERGE (tu)-[:GRAPHRAG_MENTIONS_SCENE]->(sc)
+        """,
+        stem=stem,
+        rows=text_unit_slides,
+    )
+    tx.run(
+        """
+        UNWIND $rows AS row
         MATCH (e:GraphRAGEntity {stem: $stem, id: row.entity_id})
         MATCH (s:Slide {stem: $stem, id: row.slide_id})
         MERGE (e)-[:GRAPHRAG_APPEARS_IN]->(s)
+        """,
+        stem=stem,
+        rows=[{"entity_id": e, "slide_id": s} for e, s in sorted(entity_slides)],
+    )
+    tx.run(
+        """
+        UNWIND $rows AS row
+        MATCH (e:GraphRAGEntity {stem: $stem, id: row.entity_id})
+        MATCH (sc:Scene {stem: $stem, source_slide_id: row.slide_id})
+        MERGE (e)-[:GRAPHRAG_APPEARS_IN_SCENE]->(sc)
         """,
         stem=stem,
         rows=[{"entity_id": e, "slide_id": s} for e, s in sorted(entity_slides)],
@@ -338,6 +359,17 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
             stem=stem,
             rows=text_unit_segments,
         )
+        tx.run(
+            """
+            UNWIND $rows AS row
+            MATCH (tu:GraphRAGTextUnit {stem: $stem, id: row.text_unit_id})
+            MATCH (sc:Scene {stem: $stem})-[:HAS_CONTEXT]->(ctx:Context {stem: $stem})
+            MATCH (ctx)-[:HAS_SEGMENT]->(seg:Segment {stem: $stem, id: row.segment_id})
+            MERGE (tu)-[:GRAPHRAG_MENTIONS_SCENE]->(sc)
+            """,
+            stem=stem,
+            rows=text_unit_segments,
+        )
 
     if entity_segments:
         tx.run(
@@ -350,6 +382,32 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
             stem=stem,
             rows=[{"entity_id": e, "segment_id": s} for e, s in sorted(entity_segments)],
         )
+        tx.run(
+            """
+            UNWIND $rows AS row
+            MATCH (e:GraphRAGEntity {stem: $stem, id: row.entity_id})
+            MATCH (sc:Scene {stem: $stem})-[:HAS_CONTEXT]->(ctx:Context {stem: $stem})
+            MATCH (ctx)-[:HAS_SEGMENT]->(seg:Segment {stem: $stem, id: row.segment_id})
+            MERGE (e)-[:GRAPHRAG_APPEARS_IN_SCENE]->(sc)
+            """,
+            stem=stem,
+            rows=[{"entity_id": e, "segment_id": s} for e, s in sorted(entity_segments)],
+        )
+
+    text_unit_scene_links = tx.run(
+        """
+        MATCH (:GraphRAGTextUnit {stem: $stem})-[r:GRAPHRAG_MENTIONS_SCENE]->(:Scene {stem: $stem})
+        RETURN count(r) AS count
+        """,
+        stem=stem,
+    ).single()
+    entity_scene_links = tx.run(
+        """
+        MATCH (:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_APPEARS_IN_SCENE]->(:Scene {stem: $stem})
+        RETURN count(r) AS count
+        """,
+        stem=stem,
+    ).single()
 
     tx.run(
         """
@@ -462,6 +520,8 @@ def load_graphrag_layer_tx(tx, stem: str, graphrag_dir: Path) -> dict[str, int]:
         "entity_text_unit_links": len(entity_text_units),
         "text_unit_slide_links": len(text_unit_slides),
         "entity_slide_links": len(entity_slides),
+        "text_unit_scene_links": text_unit_scene_links["count"] if text_unit_scene_links else 0,
+        "entity_scene_links": entity_scene_links["count"] if entity_scene_links else 0,
         "text_unit_segment_links": len(text_unit_segments),
         "entity_segment_links": len(entity_segments),
         "community_entity_links": len(community_entities),
