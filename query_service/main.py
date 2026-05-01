@@ -729,6 +729,8 @@ def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[
     """LLM 컨텍스트에 실제로 선택된 근거를 API 출처 청크로 변환한다."""
     out: list[RetrievedChunk] = []
     for it in items:
+        if it.start_sec is None and it.slide_number is None:
+            continue
         cid = it.uid
         if cid.startswith("lance:"):
             cid = cid[6:]
