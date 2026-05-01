@@ -7,9 +7,12 @@ import {
   heartbeatLectureGraphSession,
   leaveLectureGraphSession,
 } from '../lib/api'
+
 import VideoPlayer  from '../components/watch/VideoPlayer'
 import LecturePanel from '../components/watch/LecturePanel'
 import ChatPanel    from '../components/chat/ChatPanel'
+
+import '../styles/lecture.css'
 
 const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
 

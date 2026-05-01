@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { getLectureDetail, getLectureVerifier } from '../lib/api'
+
 import VideoPlayer from '../components/watch/VideoPlayer'
+
+import '../styles/verifier.css'
 
 const VERIFIER_POLL_MS = 5000
 
