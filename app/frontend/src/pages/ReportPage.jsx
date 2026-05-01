@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+import '../styles/report.css'
+
 const TABS = [
   { id: 'usage',    label: '이용 통계'   },
   { id: 'lectures', label: '강의 통계'   },

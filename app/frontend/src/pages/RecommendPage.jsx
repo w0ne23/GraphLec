@@ -1,6 +1,9 @@
 import { useState, useRef } from 'react'
-import RecommendListItem from '../components/recommend/RecommendListItem'
 import { recommendLectures } from '../lib/api'
+
+import RecommendListItem from '../components/recommend/RecommendListItem'
+
+import '../styles/recommend.css'
 
 const SUGGESTIONS = [
   '선형대수 행렬 강의',

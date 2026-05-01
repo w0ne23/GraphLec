@@ -1,0 +1,36 @@
+/* ============================================================
+   layout.css — 앱 전체 레이아웃 구조
+   스와이프 셸: 세 페이지(강의/추천/통계)가 가로로 나란히 배치,
+   translateX로 슬라이드 전환하는 최상위 레이아웃.
+   사용: App.jsx (또는 루트 컴포넌트)
+   ============================================================ */
+
+.app-shell {
+  width: 100vw; height: 100vh;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+.swipe-viewport {
+  flex: 1;
+  display: flex;
+  overflow-x: scroll;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.swipe-viewport::-webkit-scrollbar { display: none; }
+
+.swipe-page {
+  width: 100vw; height: 100%;
+  flex-shrink: 0;
+  scroll-snap-align: start;
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+
+/* 모바일: dvh로 전환 (주소창 대응) */
+@media (max-width: 768px) {
+  .app-shell { height: 100dvh; }
+}
