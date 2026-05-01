@@ -71,6 +71,9 @@ def embed_texts(texts: list[str], batch_size: int = 20) -> list[list[float]]:
 
 
 def load_metadata(metadata_dir: Path) -> list[dict]:
+    if not metadata_dir.exists():
+        print(f"[build_index] 메타데이터 디렉토리 없음, 인덱스 구축 생략: {metadata_dir}")
+        return []
     records = []
     files   = list(metadata_dir.glob("*_metadata.json"))
     if not files:
@@ -88,6 +91,8 @@ def build_index(metadata_dir: str = DEFAULT_METADATA_DIR, db_dir: str = DEFAULT_
     print(f"[임베딩 모델] {MODEL_NAME}")
     print(f"[메타데이터 로드] {metadata_dir}")
     metas = load_metadata(Path(metadata_dir))
+    if not metas:
+        return
     print(f"  → {len(metas)}개 강의 로드\n")
 
     # ── 필드별 텍스트 분리 ────────────────────────────────────────────

@@ -20,9 +20,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
-from collections import defaultdict
 from google import genai
 from dotenv import load_dotenv
+
+from .config import GEMINI_GENERATIVE_MODEL
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -43,7 +44,7 @@ class Config:
     output_triples_parquet: Path = field(default=None)
 
     google_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_API_KEY_1', ''))
-    gemini_model:   str = "models/gemini-2.5-flash"
+    gemini_model:   str = GEMINI_GENERATIVE_MODEL
     lecture_title:  str = "강의"
 
     def __post_init__(self):
@@ -420,7 +421,6 @@ class StructureLayerBuilder:
         self._build_scenes()
         self._build_segments()
         self._build_annotations()
-        self._build_deictic_links()
         logger.info("✓ 구조 레이어 완료")
 
     def _build_root(self):
@@ -491,29 +491,6 @@ class StructureLayerBuilder:
             if data.get('handwritten_content'):
                 props['handwritten_content'] = data['handwritten_content']
             self.c.add(ann_id, 'type', 'AnnotationEmphasis', props)
-
-    def _build_deictic_links(self):
-        """deictic_target이 있는 segment → 대상 annotation에 REFERS_TO 엣지"""
-        # annotation target_content → ann_id 역인덱스 (slide 범위 내)
-        slide_annot_index: Dict[str, Dict[str, str]] = defaultdict(dict)
-        for ann_id, data in self.pre.annot_data.items():
-            tc = data.get('target_content', '')
-            if tc:
-                slide_annot_index[data['slide_id']][tc] = ann_id
-
-        for seg_id, data in self.pre.segment_data.items():
-            dt = data.get('deictic_target')
-            if not dt:
-                continue
-            tc    = dt.get('target_content', '')
-            s_id  = data['slide_id']
-            ann_id = slide_annot_index.get(s_id, {}).get(tc)
-            if ann_id:
-                self.c.add(seg_id, 'REFERS_TO', ann_id, {
-                    'deictic_type': dt.get('annotation_type'),
-                    'confidence':   dt.get('confidence'),
-                })
-
 
 # ============================================================================
 #  개념 레이어 빌더 (Gemini)
@@ -651,6 +628,18 @@ class ConceptLayerBuilder:
             response = self.client.models.generate_content(
                 model=self.cfg.gemini_model, contents=prompt
             )
+            try:
+                from .cost_report import record_model_call
+
+                record_model_call(
+                    stage="stage6_graph_triples",
+                    provider="google",
+                    model=self.cfg.gemini_model,
+                    response=response,
+                    prompt_chars=len(prompt),
+                )
+            except Exception:
+                pass
             text = response.text
             if '```json' in text:
                 text = text.split('```json')[1].split('```')[0]
@@ -754,7 +743,7 @@ def main():
     parser.add_argument('--output_dir', default='output',           help='출력 디렉토리 (기본: output)')
     parser.add_argument('--slides_dir', default='output_slides',    help='슬라이드 디렉토리')
     parser.add_argument('--title',      default='강의',              help='강의 제목')
-    parser.add_argument('--model',      default='models/gemini-2.5-flash')
+    parser.add_argument('--model',      default=GEMINI_GENERATIVE_MODEL)
     args = parser.parse_args()
 
     cfg = Config(

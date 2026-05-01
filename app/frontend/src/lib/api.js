@@ -19,8 +19,16 @@ export async function uploadLecture({ file, title, category, description }) {
   }
   
   const data = await res.json();
-  // upload 직후에는 lecture_id가 없으므로 job_id를 반환하며 일치시켜줍니다.
-  return { id: data.job_id, job_id: data.job_id, status: 'pending' };
+  const lectureId = data.lecture_id || data.id || data.job_id;
+  return {
+    id: lectureId,
+    job_id: data.job_id,
+    lecture_id: data.lecture_id || lectureId,
+    title,
+    category,
+    description,
+    status: 'pending',
+  };
 }
 
 export async function getLectureStatus(jobId) {
@@ -155,6 +163,40 @@ export async function askQa(lectureId, question) {
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
     throw new Error(errorData.detail || 'QA request failed');
+  }
+  return res.json();
+}
+
+async function postGraphLifecycle(lectureId, action, sessionId) {
+  const res = await fetch(`${API_BASE}/results/${lectureId}/graph/${action}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Graph ${action} failed`);
+  }
+  return res.json();
+}
+
+export async function enterLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'enter', sessionId);
+}
+
+export async function heartbeatLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'heartbeat', sessionId);
+}
+
+export async function leaveLectureGraphSession(lectureId, sessionId) {
+  return postGraphLifecycle(lectureId, 'leave', sessionId);
+}
+
+export async function getLectureGraphSessionStatus(lectureId) {
+  const res = await fetch(`${API_BASE}/results/${lectureId}/graph/status`);
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Graph status fetch failed');
   }
   return res.json();
 }

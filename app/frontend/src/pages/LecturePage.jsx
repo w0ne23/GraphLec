@@ -5,10 +5,16 @@ import {
   getLectureDetail,
   getLectureTimeline,
   unloadLectureGraphRag,
+  enterLectureGraphSession,
+  heartbeatLectureGraphSession,
+  leaveLectureGraphSession,
 } from '../lib/api'
+
 import VideoPlayer  from '../components/watch/VideoPlayer'
 import LecturePanel from '../components/watch/LecturePanel'
 import ChatPanel    from '../components/chat/ChatPanel'
+
+import '../styles/lecture.css'
 
 const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
 const graphRagUnloadTimers = new Map()
@@ -39,6 +45,11 @@ function scheduleGraphRagUnload(lectureId) {
 export default function LecturePage({ onNavigate }) {
   const { id } = useParams()
   const navigate = useNavigate()
+  const graphSessionIdRef = useRef(
+    (window.crypto && window.crypto.randomUUID)
+      ? window.crypto.randomUUID()
+      : (`sess-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  )
 
   const [lecture,      setLecture]      = useState(null)
   const [loading,      setLoading]      = useState(false)
@@ -119,14 +130,50 @@ export default function LecturePage({ onNavigate }) {
   }, [id])
 
   useEffect(() => {
-    if (!id) return undefined
+    if (!id) return
 
     cancelScheduledGraphRagUnload(id)
     activateLectureGraphRag(id).catch((err) => {
       console.warn('GraphRAG activate skipped:', err)
     })
+    
+    let alive = true
+    let timer = null
+    const sessionId = graphSessionIdRef.current
+
+    const startGraphSession = async () => {
+      try {
+        await enterLectureGraphSession(id, sessionId)
+        if (!alive) return
+        timer = setInterval(async () => {
+          try {
+            await heartbeatLectureGraphSession(id, sessionId)
+          } catch (e) {
+            // heartbeat 실패는 다음 주기에서 재시도
+          }
+        }, 25000)
+      } catch (e) {
+        // 질의 API에서 로드 fallback이 있어 여기 실패해도 페이지는 계속 사용 가능
+        console.error('graph enter failed:', e)
+      }
+    }
+
+    const sendLeave = () => {
+      leaveLectureGraphSession(id, sessionId).catch(() => {})
+    }
+
+    const handleBeforeUnload = () => {
+      sendLeave()
+    }
+
+    startGraphSession()
+    window.addEventListener('beforeunload', handleBeforeUnload)
 
     return () => {
+      alive = false
+      if (timer) clearInterval(timer)
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+      sendLeave()
       scheduleGraphRagUnload(id)
     }
   }, [id])

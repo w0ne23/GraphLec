@@ -264,6 +264,18 @@ def _transcribe_chunks_from_audio(
             continue
 
         transcription = _call_groq(chunk_path)
+        try:
+            from .cost_report import record_audio_call
+
+            record_audio_call(
+                stage="stage2b_transcriber",
+                provider="groq",
+                model="whisper-large-v3-turbo",
+                audio_seconds=dur,
+                metadata={"chunk_index": i, "chunk_start": cs, "chunk_end": ce},
+            )
+        except Exception:
+            pass
         if transcription is not None:
             for seg in transcription.segments:
                 # seg["start"]/seg["end"]는 chunk 내 상대 시간

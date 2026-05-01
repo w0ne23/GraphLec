@@ -1,7 +1,7 @@
 """
 GraphLEC 질의 전용 FastAPI 서비스.
 
-Django는 /internal/query 로 stem + question 만 전달한다 (lecture_id → stem 변환은 Django 담당).
+UI(React) 또는 내부 서비스로부터 stem + question 을 전달받아 처리한다.
 
 /internal/query: 질문 유형에 따라
   - 구조(structural): LLM이 Cypher 생성 → Neo4j 조회(읽기 전용 검증, $stem 필수)

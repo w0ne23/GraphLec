@@ -108,8 +108,9 @@ async def create_job(
         db.add(new_job)
 
         # 시스템 전반에서 쓰이는 stem은 고유한 job_id(UUID)를 사용하여 충돌을 방지함
+        lecture_id = uuid.uuid4()
         new_content = LectureContent(
-            id=uuid.uuid4(),
+            id=lecture_id,
             job_id=job_id,
             stem=job_id,
             title=final_title,
@@ -127,7 +128,7 @@ async def create_job(
         logger.error(f"DB commit failed for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to create job")
 
-    return {"job_id": job_id}
+    return {"job_id": job_id, "lecture_id": str(lecture_id)}
 
 
 @router.delete("/{job_id}")
