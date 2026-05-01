@@ -996,6 +996,39 @@ def _write_graphrag_env(workspace_dir: Path, api_key: str) -> None:
     env_path.write_text("\n".join(existing).strip() + "\n", encoding="utf-8")
 
 
+def _patch_graphrag_extract_prompt(workspace_dir: Path) -> None:
+    """Keep bilingual lecture terms on one canonical GraphRAG entity."""
+    prompt_path = workspace_dir / "prompts" / "extract_graph.txt"
+    if not prompt_path.exists():
+        return
+
+    text = prompt_path.read_text(encoding="utf-8")
+    original = text
+    marker = "-GraphLec Entity Canonicalization Rules-"
+    rules = f"""
+
+{marker}
+- The lecture content is primarily Korean and may include English terms in parentheses.
+- Use the dominant Korean lecture term as the canonical entity name when Korean and English refer to the same concept.
+- Treat parenthesized English terms, acronyms, capitalization variants, and translations as aliases, not separate entities.
+- Do not emit separate entities for bilingual variants, parenthesized aliases, acronyms, casing variants, or direct translations of the same concept; emit one canonical entity and mention aliases in the description.
+- If a concept appears only in English and no Korean equivalent is present in the text, keep the English name.
+- Apply the same canonical entity name consistently in relationships.
+"""
+
+    anchor = "Format each entity as (\"entity\"<|><entity_name><|><entity_type><|><entity_description>)"
+    if marker not in text and anchor in text:
+        text = text.replace(anchor, anchor + rules, 1)
+
+    text = text.replace(
+        "3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.",
+        "3. Return output in the dominant lecture language as a single list of all the entities and relationships identified in steps 1 and 2. For Korean lectures, use Korean canonical entity names and descriptions. Use **##** as the list delimiter.",
+    )
+
+    if text != original:
+        prompt_path.write_text(text, encoding="utf-8")
+
+
 def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     """fused.json → GraphRAG workspace parquet."""
     from .config import output_paths
@@ -1072,6 +1105,8 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
             env=env,
         )
         _write_graphrag_env(workspace_dir, api_key)
+
+    _patch_graphrag_extract_prompt(workspace_dir)
 
     if args.force and output_graph_dir.exists():
         shutil.rmtree(output_graph_dir)
