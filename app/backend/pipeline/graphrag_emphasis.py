@@ -299,3 +299,58 @@ def compute_annotation_match(
         "annotation_match_entities": len(updates),
         "annotation_match_nonzero": nonzero,
     }
+
+
+# ── Step 3 ───────────────────────────────────────────────────────────────────
+
+def compute_audio_segment_match(
+    session,
+    stem: str,
+) -> dict[str, Any]:
+    """
+    Step 3: entity와 GRAPHRAG_MENTIONED_IN_SEGMENT로 연결된 Segment 중
+    segment.stressed=true 이거나 그 부모 Context.stressed=true 인 것의 수를 집계.
+    강의자가 음성으로 강조한 구간에 언급된 엔티티에 오디오 boost 부여.
+    Writes emphasis_audio_match to GraphRAGEntity nodes.
+    """
+    records = session.run(
+        """
+        MATCH (e:GraphRAGEntity {stem: $stem})
+        OPTIONAL MATCH (e)-[:GRAPHRAG_MENTIONED_IN_SEGMENT]->(seg:Segment {stem: $stem})
+        OPTIONAL MATCH (ctx:Context {stem: $stem})-[:HAS_SEGMENT]->(seg)
+        WITH e.id AS id,
+             count(
+               CASE WHEN seg IS NOT NULL AND (seg.stressed = true OR ctx.stressed = true)
+                    THEN 1 ELSE null END
+             ) AS stressed_count,
+             count(seg) AS total_segments
+        RETURN id, stressed_count, total_segments
+        """,
+        stem=stem,
+    ).data()
+
+    updates = [
+        {
+            "id": rec["id"],
+            "audio_match": rec["stressed_count"],
+            "total_segments": rec["total_segments"],
+        }
+        for rec in records
+    ]
+
+    session.run(
+        """
+        UNWIND $rows AS row
+        MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
+        SET e.emphasis_audio_match = row.audio_match,
+            e.emphasis_audio_total_segments = row.total_segments
+        """,
+        stem=stem,
+        rows=updates,
+    )
+
+    nonzero = sum(1 for u in updates if u["audio_match"] > 0)
+    return {
+        "audio_match_entities": len(updates),
+        "audio_match_nonzero": nonzero,
+    }
