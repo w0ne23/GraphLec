@@ -63,21 +63,25 @@ def run_content_queries(
     WITH slide, toLower(coalesce(slide.title,'') + ' ' + coalesce(slide.slide_text,'')) AS haystack
     WITH slide, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
+    OPTIONAL MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide)
     RETURN slide.slide_number AS slide_number, coalesce(slide.id,'') AS slide_id,
            slide.title AS title, slide.slide_text AS slide_text,
-           slide.start_sec AS start_sec, slide.end_sec AS end_sec,
+           min(scene.start_sec) AS start_sec, max(scene.end_sec) AS end_sec,
            size(hits) AS relevance
     ORDER BY relevance DESC, slide.slide_number LIMIT {SLIDE_LIM}
     """
     q_seg_text = f"""
-    MATCH (slide:Slide {{stem: $stem}})-[:HAS_SCENE]->(scene:Scene {{stem: $stem}})
-          -[:HAS_SEGMENT]->(seg:Segment {{stem: $stem}})
-    WITH slide, seg, toLower(coalesce(slide.title,'') + ' ' + coalesce(seg.text,'')) AS haystack
-    WITH slide, seg, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
+    MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide:Slide {{stem: $stem}})
+    MATCH (scene)-[:HAS_CONTEXT]->(ctx:Context {{stem: $stem}})-[:HAS_SEGMENT]->(seg:Segment {{stem: $stem}})
+    WITH slide, scene, ctx, seg,
+         toLower(coalesce(slide.title,'') + ' ' + coalesce(ctx.text,'') + ' ' + coalesce(seg.text,'')) AS haystack
+    WITH slide, scene, ctx, seg, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
     RETURN coalesce(seg.text,'') AS segment_text, seg.start AS start, seg.end AS end,
            slide.slide_number AS slide_number,
            coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id,
+           coalesce(scene.id,'') AS scene_id, coalesce(ctx.id,'') AS context_id,
+           scene.start_sec AS scene_start_sec, scene.end_sec AS scene_end_sec,
            size(hits) AS relevance
     ORDER BY relevance DESC, seg.start LIMIT {SEG_LIM}
     """
@@ -91,6 +95,7 @@ def run_content_queries(
     WITH ge, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
     OPTIONAL MATCH (ge)-[:GRAPHRAG_APPEARS_IN]->(slide:Slide {{stem: $stem}})
+    OPTIONAL MATCH (ge)-[:GRAPHRAG_APPEARS_IN_SCENE]->(scene:Scene {{stem: $stem}})
     RETURN coalesce(ge.id, '') AS graphrag_entity_id,
            ge.title AS graphrag_title,
            ge.type AS graphrag_type,
@@ -101,6 +106,9 @@ def run_content_queries(
            [] AS concept_names,
            collect(DISTINCT slide.slide_number) AS slide_numbers,
            collect(DISTINCT coalesce(slide.id, '')) AS slide_ids,
+           collect(DISTINCT coalesce(scene.id, '')) AS scene_ids,
+           collect(DISTINCT scene.start_sec) AS scene_start_secs,
+           collect(DISTINCT scene.end_sec) AS scene_end_secs,
            size(hits) AS relevance
     ORDER BY relevance DESC, coalesce(ge.degree, 0) DESC, coalesce(ge.frequency, 0) DESC
     LIMIT {GR_ENTITY_LIM}

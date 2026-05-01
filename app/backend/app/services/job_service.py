@@ -75,6 +75,10 @@ def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
             RETURN count(s) AS slide_links
         }
         CALL {
+            MATCH (:GraphRAGEntity {stem: $stem})-[s:GRAPHRAG_APPEARS_IN_SCENE]->(:Scene {stem: $stem})
+            RETURN count(s) AS scene_links
+        }
+        CALL {
             MATCH (tu:GraphRAGTextUnit {stem: $stem})
             RETURN count(tu) AS text_units
         }
@@ -82,7 +86,7 @@ def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
             MATCH (c:GraphRAGCommunity {stem: $stem})
             RETURN count(c) AS communities
         }
-        RETURN entities, relationships, slide_links, text_units, communities
+        RETURN entities, relationships, slide_links, scene_links, text_units, communities
         """,
         stem=stem,
     ).single()
@@ -91,6 +95,7 @@ def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
             "entities": 0,
             "relationships": 0,
             "slide_links": 0,
+            "scene_links": 0,
             "text_units": 0,
             "communities": 0,
         }
@@ -98,6 +103,7 @@ def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
         "entities": int(record["entities"]),
         "relationships": int(record["relationships"]),
         "slide_links": int(record["slide_links"]),
+        "scene_links": int(record["scene_links"]),
         "text_units": int(record["text_units"]),
         "communities": int(record["communities"]),
     }
