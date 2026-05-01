@@ -123,14 +123,6 @@ def _to_int(v: Any) -> Optional[int]:
         return None
 
 
-def _first_number(values: Any) -> Optional[float]:
-    if not isinstance(values, list):
-        return _to_float(values)
-    nums = [_to_float(v) for v in values]
-    nums = [v for v in nums if v is not None]
-    return min(nums) if nums else None
-
-
 def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[EvidenceItem]:
     items: list[EvidenceItem] = []
     seen: set[str] = set()
@@ -234,7 +226,6 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         text = f"{title}\n{desc}".strip()
         if meta:
             text += "\n" + " / ".join(meta)
-        first_slide = next((_to_int(x) for x in slides if _to_int(x) is not None), None)
         items.append(
             EvidenceItem(
                 uid=uid,
@@ -242,9 +233,6 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
                 text=text,
                 row=r,
                 chunk_type="graphrag_entity",
-                slide_number=first_slide,
-                start_sec=_first_number(r.get("scene_start_secs")),
-                end_sec=_first_number(r.get("scene_end_secs")),
                 linked_node_id=scene_ids[0] if scene_ids else eid,
             )
         )
