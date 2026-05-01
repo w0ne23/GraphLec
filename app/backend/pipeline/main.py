@@ -16,8 +16,8 @@ main.py
          Stage 4B: by_slide 구조 저장  — (3B 결과 기반)
   [직렬] Stage 5 : fusion              — 최종 통합
   [직렬] Stage 6 : 그래프 Parquet       — json_to_graph_triples
-  [직렬] Neo4j 적재 (옵션 스킵)        — nodes/edges Parquet → Neo4j
   [직렬] Stage 7 : lance_ingest          — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
+  [직렬] Stage 7B: GraphRAG index        — fused → GraphRAG parquet workspace
 
 Usage:
     python main.py --input lecture.mp4
@@ -34,6 +34,7 @@ except ImportError:
 
 import json
 import os
+import shutil
 import sys
 import time
 import argparse
@@ -63,7 +64,6 @@ DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
     "RECOMMENDER_DB_DIR",
     "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
 )
-
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -1104,6 +1104,172 @@ def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     _done(f"Lance 인덱스 ({cnt}청크)", elapsed)
     return {"elapsed": elapsed, **result}
 
+
+def _find_graphrag_executable() -> Optional[str]:
+    configured = os.getenv("GRAPHRAG_BIN")
+    if configured and Path(configured).exists():
+        return configured
+    return shutil.which("graphrag")
+
+
+def _write_graphrag_env(workspace_dir: Path, api_key: str) -> None:
+    env_path = workspace_dir / ".env"
+    existing: list[str] = []
+    if env_path.exists():
+        existing = [
+            line
+            for line in env_path.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("GRAPHRAG_API_KEY=")
+        ]
+    existing.append(f"GRAPHRAG_API_KEY={api_key}")
+    env_path.write_text("\n".join(existing).strip() + "\n", encoding="utf-8")
+
+
+def _patch_graphrag_extract_prompt(workspace_dir: Path) -> None:
+    """Keep bilingual lecture terms on one canonical GraphRAG entity."""
+    prompt_path = workspace_dir / "prompts" / "extract_graph.txt"
+    if not prompt_path.exists():
+        return
+
+    text = prompt_path.read_text(encoding="utf-8")
+    original = text
+    marker = "-GraphLec Entity Canonicalization Rules-"
+    rules = f"""
+
+{marker}
+- The lecture content is primarily Korean and may include English terms in parentheses.
+- Use the dominant Korean lecture term as the canonical entity name when Korean and English refer to the same concept.
+- Treat parenthesized English terms, acronyms, capitalization variants, and translations as aliases, not separate entities.
+- Do not emit separate entities for bilingual variants, parenthesized aliases, acronyms, casing variants, or direct translations of the same concept; emit one canonical entity and mention aliases in the description.
+- If a concept appears only in English and no Korean equivalent is present in the text, keep the English name.
+- Apply the same canonical entity name consistently in relationships.
+"""
+
+    anchor = "Format each entity as (\"entity\"<|><entity_name><|><entity_type><|><entity_description>)"
+    if marker not in text and anchor in text:
+        text = text.replace(anchor, anchor + rules, 1)
+
+    text = text.replace(
+        "3. Return output in English as a single list of all the entities and relationships identified in steps 1 and 2. Use **##** as the list delimiter.",
+        "3. Return output in the dominant lecture language as a single list of all the entities and relationships identified in steps 1 and 2. For Korean lectures, use Korean canonical entity names and descriptions. Use **##** as the list delimiter.",
+    )
+
+    if text != original:
+        prompt_path.write_text(text, encoding="utf-8")
+
+
+def _graphrag_workspace_dir(args, output_dir: Path, stem: str) -> Path:
+    root = getattr(args, "graphrag_root", None)
+    if root:
+        return Path(root) / stem
+    return output_dir / "graphrag"
+
+
+def stage7b_graphrag_index(args, output_dir: Path) -> dict:
+    """fused.json → GraphRAG workspace parquet."""
+    from .config import output_paths
+    from .fused_to_graphrag_text import fused_to_graphrag_text
+
+    stem = Path(args.input).stem
+    paths = output_paths(stem, output_dir, Path(args.slides))
+    fused_path = paths["fused"]
+    workspace_dir = _graphrag_workspace_dir(args, output_dir, stem)
+    input_dir = workspace_dir / "input"
+    output_graph_dir = workspace_dir / "output"
+    entities_path = output_graph_dir / "entities.parquet"
+    relationships_path = output_graph_dir / "relationships.parquet"
+    input_path = input_dir / f"{stem}.txt"
+
+    if (
+        not args.force
+        and entities_path.exists()
+        and entities_path.stat().st_size > 0
+        and relationships_path.exists()
+        and relationships_path.stat().st_size > 0
+    ):
+        print("\n  ⏭  Stage 7B GraphRAG 인덱스 — parquet 출력 파일 존재, 스킵")
+        print(f"     {output_graph_dir}")
+        print("─" * 70)
+        return {
+            "elapsed": 0.0,
+            "skipped": True,
+            "workspace_dir": str(workspace_dir),
+            "input_path": str(input_path),
+            "entities_parquet": str(entities_path),
+            "relationships_parquet": str(relationships_path),
+        }
+
+    if not fused_path.exists():
+        raise FileNotFoundError(f"Stage 7B: fused 파일 없음 — Stage 5 퓨전이 필요합니다: {fused_path}")
+
+    graphrag_bin = _find_graphrag_executable()
+    if not graphrag_bin:
+        raise RuntimeError("Stage 7B: graphrag CLI를 찾을 수 없습니다. requirements 설치 후 다시 실행하세요.")
+
+    api_key = os.getenv("GRAPHRAG_API_KEY") or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("Stage 7B: GRAPHRAG_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다.")
+
+    _banner("Stage 7B  —  GraphRAG 인덱스  (fused → parquet workspace)")
+    t0 = time.time()
+
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    input_dir.mkdir(parents=True, exist_ok=True)
+    with open(fused_path, "r", encoding="utf-8") as f:
+        fused = json.load(f)
+    input_path.write_text(fused_to_graphrag_text(fused, stem=stem), encoding="utf-8")
+
+    env = os.environ.copy()
+    env["GRAPHRAG_API_KEY"] = api_key
+    _write_graphrag_env(workspace_dir, api_key)
+
+    settings_path = workspace_dir / "settings.yaml"
+    if not settings_path.exists():
+        subprocess.run(
+            [
+                graphrag_bin,
+                "init",
+                "--root",
+                str(workspace_dir),
+                "--model",
+                os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-4.1-mini"),
+                "--embedding",
+                os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small"),
+            ],
+            check=True,
+            env=env,
+        )
+        _write_graphrag_env(workspace_dir, api_key)
+
+    _patch_graphrag_extract_prompt(workspace_dir)
+
+    if args.force and output_graph_dir.exists():
+        shutil.rmtree(output_graph_dir)
+
+    subprocess.run(
+        [
+            graphrag_bin,
+            "index",
+            "--root",
+            str(workspace_dir),
+            "--method",
+            getattr(args, "graphrag_method", "standard"),
+        ],
+        check=True,
+        env=env,
+    )
+
+    elapsed = time.time() - t0
+    _done("GraphRAG 인덱스 생성", elapsed)
+    return {
+        "elapsed": elapsed,
+        "workspace_dir": str(workspace_dir),
+        "input_path": str(input_path),
+        "entities_parquet": str(entities_path),
+        "relationships_parquet": str(relationships_path),
+    }
+
+
 def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     """Stage 8: 강의 메타데이터 생성."""
     from .generate_metadata import generate_metadata
@@ -1200,6 +1366,7 @@ def run_pipeline(args, progress_callback=None):
     try:
         r9: dict = {}
         r10: dict = {}
+        r7b: dict = {}
 
         # ── Stage 1 (병렬 A/B) ──
         _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
@@ -1374,21 +1541,9 @@ def run_pipeline(args, progress_callback=None):
             r6 = stage6_graph_triples(args, output_dir, slides_dir)
             timings["Stage 6 그래프 트리플"] = r6["elapsed"]
 
-            if not getattr(args, "skip_neo4j", False):
-                from .neo4j_ingest import stage_neo4j_ingest
-
-                _banner("Neo4j 적재  —  nodes/edges Parquet → Neo4j")
-                t_neo = time.time()
-                r_neo = stage_neo4j_ingest(args, output_dir)
-                timings["Neo4j 적재"] = time.time() - t_neo
-                _done(
-                    f"Neo4j (노드 {r_neo['node_count']}, 관계 {r_neo['edge_count']})",
-                    timings["Neo4j 적재"],
-                )
-            else:
-                print("\n  ⏭  Neo4j 적재 — 사용자 옵션으로 스킵")
-                print("─" * 70)
-                timings["Neo4j 적재"] = 0.0
+            print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
+            print("─" * 70)
+            timings["Neo4j 적재"] = 0.0
                 
         notify_stage("integrate", "done")
 
@@ -1401,6 +1556,14 @@ def run_pipeline(args, progress_callback=None):
             r7 = stage7_lance_index(args, output_dir, slides_dir)
             timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
             notify_stage("summarize", "done")
+
+        if getattr(args, "skip_graphrag_index", False):
+            print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
+            print("─" * 70)
+            timings["Stage 7B GraphRAG 인덱스"] = 0.0
+        else:
+            r7b = stage7b_graphrag_index(args, output_dir)
+            timings["Stage 7B GraphRAG 인덱스"] = r7b.get("elapsed", 0.0)
 
         # ── Stage 8 (직렬): 메타데이터 생성 ──  ← 여기 추가
         r8: dict = {}
@@ -1441,6 +1604,9 @@ def run_pipeline(args, progress_callback=None):
             r6.get("nodes_parquet", ""),
             r6.get("edges_parquet", ""),
             str(output_dir / f"{stem}_chunks_lance.parquet"),
+            r7b.get("input_path", ""),
+            r7b.get("entities_parquet", ""),
+            r7b.get("relationships_parquet", ""),
             r8.get("metadata_path", ""),
             str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
             r9.get("merged_clean_path", str(output_dir / f"{stem}_merged_clean.json")),
@@ -1510,7 +1676,8 @@ def get_parser():
   python main.py --input input/lecture.mp4 --debug --masks
   python main.py --input input/lecture.mp4 --force
   python main.py --input input/lecture.mp4 --skip-lance-index
-  python main.py --input input/lecture.mp4 --load-neo4j
+  python main.py --input input/lecture.mp4 --skip-graphrag-index
+  python main.py --input input/lecture.mp4 --skip-neo4j
         """,
     )
     parser.add_argument("--input",  "-i", default="input/lecture.mp4", help="입력 강의 영상 경로 (.mp4)")
@@ -1553,14 +1720,7 @@ def get_parser():
     parser.add_argument(
         "--skip-neo4j",
         action="store_true",
-        default=True,
-        help="Stage 6 직후 Neo4j 적재 스킵 (기본: 스킵)",
-    )
-    parser.add_argument(
-        "--load-neo4j",
-        dest="skip_neo4j",
-        action="store_false",
-        help="Stage 6 직후 Neo4j 적재 활성화 (NEO4J_URI 등 필요)",
+        help="호환성 유지용 옵션입니다. Neo4j 적재는 강의 시청 화면 진입 시 수행됩니다.",
     )
     parser.add_argument("--skip-lance-index", action="store_true",
                         help="Stage 7 LanceDB+Parquet 인덱스 스킵")
@@ -1568,6 +1728,19 @@ def get_parser():
         "--lance-root",
         default=None,
         help="LanceDB 저장 경로 (기본: 환경변수 GRAPHLEC_LANCE_ROOT 또는 data/lancedb)",
+    )
+    parser.add_argument("--skip-graphrag-index", action="store_true",
+                        help="Stage 7B GraphRAG parquet 인덱스 생성 스킵")
+    parser.add_argument(
+        "--graphrag-root",
+        default=None,
+        help="GraphRAG workspace root override. 기본값은 output_dir/graphrag",
+    )
+    parser.add_argument(
+        "--graphrag-method",
+        default=os.getenv("GRAPHLEC_GRAPHRAG_METHOD", "standard"),
+        choices=["standard", "fast", "standard-update", "fast-update"],
+        help="GraphRAG index method (default: standard)",
     )
     parser.add_argument("--skip-metadata", action="store_true",
                         help="Stage 8 메타데이터 생성 스킵")

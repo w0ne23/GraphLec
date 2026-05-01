@@ -460,6 +460,7 @@ def run_fusion(cfg: Config) -> dict:
           f"annotation events {len(annotation_data)}개")
 
     fused_slides = []
+    _seg_idx = 0
 
     for cl_slide in classified_slides:
         slide_id  = cl_slide["slide_id"]
@@ -561,12 +562,14 @@ def run_fusion(cfg: Config) -> dict:
                         seg["start"], seg["text"], flat_annots, cfg
                     )
                     fused_segs.append({
+                        "segment_id":     f"segment/{_seg_idx:04d}",
                         "start":          seg["start"],
                         "end":            seg["end"],
                         "text":           seg["text"],
                         "stressed":       stressed,  # context 단위 플래그를 segment에 상속
                         "deictic_target": deictic_target,
                     })
+                    _seg_idx += 1
 
                 fused_contexts.append({
                     "context_index": ctx["context_index"],

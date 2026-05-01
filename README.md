@@ -151,10 +151,20 @@ python main.py --input input/lecture.mp4 --output output --slides output_slides
 | 구분 | 예시 | 설명 |
 |------|------|------|
 | 퓨전 | `{stem}_fused.json` | 슬라이드·세그먼트 통합 본문 |
+| GraphRAG 입력 | `{stem}_graphrag.txt` | fused.json을 슬라이드 블록 단위 자연어 문서로 변환한 단일 txt |
 | 그래프 | `{stem}_graph_triples.parquet`, `{stem}_nodes.parquet`, `{stem}_edges.parquet` | 트리플·정규화 노드/엣지 |
 | 검색 | `{stem}_chunks_lance.parquet`, `data/lancedb/` | 청크 백업·LanceDB 테이블 `chunks`(stem 컬럼) |
 | 기타 | `{stem}_segments.json`, `{stem}_by_slide.json`, … | 전사·분류·강조 등 (`config.output_paths` 참고) |
 | 슬라이드 이미지 | `output_slides/` 등 | 추출 프레임·메타데이터 |
+
+### Microsoft GraphRAG 입력 txt 생성
+
+`fused.json`에서 제목, 슬라이드 원문, `contexts[].text`, 점수가 0보다 큰 `emphasized_keywords`, `annotations_summary`를 모아 강의 전체를 하나의 자연어 txt로 변환합니다. 슬라이드별 블록에는 `slide_id`, 시간 범위, 역할도 함께 남겨 GraphRAG로 만든 개념 그래프를 기존 구조 그래프와 다시 연결할 수 있게 합니다.
+
+```bash
+python -m app.backend.pipeline.fused_to_graphrag_text --stem os1-1 --output-dir output
+python -m app.backend.pipeline.fused_to_graphrag_text --fused-path output/os1-1_fused.json
+```
 
 ---
 
