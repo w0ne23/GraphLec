@@ -24,6 +24,7 @@ from pipeline.graphrag_emphasis import (
     compute_visual_match,
     compute_annotation_match,
     compute_audio_segment_match,
+    compute_final_weight,
 )
 from pipeline.neo4j_ingest import ingest_parquet_to_neo4j
 
@@ -514,6 +515,7 @@ async def ingest_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Di
                     graphrag_counts.update(compute_visual_match(session, stem, fused_path))
                 graphrag_counts.update(compute_annotation_match(session, stem))
                 graphrag_counts.update(compute_audio_segment_match(session, stem))
+                graphrag_counts.update(compute_final_weight(session, stem))
                 summary = _stem_graph_counts(session, stem)
         finally:
             driver.close()

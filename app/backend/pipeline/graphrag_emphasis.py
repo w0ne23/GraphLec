@@ -18,6 +18,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+_EMPHASIS_WEIGHTS = {
+    "keyword":    1.0,
+    "visual":     1.0,
+    "annotation": 1.5,
+    "audio":      1.0,
+}
+_TOTAL_WEIGHT = sum(_EMPHASIS_WEIGHTS.values())  # 4.5
+
 _SCORE_FIELDS = (
     "score",
     "audio_score",
@@ -353,4 +361,75 @@ def compute_audio_segment_match(
     return {
         "audio_match_entities": len(updates),
         "audio_match_nonzero": nonzero,
+    }
+
+
+# ── Step 4 ───────────────────────────────────────────────────────────────────
+
+def compute_final_weight(
+    session,
+    stem: str,
+) -> dict[str, Any]:
+    """
+    Step 4: 강의 내 로컬 정규화 → emphasis_boost_local → final_weight 저장.
+
+    각 신호를 강의 최댓값으로 나눠 [0, 1] 정규화 후 가중 평균:
+      emphasis_boost_local = (w_kw*norm_kw + w_vis*norm_vis + w_ann*norm_ann + w_aud*norm_aud)
+                             / total_weight  →  [0, 1]
+
+    final_weight = degree * (1 + emphasis_boost_local)
+      - degree: GraphRAG 그래프 내 연결 수 (기본 중요도)
+      - 1 + boost: 멀티모달 강조 신호로 degree를 증폭
+    """
+    records = session.run(
+        """
+        MATCH (e:GraphRAGEntity {stem: $stem})
+        RETURN e.id AS id,
+               COALESCE(e.emphasis_keyword_match, 0.0)    AS kw,
+               COALESCE(e.emphasis_visual_match, 0.0)     AS vis,
+               COALESCE(e.emphasis_annotation_match, 0.0) AS ann,
+               COALESCE(e.emphasis_audio_match, 0)        AS aud,
+               COALESCE(e.degree, 1)                      AS degree
+        """,
+        stem=stem,
+    ).data()
+
+    if not records:
+        return {"final_weight_entities": 0, "final_weight_nonzero": 0}
+
+    max_kw  = max((r["kw"]  for r in records), default=0.0) or 1.0
+    max_vis = max((r["vis"] for r in records), default=0.0) or 1.0
+    max_ann = max((r["ann"] for r in records), default=0.0) or 1.0
+    max_aud = max((r["aud"] for r in records), default=0.0) or 1.0
+
+    updates: list[dict[str, Any]] = []
+    for rec in records:
+        boost = (
+            _EMPHASIS_WEIGHTS["keyword"]    * (rec["kw"]  / max_kw)
+            + _EMPHASIS_WEIGHTS["visual"]     * (rec["vis"] / max_vis)
+            + _EMPHASIS_WEIGHTS["annotation"] * (rec["ann"] / max_ann)
+            + _EMPHASIS_WEIGHTS["audio"]      * (rec["aud"] / max_aud)
+        ) / _TOTAL_WEIGHT
+
+        updates.append({
+            "id":           rec["id"],
+            "boost":        round(boost, 4),
+            "final_weight": round(rec["degree"] * (1.0 + boost), 4),
+        })
+
+    session.run(
+        """
+        UNWIND $rows AS row
+        MATCH (e:GraphRAGEntity {stem: $stem, id: row.id})
+        SET e.emphasis_boost_local = row.boost,
+            e.final_weight         = row.final_weight
+        """,
+        stem=stem,
+        rows=updates,
+    )
+
+    nonzero = sum(1 for u in updates if u["boost"] > 0)
+    return {
+        "final_weight_entities": len(updates),
+        "final_weight_nonzero":  nonzero,
     }
