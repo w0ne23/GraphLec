@@ -26,12 +26,9 @@ _TRAILING_ALIAS_RE = re.compile(r"^\s*(?P<head>.+?)\s*[\(\[]\s*(?P<alias>[^)\]]+
 _HANGUL_RE = re.compile(r"[가-힣]")
 
 
-def _repo_root() -> Path:
-    return Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[3]
-
-
-def default_graphrag_root() -> Path:
-    return Path(os.getenv("GRAPHLEC_GRAPHRAG_ROOT", str(_repo_root() / "graphrag_workspaces")))
+def default_graphrag_root() -> Path | None:
+    configured = os.getenv("GRAPHLEC_GRAPHRAG_ROOT")
+    return Path(configured) if configured else None
 
 
 def find_graphrag_output_dir(
@@ -42,9 +39,15 @@ def find_graphrag_output_dir(
 ) -> Path | None:
     """Find a GraphRAG output directory for a lecture stem."""
     names: list[str] = []
+    alias_paths: list[Path] = []
     for name in [stem, *(aliases or [])]:
         clean = str(name or "").strip()
-        if clean and clean not in names:
+        if not clean:
+            continue
+        path = Path(clean)
+        if path.is_absolute():
+            alias_paths.append(path)
+        elif clean not in names:
             names.append(clean)
 
     candidates: list[Path] = []
@@ -56,13 +59,13 @@ def find_graphrag_output_dir(
                 output_dir / "output",
             ]
         )
-        for name in names:
-            candidates.append(output_dir / "graphrag_workspaces" / name / "output")
+    for path in alias_paths:
+        candidates.extend([path / "output", path])
 
     root = default_graphrag_root()
-    for name in names:
-        candidates.append(root / name / "output")
-        candidates.append(_repo_root() / "graphrag_workspaces" / name / "output")
+    if root:
+        for name in names:
+            candidates.append(root / name / "output")
 
     seen: set[Path] = set()
     for path in candidates:
