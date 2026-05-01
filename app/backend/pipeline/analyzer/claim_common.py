@@ -35,19 +35,24 @@ def _default_judge_model(base_model: str) -> str:
 
 
 def _resolve_stage_model(stage: str) -> str:
-    base = VERIFIER_MODEL
-    strong = VERIFIER_CLAIM_JUDGE_MODEL or _default_judge_model(base)
+    base = os.getenv("VERIFIER_MODEL", VERIFIER_MODEL).strip() or VERIFIER_MODEL
+    extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
+    judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
+    cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
+    slide_recheck_model = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", VERIFIER_SLIDE_RECHECK_MODEL).strip()
+    grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
+    strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
-        return VERIFIER_CLAIM_EXTRACT_MODEL or base
+        return extract_model or base
     if stage == "judge":
         return strong
     if stage == "cross_recheck":
-        return VERIFIER_CROSS_RECHECK_MODEL or strong
+        return cross_recheck_model or strong
     if stage == "recheck":
-        return VERIFIER_SLIDE_RECHECK_MODEL or strong
+        return slide_recheck_model or strong
     if stage == "grounding":
-        return VERIFIER_GROUNDING_MODEL or strong
+        return grounding_model or strong
     return base
 
 
@@ -849,33 +854,14 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
     return ctx
 
 
-def _has_unapplied_candidate(u: dict) -> bool:
-    return bool(
-        str(u.get("correction_status", "") or "").strip() == "candidate_only"
-        and str(u.get("text_corrected_candidate", "") or "").strip()
-    )
-
-
 def _format_utterance_for_prompt(u: dict) -> str:
     uid = u["utterance_id"]
     ts = f"{u['start_time']:.1f}s"
     corr = str(u.get("text_corrected", "") or "").strip()
     orig = str(u.get("text_original", "") or "").strip()
-    candidate = str(u.get("text_corrected_candidate", "") or "").strip()
-    risk = str(u.get("correction_risk", "") or "").strip()
-    reason = str(u.get("correction_reason", "") or "").strip()
 
-    if _has_unapplied_candidate(u):
-        details = []
-        if risk:
-            details.append(f"risk={risk}")
-        if reason:
-            details.append(f"reason={reason}")
-        detail_text = ", ".join(details) if details else "candidate_only"
-        return (
-            f"{uid} | {ts} | 발화 원문: {orig or u.get('text', '')} | "
-            f"교정 후보(미적용): {candidate} | 전사 불확실성: {detail_text}"
-        )
+    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
+        return f"{uid} | {ts} | {orig or u.get('text', '')}"
 
     if corr and orig and corr != orig:
         return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"

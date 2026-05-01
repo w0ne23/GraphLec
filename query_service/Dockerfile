@@ -8,14 +8,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY query_service/requirements.txt ./requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 ENV PYTHONPATH=/app
 
 COPY query_service/ ./query_service/
 COPY app/backend/pipeline/lance_ingest.py ./pipeline/lance_ingest.py
 COPY app/backend/pipeline/embedding_utils.py ./pipeline/embedding_utils.py
+COPY app/backend/pipeline/cost_report.py ./pipeline/cost_report.py
 RUN touch ./pipeline/__init__.py
 COPY app/backend/pipeline/utils.py ./pipeline/utils.py
 

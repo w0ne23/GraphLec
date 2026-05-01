@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # 파이프라인 deps
-COPY requirements.txt ./requirements_pipeline.txt
+COPY app/backend/pipeline/requirements.txt ./requirements_pipeline.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements_pipeline.txt
 

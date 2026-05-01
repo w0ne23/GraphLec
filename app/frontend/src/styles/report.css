@@ -1,0 +1,51 @@
+/* ============================================================
+   report.css — ReportPage 스타일
+   이용 통계 / 강의 통계 / 질의 분석 탭 구조.
+   사용: ReportPage.jsx
+   ※ BEM 리네이밍 예정
+   ============================================================ */
+
+.report-page    { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+
+/* 탭바 */
+.report-tab-bar { display: flex; background: var(--panel); border-bottom: 1px solid var(--b1); padding: 0 20px; flex-shrink: 0; }
+.report-tab-btn { padding: 10px 16px; font-size: 13px; font-weight: 500; color: var(--t3); background: none; border: none; border-bottom: 2px solid transparent; transition: all .14s; white-space: nowrap; }
+.report-tab-btn:hover   { color: var(--t1); }
+.report-tab-btn--active { color: var(--blue); border-bottom-color: var(--blue); }
+
+/* 컨텐츠 */
+.report-content   { flex: 1; overflow-y: auto; padding: 24px; }
+.report-section   { margin-bottom: 28px; }
+.report-sec-title { font-size: 15px; font-weight: 700; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--b1); }
+.report-empty     { font-size: 13px; color: var(--t3); padding: 40px; text-align: center; }
+
+/* 통계 그리드 */
+.report-stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 12px; margin-bottom: 24px; }
+.report-stat-card { background: var(--panel); border: 1px solid var(--b1); border-radius: var(--rl); padding: 14px 16px; }
+.report-stat-lbl  { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--t3); margin-bottom: 4px; }
+.report-stat-val  { font-size: 24px; font-weight: 700; line-height: 1.2; }
+.report-stat-sub  { font-size: 11px; color: var(--t3); margin-top: 2px; }
+
+/* 바 차트 */
+.report-bar-list  { display: flex; flex-direction: column; gap: 12px; }
+.report-bar-row   { display: flex; align-items: center; gap: 12px; }
+.report-bar-label { font-size: 12px; color: var(--t2); width: 120px; flex-shrink: 0; }
+.report-bar-track { flex: 1; height: 6px; background: var(--hover); border-radius: 3px; overflow: hidden; }
+.report-bar-fill  { height: 100%; background: var(--blue); border-radius: 3px; transition: width .5s cubic-bezier(.4,0,.2,1); }
+.report-bar-val   { font-size: 11px; color: var(--t3); width: 100px; text-align: right; flex-shrink: 0; }
+
+/* 자주 묻는 질문 TOP 5 */
+.report-top-list { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.report-top-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 12px; background: var(--panel);
+  border: 1px solid var(--b1); border-radius: var(--r);
+  font-size: 13px; color: var(--t2);
+}
+.report-top-rank {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: var(--blue-bg); color: var(--blue);
+  font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}

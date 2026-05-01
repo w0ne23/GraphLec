@@ -79,6 +79,38 @@ async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Dep
     return await job_service.ask_question(db, lecture_id, question)
 
 
+@router.post("/{lecture_id}/graph/enter")
+async def graph_enter(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_enter(db, lecture_id, session_id)
+
+
+@router.post("/{lecture_id}/graph/heartbeat")
+async def graph_heartbeat(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_heartbeat(db, lecture_id, session_id)
+
+
+@router.post("/{lecture_id}/graph/leave")
+async def graph_leave(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_leave(db, lecture_id, session_id)
+
+
+@router.get("/{lecture_id}/graph/status")
+async def graph_status(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    return await job_service.graph_status(db, lecture_id)
+
+
 @router.get("/{lecture_id}")
 async def get_result_detail(lecture_id: str, db: AsyncSession = Depends(get_db)):
     """특정 강의 상세 정보 조회"""
