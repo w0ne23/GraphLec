@@ -9,6 +9,7 @@ GraphLec 멀티모달 강조 신호를 GraphRAGEntity에 boost 가중치로 저�
     2b. annotation_match — AnnotationEmphasis target/handwritten 매칭
   Step 3: audio_segment_match — stressed segment 연결
   Step 4: local boost 정규화 및 final_weight 저장
+  Step 5: relation_boost — GRAPHRAG_RELATES_TO 엣지에 endpoint final_weight 기반 가중치 부여
 """
 
 from __future__ import annotations
@@ -433,3 +434,30 @@ def compute_final_weight(
         "final_weight_entities": len(updates),
         "final_weight_nonzero":  nonzero,
     }
+
+
+# ── Step 5 ───────────────────────────────────────────────────────────────────
+
+def compute_relation_boost(
+    session,
+    stem: str,
+) -> dict[str, Any]:
+    """
+    Step 5: GRAPHRAG_RELATES_TO 엣지에 endpoint_boost 저장 (마지막 단계).
+
+    emphasis_edge_weight = sqrt(src.final_weight * tgt.final_weight)
+      - 기하평균: 양 끝 entity가 모두 강조돼야 높은 값
+      - 원본 weight는 보존하고 emphasis_edge_weight를 별도 프로퍼티로 추가
+    """
+    result = session.run(
+        """
+        MATCH (src:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(tgt:GraphRAGEntity {stem: $stem})
+        WHERE src.final_weight IS NOT NULL AND tgt.final_weight IS NOT NULL
+        SET r.emphasis_edge_weight = round(sqrt(src.final_weight * tgt.final_weight), 4)
+        RETURN count(r) AS updated
+        """,
+        stem=stem,
+    ).single()
+
+    updated = result["updated"] if result else 0
+    return {"relation_boost_edges": updated}
