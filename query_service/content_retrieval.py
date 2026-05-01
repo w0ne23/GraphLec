@@ -97,7 +97,7 @@ def infer_intents_json(question: str, call_gemini_raw: Callable[[str, str], str]
 @dataclass
 class EvidenceItem:
     uid: str
-    kind: str  # slide_text, slide_concept, segment, sub_concept, lance_strict, lance_soft
+    kind: str  # slide_text, slide_concept, segment, sub_concept, graphrag_*, lance_*
     text: str
     row: Optional[dict[str, Any]] = None
     lance_score: Optional[float] = None
@@ -106,6 +106,21 @@ class EvidenceItem:
     slide_number: Optional[int] = None
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
+    retrieval_score: Optional[float] = None
+
+
+def _to_float(v: Any) -> Optional[float]:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int(v: Any) -> Optional[int]:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[EvidenceItem]:
@@ -132,7 +147,18 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             continue
         seen.add(uid)
         text = f"{st} (개념: {co})" if co else st
-        items.append(EvidenceItem(uid=uid, kind="segment", text=text, row=r))
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="segment",
+                text=text,
+                row=r,
+                chunk_type="segment",
+                slide_number=_to_int(r.get("slide_number")),
+                start_sec=_to_float(r.get("start")),
+                end_sec=_to_float(r.get("end")),
+            )
+        )
 
     for r in structured.get("slides", []):
         sn = r.get("slide_number")
@@ -146,7 +172,18 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             seen.add(uid)
             text = f"슬라이드 {sn} {tit}\n{body}".strip()
             if text:
-                items.append(EvidenceItem(uid=uid, kind="slide_concept", text=text, row=r))
+                items.append(
+                    EvidenceItem(
+                        uid=uid,
+                        kind="slide_concept",
+                        text=text,
+                        row=r,
+                        chunk_type="slide",
+                        slide_number=_to_int(sn),
+                        start_sec=_to_float(r.get("start_sec")),
+                        end_sec=_to_float(r.get("end_sec")),
+                    )
+                )
         else:
             uid = f"slt:{r.get('slide_id')}"
             if uid in seen:
@@ -154,7 +191,73 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             seen.add(uid)
             text = f"슬라이드 {sn} {tit}\n{body}".strip()
             if text:
-                items.append(EvidenceItem(uid=uid, kind="slide_text", text=text, row=r))
+                items.append(
+                    EvidenceItem(
+                        uid=uid,
+                        kind="slide_text",
+                        text=text,
+                        row=r,
+                        chunk_type="slide",
+                        slide_number=_to_int(sn),
+                        start_sec=_to_float(r.get("start_sec")),
+                        end_sec=_to_float(r.get("end_sec")),
+                    )
+                )
+
+    for r in structured.get("graphrag_entities", []):
+        eid = str(r.get("graphrag_entity_id", ""))
+        title = str(r.get("graphrag_title", "") or "")
+        desc = str(r.get("graphrag_description", "") or "")
+        gtype = str(r.get("graphrag_type", "") or "")
+        slides = [x for x in (r.get("slide_numbers") or []) if x not in (None, "")]
+        concepts = [x for x in (r.get("concept_names") or []) if x]
+        scene_ids = [str(x) for x in (r.get("scene_ids") or []) if x]
+        uid = f"gre:{eid}"
+        if uid in seen or not (title or desc):
+            continue
+        seen.add(uid)
+        meta = []
+        if gtype:
+            meta.append(f"유형: {gtype}")
+        if concepts:
+            meta.append("기존 개념 연결: " + ", ".join(str(x) for x in concepts[:4]))
+        if slides:
+            meta.append("관련 슬라이드: " + ", ".join(str(x) for x in slides[:6]))
+        text = f"{title}\n{desc}".strip()
+        if meta:
+            text += "\n" + " / ".join(meta)
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="graphrag_entity",
+                text=text,
+                row=r,
+                chunk_type="graphrag_entity",
+                linked_node_id=scene_ids[0] if scene_ids else eid,
+            )
+        )
+
+    for r in structured.get("graphrag_relationships", []):
+        sid, tid = str(r.get("src_id", "")), str(r.get("tgt_id", ""))
+        src = str(r.get("src_title", "") or "")
+        tgt = str(r.get("tgt_title", "") or "")
+        desc = str(r.get("rel_description", "") or "")
+        uid = f"grr:{sid}:{tid}:{desc[:40]}"
+        if uid in seen or not (src or tgt or desc):
+            continue
+        seen.add(uid)
+        text = f"{src} —(GraphRAG 관계)→ {tgt}"
+        if desc:
+            text += f"\n{desc}"
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="graphrag_relationship",
+                text=text,
+                row=r,
+                chunk_type="graphrag_relationship",
+            )
+        )
 
     return items
 
@@ -165,6 +268,24 @@ def _collect_ids(structured: dict[str, list[dict[str, Any]]]) -> set[str]:
         for r in structured.get(key, []):
             for fld in ("sub_id", "concept_id", "slide_id", "segment_id"):
                 v = r.get(fld)
+                if v:
+                    ids.add(str(v).strip())
+    for r in structured.get("graphrag_entities", []):
+        for fld in ("graphrag_entity_id",):
+            v = r.get(fld)
+            if v:
+                ids.add(str(v).strip())
+        for fld in ("concept_ids", "slide_ids", "scene_ids"):
+            for v in r.get(fld) or []:
+                if v:
+                    ids.add(str(v).strip())
+    for r in structured.get("graphrag_relationships", []):
+        for fld in ("src_id", "tgt_id"):
+            v = r.get(fld)
+            if v:
+                ids.add(str(v).strip())
+        for fld in ("src_concept_ids", "tgt_concept_ids"):
+            for v in r.get(fld) or []:
                 if v:
                     ids.add(str(v).strip())
     return {x for x in ids if x}
@@ -224,6 +345,10 @@ def _mmr(
         selected.append(best_i)
         pool.remove(best_i)
     return selected
+
+
+def _is_media_evidence(it: EvidenceItem) -> bool:
+    return it.kind in {"segment", "slide_text", "slide_concept"} or it.start_sec is not None
 
 
 def _distance_to_score(dist: Optional[float]) -> float:
@@ -314,11 +439,22 @@ def build_sectioned_context(
     for it in items:
         buckets.setdefault(it.kind, []).append(it)
 
-    order = ["sub_concept", "slide_text", "slide_concept", "segment", "lance_strict", "lance_soft"]
+    order = [
+        "graphrag_entity",
+        "graphrag_relationship",
+        "sub_concept",
+        "slide_text",
+        "slide_concept",
+        "segment",
+        "lance_strict",
+        "lance_soft",
+    ]
     for bk in order:
         for it in buckets.get(bk, []):
             tag = {
                 "sub_concept": "개념 관계",
+                "graphrag_entity": "GraphRAG 개념",
+                "graphrag_relationship": "GraphRAG 개념 관계",
                 "slide_text": "슬라이드 본문",
                 "slide_concept": "슬라이드-개념",
                 "segment": "음성 구간",
@@ -433,6 +569,7 @@ def run_enhanced_content_pipeline(
             ip *= 0.72
         kw = _kw_score(all_items[i].text, keywords)
         combined[i] = sw * sim_to_q[i] + iw * ip + kw_w * kw
+        it.retrieval_score = float(combined[i])
 
     order = list(np.argsort(-combined))
     mmr_k = int(lim.get("mmr_pick_k", 18))
@@ -440,6 +577,13 @@ def run_enhanced_content_pipeline(
     lambda_mmr = float(mmr_cfg.get("lambda_example_heavy", 0.62)) if ex_w > 0.45 else float(mmr_cfg.get("lambda_default", 0.78))
     picked_idx = _mmr(order, sim_to_q, sim_all, min(mmr_k, len(all_items)), lambda_mmr)
     selected = [all_items[i] for i in picked_idx]
+    selected_uids = {it.uid for it in selected}
+    if not any(_is_media_evidence(it) for it in selected):
+        for i in order:
+            candidate = all_items[i]
+            if _is_media_evidence(candidate) and candidate.uid not in selected_uids:
+                selected.append(candidate)
+                break
 
     max_c = int(lim.get("max_context_chars_per_item", 900))
     context = build_sectioned_context(question, intent_weights, selected, max_c)

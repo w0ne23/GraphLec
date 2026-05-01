@@ -16,9 +16,35 @@ from fastapi import HTTPException
 from neo4j import GraphDatabase
 
 from app.models import Job, LectureContent, GraphSession
+from pipeline.graphrag_neo4j_ingest import (
+    delete_graphrag_layer_tx,
+    find_graphrag_output_dir,
+    load_graphrag_layer_tx,
+)
+from pipeline.graphrag_emphasis import (
+    compute_keyword_match,
+    compute_visual_match,
+    compute_annotation_match,
+    compute_audio_segment_match,
+    compute_final_weight,
+    compute_relation_boost,
+)
 from pipeline.neo4j_ingest import ingest_parquet_to_neo4j
 
 logger = logging.getLogger(__name__)
+_RUNTIME_GRAPH_LABELS = {
+    "AnnotationEmphasis",
+    "ConceptGraph",
+    "Context",
+    "Domain",
+    "GraphRAGCommunity",
+    "GraphRAGEntity",
+    "GraphRAGTextUnit",
+    "Scene",
+    "Segment",
+    "Slide",
+    "Video",
+}
 
 # ── 경로 설정 ────────────────────────────────────────────────────────────────
 PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
@@ -36,6 +62,128 @@ def get_neo4j_driver():
     return GraphDatabase.driver(uri, auth=(user, pw))
 
 
+def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
+    record = session.run(
+        """
+        CALL {
+            MATCH (e:GraphRAGEntity {stem: $stem})
+            RETURN count(e) AS entities
+        }
+        CALL {
+            MATCH (:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(:GraphRAGEntity {stem: $stem})
+            RETURN count(r) AS relationships
+        }
+        CALL {
+            MATCH (:GraphRAGEntity {stem: $stem})-[s:GRAPHRAG_APPEARS_IN]->(:Slide {stem: $stem})
+            RETURN count(s) AS slide_links
+        }
+        CALL {
+            MATCH (:GraphRAGEntity {stem: $stem})-[s:GRAPHRAG_APPEARS_IN_SCENE]->(:Scene {stem: $stem})
+            RETURN count(s) AS scene_links
+        }
+        CALL {
+            MATCH (tu:GraphRAGTextUnit {stem: $stem})
+            RETURN count(tu) AS text_units
+        }
+        CALL {
+            MATCH (c:GraphRAGCommunity {stem: $stem})
+            RETURN count(c) AS communities
+        }
+        RETURN entities, relationships, slide_links, scene_links, text_units, communities
+        """,
+        stem=stem,
+    ).single()
+    if not record:
+        return {
+            "entities": 0,
+            "relationships": 0,
+            "slide_links": 0,
+            "scene_links": 0,
+            "text_units": 0,
+            "communities": 0,
+        }
+    return {
+        "entities": int(record["entities"]),
+        "relationships": int(record["relationships"]),
+        "slide_links": int(record["slide_links"]),
+        "scene_links": int(record["scene_links"]),
+        "text_units": int(record["text_units"]),
+        "communities": int(record["communities"]),
+    }
+
+
+def _stem_graph_counts(session, stem: str) -> Dict[str, int]:
+    record = session.run(
+        """
+        CALL {
+            MATCH (n {stem: $stem})
+            RETURN count(n) AS nodes
+        }
+        CALL {
+            MATCH (a {stem: $stem})-[r]->(b {stem: $stem})
+            RETURN count(r) AS relationships
+        }
+        CALL {
+            MATCH (e:GraphRAGEntity {stem: $stem})
+            RETURN count(e) AS concepts
+        }
+        RETURN nodes, relationships, concepts
+        """,
+        stem=stem,
+    ).single()
+    if not record:
+        return {"nodes": 0, "relationships": 0, "concepts": 0}
+    return {
+        "nodes": int(record["nodes"]),
+        "relationships": int(record["relationships"]),
+        "concepts": int(record["concepts"]),
+    }
+
+
+def _delete_stem_graph_tx(tx, stem: str) -> None:
+    tx.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
+
+
+def clear_runtime_lecture_graphs() -> Dict[str, int]:
+    """앱 시작 시 Neo4j에 남아 있는 강의 런타임 그래프를 비운다."""
+    driver = get_neo4j_driver()
+    if not driver:
+        logger.info("Neo4j connection is not configured; skip runtime graph cleanup")
+        return {"before": 0, "after": 0}
+
+    try:
+        with driver.session() as session:
+            before_record = session.run(
+                """
+                MATCH (n)
+                WHERE n.stem IS NOT NULL OR any(label IN labels(n) WHERE label IN $labels)
+                RETURN count(n) AS count
+                """,
+                labels=sorted(_RUNTIME_GRAPH_LABELS),
+            ).single()
+            before = int(before_record["count"]) if before_record else 0
+            session.run(
+                """
+                MATCH (n)
+                WHERE n.stem IS NOT NULL OR any(label IN labels(n) WHERE label IN $labels)
+                DETACH DELETE n
+                """,
+                labels=sorted(_RUNTIME_GRAPH_LABELS),
+            )
+            after_record = session.run(
+                """
+                MATCH (n)
+                WHERE n.stem IS NOT NULL OR any(label IN labels(n) WHERE label IN $labels)
+                RETURN count(n) AS count
+                """,
+                labels=sorted(_RUNTIME_GRAPH_LABELS),
+            ).single()
+            after = int(after_record["count"]) if after_record else 0
+            logger.info("Cleared Neo4j runtime lecture graphs: before=%s after=%s", before, after)
+            return {"before": before, "after": after}
+    except Exception as e:
+        logger.warning("Failed to clear Neo4j runtime lecture graphs: %s", e)
+        return {"before": 0, "after": 0}
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -343,6 +491,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         "stem":        content.stem,
         "video_url":   make_file_url(content.video_path),
         "output_dir":  content.output_dir,
+        "graphrag_workspace": content.graphrag_workspace,
         "created_at":  job.created_at.isoformat() if job.created_at else None,
     }
 
@@ -604,6 +753,172 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
+
+
+async def ingest_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """강의 시청 화면 진입 시 구조 그래프와 GraphRAG 그래프를 Neo4j에 적재한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("output_dir") or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    output_dir = Path(detail["output_dir"])
+    structural_counts = ingest_parquet_to_neo4j(stem=stem, output_dir=output_dir)
+    aliases = [a for a in [_str_cell(detail.get("graphrag_workspace")), _str_cell(detail.get("title"))] if a]
+    graphrag_dir = find_graphrag_output_dir(
+        stem,
+        output_dir,
+        aliases=aliases,
+    )
+
+    graphrag_counts: Dict[str, int] = {}
+    if graphrag_dir:
+        driver = get_neo4j_driver()
+        if not driver:
+            raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+        try:
+            with driver.session() as session:
+                graphrag_counts = session.execute_write(
+                    lambda tx: (
+                        delete_graphrag_layer_tx(tx, stem),
+                        load_graphrag_layer_tx(tx, stem, graphrag_dir),
+                    )[1]
+                )
+                fused_path = output_dir / f"{stem}_fused.json"
+                if fused_path.is_file():
+                    graphrag_counts.update(compute_keyword_match(session, stem, fused_path))
+                    graphrag_counts.update(compute_visual_match(session, stem, fused_path))
+                graphrag_counts.update(compute_annotation_match(session, stem))
+                graphrag_counts.update(compute_audio_segment_match(session, stem))
+                graphrag_counts.update(compute_final_weight(session, stem))
+                graphrag_counts.update(compute_relation_boost(session, stem))
+                summary = _stem_graph_counts(session, stem)
+        finally:
+            driver.close()
+    else:
+        driver = get_neo4j_driver()
+        if not driver:
+            raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+        try:
+            with driver.session() as session:
+                summary = _stem_graph_counts(session, stem)
+        finally:
+            driver.close()
+
+    return {
+        "status": "loaded",
+        "lecture_id": lecture_id,
+        "stem": stem,
+        "graphrag_output_dir": str(graphrag_dir) if graphrag_dir else None,
+        "structural": structural_counts,
+        "graphrag": graphrag_counts,
+        "node_count": summary["nodes"],
+        "edge_count": summary["relationships"],
+        "concept_count": summary["concepts"],
+    }
+
+
+async def get_graphrag_ingest_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """Neo4j에 적재된 GraphRAG 개념 그래프 상태를 확인한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+    try:
+        with driver.session() as session:
+            counts = _graphrag_layer_counts(session, stem)
+            custom_record = session.run(
+                "MATCH (c:GraphRAGEntity {stem: $stem}) RETURN count(c) AS custom_concepts",
+                stem=stem,
+            ).single()
+    finally:
+        driver.close()
+
+    graphrag_dir = find_graphrag_output_dir(
+        stem,
+        Path(detail["output_dir"]) if detail.get("output_dir") else None,
+        aliases=[_str_cell(detail.get("title"))],
+    )
+    return {
+        "stem": stem,
+        "graphrag_output_dir": str(graphrag_dir) if graphrag_dir else None,
+        **counts,
+        "custom_concepts": int(custom_record["custom_concepts"]) if custom_record else 0,
+    }
+
+
+async def ensure_graphrag_concept_graph_loaded(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """강의 화면 진입 시 구조 그래프와 GraphRAG 그래프가 Neo4j에 올라와 있도록 보장한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("output_dir") or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    output_dir = Path(detail["output_dir"])
+    aliases = [a for a in [_str_cell(detail.get("graphrag_workspace")), _str_cell(detail.get("title"))] if a]
+    graphrag_dir = find_graphrag_output_dir(
+        stem,
+        output_dir,
+        aliases=aliases,
+    )
+
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+    try:
+        with driver.session() as session:
+            graph_counts = _stem_graph_counts(session, stem)
+            graphrag_counts = _graphrag_layer_counts(session, stem)
+            if graph_counts["nodes"] > 0:
+                return {
+                    "status": "already_loaded",
+                    "lecture_id": lecture_id,
+                    "stem": stem,
+                    "graphrag_output_dir": str(graphrag_dir) if graphrag_dir else None,
+                    "node_count": graph_counts["nodes"],
+                    "edge_count": graph_counts["relationships"],
+                    "concept_count": graph_counts["concepts"],
+                    "graphrag": graphrag_counts,
+                }
+    finally:
+        driver.close()
+
+    return await ingest_graphrag_concept_graph(db, lecture_id)
+
+
+async def unload_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    """강의 화면 이탈 시 해당 stem의 구조 그래프와 GraphRAG 그래프를 Neo4j에서 제거한다."""
+    detail = await get_lecture_detail(db, lecture_id)
+    if not detail or not detail.get("stem"):
+        raise HTTPException(status_code=404, detail="Lecture result not found")
+
+    stem = str(detail["stem"])
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
+
+    try:
+        with driver.session() as session:
+            before = _stem_graph_counts(session, stem)
+            session.execute_write(lambda tx: _delete_stem_graph_tx(tx, stem))
+            after = _stem_graph_counts(session, stem)
+    finally:
+        driver.close()
+
+    return {
+        "status": "unloaded",
+        "lecture_id": lecture_id,
+        "stem": stem,
+        "before": before,
+        "after": after,
+    }
 
 
 async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:

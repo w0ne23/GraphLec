@@ -27,7 +27,7 @@ services:
       - neo4j_data:/data
       - neo4j_logs:/logs
     healthcheck:
-      test: ["CMD-SHELL", "cypher-shell -a bolt://localhost:7687 -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-password123} 'RETURN 1' >/dev/null"]
+      test: ["CMD-SHELL", "cypher-shell -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' >/dev/null 2>&1"]
       interval: 10s
       timeout: 10s
       retries: 12
@@ -50,7 +50,18 @@ services:
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
     volumes:
       - lance_data:/lance
+      - ./query_service:/app/query_service
+    command:
+      - uvicorn
+      - query_service.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8001"
+      - --reload
     depends_on:
+      neo4j:
+        condition: service_healthy
       neo4j:
         condition: service_healthy
 
@@ -67,6 +78,7 @@ services:
       - DATABASE_URL=${DATABASE_URL:-postgresql+asyncpg://user:pass@db/graphlec}
       - GOOGLE_API_KEY_1=${GOOGLE_API_KEY_1}
       - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
+      - GRAPHRAG_API_KEY=${GRAPHRAG_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - CROSS_VERIFY_MODEL=${CROSS_VERIFY_MODEL:-gpt-5.4}
@@ -89,6 +101,7 @@ services:
       - GRAPHLEC_FFMPEG_HWACCEL=cuda
       - GRAPHLEC_METADATA_DIR=/app/metadata
       - RECOMMENDER_DB_DIR=/lance/lancedb
+      - GRAPHLEC_CLEAR_NEO4J_ON_START=0
     volumes:
       - ./input:/pipeline/input
       - ./local_storage:/pipeline/local_storage

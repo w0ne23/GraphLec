@@ -1,8 +1,10 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
+  activateLectureGraphRag,
   getLectureDetail,
   getLectureTimeline,
+  unloadLectureGraphRag,
   enterLectureGraphSession,
   heartbeatLectureGraphSession,
   leaveLectureGraphSession,
@@ -15,6 +17,23 @@ import ChatPanel    from '../components/chat/ChatPanel'
 import '../styles/lecture.css'
 
 const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
+const graphRagUnloadTimers = new Map()
+
+function cancelScheduledGraphRagUnload(lectureId) {
+  const timer = graphRagUnloadTimers.get(lectureId)
+  if (!timer) return
+  window.clearTimeout(timer)
+  graphRagUnloadTimers.delete(lectureId)
+}
+
+function scheduleGraphRagUnload(lectureId) {
+  cancelScheduledGraphRagUnload(lectureId)
+  const timer = window.setTimeout(() => {
+    graphRagUnloadTimers.delete(lectureId)
+    unloadLectureGraphRag(lectureId)
+  }, 600)
+  graphRagUnloadTimers.set(lectureId, timer)
+}
 
 /**
  * LecturePage — /lectures/:id
@@ -36,6 +55,7 @@ export default function LecturePage({ onNavigate }) {
   const [loading,      setLoading]      = useState(false)
   const [currentScene, setCurrentScene] = useState(0)
   const [seekTo,       setSeekTo]       = useState(null)
+  const [seekToSeconds, setSeekToSeconds] = useState(null)
   const [chatWidth,    setChatWidth]    = useState(300)
   const [isChatOpen,   setIsChatOpen]   = useState(true)
   const [isFocusMode,  setIsFocusMode]  = useState(false) // 타임라인 집중 모드 추가
@@ -54,6 +74,7 @@ export default function LecturePage({ onNavigate }) {
     setChatMessages([INIT_MSG])
     setChatInput('')
     setChatLoading(false)
+    setSeekToSeconds(null)
   }, [id])
 
   const handleMouseDown = useCallback(() => {
@@ -110,6 +131,12 @@ export default function LecturePage({ onNavigate }) {
 
   useEffect(() => {
     if (!id) return
+
+    cancelScheduledGraphRagUnload(id)
+    activateLectureGraphRag(id).catch((err) => {
+      console.warn('GraphRAG activate skipped:', err)
+    })
+    
     let alive = true
     let timer = null
     const sessionId = graphSessionIdRef.current
@@ -147,15 +174,21 @@ export default function LecturePage({ onNavigate }) {
       if (timer) clearInterval(timer)
       window.removeEventListener('beforeunload', handleBeforeUnload)
       sendLeave()
+      scheduleGraphRagUnload(id)
     }
   }, [id])
 
   const scenes      = lecture?.scenes ?? []
   const chatContext = { type: 'watch', lecture_id: id }
 
-  function handleJumpToScene(idx) {
-    setCurrentScene(idx)
-    setSeekTo({ index: idx, time: Date.now() })
+  function handleJumpToScene(idx, seconds = null) {
+    if (Number.isInteger(idx) && idx >= 0) {
+      setCurrentScene(idx)
+      setSeekTo({ index: idx, time: Date.now() })
+    }
+    if (Number.isFinite(Number(seconds))) {
+      setSeekToSeconds({ seconds: Number(seconds), time: Date.now() })
+    }
   }
 
   if (loading) return <div className="lp-loading">불러오는 중...</div>
@@ -196,6 +229,7 @@ export default function LecturePage({ onNavigate }) {
               scenes={scenes}
               currentScene={currentScene}
               seekTo={seekTo}
+              seekToSeconds={seekToSeconds}
               onSceneChange={setCurrentScene}
               isMini={isFocusMode}
             />
