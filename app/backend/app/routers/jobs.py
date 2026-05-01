@@ -117,6 +117,7 @@ async def create_job(
             description=description,
             video_path=str(input_path),
             output_dir=str(output_dir),
+            graphrag_workspace=str(output_dir / "graphrag"),
         )
         db.add(new_content)
         await db.commit()

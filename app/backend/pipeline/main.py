@@ -67,13 +67,6 @@ DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
     "RECOMMENDER_DB_DIR",
     "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
 )
-DEFAULT_GRAPHRAG_ROOT = os.getenv(
-    "GRAPHLEC_GRAPHRAG_ROOT",
-    "/pipeline/graphrag_workspaces"
-    if Path("/pipeline").exists()
-    else str(REPO_ROOT / "graphrag_workspaces"),
-)
-
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -1029,6 +1022,13 @@ def _patch_graphrag_extract_prompt(workspace_dir: Path) -> None:
         prompt_path.write_text(text, encoding="utf-8")
 
 
+def _graphrag_workspace_dir(args, output_dir: Path, stem: str) -> Path:
+    root = getattr(args, "graphrag_root", None)
+    if root:
+        return Path(root) / stem
+    return output_dir / "graphrag"
+
+
 def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     """fused.json → GraphRAG workspace parquet."""
     from .config import output_paths
@@ -1037,8 +1037,7 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     paths = output_paths(stem, output_dir, Path(args.slides))
     fused_path = paths["fused"]
-    graphrag_root = Path(getattr(args, "graphrag_root", None) or DEFAULT_GRAPHRAG_ROOT)
-    workspace_dir = graphrag_root / stem
+    workspace_dir = _graphrag_workspace_dir(args, output_dir, stem)
     input_dir = workspace_dir / "input"
     output_graph_dir = workspace_dir / "output"
     entities_path = output_graph_dir / "entities.parquet"
@@ -1521,7 +1520,7 @@ def get_parser():
     parser.add_argument(
         "--graphrag-root",
         default=None,
-        help=f"GraphRAG workspace 저장 경로 (default: {DEFAULT_GRAPHRAG_ROOT})",
+        help="GraphRAG workspace root override. 기본값은 output_dir/graphrag",
     )
     parser.add_argument(
         "--graphrag-method",
