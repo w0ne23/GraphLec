@@ -256,13 +256,13 @@ def compute_annotation_match(
 ) -> dict[str, Any]:
     """
     Step 2b: entity title/description vs AnnotationEmphasis target_content / handwritten_content.
-    Slide 노드의 HAS_ANNOTATION 엣지를 통해 해당 강의의 모든 주석을 일괄 조회.
+    Scene 노드의 HAS_ANNOTATION 엣지를 통해 해당 강의의 모든 주석을 일괄 조회.
     Writes emphasis_annotation_match to GraphRAGEntity nodes.
     """
     ann_records = session.run(
         """
-        MATCH (s:Slide {stem: $stem})-[:HAS_ANNOTATION]->(a:AnnotationEmphasis)
-        RETURN s.id AS slide_id,
+        MATCH (sc:Scene {stem: $stem})-[:HAS_ANNOTATION]->(a:AnnotationEmphasis)
+        RETURN sc.source_slide_id    AS slide_id,
                a.target_content      AS target,
                a.handwritten_content AS handwritten,
                a.score               AS score
