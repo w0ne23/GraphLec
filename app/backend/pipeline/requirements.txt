@@ -21,6 +21,7 @@ json-repair
 google-generativeai>=0.8.0
 google-genai>=0.8.0
 groq
+openai>=1.0.0
 
 # ── ML & Vision ───────────────────────────────────────────────
 torch>=2.0.0
@@ -29,16 +30,12 @@ transformers>=4.40.0
 # ── Text & Knowledge Graph ────────────────────────────────────
 kiwipiepy
 pyvis>=0.3.2
+graphrag==3.0.9
 
 # ── Web API (질의 시스템) ─────────────────────────────────────
 fastapi>=0.110.0
 uvicorn>=0.29.0
 pydantic>=2.0.0
-
-# ── Web (Django 프록시 + PostgreSQL 옵션) ─────────────────────
-django>=4.2.0
-httpx>=0.27.0
-psycopg2-binary>=2.9.0
 
 # ── Neo4j (Stage 6 이후 Parquet 적재) ─────────────────────────
 neo4j>=5.14.0

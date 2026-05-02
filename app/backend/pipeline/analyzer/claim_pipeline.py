@@ -53,7 +53,7 @@ def extract_claims_only(
 
 def judge_claims_only(
     all_claims_by_batch: list[tuple], current_date: str, hint: dict,
-    slide_ctx: dict, num_runs: int = 3, min_detection_rate: float = 0.5,
+    slide_ctx: dict, num_runs: int = 1, min_detection_rate: float = 0.5,
 ) -> tuple[list[dict], int, dict]:
     """2단계: claim 판정 (N회 반복 + 합의)."""
     from analyzer.claim_verifier import judge_claims_only as _run
@@ -84,16 +84,20 @@ _resolve_stage_model = cc._resolve_stage_model
 
 
 def _ground_verify_all_issues(
-    issues: list[dict], hint: dict, max_workers: int = 4
+    issues: list[dict],
+    hint: dict,
+    slide_ctx: dict | None = None,
+    slides: list[dict] | None = None,
+    max_workers: int = 4,
 ) -> tuple[list[dict], list[dict], int, int, dict]:
     from analyzer.claim_grounding import ground_verify_all_issues
-    return ground_verify_all_issues(issues, hint, max_workers=max_workers)
+    return ground_verify_all_issues(issues, hint, slide_ctx, slides, max_workers=max_workers)
 
 
 # ── 메인 진입점 ──────────────────────────────────────────
 
 def verify_lecture_content(
-    merged_path: str, current_date: str = None, num_runs: int = 2,
+    merged_path: str, current_date: str = None, num_runs: int = 1,
     min_detection_rate: float = 0.5, batch_size: int = BATCH_SIZE, max_workers: int = 4,
 ) -> dict:
     if current_date is None:
@@ -188,31 +192,17 @@ def verify_lecture_content(
 
     img_dir = _resolve_detector_img_dir(merged)
 
-    # ── 3단계: 슬라이드 맥락 재검증 ──
-    from analyzer.claim_crosscheck import slide_recheck_all_issues
-
-    pre_recheck_issues = list(result.get("issues", []))
     slide_rejected = []
-    if pre_recheck_issues:
-        recheck_passed, slide_rejected, recheck_calls, slide_recheck_failures, recheck_token_usage = slide_recheck_all_issues(
-            pre_recheck_issues, slide_ctx, slides, hint,
-            max_workers=max_workers,
-        )
-        result["issues"] = recheck_passed
-        result["api_calls"] = result.get("api_calls", 0) + recheck_calls
-        result["slide_recheck_failures"] = slide_recheck_failures
-        result["token_usage"] = cc._merge_token_usage(result.get("token_usage"), recheck_token_usage)
-    else:
-        result["slide_recheck_failures"] = 0
+    result["slide_recheck_failures"] = 0
 
-    # ── 4단계: grounding 검증 (Google Search로 재검증) ──
+    # ── 3단계: grounding 검증 (Google Search로 재검증) ──
     pre_grounding_issues = list(result.get("issues", []))
     grounding_rejected = []
     if pre_grounding_issues:
         from analyzer.claim_grounding import ground_verify_all_issues
 
         verified, grounding_rejected, grounding_calls, grounding_failures, grounding_token_usage = ground_verify_all_issues(
-            pre_grounding_issues, hint, max_workers=max_workers,
+            pre_grounding_issues, hint, slide_ctx, slides, max_workers=max_workers,
         )
         result["issues"] = verified
         result["api_calls"] = result.get("api_calls", 0) + grounding_calls
@@ -291,7 +281,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="content_verifier v8 단독 실행")
     parser.add_argument("merged_json", help="검증할 merged.json 경로")
-    parser.add_argument("--runs", type=int, default=2, help="반복 검증 횟수 (기본 2)")
+    parser.add_argument("--runs", type=int, default=1, help="1차 judge 반복 횟수 (기본 1)")
     parser.add_argument("--min-rate", type=float, default=0.5, help="합의 최소 비율")
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     parser.add_argument("--max-workers", type=int, default=4)

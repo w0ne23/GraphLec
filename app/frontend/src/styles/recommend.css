@@ -1,0 +1,228 @@
+/* ============================================================
+   recommend.css — RecommendPage 스타일
+   Google-style 검색 전환: 히어로/칩이 위로 사라지고 결과가 아래서 올라옴.
+   단일 DOM + .rec-page--searched 클래스 토글로 CSS transition 구동.
+   사용: RecommendPage.jsx
+   ※ BEM 리네이밍 예정
+   ============================================================ */
+
+.rec-page {
+  display: flex; flex-direction: column;
+  height: 100%; background: var(--bg); overflow: hidden;
+}
+
+/* 히어로: 로고 + 문구 */
+.rec-hero {
+  display: flex; flex-direction: column; align-items: center;
+  padding-top: 18vh; gap: 10px; flex-shrink: 0;
+  overflow: hidden; max-height: 320px;
+  transition:
+    opacity    .32s cubic-bezier(.4,0,.2,1),
+    transform  .32s cubic-bezier(.4,0,.2,1),
+    max-height .32s cubic-bezier(.4,0,.2,1),
+    padding    .32s cubic-bezier(.4,0,.2,1);
+}
+.rec-page--searched .rec-hero {
+  opacity: 0; transform: translateY(-20px);
+  max-height: 0; padding-top: 0; pointer-events: none;
+}
+
+.rec-logo {
+  font-size: 28px; font-weight: 800;
+  color: var(--t1); letter-spacing: -.5px; cursor: pointer;
+}
+.rec-logo span   { color: var(--blue); }
+.rec-headline    { font-size: 15px; font-weight: 500; color: var(--t2); text-align: center; margin: 0 24px; }
+
+/* 검색바 래퍼 */
+.rec-bar-wrap { padding: 14px 24px; flex-shrink: 0; }
+
+.rec-searchbar {
+  display: flex; align-items: center; gap: 8px;
+  background: var(--panel); border: 1.5px solid var(--b1);
+  border-radius: 28px; padding: 11px 12px 11px 18px;
+  box-shadow: 0 2px 14px rgba(0,0,0,.08);
+  transition: border-color .15s, box-shadow .15s;
+}
+.rec-searchbar:focus-within {
+  border-color: var(--blue);
+  box-shadow: 0 2px 18px rgba(37,99,235,.14);
+}
+.rec-searchbar-icon  { font-size: 14px; color: var(--t3); flex-shrink: 0; }
+.rec-searchbar-input {
+  flex: 1; background: none; border: none; outline: none;
+  font-size: 14px; color: var(--t1); min-width: 0;
+}
+.rec-searchbar-input::placeholder { color: var(--t3); }
+.rec-searchbar-clear {
+  background: none; border: none; color: var(--t3);
+  font-size: 12px; padding: 2px 6px; border-radius: 4px;
+  flex-shrink: 0; transition: color .14s;
+}
+.rec-searchbar-clear:hover { color: var(--t1); }
+.rec-searchbar-btn {
+  padding: 7px 18px; border-radius: 20px;
+  background: var(--blue); border: none; color: #fff;
+  font-size: 13px; font-weight: 600; flex-shrink: 0;
+  white-space: nowrap; transition: opacity .15s;
+}
+.rec-searchbar-btn:disabled          { opacity: .35; cursor: not-allowed; }
+.rec-searchbar-btn:not(:disabled):hover { opacity: .87; }
+
+/* 예시 칩 */
+.rec-chips {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 4px 24px 0; flex-shrink: 0;
+  overflow: hidden; max-height: 400px;
+  transition:
+    opacity    .28s cubic-bezier(.4,0,.2,1),
+    transform  .28s cubic-bezier(.4,0,.2,1),
+    max-height .28s cubic-bezier(.4,0,.2,1),
+    padding    .28s cubic-bezier(.4,0,.2,1);
+}
+.rec-page--searched .rec-chips {
+  opacity: 0; transform: translateY(12px);
+  max-height: 0; padding-top: 0; pointer-events: none;
+}
+
+.rec-chip {
+  background: var(--panel); border: 1px solid var(--b1);
+  border-radius: var(--rl); padding: 11px 16px;
+  font-size: 13px; color: var(--t2); text-align: left;
+  transition: all .15s; line-height: 1.4;
+  display: flex; align-items: center; gap: 8px;
+}
+.rec-chip::before { content: '🔍'; font-size: 13px; flex-shrink: 0; opacity: .45; }
+.rec-chip:hover   { border-color: var(--blue-br); color: var(--t1); background: var(--blue-bg); }
+
+/* 결과 영역 */
+.rec-results {
+  flex: 1; overflow-y: auto; padding: 16px 24px;
+  opacity: 0; transform: translateY(16px); pointer-events: none;
+  transition:
+    opacity   .32s cubic-bezier(.4,0,.2,1) .18s,
+    transform .32s cubic-bezier(.4,0,.2,1) .18s;
+}
+.rec-page--searched .rec-results {
+  opacity: 1; transform: translateY(0); pointer-events: auto;
+}
+
+.rec-result-label {
+  font-size: 12px; color: var(--t3);
+  margin-bottom: 14px; padding-bottom: 10px;
+  border-bottom: 1px solid var(--b1);
+}
+.rec-result-label strong { color: var(--t1); }
+
+.rec-list { display: flex; flex-direction: column; }
+
+/* 로딩 */
+.rec-loading {
+  display: flex; align-items: center; justify-content: center;
+  gap: 7px; padding: 48px 0;
+}
+.rec-loading-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--blue); opacity: .3;
+  animation: rec-pulse 1.2s ease-in-out infinite;
+}
+.rec-loading-dot:nth-child(2) { animation-delay: .2s; }
+.rec-loading-dot:nth-child(3) { animation-delay: .4s; }
+@keyframes rec-pulse {
+  0%, 100% { opacity: .3; transform: scale(.8); }
+  50%       { opacity: 1;  transform: scale(1.1); }
+}
+
+/* 빈 결과 */
+.rec-empty       { text-align: center; padding: 48px 0; }
+.rec-empty-title { font-size: 15px; font-weight: 600; color: var(--t1); margin-bottom: 8px; }
+.rec-empty-sub   { font-size: 13px; color: var(--t3); }
+
+/* 티어 배지 (간접 관련 / 배경 강의) */
+.rec-item--related    { opacity: .92; }
+.rec-item--background { opacity: .80; }
+.rec-overall-score--related    { color: var(--amber); }
+.rec-overall-score--background { color: var(--t3); }
+.rec-tier-badge {
+  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
+  background: var(--amber-bg); color: var(--amber);
+}
+.rec-tier-badge--background { background: var(--card); color: var(--t3); }
+.rec-related-notice {
+  font-size: 12px; color: var(--amber); margin-bottom: 8px;
+  padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r);
+}
+.rec-related-notice--background { color: var(--t3); background: var(--card); }
+.rec-duration-warn { font-size: 10px; color: var(--amber); }
+
+/* 모바일 */
+@media (max-width: 768px) {
+  .rec-hero     { padding-top: 14vh; }
+  .rec-bar-wrap { padding: 10px 14px; }
+  .rec-chips    { padding: 4px 14px 0; gap: 6px; }
+  .rec-chip     { font-size: 12px; padding: 9px 14px; }
+  .rec-results  { padding: 12px 14px; }
+}
+
+/* ============================================================
+   RecommendListItem (rec-item-*, rec-score-*)
+   사용: RecommendListItem.jsx — RecommendPage 내부에서만 사용
+   ============================================================ */
+.rec-item          { background: var(--panel); border-bottom: 1px solid var(--b1); overflow: hidden; transition: background .14s; }
+.rec-item:first-child { border-top: 1px solid var(--b1); }
+.rec-item:hover    { background: var(--hover); }
+.rec-item--expanded { background: var(--panel); }
+
+.rec-item-main {
+  display: grid; grid-template-columns: 80px 1fr 100px;
+  align-items: center; gap: 14px; padding: 14px 16px; cursor: pointer;
+}
+.rec-col { min-width: 0; }
+
+.rec-thumb {
+  width: 72px; height: 48px; border-radius: var(--r);
+  background: var(--card); border: 1px solid var(--b1);
+  display: flex; align-items: center; justify-content: center;
+  position: relative; flex-shrink: 0;
+}
+.rec-thumb-icon      { font-size: 22px; opacity: .55; }
+.rec-duration        { position: absolute; bottom: 3px; right: 4px; font-size: 9px; font-family: 'JetBrains Mono', monospace; background: rgba(0,0,0,.62); color: #fff; padding: 1px 4px; border-radius: 2px; line-height: 1.4; }
+
+.rec-col-meta        { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rec-col-tags        { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 1px; }
+.rec-tag             { font-size: 10px; color: var(--t3); background: none; border: none; padding: 0; }
+.rec-title-row       { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.rec-title           { font-size: 14px; font-weight: 700; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-duration-inline { font-size: 12px; color: var(--t3); flex-shrink: 0; white-space: nowrap; }
+.rec-sub             { font-size: 11px; color: var(--t3); }
+
+.rec-col-score       { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.rec-overall-score   { font-size: 22px; font-weight: 800; line-height: 1; color: #3dad3d; }
+.rec-toggle-btn      { font-size: 11px; color: var(--t3); background: none; border: none; padding: 0; white-space: nowrap; transition: color .14s; }
+.rec-toggle-btn:hover { color: var(--t1); }
+
+.rec-item-details    { border-top: 1px solid var(--b1); background: var(--card); }
+.rec-details-content { padding: 16px; }
+.rec-details-title   { font-size: 12px; font-weight: 700; color: var(--t2); margin-bottom: 12px; }
+
+.rec-scores-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.rec-score-row   { display: flex; align-items: center; gap: 10px; }
+.rec-score-label { font-size: 11px; color: var(--t2); width: 100px; flex-shrink: 0; }
+.rec-score-track { flex: 1; height: 4px; background: var(--hover); border-radius: 2px; overflow: hidden; }
+.rec-score-fill  { height: 100%; background: var(--blue); border-radius: 2px; transition: width .4s; }
+.rec-score-num   { font-size: 11px; color: var(--t2); width: 28px; text-align: right; font-family: 'JetBrains Mono', monospace; }
+
+.rec-details-action { display: flex; justify-content: flex-end; }
+.rec-play-btn       { padding: 8px 20px; background: var(--blue); border: none; border-radius: var(--r); color: #fff; font-size: 13px; font-weight: 600; transition: opacity .15s; }
+.rec-play-btn:hover { opacity: .87; }
+
+/* 티어 배지 */
+.rec-item--related             { opacity: .92; }
+.rec-item--background          { opacity: .80; }
+.rec-overall-score--related    { color: var(--amber); }
+.rec-overall-score--background { color: var(--t3); }
+.rec-tier-badge                { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: var(--amber-bg); color: var(--amber); }
+.rec-tier-badge--background    { background: var(--card); color: var(--t3); }
+.rec-related-notice            { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
+.rec-related-notice--background { color: var(--t3); background: var(--card); }
+.rec-duration-warn             { font-size: 10px; color: var(--amber); }

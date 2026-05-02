@@ -6,12 +6,9 @@
 # ── 파이프라인 출력물 ─────────────────────────────────────────
 output/
 slides/
-src/
 *.json
 *.jpg
 *.html
-# Django 템플릿은 버전 관리에 포함
-!web/**/templates/**/*.html
 *.txt
 *.pdf
 *.csv
@@ -39,7 +36,7 @@ dist/
 build/
 .eggs/
 lib/
-!requirements.txt
+!**/requirements.txt
 
 # ── 가상환경 ──────────────────────────────────────────────────
 venv/
@@ -47,12 +44,11 @@ venv/
 env/
 .env/
 
-# Django (web/)
-web/db.sqlite3
-web/staticfiles/
-
 # LanceDB 로컬 데이터
 data/lancedb/
+
+# Microsoft GraphRAG 로컬 workspace / cache / index 산출물
+graphrag_workspaces/
 
 # ── Jupyter ───────────────────────────────────────────────────
 .ipynb_checkpoints/

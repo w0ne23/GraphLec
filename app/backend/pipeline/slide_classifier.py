@@ -164,7 +164,7 @@ def overlap_duration(a_start: float, a_end: float,
 
 def build_duplicate_groups(base_entries: Dict[int, dict]) -> List[Set[int]]:
     """
-    metadata의 duplicate_of 관계를 union-find로 묶어 중복 그룹 리스트 반환.
+    metadata의 같은 slide(family) 관계를 union-find로 묶어 그룹 리스트 반환.
     단독 슬라이드(중복 없음)는 포함하지 않는다.
     """
     parent: Dict[int, int] = {idx: idx for idx in base_entries}
@@ -181,6 +181,20 @@ def build_duplicate_groups(base_entries: Dict[int, dict]) -> List[Set[int]]:
             parent[px] = py
 
     for idx, entry in base_entries.items():
+        family = entry.get("slide_group")
+        if family:
+            for other_idx in family:
+                if other_idx != idx and other_idx in parent:
+                    union(idx, other_idx)
+            continue
+
+        family = entry.get("same_slide_group")
+        if family:
+            for other_idx in family:
+                if other_idx != idx and other_idx in parent:
+                    union(idx, other_idx)
+            continue
+
         for dup_idx in entry.get("duplicate_of", []):
             if dup_idx in parent:
                 union(idx, dup_idx)

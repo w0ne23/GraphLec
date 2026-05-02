@@ -1,0 +1,150 @@
+/* ============================================================
+   lecture.css — LecturePage 스타일
+   영상 뷰어 + 채팅 패널 레이아웃 페이지.
+   사용: LecturePage.jsx
+   ※ lp-back, lp-title, lp-loading 은 VerifierPage.jsx 에서도 사용 중
+   ※ BEM 리네이밍 예정
+   ============================================================ */
+
+.lp-shell {
+  display: flex; flex-direction: column;
+  height: 100%; overflow: hidden; position: relative;
+}
+.lp-loading {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; font-size: 13px; color: var(--t3);
+}
+
+/* 상단바 */
+.lp-topbar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 16px; height: 48px; flex-shrink: 0;
+  background: var(--panel); border-bottom: 1px solid var(--b1);
+  position: sticky; top: 0; z-index: 100;
+}
+.lp-topbar-left {
+  display: flex; align-items: center; gap: 10px;
+  min-width: 0; flex: 1;
+}
+.lp-topbar-right { display: flex; align-items: center; gap: 8px; }
+
+.lp-back {
+  background: none; border: none; color: var(--t3);
+  font-size: 12px; padding: 4px 6px; border-radius: 4px;
+  transition: color .14s; white-space: nowrap; cursor: pointer;
+}
+.lp-back:hover { color: var(--t1); }
+
+.lp-title {
+  font-size: 13px; font-weight: 600; color: var(--t1);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.lp-chat-open-btn {
+  background: var(--blue-bg); color: var(--blue);
+  border: 1px solid var(--blue-br);
+  padding: 5px 12px; border-radius: 6px;
+  font-size: 12px; font-weight: 600; cursor: pointer;
+  transition: all .2s; white-space: nowrap;
+}
+.lp-chat-open-btn:hover { background: var(--blue); color: #fff; }
+
+/* 포커스 모드 토글 버튼 */
+.lp-focus-btn {
+  padding: 6px 12px; font-size: 12px; font-weight: 600;
+  border-radius: 6px; border: 1px solid var(--b2);
+  background: var(--bg); color: var(--t2);
+  cursor: pointer; display: flex; align-items: center; gap: 6px;
+  transition: all 0.2s;
+}
+.lp-focus-btn:hover        { background: var(--hover); border-color: var(--blue); }
+.lp-focus-btn--active      { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+/* 본문 좌우 분할 */
+.lp-body { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+
+/* 좌: 뷰어 */
+.lp-left {
+  flex: 1; min-width: 0;
+  border-right: 1px solid var(--b1);
+  display: flex; flex-direction: column;
+  overflow-y: auto; overflow-x: hidden;
+}
+
+/* 우: 채팅 (PC) */
+.lp-right {
+  display: flex; flex-direction: column;
+  flex-shrink: 0; position: relative;
+  background: var(--panel);
+}
+
+/* 리사이저 핸들 */
+.lp-resizer {
+  position: absolute; top: 0; left: -4px;
+  width: 8px; height: 100%;
+  cursor: col-resize; z-index: 50; background: transparent;
+}
+.lp-resizer:hover { background: rgba(37,99,235,.12); }
+
+/* 뷰어 컨테이너 (VideoPlayer + LecturePanel) */
+.lp-viewer-container {
+  display: flex; flex-direction: column;
+  flex: 1; min-height: 0; position: relative;
+}
+
+/* 모바일 채팅: 기본 숨김 */
+.lp-mobile-chat { display: none; }
+
+/* 모바일 */
+@media (max-width: 768px) {
+  .lp-body { flex-direction: column; overflow-y: auto; }
+  .lp-left { border-right: none; overflow: visible; flex-shrink: 0; }
+  .lp-right { display: none; }
+  .lp-mobile-chat {
+    display: flex; flex-direction: column;
+    border-top: 1px solid var(--b1); min-height: 60vh;
+  }
+}
+
+/* ============================================================
+   GraphViewer (gv-*)
+   사용: GraphViewer.jsx — LecturePanel 내부에서만 사용
+   ============================================================ */
+.gv-container {
+  display: flex; flex-direction: column;
+  height: 500px; width: 100%;
+  background: var(--bg-soft);
+  border-radius: var(--r); border: 1px solid var(--b1);
+  overflow: hidden; margin-bottom: 20px;
+}
+.gv-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 12px; background: var(--panel);
+  border-bottom: 1px solid var(--b1); font-size: 11px;
+}
+.gv-stats   { font-weight: 600; color: var(--blue); }
+.gv-hint    { color: var(--t3); }
+.gv-network { flex: 1; width: 100%; min-height: 0; background: #fafbfc; position: relative; }
+.gv-status  { padding: 40px; text-align: center; color: var(--t3); font-size: 13px; }
+.gv-error   { color: var(--red); }
+
+/* ============================================================
+   포커스 모드 / PiP (lp-left--focus, vp-wrap--mini)
+   LecturePage 포커스 모드 전용 레이아웃 조정
+   ============================================================ */
+.lp-left--focus .lp-viewer-container { flex-direction: column; }
+.lp-left--focus .sp-wrap             { flex: 1; border-top: none; }
+
+/* VideoPlayer PiP 모드 */
+.vp-wrap--mini {
+  position: fixed; top: 64px;
+  right: calc(var(--chat-width) + 16px);
+  width: 300px; z-index: 1000;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  border-radius: 12px; overflow: hidden;
+  border: 1px solid var(--b2); background: #000;
+  transition: right 0.2s ease, transform 0.3s ease;
+}
+.vp-wrap--mini .vp-controls          { padding: 4px 8px; }
+.vp-wrap--mini .vp-ctrl-row          { transform: scale(0.85); transform-origin: left center; }
+.vp-wrap--mini .vp-scene-lbl         { display: none; }

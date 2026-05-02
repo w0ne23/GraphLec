@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 _NEO4J_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_CUSTOM_CONCEPT_LABELS = {"Concept"}
 
 
 def _require_identifier(name: str, kind: str) -> str:
@@ -118,6 +119,8 @@ def ingest_parquet_to_neo4j(
     driver = GraphDatabase.driver(uri, auth=(user, password))
     c_nodes = 0
     c_rels = 0
+    skipped_concept_nodes = 0
+    skipped_concept_edges = 0
     labels_seen: set[str] = set()
 
     try:
@@ -129,8 +132,15 @@ def ingest_parquet_to_neo4j(
             ) from e
 
         def work(tx) -> None:
-            nonlocal labels_seen
+            nonlocal labels_seen, skipped_concept_nodes, skipped_concept_edges
             _delete_stem(tx, stem)
+
+            concept_node_ids: set[str] = set()
+            for _, row in ndf.iterrows():
+                node_id = str(row.get("node_id", "")).strip()
+                label = str(row.get("label", "")).strip()
+                if node_id and label in _CUSTOM_CONCEPT_LABELS:
+                    concept_node_ids.add(node_id)
 
             by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for _, row in ndf.iterrows():
@@ -145,6 +155,9 @@ def ingest_parquet_to_neo4j(
                 label = str(row.get("label", "")).strip()
                 if not label:
                     raise ValueError(f"노드 {node_id!r} 에 label 이 없습니다.")
+                if label in _CUSTOM_CONCEPT_LABELS:
+                    skipped_concept_nodes += 1
+                    continue
                 _require_identifier(label, "라벨")
                 labels_seen.add(label)
 
@@ -171,6 +184,9 @@ def ingest_parquet_to_neo4j(
                 tgt = str(row.get("tgt_id", "")).strip()
                 rel_type = str(row.get("rel_type", "")).strip()
                 if not src or not tgt or not rel_type:
+                    continue
+                if src in concept_node_ids or tgt in concept_node_ids:
+                    skipped_concept_edges += 1
                     continue
                 row_stem = str(row.get("stem", stem)).strip() or stem
                 if row_stem != stem:
@@ -238,6 +254,8 @@ def ingest_parquet_to_neo4j(
         "stem": stem,
         "node_count": c_nodes,
         "edge_count": c_rels,
+        "skipped_concept_nodes": skipped_concept_nodes,
+        "skipped_concept_edges": skipped_concept_edges,
         "elapsed_sec": elapsed,
         "uri": uri,
     }

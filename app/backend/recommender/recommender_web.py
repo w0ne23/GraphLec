@@ -88,6 +88,7 @@ class ScoreDetail(BaseModel):
     sim_keyword:       float
     sim_summary:       float
     dm_keyword:        float
+    graph_score:       float
     domain_score:      float
     difficulty_match:  float
     depth_score:       float
@@ -106,6 +107,7 @@ class LectureResult(BaseModel):
     duration_sec:      float
     reason:            str
     summary:           str
+    tier:              str
     score_detail:      ScoreDetail
 
 
@@ -136,6 +138,8 @@ def recommend(req: RecommendRequest):
         raise HTTPException(status_code=503, detail="추천 엔진 초기화 중")
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="query가 비어 있습니다")
+    if not _recommender.collection.lectures:
+        return RecommendResponse(query=req.query, results=[])
 
     results = _recommender.recommend_from_query(req.query, top_k=req.top_k)
     top     = [r for r in results if r.score > 0][: req.top_k]
@@ -152,6 +156,7 @@ def recommend(req: RecommendRequest):
                 duration_sec = r.score_detail.get("duration_sec", 0.0),
                 reason       = r.reason,
                 summary      = r.summary,
+                tier         = r.tier,
                 score_detail = ScoreDetail(
                     content_pct       = r.score_detail.get("content_pct",       0.0),
                     vec_score         = r.score_detail.get("vec_score",          0.0),
@@ -160,6 +165,7 @@ def recommend(req: RecommendRequest):
                     sim_keyword       = r.score_detail.get("sim_keyword",        0.0),
                     sim_summary       = r.score_detail.get("sim_summary",        0.0),
                     dm_keyword        = r.score_detail.get("dm_keyword",         0.0),
+                    graph_score       = r.score_detail.get("graph_score",        0.0),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     difficulty_match  = r.score_detail.get("difficulty_match",   0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),

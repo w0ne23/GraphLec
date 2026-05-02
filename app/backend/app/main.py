@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import init_db
 from app.worker import worker_loop
 from app.routers import jobs, results
+from app.services.job_service import clear_runtime_lecture_graphs
 
 # Cross-platform path handling for local_storage
 # main.py is in app/backend/app/ -> 4 levels deep from root (including filename)
@@ -38,6 +39,13 @@ async def lifespan(app: FastAPI):
         print("--- [FastAPI] DB initialized successfully. ---", flush=True)
     except Exception as e:
         print(f"--- [FastAPI] ERROR initializing DB: {e} ---", flush=True)
+
+    if os.getenv("GRAPHLEC_CLEAR_NEO4J_ON_START", "0").lower() not in {"0", "false", "no"}:
+        cleanup = clear_runtime_lecture_graphs()
+        print(
+            f"--- [FastAPI] Neo4j runtime graph cleanup: before={cleanup['before']} after={cleanup['after']} ---",
+            flush=True,
+        )
     
     print("--- [FastAPI] Starting worker loops... ---", flush=True)
     tasks = [asyncio.create_task(worker_loop()) for _ in range(3)]

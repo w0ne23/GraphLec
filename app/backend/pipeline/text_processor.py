@@ -17,11 +17,11 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-from .config import gemini_client_2
+from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 
 load_dotenv()
 
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "50"))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
@@ -55,12 +55,23 @@ def _get_client() -> genai.Client:
     return _override_client
 
 
-def _add_usage(response) -> None:
+def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
     usage = getattr(response, "usage_metadata", None)
     if usage:
         _token_usage["input"] += getattr(usage, "prompt_token_count", 0) or 0
         _token_usage["output"] += getattr(usage, "candidates_token_count", 0) or 0
     _token_usage["calls"] += 1
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage=stage,
+            provider="google",
+            model=GEMINI_MODEL,
+            response=response,
+        )
+    except Exception:
+        pass
 
 
 def api_call_with_retry(func, max_retries: int = 5, initial_wait: int = 10):
@@ -149,7 +160,7 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_domain")
         raw = (response.text or "").strip()
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
@@ -284,7 +295,7 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
     seen: set[int] = set()
 
     for entry in metadata:
-        slide_no = entry.get("slide_index")
+        slide_no = entry.get("scene_index", entry.get("slide_index"))
         start_sec = entry.get("slide_start_sec")
         end_sec = entry.get("slide_end_sec")
         if not isinstance(slide_no, int) or slide_no in seen:
@@ -307,11 +318,47 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
     return slide_occurrences, slide_det_no
 
 
-def _load_integrated_slide_texts(integrated_data: dict, base_dir: Path) -> dict[int, dict]:
+def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
+    scene_meta: dict[int, dict] = {}
+    for entry in metadata:
+        if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
+            continue
+        scene_idx = entry.get("scene_index", entry.get("slide_index"))
+        if not isinstance(scene_idx, int) or scene_idx in scene_meta:
+            continue
+        slide_number = entry.get("slide_number", entry.get("slide_canonical_index"))
+        slide_canonical_index = entry.get(
+            "slide_canonical_index",
+            entry.get("same_slide_canonical"),
+        )
+        scene_meta[scene_idx] = {
+            "scene_index": scene_idx,
+            "slide_number": slide_number if isinstance(slide_number, int) else None,
+            "slide_canonical_index": (
+                slide_canonical_index if isinstance(slide_canonical_index, int) else None
+            ),
+            "slide_visit_order": int(entry.get("slide_visit_order", entry.get("same_slide_visit_order", 1)) or 1),
+            "slide_is_revisit": bool(
+                entry.get("slide_is_revisit", entry.get("same_slide_is_revisit", False))
+            ),
+        }
+    return scene_meta
+
+
+def _load_integrated_slide_texts(
+    integrated_data: dict,
+    base_dir: Path,
+    scene_meta_by_index: Optional[dict[int, dict]] = None,
+) -> dict[int, dict]:
     result: dict[int, dict] = {}
     for slide in integrated_data.get("slides", []):
+        scene_no = slide.get("scene_number", slide.get("slide_number"))
         slide_no = slide.get("slide_number")
-        if not isinstance(slide_no, int):
+        if scene_meta_by_index and isinstance(scene_no, int):
+            logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
+        else:
+            logical_slide_no = slide_no
+        if not isinstance(logical_slide_no, int):
             continue
         raw_image_path = str(slide.get("image_path", "") or "")
         image_path = ""
@@ -325,11 +372,20 @@ def _load_integrated_slide_texts(integrated_data: dict, base_dir: Path) -> dict[
             text_parts.append(str(slide.get("t1")))
         if slide.get("t1_structure"):
             text_parts.append(str(slide.get("t1_structure")))
-        result[slide_no] = {
+        current = result.get(logical_slide_no)
+        candidate_entry = {
             "title": str(slide.get("title", "") or ""),
             "text": "\n".join(part for part in text_parts if part),
             "image_path": image_path,
+            "scene_number": scene_no if isinstance(scene_no, int) else None,
         }
+        if current is None:
+            result[logical_slide_no] = candidate_entry
+            continue
+        current_len = len(current.get("text", "")) + len(current.get("title", ""))
+        candidate_len = len(candidate_entry.get("text", "")) + len(candidate_entry.get("title", ""))
+        if candidate_len > current_len:
+            result[logical_slide_no] = candidate_entry
     return result
 
 
@@ -387,7 +443,7 @@ def _correct_batch_pass1(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_pass1")
         local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass1 오류 무시] {exc}")
@@ -471,7 +527,7 @@ def _correct_batch_pass2(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response)
+        _add_usage(response, stage="stage3b_text_processor_pass2")
         local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")
@@ -576,28 +632,45 @@ def correct_segments_two_pass(
         return []
 
     slide_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
-    extracted_slide_texts = _load_integrated_slide_texts(textualized_data, textualized_dir)
+    scene_meta_by_index = _build_scene_metadata_index(metadata)
+    extracted_slide_texts = _load_integrated_slide_texts(
+        textualized_data,
+        textualized_dir,
+        scene_meta_by_index=scene_meta_by_index,
+    )
 
     occ_index = _build_occurrence_index(slide_occurrences)
-    seg_slide: dict[int, int] = {}
+    seg_scene: dict[int, int] = {}
+    seg_logical_slide: dict[int, int] = {}
     for i, seg in enumerate(segments):
-        slide_no = seg.get("slide_index")
-        if isinstance(slide_no, int):
-            seg_slide[i] = slide_no
+        scene_no = seg.get("scene_index", seg.get("slide_index"))
+        if isinstance(scene_no, int):
+            seg_scene[i] = scene_no
+            logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
+            if isinstance(logical_slide_no, int):
+                seg_logical_slide[i] = logical_slide_no
             continue
         occ_idx = _assign_segment_occurrence(seg, occ_index)
         if occ_idx is not None:
-            seg_slide[i] = occ_index[occ_idx]["slide_no"]
+            scene_no = occ_index[occ_idx]["slide_no"]
+            seg_scene[i] = scene_no
+            logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
+            if isinstance(logical_slide_no, int):
+                seg_logical_slide[i] = logical_slide_no
 
     groups: dict[int, list[tuple[int, dict]]] = {}
+    group_scene_indices: dict[int, set[int]] = {}
     no_slide: list[tuple[int, dict]] = []
     for i, seg in enumerate(segments):
-        if i in seg_slide:
-            groups.setdefault(seg_slide[i], []).append((i, seg))
+        if i in seg_logical_slide:
+            logical_slide_no = seg_logical_slide[i]
+            groups.setdefault(logical_slide_no, []).append((i, seg))
+            if i in seg_scene:
+                group_scene_indices.setdefault(logical_slide_no, set()).add(seg_scene[i])
         else:
             no_slide.append((i, seg))
 
-    slide_titles = [extracted_slide_texts.get(sno, {}).get("title", "") for sno in sorted(slide_occurrences.keys())]
+    slide_titles = [extracted_slide_texts.get(sno, {}).get("title", "") for sno in sorted(extracted_slide_texts.keys())]
     transcript_sample = " ".join(seg.get("text", "") for seg in segments[:30])
     domain_info = classify_lecture_domain(slide_titles, transcript_sample)
     subdomain = domain_info.get("subdomain", "")
@@ -609,14 +682,23 @@ def correct_segments_two_pass(
         print(f"    용어 사전: {len(glossary_terms)}개 용어")
 
     all_corrections: dict[int, dict] = {}
-    for slide_no in sorted(slide_occurrences.keys()):
-        group = groups.get(slide_no, [])
+    for logical_slide_no in sorted(extracted_slide_texts.keys()):
+        group = groups.get(logical_slide_no, [])
         if not group:
             continue
-        extracted = extracted_slide_texts.get(slide_no, {})
+        extracted = extracted_slide_texts.get(logical_slide_no, {})
         context = f"슬라이드 제목: {extracted.get('title', '')}\n{extracted.get('text', '')}"
         slide_title = extracted.get("title", "")
-        print(f"    슬라이드 {slide_no:3d} ({slide_title[:30]:30s}): {len(group):3d}개", end="", flush=True)
+        scene_list = sorted(group_scene_indices.get(logical_slide_no, set()))
+        if len(scene_list) <= 3:
+            scene_label = ",".join(f"{scene_idx}" for scene_idx in scene_list)
+        else:
+            scene_label = f"{scene_list[0]},{scene_list[1]},...,{scene_list[-1]}"
+        print(
+            f"    slide {logical_slide_no:3d} (scenes {scene_label:>7s}, {slide_title[:22]:22s}): {len(group):3d}개",
+            end="",
+            flush=True,
+        )
 
         sub_batches = [group[b:b + BATCH_SIZE] for b in range(0, len(group), BATCH_SIZE)]
         for sub in sub_batches:
@@ -667,6 +749,19 @@ def correct_segments_two_pass(
     applied_count = 0
     for i, seg in enumerate(segments):
         corrected = seg.copy()
+        scene_idx = seg_scene.get(i)
+        if isinstance(scene_idx, int):
+            corrected["slide_index"] = scene_idx  # 하위 호환: 기존 pipeline은 scene을 slide_index로 본다.
+            corrected["scene_index"] = scene_idx
+            scene_meta = scene_meta_by_index.get(scene_idx, {})
+            logical_slide_no = scene_meta.get("slide_number")
+            if isinstance(logical_slide_no, int):
+                corrected["slide_number"] = logical_slide_no
+            slide_canonical_index = scene_meta.get("slide_canonical_index")
+            if isinstance(slide_canonical_index, int):
+                corrected["slide_canonical_index"] = slide_canonical_index
+            corrected["slide_visit_order"] = int(scene_meta.get("slide_visit_order", 1) or 1)
+            corrected["slide_is_revisit"] = bool(scene_meta.get("slide_is_revisit", False))
         original = seg.get("text_original", seg["text"])
         corrected["text_raw"] = original
         corrected["text_corrected"] = original
