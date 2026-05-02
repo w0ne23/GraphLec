@@ -1,0 +1,20 @@
+# Git & History
+.git
+.history
+
+# Environment & Secrets
+.env
+
+# Python Runtime
+__pycache__/
+*.pyc
+venv/
+
+# Node.js (Frontend)
+node_modules/
+dist/
+
+# Runtime Data (Volumes)
+local_storage/
+input/
+output/
