@@ -48,6 +48,7 @@ import math
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+_FFMPEG_HWACCEL_DEVICE_CACHE: dict[str, bool] = {}
 
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -306,11 +307,68 @@ def _cuda_runtime_available() -> bool:
         return False
 
 
+def _ffmpeg_hwaccel_device_available(hwaccel: str) -> bool:
+    hwaccel = (hwaccel or "").strip().lower()
+    if not hwaccel:
+        return False
+
+    cached = _FFMPEG_HWACCEL_DEVICE_CACHE.get(hwaccel)
+    if cached is not None:
+        return cached
+
+    if hwaccel != "cuda":
+        _FFMPEG_HWACCEL_DEVICE_CACHE[hwaccel] = True
+        return True
+
+    if shutil.which("ffmpeg") is None:
+        _FFMPEG_HWACCEL_DEVICE_CACHE[hwaccel] = False
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-init_hw_device",
+                "cuda=graphlec_cuda",
+                "-f",
+                "lavfi",
+                "-i",
+                "nullsrc=s=16x16:d=0.01",
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        available = result.returncode == 0
+        if not available:
+            err_text = (result.stderr or "").strip()
+            log.warning(f"ffmpeg cuda 초기화 확인 실패로 CUDA 디코드를 비활성화합니다: {err_text}")
+    except Exception as e:
+        available = False
+        log.warning(f"ffmpeg cuda 초기화 확인 실패로 CUDA 디코드를 비활성화합니다: {e}")
+
+    _FFMPEG_HWACCEL_DEVICE_CACHE[hwaccel] = available
+    return available
+
+
 def _resolve_decode_backend(preferred_backend: str) -> tuple[str, str | None]:
     backend = (preferred_backend or "auto").strip().lower()
     hwaccels = _ffmpeg_hwaccels()
     system = platform.system().lower()
-    cuda_usable = "cuda" in hwaccels and _cuda_runtime_available()
+    cuda_usable = (
+        "cuda" in hwaccels
+        and _cuda_runtime_available()
+        and _ffmpeg_hwaccel_device_available("cuda")
+    )
 
     if backend == "ffmpeg-cuda":
         if cuda_usable:
@@ -520,6 +578,22 @@ def _iter_processed_frames_ffmpeg_hwaccel_range(
         raise RuntimeError(f"ffmpeg hwaccel 디코드 실패 (hwaccel={hwaccel}, exit={ret}): {err_text}")
 
 
+def _iter_with_opencv_fallback(ffmpeg_iter, opencv_iter_factory, hwaccel: str):
+    last_frame_no = 0
+    try:
+        for frame_no, timestamp, frame in ffmpeg_iter:
+            last_frame_no = max(last_frame_no, int(frame_no))
+            yield frame_no, timestamp, frame
+        return
+    except Exception as e:
+        log.warning(f"ffmpeg hwaccel 디코드 실패로 OpenCV 디코드로 폴백합니다 (hwaccel={hwaccel}): {e}")
+
+    for frame_no, timestamp, frame in opencv_iter_factory():
+        if int(frame_no) <= last_frame_no:
+            continue
+        yield frame_no, timestamp, frame
+
+
 def _frame_iterator(
     input_path: str,
     cfg: Config,
@@ -531,16 +605,15 @@ def _frame_iterator(
     resolved_backend, hwaccel = _resolve_decode_backend(decode_backend or cfg.DECODE_BACKEND)
 
     if resolved_backend == "ffmpeg" and hwaccel:
-        try:
-            log.info(f"프레임 디코드 백엔드: ffmpeg ({hwaccel})")
-            return (
+        log.info(f"프레임 디코드 백엔드: ffmpeg ({hwaccel})")
+        return (
+            _iter_with_opencv_fallback(
                 _iter_processed_frames_ffmpeg_hwaccel(input_path, cfg, fps, width, height, hwaccel),
-                f"ffmpeg-{hwaccel}",
-            )
-        except FileNotFoundError:
-            log.warning("ffmpeg를 찾지 못해 OpenCV 디코드로 폴백합니다.")
-        except Exception as e:
-            log.warning(f"ffmpeg hwaccel 초기화 실패로 OpenCV 디코드로 폴백합니다: {e}")
+                lambda: _iter_processed_frames_opencv(input_path, cfg, fps),
+                hwaccel,
+            ),
+            f"ffmpeg-{hwaccel}/opencv-fallback",
+        )
 
     log.info("프레임 디코드 백엔드: opencv")
     return _iter_processed_frames_opencv(input_path, cfg, fps), "opencv"
@@ -559,20 +632,21 @@ def _frame_iterator_range(
     resolved_backend, hwaccel = _resolve_decode_backend(decode_backend or cfg.DECODE_BACKEND)
 
     if resolved_backend == "ffmpeg" and hwaccel:
-        try:
-            log.info(
-                f"청크 프레임 디코드 백엔드: ffmpeg ({hwaccel}) [{start_sec:.2f}s ~ {end_sec:.2f}s]"
-            )
-            return (
+        log.info(
+            f"청크 프레임 디코드 백엔드: ffmpeg ({hwaccel}) [{start_sec:.2f}s ~ {end_sec:.2f}s]"
+        )
+        return (
+            _iter_with_opencv_fallback(
                 _iter_processed_frames_ffmpeg_hwaccel_range(
                     input_path, cfg, fps, width, height, hwaccel, start_sec, end_sec
                 ),
-                f"ffmpeg-{hwaccel}",
-            )
-        except FileNotFoundError:
-            log.warning("ffmpeg를 찾지 못해 OpenCV 디코드로 폴백합니다.")
-        except Exception as e:
-            log.warning(f"ffmpeg hwaccel 초기화 실패로 OpenCV 디코드로 폴백합니다: {e}")
+                lambda: _iter_processed_frames_opencv_range(
+                    input_path, cfg, fps, start_sec, end_sec
+                ),
+                hwaccel,
+            ),
+            f"ffmpeg-{hwaccel}/opencv-fallback",
+        )
 
     log.info(f"청크 프레임 디코드 백엔드: opencv [{start_sec:.2f}s ~ {end_sec:.2f}s]")
     return _iter_processed_frames_opencv_range(input_path, cfg, fps, start_sec, end_sec), "opencv"
