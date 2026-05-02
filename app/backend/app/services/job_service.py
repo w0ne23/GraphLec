@@ -401,16 +401,9 @@ async def retry_job(db: AsyncSession, job_id: str) -> bool:
     job = await get_job(db, job_id)
     if not job:
         return False
-    result = await db.execute(select(LectureContent).where(LectureContent.job_id == job_id))
-    content = result.scalar_one_or_none()
-    if content and content.output_dir:
-        output_dir = Path(content.output_dir)
-        if output_dir.exists() and "results" in output_dir.as_posix():
-            shutil.rmtree(output_dir, ignore_errors=True)
-            logger.info("Cleared output dir for retry: %s", output_dir)
     job.status          = "pending"
     job.error_message   = None
-    job.current_stage   = "Retrying..."
+    job.current_stage   = "Resuming pipeline..."
     job.pipeline_stages = []
     await db.commit()
     return True
