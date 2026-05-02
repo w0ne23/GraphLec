@@ -8,8 +8,11 @@ function secToTs(s) {
 
 function tsToSec(ts = '00:00') {
   if (typeof ts === 'number') return ts
-  const [m, s] = ts.split(':').map(Number)
-  return m * 60 + s
+  const parts = String(ts).split(':').map(Number)
+  if (parts.some(Number.isNaN)) return 0
+  if (parts.length === 1) return parts[0]
+  if (parts.length === 2) return parts[0] * 60 + parts[1]
+  return parts[0] * 3600 + parts[1] * 60 + parts[2]
 }
 
 export default function VideoPlayer({
@@ -126,8 +129,14 @@ export default function VideoPlayer({
 
   useEffect(() => {
     if (!videoRef.current) return
-    if (!Number.isFinite(seekToSeconds)) return
-    videoRef.current.currentTime = Math.max(0, seekToSeconds)
+    const target = typeof seekToSeconds === 'object' && seekToSeconds !== null
+      ? seekToSeconds.seconds
+      : seekToSeconds
+    if (!Number.isFinite(Number(target))) return
+    const targetSec = Math.max(0, Number(target))
+    videoRef.current.currentTime = targetSec
+    setCurrentTime(targetSec)
+    setProgress((targetSec / videoRef.current.duration) * 100 || 0)
   }, [seekToSeconds])
 
   if (!lecture) {

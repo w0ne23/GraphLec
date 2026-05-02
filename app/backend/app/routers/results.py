@@ -27,6 +27,42 @@ async def get_knowledge_graph(lecture_id: str, db: AsyncSession = Depends(get_db
     return await job_service.get_knowledge_graph(db, lecture_id)
 
 
+@router.post("/{lecture_id}/graph/graphrag/ingest")
+async def ingest_graphrag_concept_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """구조 그래프와 GraphRAG 그래프를 Neo4j에 적재"""
+    return await job_service.ingest_graphrag_concept_graph(db, lecture_id)
+
+
+@router.post("/{lecture_id}/graph/activate")
+async def activate_lecture_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """강의 화면 진입 시 구조 그래프와 GraphRAG 그래프를 Neo4j에 적재"""
+    return await job_service.ensure_graphrag_concept_graph_loaded(db, lecture_id)
+
+
+@router.post("/{lecture_id}/graph/unload")
+async def unload_lecture_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """강의 화면 이탈 시 해당 강의 그래프를 Neo4j에서 제거"""
+    return await job_service.unload_graphrag_concept_graph(db, lecture_id)
+
+
+@router.post("/{lecture_id}/graph/graphrag/activate")
+async def activate_graphrag_concept_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """이전 프론트 호환용: 구조 그래프와 GraphRAG 그래프를 Neo4j에 적재"""
+    return await job_service.ensure_graphrag_concept_graph_loaded(db, lecture_id)
+
+
+@router.post("/{lecture_id}/graph/graphrag/unload")
+async def unload_graphrag_concept_graph(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """이전 프론트 호환용: 해당 강의 그래프를 Neo4j에서 제거"""
+    return await job_service.unload_graphrag_concept_graph(db, lecture_id)
+
+
+@router.get("/{lecture_id}/graph/graphrag/status")
+async def get_graphrag_ingest_status(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    """GraphRAG 개념 그래프 Neo4j 적재 상태 조회"""
+    return await job_service.get_graphrag_ingest_status(db, lecture_id)
+
+
 @router.get("/{lecture_id}/verifier")
 async def get_content_verification(lecture_id: str, db: AsyncSession = Depends(get_db)):
     """강의 verifier 결과 조회"""
@@ -41,6 +77,38 @@ async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Dep
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
     return await job_service.ask_question(db, lecture_id, question)
+
+
+@router.post("/{lecture_id}/graph/enter")
+async def graph_enter(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_enter(db, lecture_id, session_id)
+
+
+@router.post("/{lecture_id}/graph/heartbeat")
+async def graph_heartbeat(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_heartbeat(db, lecture_id, session_id)
+
+
+@router.post("/{lecture_id}/graph/leave")
+async def graph_leave(lecture_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    session_id = (body.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    return await job_service.graph_leave(db, lecture_id, session_id)
+
+
+@router.get("/{lecture_id}/graph/status")
+async def graph_status(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    return await job_service.graph_status(db, lecture_id)
 
 
 @router.get("/{lecture_id}")

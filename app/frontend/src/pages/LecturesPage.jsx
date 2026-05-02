@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { getLectureStatus, listLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
+import '../styles/upload.css'
+
 const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '분석 통합', '그래프/DB', '요약 색인', '메타데이터']
 const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'graph', 'summarize', 'metadata']
 

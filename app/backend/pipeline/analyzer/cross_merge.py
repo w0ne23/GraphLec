@@ -27,16 +27,29 @@ def _token_overlap_ratio(a: str, b: str) -> float:
     return len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
 
 
+def _time_distance_sec(a: dict, b: dict) -> float:
+    try:
+        return abs(float(a.get("start_time", 0) or 0) - float(b.get("start_time", 0) or 0))
+    except Exception:
+        return 999999.0
+
+
 def _same_contextual_issue(a: dict, b: dict) -> bool:
-    """같은 발화에서 wording만 조금 다른 동일 이슈인지 판단."""
-    if (a.get("utterance_id") or "") != (b.get("utterance_id") or ""):
+    """같은 맥락에서 wording만 조금 다른 동일 이슈인지 판단."""
+    same_utterance = (a.get("utterance_id") or "") == (b.get("utterance_id") or "")
+    same_local_context = (
+        not same_utterance
+        and int(a.get("slide_number", 0) or 0) == int(b.get("slide_number", 0) or 0)
+        and _time_distance_sec(a, b) <= 12.0
+    )
+    if not same_utterance and not same_local_context:
         return False
     if (a.get("type") or "") != (b.get("type") or ""):
         return False
 
     a_claim = _compact_issue_text(a.get("claim_text", ""))
     b_claim = _compact_issue_text(b.get("claim_text", ""))
-    if a_claim and b_claim:
+    if same_utterance and a_claim and b_claim:
         if a_claim == b_claim:
             return True
         shorter, longer = sorted((a_claim, b_claim), key=len)
@@ -60,7 +73,14 @@ def _same_contextual_issue(a: dict, b: dict) -> bool:
         shorter, longer = sorted((a_issue, b_issue), key=len)
         if len(shorter) >= 16 and shorter in longer:
             return True
-        if _token_overlap_ratio(a_issue, b_issue) >= 0.8:
+        local_threshold = 0.4 if _time_distance_sec(a, b) <= 5.0 else 0.55
+        if _token_overlap_ratio(a_issue, b_issue) >= (local_threshold if same_local_context else 0.8):
+            return True
+
+    if same_local_context:
+        a_correct = _compact_issue_text(a.get("correct_info", ""))
+        b_correct = _compact_issue_text(b.get("correct_info", ""))
+        if a_correct and b_correct and _token_overlap_ratio(a_correct, b_correct) >= 0.55:
             return True
     return False
 
