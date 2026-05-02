@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Optional, List, Any, Dict
 
 from sqlalchemy import select, delete, and_, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from neo4j import GraphDatabase
@@ -262,6 +263,35 @@ async def _touch_or_create_graph_session(
         extra.ended_at = now
 
 
+async def _commit_graph_session_touch(
+    db: AsyncSession,
+    *,
+    lecture_id,
+    stem: str,
+    session_id: str,
+    now: datetime,
+) -> None:
+    try:
+        await _touch_or_create_graph_session(
+            db,
+            lecture_id=lecture_id,
+            stem=stem,
+            session_id=session_id,
+            now=now,
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        await _touch_or_create_graph_session(
+            db,
+            lecture_id=lecture_id,
+            stem=stem,
+            session_id=session_id,
+            now=now,
+        )
+        await db.commit()
+
+
 def _is_stem_loaded(stem: str) -> bool:
     driver = get_neo4j_driver()
     if not driver:
@@ -288,11 +318,66 @@ def _unload_stem_from_neo4j(stem: str) -> None:
         driver.close()
 
 
-def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
-    if _is_stem_loaded(stem):
-        return {"loaded_now": False}
+def _load_graphrag_layer_for_stem(
+    stem: str,
+    output_dir: Path,
+    graphrag_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
+    graphrag_dir = graphrag_dir or find_graphrag_output_dir(stem, output_dir)
+    if not graphrag_dir:
+        return {"graphrag_output_dir": None, "graphrag": {}}
+
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
+
     try:
-        ingest_result = ingest_parquet_to_neo4j(stem=stem, output_dir=Path(output_dir))
+        with driver.session() as session:
+            graphrag_counts = session.execute_write(
+                lambda tx: (
+                    delete_graphrag_layer_tx(tx, stem),
+                    load_graphrag_layer_tx(tx, stem, graphrag_dir),
+                )[1]
+            )
+            fused_path = output_dir / f"{stem}_fused.json"
+            if fused_path.is_file():
+                graphrag_counts.update(compute_keyword_match(session, stem, fused_path))
+                graphrag_counts.update(compute_visual_match(session, stem, fused_path))
+            graphrag_counts.update(compute_annotation_match(session, stem))
+            graphrag_counts.update(compute_audio_segment_match(session, stem))
+            graphrag_counts.update(compute_final_weight(session, stem))
+            graphrag_counts.update(compute_relation_boost(session, stem))
+            graph_counts = _stem_graph_counts(session, stem)
+    finally:
+        driver.close()
+
+    return {
+        "graphrag_output_dir": str(graphrag_dir),
+        "graphrag": graphrag_counts,
+        "node_count": graph_counts["nodes"],
+        "edge_count": graph_counts["relationships"],
+        "concept_count": graph_counts["concepts"],
+    }
+
+
+def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
+    output_path = Path(output_dir)
+    if _is_stem_loaded(stem):
+        driver = get_neo4j_driver()
+        if not driver:
+            raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
+        try:
+            with driver.session() as session:
+                graphrag_counts = _graphrag_layer_counts(session, stem)
+        finally:
+            driver.close()
+        if graphrag_counts.get("entities", 0) == 0:
+            loaded = _load_graphrag_layer_for_stem(stem, output_path)
+            return {"loaded_now": False, "graphrag_loaded_now": bool(loaded.get("graphrag")), **loaded}
+        return {"loaded_now": False, "graphrag": graphrag_counts}
+    try:
+        ingest_result = ingest_parquet_to_neo4j(stem=stem, output_dir=output_path)
+        graphrag_loaded = _load_graphrag_layer_for_stem(stem, output_path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -301,6 +386,7 @@ def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
         "loaded_now": True,
         "node_count": ingest_result.get("node_count", 0),
         "edge_count": ingest_result.get("edge_count", 0),
+        **graphrag_loaded,
     }
 
 
@@ -535,24 +621,24 @@ async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
     if not content:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
+    content_id = content.id
     stem = str(content.stem)
     output_dir = str(content.output_dir)
     now = _utcnow()
 
     await _cleanup_stale_sessions(db, stem)
-    await _touch_or_create_graph_session(
+    await _commit_graph_session_touch(
         db,
-        lecture_id=content.id,
+        lecture_id=content_id,
         stem=stem,
         session_id=session_id,
         now=now,
     )
-    await db.commit()
 
     load_info = _ensure_stem_loaded(stem, output_dir)
     active_count = await _active_session_count(db, stem)
     return {
-        "lecture_id": str(content.id),
+        "lecture_id": str(content_id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -565,20 +651,20 @@ async def graph_heartbeat(db: AsyncSession, lecture_id: str, session_id: str) ->
     content = await _get_lecture_content(db, lecture_id)
     if not content:
         raise HTTPException(status_code=404, detail="Lecture not found")
+    content_id = content.id
     stem = str(content.stem)
     now = _utcnow()
 
-    await _touch_or_create_graph_session(
+    await _commit_graph_session_touch(
         db,
-        lecture_id=content.id,
+        lecture_id=content_id,
         stem=stem,
         session_id=session_id,
         now=now,
     )
-    await db.commit()
 
     return {
-        "lecture_id": str(content.id),
+        "lecture_id": str(content_id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": await _active_session_count(db, stem),
@@ -589,10 +675,11 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
     content = await _get_lecture_content(db, lecture_id)
     if not content:
         raise HTTPException(status_code=404, detail="Lecture not found")
+    content_id = content.id
     stem = str(content.stem)
 
     q = select(GraphSession).where(
-        GraphSession.lecture_id == content.id,
+        GraphSession.lecture_id == content_id,
         GraphSession.session_id == session_id,
         GraphSession.ended_at.is_(None),
     )
@@ -611,7 +698,7 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         unloaded_now = True
 
     return {
-        "lecture_id": str(content.id),
+        "lecture_id": str(content_id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -870,6 +957,14 @@ async def ensure_graphrag_concept_graph_loaded(db: AsyncSession, lecture_id: str
             graph_counts = _stem_graph_counts(session, stem)
             graphrag_counts = _graphrag_layer_counts(session, stem)
             if graph_counts["nodes"] > 0:
+                if graphrag_dir and graphrag_counts.get("entities", 0) == 0:
+                    loaded = _load_graphrag_layer_for_stem(stem, output_dir, graphrag_dir)
+                    return {
+                        "status": "graphrag_layer_loaded",
+                        "lecture_id": lecture_id,
+                        "stem": stem,
+                        **loaded,
+                    }
                 return {
                     "status": "already_loaded",
                     "lecture_id": lecture_id,
