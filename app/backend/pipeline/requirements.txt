@@ -13,6 +13,7 @@ Pillow>=10.0.0
 python-dotenv>=1.0.0
 librosa
 pymupdf
+psycopg2-binary
 python-pptx
 ImageHash>=4.3.1
 json-repair
