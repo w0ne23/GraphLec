@@ -142,7 +142,9 @@ services:
       - backend
 
   frontend:
-    build: ./app/frontend
+    build:
+      context: .
+      dockerfile: ./app/frontend/Dockerfile
     ports:
       - "5173:5173"
     environment:
