@@ -195,7 +195,7 @@ async def worker_loop():
                 async with AsyncSessionLocal() as db:
                     if success:
                         await db.execute(text("""
-                            UPDATE lectures_content
+                            UPDATE lectures
                             SET output_dir = :out_dir
                             WHERE job_id = :id
                         """), {"out_dir": output_dir, "id": job_id_val})
