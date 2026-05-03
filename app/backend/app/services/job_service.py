@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from neo4j import GraphDatabase
 
-from app.models import Job, LectureContent, GraphSession
+from app.models import Job, Lecture, GraphSession
 from pipeline.graphrag_neo4j_ingest import (
     delete_graphrag_layer_tx,
     find_graphrag_output_dir,
@@ -391,8 +391,8 @@ def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
-def format_job_dict(job: Job, content: Optional[LectureContent]) -> Dict[str, Any]:
-    """Job과 LectureContent를 하나의 딕셔너리로 직렬화"""
+def format_job_dict(job: Job, content: Optional[Lecture]) -> Dict[str, Any]:
+    """Job과 Lecture를 하나의 딕셔너리로 직렬화"""
     stages = job.pipeline_stages
     if isinstance(stages, str):
         try:
@@ -461,8 +461,8 @@ async def get_job(db: AsyncSession, job_id: str) -> Optional[Job]:
 
 async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, Any]]:
     query = (
-        select(Job, LectureContent)
-        .outerjoin(LectureContent, Job.id == LectureContent.job_id)
+        select(Job, Lecture)
+        .outerjoin(Lecture, Job.id == Lecture.job_id)
         .where(Job.id == job_id)
     )
     result = await db.execute(query)
@@ -474,8 +474,8 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
 
 async def list_jobs(db: AsyncSession) -> List[Dict[str, Any]]:
     query = (
-        select(Job, LectureContent)
-        .outerjoin(LectureContent, Job.id == LectureContent.job_id)
+        select(Job, Lecture)
+        .outerjoin(Lecture, Job.id == Lecture.job_id)
         .order_by(Job.created_at.desc())
     )
     result = await db.execute(query)
@@ -502,7 +502,7 @@ async def delete_job_and_content(db: AsyncSession, job_id: str) -> bool:
         return False
 
     stem = Path(job.input_path).stem if job.input_path else None
-    result  = await db.execute(select(LectureContent).where(LectureContent.job_id == job_id))
+    result  = await db.execute(select(Lecture).where(Lecture.job_id == job_id))
     content = result.scalar_one_or_none()
 
     if job.input_path:
@@ -528,8 +528,8 @@ async def delete_job_and_content(db: AsyncSession, job_id: str) -> bool:
 async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
     """완료된 강의 목록 — Lecture ID 및 Job 상태 포함"""
     query = (
-        select(Job, LectureContent)
-        .join(LectureContent, Job.id == LectureContent.job_id)
+        select(Job, Lecture)
+        .join(Lecture, Job.id == Lecture.job_id)
         .order_by(Job.created_at.desc())
     )
     result = await db.execute(query)
@@ -553,8 +553,8 @@ async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict[str, Any]]:
     """강의 상세 정보 조회.
 
-    프론트가 업로드 직후 job_id를 들고 있는 경우가 있어 LectureContent.id,
-    Job.id, LectureContent.job_id, stem을 모두 허용한다.
+    프론트가 업로드 직후 job_id를 들고 있는 경우가 있어 Lecture.id,
+    Job.id, Lecture.job_id, stem을 모두 허용한다.
     """
     row = await _get_lecture_row(db, lecture_id)
     if not row:
@@ -577,14 +577,14 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
 
 def _content_identifier_conditions(identifier: str):
     raw = str(identifier)
-    conditions = [LectureContent.stem == raw]
+    conditions = [Lecture.stem == raw]
     try:
         ident_uuid = uuid.UUID(raw)
     except (ValueError, TypeError):
         return conditions
     conditions.extend([
-        LectureContent.id == ident_uuid,
-        LectureContent.job_id == ident_uuid,
+        Lecture.id == ident_uuid,
+        Lecture.job_id == ident_uuid,
     ])
     return conditions
 
@@ -601,17 +601,17 @@ def _row_identifier_conditions(identifier: str):
 
 async def _get_lecture_row(db: AsyncSession, lecture_id: str):
     query = (
-        select(Job, LectureContent)
-        .join(LectureContent, Job.id == LectureContent.job_id)
+        select(Job, Lecture)
+        .join(Lecture, Job.id == Lecture.job_id)
         .where(or_(*_row_identifier_conditions(lecture_id)))
     )
     result = await db.execute(query)
     return result.unique().one_or_none()
 
 
-async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[LectureContent]:
+async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[Lecture]:
     result = await db.execute(
-        select(LectureContent).where(or_(*_content_identifier_conditions(lecture_id)))
+        select(Lecture).where(or_(*_content_identifier_conditions(lecture_id)))
     )
     return result.scalar_one_or_none()
 

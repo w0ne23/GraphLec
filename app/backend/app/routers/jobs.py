@@ -10,7 +10,7 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import Job, LectureContent
+from app.models import Job, Lecture
 from app.services import job_service
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ async def create_job(
 
         # 시스템 전반에서 쓰이는 stem은 고유한 job_id(UUID)를 사용하여 충돌을 방지함
         lecture_id = uuid.uuid4()
-        new_content = LectureContent(
+        new_lecture = Lecture(
             id=lecture_id,
             job_id=job_id,
             stem=job_id,
@@ -120,7 +120,7 @@ async def create_job(
             output_dir=str(output_dir),
             graphrag_workspace=str(output_dir / "graphrag"),
         )
-        db.add(new_content)
+        db.add(new_lecture)
         await db.commit()
     except Exception as e:
         await db.rollback()

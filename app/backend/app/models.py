@@ -23,9 +23,9 @@ class Job(Base):
     updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class LectureContent(Base):
+class Lecture(Base):
     """실제 강의 콘텐츠 데이터"""
-    __tablename__ = "lectures_content"
+    __tablename__ = "lectures"
 
     id          = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     job_id      = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=True)
@@ -49,7 +49,7 @@ class GraphSession(Base):
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    lecture_id = Column(UUID(as_uuid=True), ForeignKey("lectures_content.id", ondelete="CASCADE"), nullable=False, index=True)
+    lecture_id = Column(UUID(as_uuid=True), ForeignKey("lectures.id", ondelete="CASCADE"), nullable=False, index=True)
     stem = Column(String, nullable=False, index=True)
     session_id = Column(String, nullable=False, index=True)
     last_heartbeat_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
