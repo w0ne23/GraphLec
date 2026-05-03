@@ -6,13 +6,13 @@
 .env
 
 # Python Runtime
-__pycache__/
-*.pyc
+**/__pycache__/
+**/*.pyc
 venv/
 
 # Node.js (Frontend)
-node_modules/
-dist/
+**/node_modules/
+**/dist/
 
 # Runtime Data (Volumes)
 local_storage/
