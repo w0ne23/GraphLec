@@ -225,6 +225,9 @@ def cross_verify(
         final = {
             "issues": [],
             "slide_rejected": [],
+            "slide_recheck_status": "skipped_no_issues",
+            "slide_recheck_reason": "crosscheck 통과 이슈가 없어 슬라이드 문맥 재검증을 건너뜀",
+            "slide_recheck_failures": 0,
             "grounding_rejected": [],
             "token_usage": _empty_token_usage(),
         }
@@ -286,11 +289,8 @@ def cross_verify(
         "slide_typos": slide_typo_result.get("slide_typos", []),
         "crosscheck_rejected_issues": cross_recheck_rejected,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
-        "slide_recheck_status": "not_applicable",
-        "slide_recheck_reason": (
-            "cross_verification path does not run a separate slide recheck stage; "
-            "slide context is used in crosscheck and grounding prompts."
-        ),
+        "slide_recheck_status": final.get("slide_recheck_status", "completed"),
+        "slide_recheck_reason": final.get("slide_recheck_reason", ""),
         "slide_rejected_issues": final["slide_rejected"],
         "grounding_rejected_issues": final["grounding_rejected"],
         "rejected_issues": all_rejected,
@@ -306,7 +306,7 @@ def cross_verify(
         "crosscheck_inconclusive_filtered": len(cross_recheck_inconclusive),
         "slide_recheck_filtered": len(final["slide_rejected"]),
         "grounding_filtered": len(final["grounding_rejected"]),
-        "slide_recheck_failures": len(final["slide_rejected"]),
+        "slide_recheck_failures": int(final.get("slide_recheck_failures", 0) or 0),
         "grounding_failures": len(final["grounding_rejected"]),
         "slide_typo_failures": int(slide_typo_result.get("failures", 0) or 0),
     }

@@ -911,6 +911,12 @@ def stage9_build_analyzer_merged_clean(
             candidate_meta = {
                 "title": str(slide.get("title", "") or ""),
                 "slide_text": "\n".join(part for part in text_parts if part),
+                "slide_id": slide.get("slide_id", ""),
+                "slide_type": slide.get("slide_type", ""),
+                "text_source": slide.get("text_source", ""),
+                "t1": slide.get("t1", ""),
+                "t1_structure": slide.get("t1_structure", ""),
+                "image_path": slide.get("image_path", ""),
             }
             current_meta = slide_meta_by_no.get(slide_no)
             if current_meta is None or len(candidate_meta["slide_text"]) > len(current_meta.get("slide_text", "")):
@@ -971,7 +977,7 @@ def stage9_build_analyzer_merged_clean(
             start_sec = 0.0
             end_sec = 0.0
             total_duration_sec = 0.0
-        slides.append({
+        slide_payload = {
             "slide_number": slide_no,
             "title": slide_meta.get("title", ""),
             "time_range": f"{_fmt_ts(start_sec)} ~ {_fmt_ts(end_sec)}",
@@ -982,7 +988,19 @@ def stage9_build_analyzer_merged_clean(
             "transcript_segments": transcript_segments,
             "transcript": " ".join(str(seg.get("text", "") or "") for seg in transcript_segments).strip(),
             "segment_count": len(transcript_segments),
-        })
+        }
+        for key in (
+            "slide_id",
+            "slide_type",
+            "text_source",
+            "t1",
+            "t1_structure",
+            "image_path",
+        ):
+            value = slide_meta.get(key)
+            if value not in (None, "", []):
+                slide_payload[key] = value
+        slides.append(slide_payload)
 
     total_duration = 0.0
     if slides:

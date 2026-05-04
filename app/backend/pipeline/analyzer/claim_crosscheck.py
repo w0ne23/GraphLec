@@ -6,6 +6,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
 _CROSSCHECK_PARSE_RETRIES = 1
+_SLIDE_SUPPORT_STATUSES = {"supports", "contradicts", "neutral", "insufficient"}
+_ERROR_ORIGINS = {"speech_error", "slide_error", "slide_speech_mismatch", "unclear"}
 
 
 def _parse_crosscheck_payload(text: str) -> dict:
@@ -96,12 +98,18 @@ def _parse_crosscheck_payload(text: str) -> dict:
 
 def _build_slide_transcript_block(slides: list[dict], slide_number: int) -> str:
     slide_text = ""
+    structure_text = ""
+    meta_lines = []
     transcript_lines = []
     for slide in slides:
         if int(slide.get("slide_number", 0) or 0) != slide_number:
             continue
         # 슬라이드 자체 텍스트 (슬라이드에 적힌 내용)
         slide_text = str(slide.get("slide_text", "") or "").strip()
+        structure_text = str(slide.get("t1_structure", "") or "").strip()
+        slide_type = str(slide.get("slide_type", "") or "").strip()
+        if slide_type:
+            meta_lines.append(f"  slide_type: {slide_type}")
         for seg in slide.get("transcript_segments", []) or []:
             start = float(seg.get("start", 0) or 0)
             corr = str(seg.get("text", "") or "").strip()
@@ -118,8 +126,12 @@ def _build_slide_transcript_block(slides: list[dict], slide_number: int) -> str:
                 transcript_lines.append(f"  [{start:.1f}s] {text}")
         break
     parts = []
+    if meta_lines:
+        parts.append("[슬라이드 텍스트화 메타]\n" + "\n".join(meta_lines))
     if slide_text:
         parts.append(f"[슬라이드 텍스트]\n{slide_text}")
+    if structure_text and structure_text not in slide_text:
+        parts.append(f"[슬라이드 시각 구조 설명]\n{structure_text}")
     parts.append("[강의자 발화]\n" + ("\n".join(transcript_lines) if transcript_lines else "(없음)"))
     return "\n".join(parts)
 
@@ -338,17 +350,47 @@ def _build_slide_recheck_prompt(
 결론:
 - 슬라이드 전체 맥락을 봐도 여전히 틀리면 → "valid": true
 - 슬라이드 맥락을 보면 실제로는 맞는 설명이었으면 → "valid": false
+- supporting_slide_status:
+  - "supports": 슬라이드가 발화/claim을 뒷받침함
+  - "contradicts": 슬라이드가 발화/claim과 직접 충돌함
+  - "neutral": 슬라이드가 직접 뒷받침하거나 반박하지 않음
+  - "insufficient": 슬라이드 텍스트/발화 맥락만으로 판단 부족
+- error_origin:
+  - "speech_error": 슬라이드는 맞지만 발화가 잘못됨
+  - "slide_error": 슬라이드 자체 설명이 잘못됨
+  - "slide_speech_mismatch": 슬라이드와 발화가 서로 충돌함
+  - "unclear": 원인을 특정하기 어려움
 
 응답 (JSON만):
 ```json
 {{
   "valid": true | false,
-  "reason": "슬라이드 맥락을 참고한 판단 이유"
+  "reason": "슬라이드 맥락을 참고한 판단 이유",
+  "supporting_slide_status": "supports" | "contradicts" | "neutral" | "insufficient",
+  "error_origin": "speech_error" | "slide_error" | "slide_speech_mismatch" | "unclear"
 }}
 ```
 
 JSON 외 텍스트를 출력하지 마세요.
 """
+
+
+def _coerce_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "1", "valid"}:
+        return True
+    if text in {"false", "no", "0", "invalid", "rejected"}:
+        return False
+    return default
+
+
+def _normalize_choice(value: str, allowed: set[str], default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in allowed else default
 
 
 def _slide_recheck_issue(
@@ -370,17 +412,31 @@ def _slide_recheck_issue(
             stage="recheck",
         )
         payload = json.loads(cv._strip_json_fence(text.strip()))
-        valid = payload.get("valid", True)
+        valid = _coerce_bool(payload.get("valid", True), default=True)
         reason = str(payload.get("reason", "") or "")
-        issue["slide_recheck_valid"] = bool(valid)
+        issue["slide_recheck_status"] = "completed"
+        issue["slide_recheck_valid"] = valid
         issue["slide_recheck_reason"] = reason
+        issue["supporting_slide_status"] = _normalize_choice(
+            payload.get("supporting_slide_status"),
+            _SLIDE_SUPPORT_STATUSES,
+            "insufficient",
+        )
+        issue["error_origin"] = _normalize_choice(
+            payload.get("error_origin"),
+            _ERROR_ORIGINS,
+            "unclear",
+        )
         issue["slide_recheck_api_failed"] = False
         token_usage = cv._empty_token_usage()
         cv._add_call_usage(token_usage, call_usage)
         return issue, token_usage
     except Exception as e:
+        issue["slide_recheck_status"] = "failed"
         issue["slide_recheck_valid"] = True
         issue["slide_recheck_reason"] = f"재검증 호출 실패: {e}"
+        issue["supporting_slide_status"] = "insufficient"
+        issue["error_origin"] = "unclear"
         issue["slide_recheck_api_failed"] = True
         return issue, cv._empty_token_usage()
 
@@ -427,8 +483,11 @@ def slide_recheck_all_issues(
             except Exception as e:
                 idx = futures[f]
                 issue_copy = issues[idx].copy()
+                issue_copy["slide_recheck_status"] = "failed"
                 issue_copy["slide_recheck_valid"] = True
                 issue_copy["slide_recheck_reason"] = f"재검증 실패: {e}"
+                issue_copy["supporting_slide_status"] = "insufficient"
+                issue_copy["error_origin"] = "unclear"
                 issue_copy["slide_recheck_api_failed"] = True
                 verified.append(issue_copy)
                 failed_calls += 1
