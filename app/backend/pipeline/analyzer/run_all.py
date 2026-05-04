@@ -44,7 +44,7 @@ def _token_overlap(a: str, b: str) -> float:
 
 
 def _classify_pedagogical_issue(issue: dict) -> dict:
-    """Professor-facing category: wrong vs ambiguous vs needs clarification."""
+    """Professor-facing category plus a conservative issue pattern hint."""
     text = " ".join(
         str(issue.get(key, "") or "")
         for key in ("claim_text", "issue", "correct_info", "explanation", "grounding_reason")
@@ -79,9 +79,12 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         "설명",
         "단순화",
     )
-
     needs_clarification = any(marker in normalized for marker in clarification_markers)
     is_ambiguous = any(marker in normalized for marker in ambiguity_markers)
+    # Reserved for a future LLM/structure-based classifier. Keep null rather
+    # than polluting analysis counts with low-confidence keyword guesses.
+    issue_pattern = None
+    issue_pattern_reason = None
 
     if is_ambiguous:
         category = "ambiguous"
@@ -107,6 +110,8 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         "issue_category": category,
         "issue_category_label": label,
         "issue_category_reason": rationale,
+        "issue_pattern": issue_pattern,
+        "issue_pattern_reason": issue_pattern_reason,
     }
 
 
@@ -383,6 +388,20 @@ def _dedupe_records(records: list[dict]) -> list[dict]:
     return list(deduped.values())
 
 
+def _breakdown(records: list[dict], field: str, *, include_none: bool = False) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in records:
+        value = record.get(field)
+        if value in (None, ""):
+            if not include_none:
+                continue
+            key = "none"
+        else:
+            key = str(value)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
 def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     claims = result.get("merged_claims")
     if claims is None:
@@ -488,20 +507,24 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         for records in final_rejected_lists
         for record in records
     }
-    category_breakdown: dict[str, int] = {}
-    for record in final_confirmed:
-        key = str(record.get("issue_category") or record.get("pedagogical_type") or "uncategorized")
-        category_breakdown[key] = category_breakdown.get(key, 0) + 1
+    category_breakdown = _breakdown(final_confirmed, "issue_category", include_none=True)
+    pattern_breakdown = _breakdown(final_confirmed, "issue_pattern", include_none=True)
+    needs_review_pattern_breakdown = _breakdown(needs_review, "issue_pattern", include_none=True)
 
     result["claim_decision_flow_summary"] = {
         "extracted_claim_count": len(claims),
         "final_confirmed_claim_count": len(final_confirmed),
         "final_confirmed_issue_category_breakdown": category_breakdown,
+        "final_confirmed_issue_pattern_breakdown": pattern_breakdown,
         "crosscheck_rejected_claim_count": len(crosscheck_rejected),
         "crosscheck_inconclusive_claim_count": len(crosscheck_inconclusive),
         "slide_rejected_claim_count": len(slide_rejected),
+        "slide_recheck_status": result.get("slide_recheck_status", ""),
+        "slide_recheck_reason": result.get("slide_recheck_reason", ""),
+        "slide_recheck_failure_count": int(result.get("slide_recheck_failures", 0) or 0),
         "grounding_rejected_claim_count": len(grounding_rejected),
         "needs_review_claim_count": len(needs_review),
+        "needs_review_issue_pattern_breakdown": needs_review_pattern_breakdown,
         "first_stage_rejected_claim_count": len(first_stage_rejected),
         "final_rejected_claim_count": len(final_rejected_keys),
         "unmatched_issue_record_count": len(unmatched_issue_records),
@@ -522,6 +545,12 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             "key": "final_confirmed_issue_category_breakdown",
             "count": len(final_confirmed),
             "breakdown": category_breakdown,
+        },
+        {
+            "label": "최종 확정 이슈 패턴별 수",
+            "key": "final_confirmed_issue_pattern_breakdown",
+            "count": len(final_confirmed),
+            "breakdown": pattern_breakdown,
         },
         {
             "label": "crosscheck에서 기각된 claim",
