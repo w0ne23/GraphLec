@@ -253,6 +253,16 @@ def _grounding_from_issue(issue: dict) -> dict:
     }
 
 
+def _slide_recheck_from_issue(issue: dict) -> dict:
+    return {
+        "status": issue.get("slide_recheck_status", "not_applicable"),
+        "valid": issue.get("slide_recheck_valid"),
+        "reason": issue.get("slide_recheck_reason", ""),
+        "supporting_slide_status": issue.get("supporting_slide_status", ""),
+        "error_origin": issue.get("error_origin", ""),
+    }
+
+
 def _default_rejection_reason_code(stage: str, issue: dict) -> str:
     if issue.get("rejection_reason_code"):
         return str(issue.get("rejection_reason_code"))
@@ -308,6 +318,7 @@ def _claim_record_from_issue(
             "severity": issue.get("severity", ""),
             "confidence": issue.get("confidence", 0),
             "model_verdicts": _model_verdicts_from_issue(issue),
+            "slide_recheck": _slide_recheck_from_issue(issue),
             "grounding": _grounding_from_issue(issue),
             **_classify_pedagogical_issue(issue),
         }
