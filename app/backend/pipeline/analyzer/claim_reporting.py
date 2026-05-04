@@ -171,6 +171,27 @@ def format_verification_report(result: dict) -> str:
             lines.append(f"    수정: {typo.get('corrected_text', '')}")
             lines.append(f"    이유: {typo.get('reason', '')}")
             lines.append(f"    신뢰도: {float(typo.get('confidence', 0) or 0):.0%}")
+            if int(typo.get("run_count", 0) or 0) > 1:
+                lines.append(
+                    f"    합의: {typo.get('support_count', 0)}/{typo.get('run_count', 0)}"
+                )
+
+    slide_typo_needs_review = result.get("slide_typo_needs_review", [])
+    if slide_typo_needs_review:
+        lines.append(f"\n{'=' * 60}")
+        lines.append(f"슬라이드 오타 리뷰 필요 ({len(slide_typo_needs_review)}건)")
+        lines.append("=" * 60)
+        for i, typo in enumerate(slide_typo_needs_review, 1):
+            lines.append(
+                f"\n  [{i}] 슬라이드 {typo.get('slide_number', '?')} ({typo.get('slide_title', '')})"
+            )
+            lines.append(f"    문제: {typo.get('problematic_text', '')}")
+            lines.append(f"    수정 후보: {typo.get('corrected_text', '')}")
+            lines.append(f"    이유: {typo.get('reason', '')}")
+            if int(typo.get("run_count", 0) or 0) > 1:
+                lines.append(
+                    f"    합의: {typo.get('support_count', 0)}/{typo.get('run_count', 0)}"
+                )
 
     lines.extend([
         f"\n{'=' * 60}", "메타데이터", "=" * 60,
@@ -183,6 +204,7 @@ def format_verification_report(result: dict) -> str:
         f"  토큰(총): {_format_token_bucket(token_usage.get('total', {}))}",
         f"  추출 claim: {meta.get('total_claims_extracted', 0)}개",
         f"  슬라이드 오타: {meta.get('slide_typo_count', len(result.get('slide_typos', [])))}건",
+        f"  슬라이드 오타 리뷰 필요: {len(result.get('slide_typo_needs_review', []))}건",
         f"  파싱 실패: {result.get('parse_failures', 0)}건",
         f"  슬라이드 재검증 실패: {result.get('slide_recheck_failures', 0)}건",
         f"  grounding 실패: {result.get('grounding_failures', 0)}건",

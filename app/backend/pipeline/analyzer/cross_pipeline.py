@@ -59,13 +59,14 @@ def _cache_meta(
     judge_batch_size: int | None,
     *,
     model: str | None = None,
+    extra: dict | None = None,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     try:
         merged_mtime_ns = merged_file.stat().st_mtime_ns
     except OSError:
         merged_mtime_ns = None
-    return {
+    meta = {
         "cache_version": _CACHE_VERSION,
         "stage": stage,
         "merged_path": str(merged_file),
@@ -78,6 +79,30 @@ def _cache_meta(
         "batch_size": batch_size,
         "judge_batch_size": judge_batch_size,
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
+    }
+    if extra:
+        meta.update(extra)
+    return meta
+
+
+def _slide_typo_settings(env_vars: dict) -> dict:
+    def parse_int(name: str, default: int) -> int:
+        try:
+            return max(1, int(env_vars.get(name, default) or default))
+        except Exception:
+            return default
+
+    def parse_rate(name: str, default: float) -> float:
+        try:
+            value = float(env_vars.get(name, default) or default)
+        except Exception:
+            value = default
+        return max(0.0, min(1.0, value))
+
+    return {
+        "slide_typo_runs": parse_int("VERIFIER_SLIDE_TYPO_RUNS", 1),
+        "slide_typo_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_MIN_RATE", 1.0),
+        "slide_typo_review_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", 0.5),
     }
 
 
@@ -457,10 +482,12 @@ def cross_verify(
     slide_typo_result = {
         "model": primary,
         "slide_typos": [],
+        "slide_typo_needs_review": [],
         "api_calls": 0,
         "failures": 0,
         "token_usage": _empty_token_usage(),
     }
+    typo_settings = _slide_typo_settings(env_vars)
     if skip_slide_typo:
         print(f"\n  ⏭  슬라이드 오타 검사 스킵 (--skip-slide-typo)")
         slide_typo_result["skipped"] = True
@@ -476,6 +503,7 @@ def cross_verify(
             batch_size,
             judge_batch_size,
             model=primary,
+            extra=typo_settings,
         )
         slide_typo_result = _load_cache(cache_dir, "slide_typo", typo_meta, resume=resume)
         if slide_typo_result is None:
@@ -487,6 +515,7 @@ def cross_verify(
                 slide_typo_result = {
                     "model": primary,
                     "slide_typos": [],
+                    "slide_typo_needs_review": [],
                     "api_calls": 0,
                     "failures": 1,
                     "token_usage": _empty_token_usage(),
@@ -540,6 +569,8 @@ def cross_verify(
         "confirmed_count": len(all_confirmed),
         "issues": final["issues"],
         "slide_typos": slide_typo_result.get("slide_typos", []),
+        "slide_typo_needs_review": slide_typo_result.get("slide_typo_needs_review", []),
+        "slide_typo_consensus": typo_settings,
         "slide_typo_status": "skipped" if slide_typo_result.get("skipped") else "completed",
         "slide_typo_skip_reason": slide_typo_result.get("skip_reason", ""),
         "crosscheck_rejected_issues": cross_recheck_rejected,
@@ -563,6 +594,7 @@ def cross_verify(
         "slide_recheck_filtered": len(final["slide_rejected"]),
         "grounding_filtered": len(final["grounding_rejected"]),
         "needs_review_count": len(final.get("needs_review", [])),
+        "slide_typo_needs_review_count": len(slide_typo_result.get("slide_typo_needs_review", []) or []),
         "slide_recheck_failures": int(final.get("slide_recheck_failures", 0) or 0),
         "grounding_failures": int(final.get("grounding_failures", 0) or 0),
         "slide_typo_failures": int(slide_typo_result.get("failures", 0) or 0),
@@ -711,6 +743,15 @@ def print_cross_result(result: dict):
             print(
                 f"    [{i}] 슬라이드 {typo.get('slide_number', '?')} | "
                 f"{typo.get('problematic_text', '')} -> {typo.get('corrected_text', '')}"
+            )
+    slide_typo_needs_review = result.get("slide_typo_needs_review", [])
+    if slide_typo_needs_review:
+        print(f"\n  ⚠️ 슬라이드 오타 리뷰 필요: {len(slide_typo_needs_review)}건")
+        for i, typo in enumerate(slide_typo_needs_review[:10], 1):
+            print(
+                f"    [{i}] 슬라이드 {typo.get('slide_number', '?')} | "
+                f"{typo.get('problematic_text', '')} -> {typo.get('corrected_text', '')} "
+                f"({typo.get('support_count', 0)}/{typo.get('run_count', 0)})"
             )
     if result.get("slide_typo_failures", 0):
         print(f"  ⚠️ 슬라이드 오타 검사 실패: {result['slide_typo_failures']}건")

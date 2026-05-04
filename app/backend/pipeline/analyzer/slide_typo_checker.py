@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -56,7 +57,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 """
 
 
-def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict], bool, int, dict]:
+def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1) -> tuple[list[dict], bool, int, dict]:
     from . import claim_common as cc
 
     slide_no = int(slide.get("slide_number", 0) or 0)
@@ -119,6 +120,7 @@ def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict]
                     "corrected_text": corrected,
                     "reason": reason,
                     "confidence": conf,
+                    "run_index": run_index,
                 })
             return cleaned, False, api_calls, token_usage
         except Exception:
@@ -127,30 +129,182 @@ def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict]
     return [], True, api_calls, token_usage
 
 
+def _safe_rate(value, default: float) -> float:
+    try:
+        rate = float(value)
+    except Exception:
+        rate = default
+    return max(0.0, min(1.0, rate))
+
+
+def _normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _typo_key(typo: dict) -> tuple:
+    # Future: consider conservative prefix/substring grouping for problematic_text.
+    # Avoid semantic/fuzzy merging here because typo reporting favors precision.
+    return (
+        int(typo.get("slide_number", 0) or 0),
+        _normalize_text(typo.get("problematic_text", "")),
+    )
+
+
+def _meets_rate(support_count: int, run_count: int, threshold: float) -> bool:
+    if run_count <= 0:
+        return False
+    return round(support_count / run_count, 2) >= threshold
+
+
+def _collect_reasons(items: list[dict]) -> list[str]:
+    reasons = []
+    for item in items:
+        reason = str(item.get("reason", "") or "").strip()
+        if reason and reason not in reasons:
+            reasons.append(reason)
+    return reasons
+
+
+def _correction_candidates(group: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for item in group:
+        grouped.setdefault(_normalize_text(item.get("corrected_text", "")), []).append(item)
+
+    candidates = []
+    for items in grouped.values():
+        best = max(items, key=lambda item: float(item.get("confidence", 0) or 0))
+        confidences = [float(item.get("confidence", 0) or 0) for item in items]
+        run_indices = sorted({
+            int(item.get("run_index", 0) or 0)
+            for item in items
+            if int(item.get("run_index", 0) or 0) > 0
+        })
+        reasons = _collect_reasons(items)
+        candidate = {
+            "corrected_text": best.get("corrected_text", ""),
+            "support_count": len(run_indices),
+            "confidence": max(confidences) if confidences else 0.0,
+            "average_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+            "supporting_runs": run_indices,
+        }
+        if reasons:
+            candidate["reason"] = reasons[0]
+        if len(reasons) > 1:
+            candidate["reasons"] = reasons
+        candidates.append(candidate)
+
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -int(item.get("support_count", 0) or 0),
+            -float(item.get("confidence", 0) or 0),
+            str(item.get("corrected_text", "")),
+        ),
+    )
+
+
+def _merge_typo_group(group: list[dict], *, run_count: int, status: str) -> dict:
+    best = max(group, key=lambda item: float(item.get("confidence", 0) or 0))
+    confidences = [float(item.get("confidence", 0) or 0) for item in group]
+    reasons = _collect_reasons(group)
+    candidates = _correction_candidates(group)
+    top_candidate = candidates[0] if candidates else {}
+    run_indices = sorted({
+        int(item.get("run_index", 0) or 0)
+        for item in group
+        if int(item.get("run_index", 0) or 0) > 0
+    })
+    support_count = len(run_indices)
+    merged = {
+        "slide_number": best.get("slide_number"),
+        "slide_title": best.get("slide_title", ""),
+        "problematic_text": best.get("problematic_text", ""),
+        "corrected_text": top_candidate.get("corrected_text") or best.get("corrected_text", ""),
+        "correction_candidates": candidates,
+        "reason": top_candidate.get("reason") or (reasons[0] if reasons else str(best.get("reason", "") or "")),
+        "confidence": max(confidences) if confidences else 0.0,
+        "average_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
+        "support_count": support_count,
+        "run_count": run_count,
+        "detection_rate": support_count / run_count if run_count else 0.0,
+        "supporting_runs": run_indices,
+        "consensus_status": status,
+    }
+    if len(reasons) > 1:
+        merged["reasons"] = reasons
+    return merged
+
+
+def _split_by_consensus(
+    typos: list[dict],
+    *,
+    run_count: int,
+    min_detection_rate: float,
+    review_min_detection_rate: float,
+) -> tuple[list[dict], list[dict]]:
+    grouped: dict[tuple, list[dict]] = {}
+    for typo in typos:
+        grouped.setdefault(_typo_key(typo), []).append(typo)
+
+    confirmed: list[dict] = []
+    needs_review: list[dict] = []
+    for group in grouped.values():
+        support_count = len({
+            int(item.get("run_index", 0) or 0)
+            for item in group
+            if int(item.get("run_index", 0) or 0) > 0
+        })
+        if _meets_rate(support_count, run_count, min_detection_rate):
+            confirmed.append(_merge_typo_group(group, run_count=run_count, status="confirmed"))
+        elif _meets_rate(support_count, run_count, review_min_detection_rate):
+            review_item = _merge_typo_group(group, run_count=run_count, status="needs_review")
+            review_item["review_stage"] = "slide_typo"
+            review_item["review_reason_code"] = "low_typo_consensus"
+            needs_review.append(review_item)
+
+    sort_key = lambda x: (
+        int(x.get("slide_number", 0) or 0),
+        -float(x.get("detection_rate", 0) or 0),
+        -float(x.get("confidence", 0) or 0),
+    )
+    return sorted(confirmed, key=sort_key), sorted(needs_review, key=sort_key)
+
+
 def detect_slide_typos(
     slides: list[dict],
     img_dir: Optional[str] = None,
     max_workers: int = 4,
-) -> tuple[list[dict], int, int, dict]:
+) -> tuple[list[dict], list[dict], int, int, dict]:
     from . import claim_common as cc
 
     if not slides:
-        return [], 0, 0, cc._empty_token_usage()
+        return [], [], 0, 0, cc._empty_token_usage()
 
     results: list[dict] = []
     api_calls = 0
     failures = 0
     token_usage = cc._empty_token_usage()
+    num_runs = max(1, int(getattr(cc, "VERIFIER_SLIDE_TYPO_RUNS", 1) or 1))
+    min_detection_rate = _safe_rate(getattr(cc, "VERIFIER_SLIDE_TYPO_MIN_RATE", 1.0), 1.0)
+    review_min_detection_rate = _safe_rate(
+        getattr(cc, "VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", 0.5),
+        0.5,
+    )
+    review_min_detection_rate = min(review_min_detection_rate, min_detection_rate)
 
-    def process(slide: dict):
+    def process(slide: dict, run_index: int):
         sn = slide.get("slide_number", "?")
-        print(f"    슬라이드 오타 검사 [{sn}]")
-        return _check_single_slide(slide, img_dir)
+        suffix = f" ({run_index}/{num_runs})" if num_runs > 1 else ""
+        print(f"    슬라이드 오타 검사 [{sn}]{suffix}")
+        return _check_single_slide(slide, img_dir, run_index=run_index)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(process, slide): slide for slide in slides}
+        futures = {
+            ex.submit(process, slide, run_index): (slide, run_index)
+            for slide in slides
+            for run_index in range(1, num_runs + 1)
+        }
         for future in as_completed(futures):
-            slide = futures[future]
             try:
                 typos, parse_failed, calls, usage = future.result()
                 results.extend(typos)
@@ -161,19 +315,10 @@ def detect_slide_typos(
             except Exception:
                 failures += 1
 
-    dedup = {}
-    for typo in results:
-        key = (
-            typo.get("slide_number"),
-            typo.get("problematic_text", "").strip().lower(),
-            typo.get("corrected_text", "").strip().lower(),
-        )
-        prev = dedup.get(key)
-        if prev is None or float(typo.get("confidence", 0) or 0) > float(prev.get("confidence", 0) or 0):
-            dedup[key] = typo
-
-    final = sorted(
-        dedup.values(),
-        key=lambda x: (int(x.get("slide_number", 0) or 0), -float(x.get("confidence", 0) or 0)),
+    confirmed, needs_review = _split_by_consensus(
+        results,
+        run_count=num_runs,
+        min_detection_rate=min_detection_rate,
+        review_min_detection_rate=review_min_detection_rate,
     )
-    return final, api_calls, failures, token_usage
+    return confirmed, needs_review, api_calls, failures, token_usage
