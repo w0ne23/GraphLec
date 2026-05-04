@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import traceback
 from pathlib import Path
 
@@ -9,24 +10,129 @@ from .cross_merge import _issue_match_key
 from .cross_utils import _empty_token_usage, _merge_token_usage, _setup_worker
 
 
+def _extract_batch_cache_path(cache_dir: str | None, index: int, first_uid: str, last_uid: str) -> Path | None:
+    if not cache_dir:
+        return None
+    safe_first = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(first_uid or "start"))
+    safe_last = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in str(last_uid or "end"))
+    return Path(cache_dir) / f"phase1_extract_batch_{index + 1:03d}_{safe_first}_{safe_last}.json"
+
+
+def _load_extract_batch_cache(
+    cache_dir: str | None,
+    index: int,
+    batch: list[dict],
+    expected_meta: dict,
+    *,
+    resume: bool,
+) -> dict | None:
+    if not batch:
+        return None
+    path = _extract_batch_cache_path(
+        cache_dir,
+        index,
+        str(batch[0].get("utterance_id", "") or ""),
+        str(batch[-1].get("utterance_id", "") or ""),
+    )
+    if not resume or path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"    ⚠️ claim batch 캐시 로드 실패, 재실행: {path.name} ({e})", flush=True)
+        return None
+    if payload.get("meta") != expected_meta:
+        print(f"    ⚠️ claim batch 캐시 설정 불일치, 재실행: {path.name}", flush=True)
+        return None
+    print(f"    ↻ claim batch 캐시 사용 [{index + 1}] {path.name}", flush=True)
+    return payload.get("payload")
+
+
+def _save_extract_batch_cache(
+    cache_dir: str | None,
+    index: int,
+    batch: list[dict],
+    meta: dict,
+    payload: dict,
+) -> None:
+    if not batch:
+        return
+    path = _extract_batch_cache_path(
+        cache_dir,
+        index,
+        str(batch[0].get("utterance_id", "") or ""),
+        str(batch[-1].get("utterance_id", "") or ""),
+    )
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps({"meta": meta, "payload": payload}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
 def extract_worker(args_tuple):
     try:
-        merged_path, model, batch_size, root, env_vars, current_date = args_tuple
+        if len(args_tuple) >= 9:
+            merged_path, model, batch_size, root, env_vars, current_date, cache_dir, resume, cache_meta = args_tuple
+        else:
+            merged_path, model, batch_size, root, env_vars, current_date = args_tuple
+            cache_dir, resume, cache_meta = None, False, {}
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
+        from analyzer.claim_extractor import recover_claim_extraction
 
         ctx = cv.prepare_verification(merged_path, current_date=current_date)
         print(f"\n  [{model}] 1단계: claim 추출 시작", flush=True)
 
-        claims_by_batch, api_calls, token_usage = cv.extract_claims_only(
-            ctx["utterances"], ctx["current_date"], ctx["hint"], ctx["slide_ctx"], batch_size
-        )
+        utterances = ctx["utterances"]
+        batches = [utterances[i:i + batch_size] for i in range(0, len(utterances), batch_size)]
+        claims_by_batch = []
+        api_calls = 0
+        token_usage = cv.cc._empty_token_usage()
+
+        for i, batch in enumerate(batches):
+            ids = f"{batch[0]['utterance_id']}..{batch[-1]['utterance_id']}"
+            batch_meta = {
+                **(cache_meta or {}),
+                "stage": "phase1_extract_batch",
+                "batch_index": i,
+                "batch_first_utterance_id": batch[0].get("utterance_id", ""),
+                "batch_last_utterance_id": batch[-1].get("utterance_id", ""),
+                "batch_utterance_count": len(batch),
+            }
+            cached = _load_extract_batch_cache(cache_dir, i, batch, batch_meta, resume=resume)
+            if cached is not None:
+                claims = cached.get("claims", [])
+                batch_calls = int(cached.get("api_calls", 0) or 0)
+                batch_usage = cached.get("token_usage") or cv.cc._empty_token_usage()
+            else:
+                print(f"    추출 [{i+1}/{len(batches)}] {ids}", flush=True)
+                claims, parse_failed, batch_calls, batch_usage, ok = recover_claim_extraction(
+                    batch, ctx["current_date"], ctx["hint"], ctx["slide_ctx"], f"배치 {i+1} {ids}"
+                )
+                if parse_failed or not ok:
+                    raise RuntimeError(f"claim 추출 batch 실패: {ids}")
+                _save_extract_batch_cache(
+                    cache_dir,
+                    i,
+                    batch,
+                    batch_meta,
+                    {"claims": claims, "api_calls": batch_calls, "token_usage": batch_usage},
+                )
+            claims_by_batch.append((batch, claims))
+            api_calls += batch_calls
+            token_usage = cv.cc._merge_token_usage(token_usage, batch_usage)
 
         serialized = []
         for batch, claims in claims_by_batch:
             serialized.append({"batch": batch, "claims": claims})
 
         total = sum(len(c) for _, c in claims_by_batch)
+        print(f"  추출된 claim: {total}개", flush=True)
         print(f"  [{model}] claim 추출 완료: {total}개", flush=True)
         return {
             "model": model,
