@@ -763,7 +763,7 @@ def _parse_grounding_payload(text: str) -> dict:
     grounding 응답을 최대한 복구해서 파싱.
     1) strict JSON
     2) object 블록 추출 + trailing comma 정리
-    3) 최소 필드(is_valid/reason/evidence_sources) regex 복구
+    3) 최소 필드(status/is_valid/reason/evidence_sources) regex 복구
     """
     cleaned = _strip_json_fence((text or "").strip())
     candidates = [cleaned]
@@ -789,6 +789,10 @@ def _parse_grounding_payload(text: str) -> dict:
                 pass
 
     recovered = {}
+    status = _extract_json_like_string_field(cleaned, "status").lower().strip()
+    if status:
+        recovered["status"] = status
+
     is_valid = _extract_json_like_bool_field(
         cleaned,
         ["is_valid", "issue_is_valid", "claim_is_true", "claim_is_valid"],

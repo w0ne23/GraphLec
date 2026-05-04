@@ -72,15 +72,55 @@ Google Search 결과를 근거로, 이 지적이 **타당한지** 판단해주�
 응답 (JSON만):
 ```json
 {{
+  "status": "verified_error" | "rejected_by_evidence" | "insufficient_evidence" | "grounding_unavailable",
   "is_valid": true | false,
   "reason": "검색 근거를 바탕으로 판단 이유를 한 줄로 설명",
   "evidence_sources": ["근거가 된 URL (있으면)"]
 }}
 ```
 
+status 기준:
+- verified_error: 검색 근거로 이 오류 지적이 타당함
+- rejected_by_evidence: 검색 근거상 발화/claim이 맞거나 이슈가 아님
+- insufficient_evidence: 검색 근거가 부족하거나 모호함
+- grounding_unavailable: 검색/도구 문제로 판단할 수 없음
+
+호환 규칙:
+- status가 verified_error이면 is_valid는 true
+- status가 rejected_by_evidence 또는 insufficient_evidence이면 is_valid는 false
+- status가 grounding_unavailable이면 is_valid는 true로 두고 reason에 한계를 설명
+
 JSON 외 텍스트를 출력하지 마세요.
 reason에는 줄바꿈을 넣지 마세요.
 """
+
+
+_GROUNDING_STATUSES = {
+    "verified_error",
+    "rejected_by_evidence",
+    "insufficient_evidence",
+    "grounding_unavailable",
+}
+
+
+def _coerce_bool(value, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value or "").strip().lower()
+    if text in {"true", "yes", "1", "valid"}:
+        return True
+    if text in {"false", "no", "0", "invalid", "rejected"}:
+        return False
+    return default
+
+
+def _normalize_grounding_status(payload: dict, is_valid: bool) -> str:
+    status = str(payload.get("status", "") or "").strip().lower()
+    if status in _GROUNDING_STATUSES:
+        return status
+    return "verified_error" if is_valid else "rejected_by_evidence"
 
 
 def _ground_verify_issue(
@@ -104,13 +144,15 @@ def _ground_verify_issue(
             stage="grounding",
         )
         payload = cv._parse_grounding_payload(text)
-        is_valid = payload.get("is_valid", True)
+        is_valid = _coerce_bool(payload.get("is_valid", True), default=True)
+        status = _normalize_grounding_status(payload, is_valid)
         reason = str(payload.get("reason", "") or "")
         sources = payload.get("evidence_sources", [])
         if not isinstance(sources, list):
             sources = []
 
-        issue["grounding_verified"] = bool(is_valid)
+        issue["grounding_status"] = status
+        issue["grounding_verified"] = is_valid
         issue["grounding_reason"] = reason
         issue["grounding_api_failed"] = False
         if sources:
@@ -120,6 +162,7 @@ def _ground_verify_issue(
         cv._add_call_usage(token_usage, call_usage)
         return issue, token_usage
     except Exception:
+        issue["grounding_status"] = "grounding_unavailable"
         issue["grounding_verified"] = None
         issue["grounding_reason"] = "grounding 응답 파싱 실패(이슈는 보수적으로 유지)"
         issue["grounding_api_failed"] = True
@@ -169,6 +212,7 @@ def ground_verify_all_issues(
             except Exception as e:
                 idx = futures[f]
                 issue_copy = issues[idx].copy()
+                issue_copy["grounding_status"] = "grounding_unavailable"
                 issue_copy["grounding_verified"] = None
                 issue_copy["grounding_reason"] = f"grounding 실패: {e}"
                 issue_copy["grounding_api_failed"] = True
