@@ -192,7 +192,7 @@ def _resolve_claim_match(issue: dict, claim_candidates: dict[str, list[dict]]) -
 def _claim_record_from_claim(claim: dict, utterance_lookup: dict[str, dict], stage: str) -> dict:
     uid = str(claim.get("utterance_id", "") or "")
     utt = utterance_lookup.get(uid, {})
-    return {
+    record = {
         "utterance_id": uid,
         "slide_number": utt.get("slide_number"),
         "start_time": utt.get("start_time"),
@@ -205,7 +205,66 @@ def _claim_record_from_claim(claim: dict, utterance_lookup: dict[str, dict], sta
         "source_claim_key": _claim_key(claim),
         "matched_to_extracted_claim": True,
         "stage": stage,
+        "source": {
+            "slide_number": utt.get("slide_number"),
+            "utterance_id": uid,
+            "start_time": utt.get("start_time"),
+            "end_time": utt.get("end_time"),
+        },
     }
+    if stage == "first_stage_rejected":
+        record["rejection_reason_code"] = "first_stage_not_flagged"
+    return record
+
+
+def _model_verdicts_from_issue(issue: dict) -> dict:
+    verdicts = {}
+    for row in issue.get("crosscheck_details", []) or []:
+        if not isinstance(row, dict):
+            continue
+        model = str(row.get("model") or row.get("resolved_model") or "").strip()
+        if not model:
+            continue
+        verdicts[model] = {
+            "verdict": row.get("verdict", ""),
+            "reason": row.get("reason", ""),
+            "resolved_model": row.get("resolved_model", model),
+        }
+    return verdicts
+
+
+def _grounding_from_issue(issue: dict) -> dict:
+    verified = issue.get("grounding_verified")
+    if verified is True:
+        status = "verified_error"
+    elif verified is False:
+        status = "rejected_by_evidence"
+    elif issue.get("grounding_api_failed"):
+        status = "grounding_unavailable"
+    else:
+        status = "not_applicable"
+    sources = issue.get("evidence_sources", [])
+    if not isinstance(sources, list):
+        sources = []
+    return {
+        "status": status,
+        "reason": issue.get("grounding_reason", ""),
+        "evidence_sources": sources,
+    }
+
+
+def _default_rejection_reason_code(stage: str, issue: dict) -> str:
+    if issue.get("rejection_reason_code"):
+        return str(issue.get("rejection_reason_code"))
+    if stage == "crosscheck_rejected":
+        return "model_disagreement"
+    if stage == "crosscheck_inconclusive":
+        return "crosscheck_inconclusive"
+    if stage == "slide_recheck_rejected":
+        return "slide_context_rejected"
+    if stage == "grounding_rejected":
+        return "grounding_rejected"
+    return ""
 
 
 def _claim_record_from_issue(
@@ -248,9 +307,14 @@ def _claim_record_from_issue(
             "correct_info": issue.get("correct_info", ""),
             "severity": issue.get("severity", ""),
             "confidence": issue.get("confidence", 0),
+            "model_verdicts": _model_verdicts_from_issue(issue),
+            "grounding": _grounding_from_issue(issue),
             **_classify_pedagogical_issue(issue),
         }
     )
+    rejection_reason_code = _default_rejection_reason_code(stage, issue)
+    if rejection_reason_code:
+        record["rejection_reason_code"] = rejection_reason_code
     if utt := utterance_lookup.get(record["utterance_id"], {}):
         if utt.get("utterance_context"):
             record["utterance_context"] = utt["utterance_context"]
@@ -478,6 +542,7 @@ def _reorder_result_for_output(result: dict) -> dict:
         "claim_decision_flow",
         "overall_assessment",
         "mode",
+        "verification_date",
         "models",
         "primary_model",
         "claim_extract_model",
@@ -494,6 +559,8 @@ def _reorder_result_for_output(result: dict) -> dict:
         "issues",
         "crosscheck_rejected_issues",
         "crosscheck_inconclusive_issues",
+        "slide_recheck_status",
+        "slide_recheck_reason",
         "slide_rejected_issues",
         "grounding_rejected_issues",
         "rejected_issues",
@@ -564,6 +631,7 @@ def run_all_analyzers(
         batch_size=claim_batch_size,
         judge_batch_size=cross_batch_size,
         env_vars=_collect_env_vars(),
+        current_date=current_date,
     )
 
     claims_for_log = verification_result.get("merged_claims")
