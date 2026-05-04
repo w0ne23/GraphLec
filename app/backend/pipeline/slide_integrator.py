@@ -220,9 +220,8 @@ class SlideIntegrator:
         """
         slide_textualized.json의 slide_emphasis에서 slide 강조 수집.
 
-        emphasis_weight (slide_textualizer 후처리에서 부여):
-          - callout 타입 : 0.3  (말풍선/설명 줄글 — 강조 신호 약함)
-          - 그 외         : 1.0
+        emphasis_weight는 legacy slide_textualized.json에 있을 때만 사용한다.
+        현재 slide_textualizer는 이 필드를 새로 생성하지 않으므로 기본값 1.0으로 처리한다.
         emphasis_count는 정수 그대로 집계하고 (마킹 레벨 결정용),
         emphasis_weight_sum에 가중치를 누적한다.
         """

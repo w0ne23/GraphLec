@@ -509,15 +509,7 @@ class T1Extractor:
              - 같은 text(정규화 기준)가 여러 항목으로 등장하면 하나로 합침
              - type은 리스트로 수집 후 중복 제거: ["bold", "box"]
              - bbox는 첫 번째 항목 기준 유지
-          3. emphasis_weight 부여 (병합 후 적용)
-             - callout 타입 포함 : 0.3
-             - box 타입만 포함   : 0.5  (테두리 박스 — 레이아웃 요소일 수 있음)
-             - 그 외             : 1.0
         """
-        WEIGHT_CALLOUT = 0.3
-        WEIGHT_BOX     = 0.5
-        WEIGHT_NORMAL  = 1.0
-
         # 순번 단독 패턴: "1" / "2." / "3)" / "10. " 등
         _standalone_num = re.compile(r'^\d+[\.\)]*\s*$')
 
@@ -548,25 +540,17 @@ class T1Extractor:
                 if not buckets[key]["color"] and item.get("color"):
                     buckets[key]["color"] = item.get("color")
 
-        # ── 2단계: weight 부여 후 최종 리스트 생성 ──────────────────────────── #
+        # ── 2단계: 최종 리스트 생성 ────────────────────────────────────────── #
         filtered = []
         for bucket in buckets.values():
             types = bucket["types"]
             type_val = types[0] if len(types) == 1 else types  # 단일이면 str, 복수면 list
 
-            if "callout" in types:
-                weight = WEIGHT_CALLOUT
-            elif types == ["box"]:
-                weight = WEIGHT_BOX
-            else:
-                weight = WEIGHT_NORMAL
-
             filtered.append({
-                "text":             bucket["text"],
-                "type":             type_val,
-                "color":            bucket["color"],
-                "bbox":             bucket["bbox"],
-                "emphasis_weight":  weight,
+                "text":  bucket["text"],
+                "type":  type_val,
+                "color": bucket["color"],
+                "bbox":  bucket["bbox"],
             })
 
         return filtered
