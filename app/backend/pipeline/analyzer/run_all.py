@@ -594,6 +594,8 @@ def _reorder_result_for_output(result: dict) -> dict:
         "verification_date",
         "models",
         "primary_model",
+        "resume_enabled",
+        "resume_cache_dir",
         "claim_extract_model",
         "claims_per_model",
         "merged_claims_count",
@@ -655,6 +657,7 @@ def run_all_analyzers(
     cross_batch_size: int = 20,
     current_date: str | None = None,
     skip_slide_typo: bool = False,
+    resume: bool = False,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
@@ -687,6 +690,8 @@ def run_all_analyzers(
         env_vars=_collect_env_vars(),
         current_date=current_date,
         skip_slide_typo=skip_slide_typo,
+        resume=resume,
+        cache_dir=str(out_dir / "_verifier_cache"),
     )
 
     claims_for_log = verification_result.get("merged_claims")
@@ -740,6 +745,7 @@ def main():
     parser.add_argument("--cross-batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
+    parser.add_argument("--resume", action="store_true", help="output-dir의 중간 캐시를 재사용해 실패 지점부터 재개")
     args = parser.parse_args()
 
     result = run_all_analyzers(
@@ -755,6 +761,7 @@ def main():
         cross_batch_size=args.cross_batch_size,
         current_date=args.date,
         skip_slide_typo=args.skip_slide_typo,
+        resume=args.resume,
     )
 
     print("\n=== Verifier 완료 ===")
