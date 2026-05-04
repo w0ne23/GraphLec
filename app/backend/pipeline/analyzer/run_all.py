@@ -335,6 +335,9 @@ def _claim_record_from_issue(
             "model_verdicts": _model_verdicts_from_issue(issue),
             "slide_recheck": _slide_recheck_from_issue(issue),
             "grounding": _grounding_from_issue(issue),
+            "merged_claim_texts": issue.get("merged_claim_texts", []),
+            "merged_problematic_contents": issue.get("merged_problematic_contents", []),
+            "merged_issue_count": issue.get("merged_issue_count", 1),
             **_classify_pedagogical_issue(issue),
         }
     )
