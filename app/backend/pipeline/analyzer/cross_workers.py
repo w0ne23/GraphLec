@@ -11,11 +11,11 @@ from .cross_utils import _empty_token_usage, _merge_token_usage, _setup_worker
 
 def extract_worker(args_tuple):
     try:
-        merged_path, model, batch_size, root, env_vars = args_tuple
+        merged_path, model, batch_size, root, env_vars, current_date = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
-        ctx = cv.prepare_verification(merged_path)
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
         print(f"\n  [{model}] 1단계: claim 추출 시작", flush=True)
 
         claims_by_batch, api_calls, token_usage = cv.extract_claims_only(
@@ -40,11 +40,11 @@ def extract_worker(args_tuple):
 
 def judge_worker(args_tuple):
     try:
-        merged_path, model, claims_serialized, num_runs, min_rate, root, env_vars = args_tuple
+        merged_path, model, claims_serialized, num_runs, min_rate, root, env_vars, current_date = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
-        ctx = cv.prepare_verification(merged_path)
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
         print(f"\n  [{model}] 2단계: claim 판정 시작", flush=True)
 
         claims_by_batch = [(item["batch"], item["claims"]) for item in claims_serialized]
@@ -66,11 +66,11 @@ def judge_worker(args_tuple):
 def cross_recheck_worker(args_tuple):
     """합집합 전체 이슈를 각 모델이 텍스트+문맥으로 재검증."""
     try:
-        issues, merged_path, model, root, env_vars = args_tuple
+        issues, merged_path, model, root, env_vars, current_date = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
-        ctx = cv.prepare_verification(merged_path)
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
         print(f"\n  [{model}] 텍스트+문맥 교차검증: {len(issues)}건 확인 중...", flush=True)
         resolved_model = cv._resolve_stage_model("cross_recheck")
 
@@ -98,11 +98,11 @@ def cross_recheck_worker(args_tuple):
 def stages_3_4_worker(args_tuple):
     """primary 모델로 grounding 실행."""
     try:
-        merged_path, model, issues, root, env_vars = args_tuple
+        merged_path, model, issues, root, env_vars, current_date = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
-        ctx = cv.prepare_verification(merged_path)
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
         hint = ctx["hint"]
         slide_ctx = ctx["slide_ctx"]
         slides = ctx["slides"]
@@ -131,12 +131,12 @@ def stages_3_4_worker(args_tuple):
 def slide_typo_worker(args_tuple):
     """슬라이드 이미지 기준 오타 검사."""
     try:
-        merged_path, model, root, env_vars = args_tuple
+        merged_path, model, root, env_vars, current_date = args_tuple
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
         from analyzer.slide_typo_checker import detect_slide_typos
 
-        ctx = cv.prepare_verification(merged_path)
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
         merged = ctx["merged"]
         detector_log = str(merged.get("source_detector_log", "") or "").strip()
         img_dir = str(Path(detector_log).parent) if detector_log else None

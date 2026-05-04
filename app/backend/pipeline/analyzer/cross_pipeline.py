@@ -16,6 +16,7 @@ import argparse
 import json
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 
 from .cross_merge import _cluster_contextual_issues, _issue_match_key, rebuild_claim_batches, union_claims, union_issues
@@ -48,15 +49,17 @@ def cross_verify(
     batch_size: int,
     env_vars: dict,
     judge_batch_size: int | None = None,
+    current_date: str | None = None,
 ) -> dict:
     root = str(_ROOT)
+    current_date = current_date or datetime.now().strftime("%Y-%m-%d")
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
     print(f"  Phase 1: claim 추출 (단일) — {CLAIM_EXTRACT_MODEL}")
     print(f"{'='*60}")
 
-    extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars)
+    extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars, current_date)
 
     try:
         extract_result = extract_worker(extract_args)
@@ -97,7 +100,7 @@ def cross_verify(
     print(f"{'='*60}")
 
     judge_args = [
-        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars)
+        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars, current_date)
         for model in models
     ]
 
@@ -146,7 +149,7 @@ def cross_verify(
         print(f"  Phase 3: 텍스트+문맥 교차검증 — 합집합 {total_union}건을 두 모델이 재검증")
         print(f"{'='*60}")
 
-        recheck_args = [(unioned, merged_path, m, root, env_vars) for m in models]
+        recheck_args = [(unioned, merged_path, m, root, env_vars, current_date) for m in models]
         cross_recheck_by_model = {}
 
         with ProcessPoolExecutor(max_workers=len(recheck_args)) as executor:
@@ -191,8 +194,10 @@ def cross_verify(
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = " / ".join(reasons)
                 if any_inconclusive:
+                    issue["rejection_reason_code"] = "crosscheck_inconclusive"
                     cross_recheck_inconclusive.append(issue)
                 else:
+                    issue["rejection_reason_code"] = "model_disagreement"
                     cross_recheck_rejected.append(issue)
 
         if cross_recheck_verified:
@@ -214,7 +219,7 @@ def cross_verify(
 
         with ProcessPoolExecutor(max_workers=1) as executor:
             future = executor.submit(stages_3_4_worker,
-                                     (merged_path, primary, all_confirmed, root, env_vars))
+                                     (merged_path, primary, all_confirmed, root, env_vars, current_date))
             final = future.result()
     else:
         final = {
@@ -233,11 +238,18 @@ def cross_verify(
         "token_usage": _empty_token_usage(),
     }
     try:
-        slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars))
+        slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
     except Exception as e:
         print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
 
     # ── 결과 조합 ──
+    for issue in final["slide_rejected"]:
+        issue.setdefault("rejection_stage", "슬라이드 재검증")
+        issue.setdefault("rejection_reason_code", "slide_context_rejected")
+    for issue in final["grounding_rejected"]:
+        issue.setdefault("rejection_stage", "grounding")
+        issue.setdefault("rejection_reason_code", "grounding_rejected")
+
     all_rejected = final["slide_rejected"] + final["grounding_rejected"] + cross_recheck_rejected + cross_recheck_inconclusive
     token_usage_per_model = {m: _empty_token_usage() for m in models}
     extract_token_usage = extract_result.get("token_usage")
@@ -255,6 +267,7 @@ def cross_verify(
     total_token_usage = _merge_token_usage(extract_token_usage, *(token_usage_per_model.values()))
     result = {
         "mode": "cross_verification",
+        "verification_date": current_date,
         "models": models,
         "primary_model": primary,
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
@@ -273,6 +286,11 @@ def cross_verify(
         "slide_typos": slide_typo_result.get("slide_typos", []),
         "crosscheck_rejected_issues": cross_recheck_rejected,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
+        "slide_recheck_status": "not_applicable",
+        "slide_recheck_reason": (
+            "cross_verification path does not run a separate slide recheck stage; "
+            "slide context is used in crosscheck and grounding prompts."
+        ),
         "slide_rejected_issues": final["slide_rejected"],
         "grounding_rejected_issues": final["grounding_rejected"],
         "rejected_issues": all_rejected,
@@ -437,6 +455,7 @@ def main():
     parser.add_argument("--num-runs", type=int, default=1, help="1차 judge 반복 횟수 (기본 1)")
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=20)
+    parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -450,6 +469,7 @@ def main():
         result = cross_verify(
             args.merged_path, args.models, args.num_runs,
             args.min_rate, args.batch_size, env_vars,
+            current_date=args.date,
         )
         print_cross_result(result)
     else:
