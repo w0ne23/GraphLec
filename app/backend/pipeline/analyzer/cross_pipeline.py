@@ -50,6 +50,7 @@ def cross_verify(
     env_vars: dict,
     judge_batch_size: int | None = None,
     current_date: str | None = None,
+    skip_slide_typo: bool = False,
 ) -> dict:
     root = str(_ROOT)
     current_date = current_date or datetime.now().strftime("%Y-%m-%d")
@@ -229,6 +230,8 @@ def cross_verify(
             "slide_recheck_reason": "crosscheck 통과 이슈가 없어 슬라이드 문맥 재검증을 건너뜀",
             "slide_recheck_failures": 0,
             "grounding_rejected": [],
+            "needs_review": [],
+            "grounding_failures": 0,
             "token_usage": _empty_token_usage(),
         }
 
@@ -240,10 +243,15 @@ def cross_verify(
         "failures": 0,
         "token_usage": _empty_token_usage(),
     }
-    try:
-        slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
-    except Exception as e:
-        print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
+    if skip_slide_typo:
+        print(f"\n  ⏭  슬라이드 오타 검사 스킵 (--skip-slide-typo)")
+        slide_typo_result["skipped"] = True
+        slide_typo_result["skip_reason"] = "skip_slide_typo"
+    else:
+        try:
+            slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
+        except Exception as e:
+            print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
 
     # ── 결과 조합 ──
     for issue in final["slide_rejected"]:
@@ -252,6 +260,10 @@ def cross_verify(
     for issue in final["grounding_rejected"]:
         issue.setdefault("rejection_stage", "grounding")
         issue.setdefault("rejection_reason_code", "grounding_rejected")
+    for issue in final.get("needs_review", []):
+        status = str(issue.get("grounding_status") or "").strip() or "grounding_unavailable"
+        issue.setdefault("review_stage", "grounding")
+        issue.setdefault("review_reason_code", status)
 
     all_rejected = final["slide_rejected"] + final["grounding_rejected"] + cross_recheck_rejected + cross_recheck_inconclusive
     token_usage_per_model = {m: _empty_token_usage() for m in models}
@@ -287,12 +299,15 @@ def cross_verify(
         "confirmed_count": len(all_confirmed),
         "issues": final["issues"],
         "slide_typos": slide_typo_result.get("slide_typos", []),
+        "slide_typo_status": "skipped" if slide_typo_result.get("skipped") else "completed",
+        "slide_typo_skip_reason": slide_typo_result.get("skip_reason", ""),
         "crosscheck_rejected_issues": cross_recheck_rejected,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
         "slide_recheck_status": final.get("slide_recheck_status", "completed"),
         "slide_recheck_reason": final.get("slide_recheck_reason", ""),
         "slide_rejected_issues": final["slide_rejected"],
         "grounding_rejected_issues": final["grounding_rejected"],
+        "needs_review_issues": final.get("needs_review", []),
         "rejected_issues": all_rejected,
         "claim_extract_token_usage": extract_token_usage,
         "token_usage_per_model": token_usage_per_model,
@@ -306,8 +321,9 @@ def cross_verify(
         "crosscheck_inconclusive_filtered": len(cross_recheck_inconclusive),
         "slide_recheck_filtered": len(final["slide_rejected"]),
         "grounding_filtered": len(final["grounding_rejected"]),
+        "needs_review_count": len(final.get("needs_review", [])),
         "slide_recheck_failures": int(final.get("slide_recheck_failures", 0) or 0),
-        "grounding_failures": len(final["grounding_rejected"]),
+        "grounding_failures": int(final.get("grounding_failures", 0) or 0),
         "slide_typo_failures": int(slide_typo_result.get("failures", 0) or 0),
     }
 
@@ -369,10 +385,15 @@ def print_cross_result(result: dict):
     print(f"    ├─ 텍스트+문맥 교차검증 불확실: {xi}건")
     print(f"    └─ 확정 이슈 (grounding 진입): {confirmed}건")
 
+    sr = result.get("slide_recheck_filtered", 0)
+    gr = result.get("grounding_filtered", 0)
+    nr = result.get("needs_review_count", 0)
+    if sr or gr or nr:
+        print(f"    → 슬라이드 재검증 기각: {sr}건, grounding 기각: {gr}건, 리뷰 필요: {nr}건")
     sf = result.get("slide_recheck_failures", 0)
     gf = result.get("grounding_failures", 0)
     if sf or gf:
-        print(f"    → 슬라이드 재검증 기각: {sf}건, grounding 기각: {gf}건")
+        print(f"    → 검사 실패: 슬라이드 재검증 {sf}건, grounding {gf}건")
     print()
 
     token_usage_per_model = result.get("token_usage_per_model", {})
@@ -401,6 +422,7 @@ def print_cross_result(result: dict):
     crosscheck_rejected = result.get("crosscheck_rejected_issues", [])
     crosscheck_inconclusive = result.get("crosscheck_inconclusive_issues", [])
     grounding_rejected = result.get("grounding_rejected_issues", [])
+    needs_review = result.get("needs_review_issues", [])
 
     if crosscheck_rejected:
         print(f"\n  ❌ 텍스트+문맥 교차검증 기각: {len(crosscheck_rejected)}건")
@@ -425,6 +447,17 @@ def print_cross_result(result: dict):
         for i, issue in enumerate(grounding_rejected):
             reason = issue.get("grounding_reason", "")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
+            print(f"        claim: {issue.get('claim_text','')[:100]}")
+            print(f"        issue: {issue.get('issue','')[:100]}")
+            if reason:
+                print(f"        사유: {reason[:120]}")
+
+    if needs_review:
+        print(f"\n  ⚠️ 리뷰 필요: {len(needs_review)}건")
+        for i, issue in enumerate(needs_review):
+            reason = issue.get("grounding_reason", "")
+            status = issue.get("grounding_status", "needs_review")
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} status={status}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             if reason:
@@ -456,6 +489,7 @@ def main():
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
+    parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -470,6 +504,7 @@ def main():
             args.merged_path, args.models, args.num_runs,
             args.min_rate, args.batch_size, env_vars,
             current_date=args.date,
+            skip_slide_typo=args.skip_slide_typo,
         )
         print_cross_result(result)
     else:

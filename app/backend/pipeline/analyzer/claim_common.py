@@ -16,6 +16,7 @@ if str(_ROOT) not in sys.path:
 from google.genai import types
 
 from config import (
+    OPENAI_SDK_IMPORT_ERROR,
     get_anthropic_client,
     get_gemini_client_sequence,
     get_openai_client,
@@ -243,7 +244,15 @@ def _call_llm(
         import base64
         client = get_openai_client()
         if client is None:
-            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+            if OPENAI_SDK_IMPORT_ERROR is not None:
+                raise RuntimeError(
+                    "openai 패키지가 설치되지 않았습니다. "
+                    "venv/bin/python -m pip install -r app/backend/pipeline/requirements.txt "
+                    "또는 venv/bin/python -m pip install 'openai>=1.0.0' 실행 후 다시 시도하세요."
+                )
+            if not os.getenv("OPENAI_API_KEY"):
+                raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+            raise RuntimeError("OpenAI client 초기화에 실패했습니다.")
 
         image_payloads = []
         if image_bytes_list:

@@ -89,12 +89,13 @@ def format_verification_report(result: dict) -> str:
             if issue.get("slide_recheck_reason"):
                 lines.append(f"  재검증 근거: {issue['slide_recheck_reason'][:200]}")
 
-    if not result.get("issues"):
-        lines.append("\n✅ 문제가 발견되지 않았습니다!")
-
     slide_rejected = result.get("slide_rejected_issues", [])
     grounding_rejected = result.get("grounding_rejected_issues", [])
+    needs_review = result.get("needs_review_issues", [])
     legacy_rejected = result.get("rejected_issues", [])
+
+    if not result.get("issues") and not slide_rejected and not grounding_rejected and not needs_review:
+        lines.append("\n✅ 문제가 발견되지 않았습니다!")
 
     if slide_rejected:
         lines.append(f"\n{'─' * 40}")
@@ -116,7 +117,18 @@ def format_verification_report(result: dict) -> str:
             lines.append(f"  [{i}] {t} | {issue.get('claim_text', issue.get('problematic_content', ''))[:60]}")
             lines.append(f"       사유: {reason[:120]}")
 
-    if not slide_rejected and not grounding_rejected and legacy_rejected:
+    if needs_review:
+        lines.append(f"\n{'─' * 40}")
+        lines.append(f"리뷰 필요 ({len(needs_review)}건)")
+        lines.append(f"{'─' * 40}")
+        for i, issue in enumerate(needs_review, 1):
+            t = format_timestamp(issue.get("start_time", 0))
+            status = issue.get("grounding_status") or "needs_review"
+            reason = issue.get("grounding_reason") or "N/A"
+            lines.append(f"  [{i}] {t} | {status} | {issue.get('claim_text', issue.get('problematic_content', ''))[:60]}")
+            lines.append(f"       사유: {reason[:120]}")
+
+    if not slide_rejected and not grounding_rejected and not needs_review and legacy_rejected:
         lines.append(f"\n{'─' * 40}")
         lines.append(f"기각된 이슈 ({len(legacy_rejected)}건)")
         lines.append(f"{'─' * 40}")
