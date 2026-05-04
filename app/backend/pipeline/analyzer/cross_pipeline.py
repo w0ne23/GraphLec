@@ -14,6 +14,7 @@
 
 import argparse
 import json
+import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
@@ -39,6 +40,88 @@ from .cross_workers import (
 )
 
 
+_CACHE_VERSION = 1
+
+
+def _safe_cache_name(value: str) -> str:
+    text = str(value or "").strip()
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_") or "default"
+
+
+def _cache_meta(
+    stage: str,
+    merged_path: str,
+    models: list[str],
+    current_date: str,
+    num_runs: int,
+    min_rate: float,
+    batch_size: int,
+    judge_batch_size: int | None,
+    *,
+    model: str | None = None,
+) -> dict:
+    merged_file = Path(merged_path).resolve()
+    try:
+        merged_mtime_ns = merged_file.stat().st_mtime_ns
+    except OSError:
+        merged_mtime_ns = None
+    return {
+        "cache_version": _CACHE_VERSION,
+        "stage": stage,
+        "merged_path": str(merged_file),
+        "merged_mtime_ns": merged_mtime_ns,
+        "models": list(models),
+        "model": model or "",
+        "current_date": current_date,
+        "num_runs": num_runs,
+        "min_rate": min_rate,
+        "batch_size": batch_size,
+        "judge_batch_size": judge_batch_size,
+        "claim_extract_model": CLAIM_EXTRACT_MODEL,
+    }
+
+
+def _cache_path(cache_dir: str | Path | None, name: str) -> Path | None:
+    if not cache_dir:
+        return None
+    return Path(cache_dir) / f"{name}.json"
+
+
+def _load_cache(
+    cache_dir: str | Path | None,
+    name: str,
+    expected_meta: dict,
+    *,
+    resume: bool,
+) -> dict | None:
+    path = _cache_path(cache_dir, name)
+    if not resume or path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  ⚠️ 캐시 로드 실패, 재실행: {path} ({e})")
+        return None
+    if payload.get("meta") != expected_meta:
+        print(f"  ⚠️ 캐시 설정 불일치, 재실행: {path.name}")
+        return None
+    print(f"  ↻ 캐시 사용: {path.name}")
+    return payload.get("payload")
+
+
+def _save_cache(cache_dir: str | Path | None, name: str, meta: dict, payload: dict) -> None:
+    path = _cache_path(cache_dir, name)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps({"meta": meta, "payload": payload}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+
+
 # ── 교차 검증 메인 ────────────────────────────────────────
 
 def cross_verify(
@@ -51,9 +134,13 @@ def cross_verify(
     judge_batch_size: int | None = None,
     current_date: str | None = None,
     skip_slide_typo: bool = False,
+    resume: bool = False,
+    cache_dir: str | None = None,
 ) -> dict:
     root = str(_ROOT)
     current_date = current_date or datetime.now().strftime("%Y-%m-%d")
+    if cache_dir:
+        print(f"  중간 캐시: {cache_dir} ({'resume' if resume else 'save-only'})")
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
@@ -61,17 +148,25 @@ def cross_verify(
     print(f"{'='*60}")
 
     extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars, current_date)
+    extract_meta = _cache_meta(
+        "phase1_extract",
+        merged_path,
+        models,
+        current_date,
+        num_runs,
+        min_rate,
+        batch_size,
+        judge_batch_size,
+        model=CLAIM_EXTRACT_MODEL,
+    )
 
-    try:
-        extract_result = extract_worker(extract_args)
-    except Exception as e:
-        print(f"  ❌ [{CLAIM_EXTRACT_MODEL}] 추출 실패: {e}")
-        extract_result = {
-            "model": CLAIM_EXTRACT_MODEL,
-            "claims_by_batch": [],
-            "api_calls": 0,
-            "token_usage": _empty_token_usage(),
-        }
+    extract_result = _load_cache(cache_dir, "phase1_extract", extract_meta, resume=resume)
+    if extract_result is None:
+        try:
+            extract_result = extract_worker(extract_args)
+            _save_cache(cache_dir, "phase1_extract", extract_meta, extract_result)
+        except Exception as e:
+            raise RuntimeError(f"[{CLAIM_EXTRACT_MODEL}] claim 추출 실패. 재실행 시 --resume을 사용할 수 있습니다.\n{e}") from e
 
     merged_claims = union_claims([extract_result])
     extract_claim_count = sum(len(item["claims"]) for item in extract_result["claims_by_batch"])
@@ -106,20 +201,47 @@ def cross_verify(
     ]
 
     judge_results = {}
-    with ProcessPoolExecutor(max_workers=len(models)) as executor:
-        futures = {executor.submit(judge_worker, a): a[1] for a in judge_args}
-        for future in as_completed(futures):
-            model = futures[future]
-            try:
-                judge_results[model] = future.result()
-            except Exception as e:
-                print(f"  ❌ [{model}] 판정 실패: {e}")
-                judge_results[model] = {
-                    "model": model,
-                    "issues": [],
-                    "api_calls": 0,
-                    "token_usage": _empty_token_usage(),
-                }
+    missing_judge_args = []
+    for arg in judge_args:
+        model = arg[1]
+        meta = _cache_meta(
+            "phase2_judge",
+            merged_path,
+            models,
+            current_date,
+            num_runs,
+            min_rate,
+            batch_size,
+            judge_batch_size,
+            model=model,
+        )
+        cache_name = f"phase2_judge_{_safe_cache_name(model)}"
+        cached = _load_cache(cache_dir, cache_name, meta, resume=resume)
+        if cached is not None:
+            judge_results[model] = cached
+        else:
+            missing_judge_args.append((arg, meta, cache_name))
+
+    judge_failures = []
+    if missing_judge_args:
+        with ProcessPoolExecutor(max_workers=len(missing_judge_args)) as executor:
+            futures = {executor.submit(judge_worker, a): (a, meta, cache_name) for a, meta, cache_name in missing_judge_args}
+            for future in as_completed(futures):
+                arg, meta, cache_name = futures[future]
+                model = arg[1]
+                try:
+                    result = future.result()
+                    judge_results[model] = result
+                    _save_cache(cache_dir, cache_name, meta, result)
+                except Exception as e:
+                    print(f"  ❌ [{model}] 판정 실패: {e}")
+                    judge_failures.append(model)
+    if judge_failures:
+        raise RuntimeError(
+            "claim 판정 실패: "
+            + ", ".join(judge_failures)
+            + ". 성공한 모델 결과는 캐시에 저장했습니다. 재실행 시 --resume을 사용하세요."
+        )
 
     # 합집합 + 공통/단독 탐지 분류
     judge_list = [{"model": m, "issues": r["issues"]} for m, r in judge_results.items()]
@@ -152,19 +274,55 @@ def cross_verify(
 
         recheck_args = [(unioned, merged_path, m, root, env_vars, current_date) for m in models]
         cross_recheck_by_model = {}
+        missing_recheck_args = []
+        for arg in recheck_args:
+            model = arg[2]
+            meta = _cache_meta(
+                "phase3_cross_recheck",
+                merged_path,
+                models,
+                current_date,
+                num_runs,
+                min_rate,
+                batch_size,
+                judge_batch_size,
+                model=model,
+            )
+            cache_name = f"phase3_cross_recheck_{_safe_cache_name(model)}"
+            cached = _load_cache(cache_dir, cache_name, meta, resume=resume)
+            if cached is not None:
+                cross_recheck_by_model[cached["model"]] = cached["verdicts"]
+                cross_recheck_usage_per_model[cached["model"]] = _merge_token_usage(
+                    cross_recheck_usage_per_model[cached["model"]],
+                    cached.get("token_usage"),
+                )
+            else:
+                missing_recheck_args.append((arg, meta, cache_name))
 
-        with ProcessPoolExecutor(max_workers=len(recheck_args)) as executor:
-            futures = {executor.submit(cross_recheck_worker, a): a for a in recheck_args}
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    cross_recheck_by_model[result["model"]] = result["verdicts"]
-                    cross_recheck_usage_per_model[result["model"]] = _merge_token_usage(
-                        cross_recheck_usage_per_model[result["model"]],
-                        result.get("token_usage"),
-                    )
-                except Exception as e:
-                    print(f"  ❌ 교차 재검증 실패: {e}")
+        recheck_failures = []
+        if missing_recheck_args:
+            with ProcessPoolExecutor(max_workers=len(missing_recheck_args)) as executor:
+                futures = {executor.submit(cross_recheck_worker, a): (a, meta, cache_name) for a, meta, cache_name in missing_recheck_args}
+                for future in as_completed(futures):
+                    arg, meta, cache_name = futures[future]
+                    model = arg[2]
+                    try:
+                        result = future.result()
+                        cross_recheck_by_model[result["model"]] = result["verdicts"]
+                        cross_recheck_usage_per_model[result["model"]] = _merge_token_usage(
+                            cross_recheck_usage_per_model[result["model"]],
+                            result.get("token_usage"),
+                        )
+                        _save_cache(cache_dir, cache_name, meta, result)
+                    except Exception as e:
+                        print(f"  ❌ [{model}] 교차 재검증 실패: {e}")
+                        recheck_failures.append(model)
+        if recheck_failures:
+            raise RuntimeError(
+                "텍스트+문맥 교차검증 실패: "
+                + ", ".join(recheck_failures)
+                + ". 성공한 모델 결과는 캐시에 저장했습니다. 재실행 시 --resume을 사용하세요."
+            )
 
         for issue in unioned:
             key = _issue_match_key(issue)
@@ -218,10 +376,24 @@ def cross_verify(
         print(f"  Phase 4: grounding — [{primary}]")
         print(f"{'='*60}")
 
-        with ProcessPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(stages_3_4_worker,
-                                     (merged_path, primary, all_confirmed, root, env_vars, current_date))
-            final = future.result()
+        final_meta = _cache_meta(
+            "phase4_slide_grounding",
+            merged_path,
+            models,
+            current_date,
+            num_runs,
+            min_rate,
+            batch_size,
+            judge_batch_size,
+            model=primary,
+        )
+        final = _load_cache(cache_dir, "phase4_slide_grounding", final_meta, resume=resume)
+        if final is None:
+            with ProcessPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(stages_3_4_worker,
+                                         (merged_path, primary, all_confirmed, root, env_vars, current_date))
+                final = future.result()
+            _save_cache(cache_dir, "phase4_slide_grounding", final_meta, final)
     else:
         final = {
             "issues": [],
@@ -248,10 +420,31 @@ def cross_verify(
         slide_typo_result["skipped"] = True
         slide_typo_result["skip_reason"] = "skip_slide_typo"
     else:
-        try:
-            slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
-        except Exception as e:
-            print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
+        typo_meta = _cache_meta(
+            "slide_typo",
+            merged_path,
+            models,
+            current_date,
+            num_runs,
+            min_rate,
+            batch_size,
+            judge_batch_size,
+            model=primary,
+        )
+        slide_typo_result = _load_cache(cache_dir, "slide_typo", typo_meta, resume=resume)
+        if slide_typo_result is None:
+            try:
+                slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
+                _save_cache(cache_dir, "slide_typo", typo_meta, slide_typo_result)
+            except Exception as e:
+                print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
+                slide_typo_result = {
+                    "model": primary,
+                    "slide_typos": [],
+                    "api_calls": 0,
+                    "failures": 1,
+                    "token_usage": _empty_token_usage(),
+                }
 
     # ── 결과 조합 ──
     for issue in final["slide_rejected"]:
@@ -285,6 +478,8 @@ def cross_verify(
         "verification_date": current_date,
         "models": models,
         "primary_model": primary,
+        "resume_enabled": resume,
+        "resume_cache_dir": str(cache_dir or ""),
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
         "claims_per_model": {CLAIM_EXTRACT_MODEL: extract_claim_count},
         "merged_claims_count": len(merged_claims),
@@ -490,6 +685,8 @@ def main():
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
+    parser.add_argument("--resume", action="store_true", help="중간 캐시를 재사용해 실패 지점부터 재개")
+    parser.add_argument("--cache-dir", default=None, help="중간 캐시 저장 디렉토리")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -505,6 +702,8 @@ def main():
             args.min_rate, args.batch_size, env_vars,
             current_date=args.date,
             skip_slide_typo=args.skip_slide_typo,
+            resume=args.resume,
+            cache_dir=args.cache_dir or (str(Path(args.output).with_suffix("")) + "_cache" if args.output else None),
         )
         print_cross_result(result)
     else:
