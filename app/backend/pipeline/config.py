@@ -31,15 +31,19 @@ from dotenv import load_dotenv
 from groq import Groq
 from google import genai
 
+OPENAI_SDK_IMPORT_ERROR = None
 try:
     from openai import OpenAI
-except ImportError:
+except ImportError as e:
     OpenAI = None
+    OPENAI_SDK_IMPORT_ERROR = e
 
+ANTHROPIC_SDK_IMPORT_ERROR = None
 try:
     from anthropic import Anthropic
-except ImportError:
+except ImportError as e:
     Anthropic = None
+    ANTHROPIC_SDK_IMPORT_ERROR = e
 
 load_dotenv()
 
