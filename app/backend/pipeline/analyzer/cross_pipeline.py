@@ -176,7 +176,6 @@ def cross_verify(
     print(f"  Phase 1: claim 추출 (단일) — {CLAIM_EXTRACT_MODEL}")
     print(f"{'='*60}")
 
-    extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars, current_date)
     extract_meta = _cache_meta(
         "phase1_extract",
         merged_path,
@@ -187,6 +186,17 @@ def cross_verify(
         batch_size,
         judge_batch_size,
         model=CLAIM_EXTRACT_MODEL,
+    )
+    extract_args = (
+        merged_path,
+        CLAIM_EXTRACT_MODEL,
+        batch_size,
+        root,
+        env_vars,
+        current_date,
+        cache_dir,
+        resume,
+        extract_meta,
     )
 
     extract_result = _load_cache(cache_dir, "phase1_extract", extract_meta, resume=resume)
