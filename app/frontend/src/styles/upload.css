@@ -116,5 +116,7 @@
 .upload-btn-retry:hover  { border-color: var(--blue); color: var(--blue); }
 .upload-btn-delete   { background: var(--red-bg); color: var(--red); border: 1px solid rgba(220,38,38,.2); padding: 4px 8px; border-radius: 4px; font-size: 11px; }
 .upload-btn-delete:hover { opacity: .8; }
+.upload-btn-verifier { background: var(--blue-bg); color: var(--blue); border: 1px solid var(--blue-br); padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; transition: all .14s; }
+.upload-btn-verifier:hover { background: var(--blue);  color: #fff; }
 .upload-row-arrow    { font-size: 16px; color: var(--t3); transition: color .14s; }
 .upload-row:hover .upload-row-arrow { color: var(--blue); }
