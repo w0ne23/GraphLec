@@ -234,15 +234,17 @@ def _model_verdicts_from_issue(issue: dict) -> dict:
 
 
 def _grounding_from_issue(issue: dict) -> dict:
-    verified = issue.get("grounding_verified")
-    if verified is True:
-        status = "verified_error"
-    elif verified is False:
-        status = "rejected_by_evidence"
-    elif issue.get("grounding_api_failed"):
-        status = "grounding_unavailable"
-    else:
-        status = "not_applicable"
+    status = str(issue.get("grounding_status") or "").strip()
+    if not status:
+        verified = issue.get("grounding_verified")
+        if verified is True:
+            status = "verified_error"
+        elif verified is False:
+            status = "rejected_by_evidence"
+        elif issue.get("grounding_api_failed"):
+            status = "grounding_unavailable"
+        else:
+            status = "not_applicable"
     sources = issue.get("evidence_sources", [])
     if not isinstance(sources, list):
         sources = []
