@@ -110,6 +110,8 @@ def stages_3_4_worker(args_tuple):
 
         slide_rejected = []
         grounding_rejected = []
+        needs_review = []
+        grounding_failures = 0
         slide_recheck_failures = 0
         slide_recheck_status = "skipped_no_issues"
         slide_recheck_reason = "crosscheck 통과 이슈가 없어 슬라이드 문맥 재검증을 건너뜀"
@@ -125,10 +127,12 @@ def stages_3_4_worker(args_tuple):
             token_usage = _merge_token_usage(token_usage, slide_token_usage)
 
         if issues:
-            verified, g_rejected, g_calls, g_failures, grounding_token_usage = cv._ground_verify_all_issues(
+            verified, g_rejected, g_needs_review, g_calls, g_failures, grounding_token_usage = cv._ground_verify_all_issues(
                 issues, hint, slide_ctx, slides
             )
             grounding_rejected = g_rejected
+            needs_review = g_needs_review
+            grounding_failures = g_failures
             issues = verified
             token_usage = _merge_token_usage(token_usage, grounding_token_usage)
 
@@ -139,6 +143,8 @@ def stages_3_4_worker(args_tuple):
             "slide_recheck_reason": slide_recheck_reason,
             "slide_recheck_failures": slide_recheck_failures,
             "grounding_rejected": grounding_rejected,
+            "needs_review": needs_review,
+            "grounding_failures": grounding_failures,
             "token_usage": token_usage,
         }
     except Exception as e:

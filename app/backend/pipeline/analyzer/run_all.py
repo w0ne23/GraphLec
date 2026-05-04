@@ -279,6 +279,19 @@ def _default_rejection_reason_code(stage: str, issue: dict) -> str:
     return ""
 
 
+def _default_review_reason_code(stage: str, issue: dict) -> str:
+    if issue.get("review_reason_code"):
+        return str(issue.get("review_reason_code"))
+    if stage == "needs_review":
+        status = str(issue.get("grounding_status") or "").strip()
+        if status:
+            return status
+        if issue.get("grounding_verified") is None:
+            return "grounding_unavailable"
+        return "needs_review"
+    return ""
+
+
 def _claim_record_from_issue(
     issue: dict,
     claim_lookup: dict[str, dict],
@@ -328,6 +341,9 @@ def _claim_record_from_issue(
     rejection_reason_code = _default_rejection_reason_code(stage, issue)
     if rejection_reason_code:
         record["rejection_reason_code"] = rejection_reason_code
+    review_reason_code = _default_review_reason_code(stage, issue)
+    if review_reason_code:
+        record["review_reason_code"] = review_reason_code
     if utt := utterance_lookup.get(record["utterance_id"], {}):
         if utt.get("utterance_context"):
             record["utterance_context"] = utt["utterance_context"]
@@ -343,6 +359,8 @@ def _claim_record_from_issue(
     )
     if rejection_reason:
         record["rejection_reason"] = rejection_reason
+    if stage == "needs_review" and rejection_reason:
+        record["review_reason"] = rejection_reason
     return record
 
 
@@ -381,6 +399,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "crosscheck_inconclusive_issues",
         "slide_rejected_issues",
         "grounding_rejected_issues",
+        "needs_review_issues",
         "rejected_issues",
     ):
         for issue in result.get(issue_list_key, []) or []:
@@ -414,6 +433,10 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "grounding_rejected")
         for issue in result.get("grounding_rejected_issues", [])
     ])
+    raw_needs_review = _dedupe_records([
+        _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "needs_review")
+        for issue in result.get("needs_review_issues", [])
+    ])
     unmatched_issue_records = [
         record
         for record in (
@@ -422,6 +445,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             + raw_crosscheck_inconclusive
             + raw_slide_rejected
             + raw_grounding_rejected
+            + raw_needs_review
         )
         if not record.get("matched_to_extracted_claim", True)
     ]
@@ -430,6 +454,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     crosscheck_inconclusive = [record for record in raw_crosscheck_inconclusive if record.get("matched_to_extracted_claim", True)]
     slide_rejected = [record for record in raw_slide_rejected if record.get("matched_to_extracted_claim", True)]
     grounding_rejected = [record for record in raw_grounding_rejected if record.get("matched_to_extracted_claim", True)]
+    needs_review = [record for record in raw_needs_review if record.get("matched_to_extracted_claim", True)]
     issue_keys = {
         record.get("source_claim_key") or _record_key(record)
         for records in (
@@ -438,6 +463,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             crosscheck_inconclusive,
             slide_rejected,
             grounding_rejected,
+            needs_review,
         )
         for record in records
     }
@@ -472,6 +498,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "crosscheck_inconclusive_claim_count": len(crosscheck_inconclusive),
         "slide_rejected_claim_count": len(slide_rejected),
         "grounding_rejected_claim_count": len(grounding_rejected),
+        "needs_review_claim_count": len(needs_review),
         "first_stage_rejected_claim_count": len(first_stage_rejected),
         "final_rejected_claim_count": len(final_rejected_keys),
         "unmatched_issue_record_count": len(unmatched_issue_records),
@@ -528,6 +555,14 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
                 "count": len(grounding_rejected),
             }
         )
+    if needs_review:
+        result["claim_decision_overview"].append(
+            {
+                "label": "리뷰 필요 claim",
+                "key": "needs_review_claims",
+                "count": len(needs_review),
+            }
+        )
     if unmatched_issue_records:
         result["claim_decision_overview"].append(
             {
@@ -543,6 +578,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "crosscheck_inconclusive_claims": crosscheck_inconclusive,
         "slide_rejected_claims": slide_rejected,
         "grounding_rejected_claims": grounding_rejected,
+        "needs_review_claims": needs_review,
         "unmatched_issue_records": unmatched_issue_records,
     }
     return result
@@ -576,8 +612,11 @@ def _reorder_result_for_output(result: dict) -> dict:
         "slide_recheck_reason",
         "slide_rejected_issues",
         "grounding_rejected_issues",
+        "needs_review_issues",
         "rejected_issues",
         "slide_typos",
+        "slide_typo_status",
+        "slide_typo_skip_reason",
         "claims_log_path",
         "merged_claims",
         "claim_extract_token_usage",
@@ -587,6 +626,7 @@ def _reorder_result_for_output(result: dict) -> dict:
         "crosscheck_inconclusive_filtered",
         "slide_recheck_filtered",
         "grounding_filtered",
+        "needs_review_count",
         "slide_recheck_failures",
         "grounding_failures",
         "slide_typo_failures",
@@ -614,6 +654,7 @@ def run_all_analyzers(
     cross_min_rate: float = 0.5,
     cross_batch_size: int = 20,
     current_date: str | None = None,
+    skip_slide_typo: bool = False,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
@@ -645,6 +686,7 @@ def run_all_analyzers(
         judge_batch_size=cross_batch_size,
         env_vars=_collect_env_vars(),
         current_date=current_date,
+        skip_slide_typo=skip_slide_typo,
     )
 
     claims_for_log = verification_result.get("merged_claims")
@@ -697,6 +739,7 @@ def main():
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
+    parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
     args = parser.parse_args()
 
     result = run_all_analyzers(
@@ -711,6 +754,7 @@ def main():
         cross_min_rate=args.cross_min_rate,
         cross_batch_size=args.cross_batch_size,
         current_date=args.date,
+        skip_slide_typo=args.skip_slide_typo,
     )
 
     print("\n=== Verifier 완료 ===")

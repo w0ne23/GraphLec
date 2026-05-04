@@ -161,7 +161,7 @@ def _ground_verify_all_issues(
     slide_ctx: dict | None = None,
     slides: list[dict] | None = None,
     max_workers: int = 4,
-) -> tuple[list[dict], list[dict], int, int, dict]:
+) -> tuple[list[dict], list[dict], list[dict], int, int, dict]:
     from analyzer.claim_grounding import ground_verify_all_issues
     return ground_verify_all_issues(issues, hint, slide_ctx, slides, max_workers=max_workers)
 
@@ -281,10 +281,18 @@ def verify_lecture_content(
     # ── 3단계: grounding 검증 (Google Search로 재검증) ──
     pre_grounding_issues = list(result.get("issues", []))
     grounding_rejected = []
+    needs_review = []
     if pre_grounding_issues:
         from analyzer.claim_grounding import ground_verify_all_issues
 
-        verified, grounding_rejected, grounding_calls, grounding_failures, grounding_token_usage = ground_verify_all_issues(
+        (
+            verified,
+            grounding_rejected,
+            needs_review,
+            grounding_calls,
+            grounding_failures,
+            grounding_token_usage,
+        ) = ground_verify_all_issues(
             pre_grounding_issues, hint, slide_ctx, slides, max_workers=max_workers,
         )
         result["issues"] = verified
@@ -318,9 +326,11 @@ def verify_lecture_content(
     # 단계별 기각 이슈 저장
     result["slide_rejected_issues"] = slide_rejected
     result["grounding_rejected_issues"] = grounding_rejected
+    result["needs_review_issues"] = needs_review
     result["rejected_issues"] = slide_rejected + grounding_rejected
     result["slide_recheck_filtered"] = len(slide_rejected)
     result["grounding_filtered"] = len(grounding_rejected)
+    result["needs_review_count"] = len(needs_review)
     result["is_complete"] = not any([
         result.get("parse_failures", 0),
         result.get("failed_calls", 0),
