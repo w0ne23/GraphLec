@@ -122,6 +122,35 @@ def _save_cache(cache_dir: str | Path | None, name: str, meta: dict, payload: di
     tmp_path.replace(path)
 
 
+def _dedupe_stage_issues(final: dict) -> None:
+    for key in ("issues", "slide_rejected", "grounding_rejected", "needs_review"):
+        final[key] = _cluster_contextual_issues(final.get(key, []) or [])
+
+
+def _split_missing_grounding_evidence(issues: list[dict]) -> tuple[list[dict], list[dict]]:
+    confirmed = []
+    needs_review = []
+    for issue in issues:
+        status = str(issue.get("grounding_status") or "").strip()
+        sources = issue.get("evidence_sources", [])
+        if not isinstance(sources, list):
+            sources = []
+        if status == "verified_error" and not sources:
+            review_issue = dict(issue)
+            review_issue["grounding_status_before_evidence_policy"] = status
+            review_issue["grounding_status"] = "insufficient_evidence"
+            review_issue["grounding_verified"] = False
+            reason = str(review_issue.get("grounding_reason") or "").strip()
+            suffix = "grounding evidence URL이 없어 최종 확정 대신 리뷰 필요로 분류"
+            review_issue["grounding_reason"] = f"{reason} ({suffix})" if reason else suffix
+            review_issue["review_stage"] = "grounding"
+            review_issue["review_reason_code"] = "missing_grounding_evidence"
+            needs_review.append(review_issue)
+        else:
+            confirmed.append(issue)
+    return confirmed, needs_review
+
+
 # ── 교차 검증 메인 ────────────────────────────────────────
 
 def cross_verify(
@@ -406,6 +435,13 @@ def cross_verify(
             "grounding_failures": 0,
             "token_usage": _empty_token_usage(),
         }
+    _dedupe_stage_issues(final)
+    final["issues"], missing_evidence_review = _split_missing_grounding_evidence(final.get("issues", []))
+    if missing_evidence_review:
+        final["needs_review"] = _cluster_contextual_issues([
+            *(final.get("needs_review", []) or []),
+            *missing_evidence_review,
+        ])
 
     # ── 별도: 슬라이드 오타 검사 ──
     slide_typo_result = {
