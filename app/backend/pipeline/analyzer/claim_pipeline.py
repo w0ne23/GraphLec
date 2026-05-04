@@ -19,6 +19,77 @@ VERIFIER_REQUIRE_COMPLETE = cc.VERIFIER_REQUIRE_COMPLETE
 
 # ── 단계별 공개 함수 (교차 검증용) ────────────────────────
 
+def _base_stem_from_merged_path(merged_path: Path) -> str:
+    stem = merged_path.stem
+    if stem.endswith("_merged_clean"):
+        return stem[: -len("_merged_clean")]
+    if stem.endswith("_merged"):
+        return stem[: -len("_merged")]
+    return stem
+
+
+def _enrich_slides_with_textualized(slides: list[dict], merged_path: str) -> None:
+    """같은 결과 폴더의 slide_textualized 산출물이 있으면 recheck용 구조 정보를 보강."""
+    path = Path(merged_path)
+    base_stem = _base_stem_from_merged_path(path)
+    candidates = [
+        path.with_name(f"{base_stem}_slide_textualized.json"),
+        path.parent / "slide_textualized.json",
+    ]
+    textualized_path = next((p for p in candidates if p.exists()), None)
+    if textualized_path is None:
+        return
+
+    try:
+        with textualized_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        return
+
+    raw_slides = payload.get("slides", []) if isinstance(payload, dict) else []
+    if not isinstance(raw_slides, list):
+        return
+
+    by_number = {}
+    for item in raw_slides:
+        if not isinstance(item, dict):
+            continue
+        try:
+            slide_no = int(item.get("slide_number", 0) or 0)
+        except Exception:
+            slide_no = 0
+        if slide_no > 0:
+            by_number[slide_no] = item
+
+    for slide in slides:
+        try:
+            slide_no = int(slide.get("slide_number", 0) or 0)
+        except Exception:
+            continue
+        src = by_number.get(slide_no)
+        if not src:
+            continue
+
+        for key in (
+            "slide_id",
+            "slide_type",
+            "text_source",
+            "t1",
+            "t1_structure",
+            "image_path",
+            "timestamp",
+            "timestamp_formatted",
+        ):
+            value = src.get(key)
+            if value not in (None, "", []):
+                slide.setdefault(key, value)
+        slide["slide_textualized_path"] = str(textualized_path)
+
+        if not str(slide.get("slide_text", "") or "").strip():
+            text_parts = [str(src.get("t1", "") or ""), str(src.get("t1_structure", "") or "")]
+            slide["slide_text"] = "\n".join(part for part in text_parts if part.strip())
+
+
 def prepare_verification(merged_path: str, current_date: str = None):
     """merged.json 로드 + 공통 데이터 반환. 교차 검증에서 양쪽 모델이 공유."""
     if current_date is None:
@@ -26,6 +97,7 @@ def prepare_verification(merged_path: str, current_date: str = None):
     with open(merged_path, "r", encoding="utf-8") as f:
         merged = json.load(f)
     slides = merged.get("slides", [])
+    _enrich_slides_with_textualized(slides, merged_path)
     domain, sub_domain = cc._resolve_domain_fields(merged)
     hint = cc._get_domain_hint(domain, sub_domain)
     utterances = cc._collect_utterances(slides)
@@ -92,6 +164,17 @@ def _ground_verify_all_issues(
 ) -> tuple[list[dict], list[dict], int, int, dict]:
     from analyzer.claim_grounding import ground_verify_all_issues
     return ground_verify_all_issues(issues, hint, slide_ctx, slides, max_workers=max_workers)
+
+
+def _slide_recheck_all_issues(
+    issues: list[dict],
+    slide_ctx: dict,
+    slides: list[dict],
+    hint: dict,
+    max_workers: int = 4,
+) -> tuple[list[dict], list[dict], int, int, dict]:
+    from analyzer.claim_crosscheck import slide_recheck_all_issues
+    return slide_recheck_all_issues(issues, slide_ctx, slides, hint, max_workers=max_workers)
 
 
 # ── 메인 진입점 ──────────────────────────────────────────

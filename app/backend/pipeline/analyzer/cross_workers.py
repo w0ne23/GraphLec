@@ -110,6 +110,20 @@ def stages_3_4_worker(args_tuple):
 
         slide_rejected = []
         grounding_rejected = []
+        slide_recheck_failures = 0
+        slide_recheck_status = "skipped_no_issues"
+        slide_recheck_reason = "crosscheck 통과 이슈가 없어 슬라이드 문맥 재검증을 건너뜀"
+        if issues:
+            verified, s_rejected, s_calls, s_failures, slide_token_usage = cv._slide_recheck_all_issues(
+                issues, slide_ctx, slides, hint
+            )
+            slide_rejected = s_rejected
+            slide_recheck_failures = s_failures
+            slide_recheck_status = "completed_with_failures" if s_failures else "completed"
+            slide_recheck_reason = f"슬라이드 문맥 재검증 완료: {len(verified)}건 유지, {len(s_rejected)}건 기각"
+            issues = verified
+            token_usage = _merge_token_usage(token_usage, slide_token_usage)
+
         if issues:
             verified, g_rejected, g_calls, g_failures, grounding_token_usage = cv._ground_verify_all_issues(
                 issues, hint, slide_ctx, slides
@@ -121,6 +135,9 @@ def stages_3_4_worker(args_tuple):
         return {
             "issues": issues,
             "slide_rejected": slide_rejected,
+            "slide_recheck_status": slide_recheck_status,
+            "slide_recheck_reason": slide_recheck_reason,
+            "slide_recheck_failures": slide_recheck_failures,
             "grounding_rejected": grounding_rejected,
             "token_usage": token_usage,
         }
