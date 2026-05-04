@@ -273,13 +273,14 @@ def slide_typo_worker(args_tuple):
             img_dir = None
 
         print(f"\n  [{model}] 슬라이드 오타 검사 시작", flush=True)
-        typos, api_calls, failures, token_usage = detect_slide_typos(
+        typos, needs_review, api_calls, failures, token_usage = detect_slide_typos(
             ctx["slides"], img_dir=img_dir, max_workers=4
         )
-        print(f"  [{model}] 슬라이드 오타 검사 완료: {len(typos)}건", flush=True)
+        print(f"  [{model}] 슬라이드 오타 검사 완료: {len(typos)}건, 리뷰 필요 {len(needs_review)}건", flush=True)
         return {
             "model": model,
             "slide_typos": typos,
+            "slide_typo_needs_review": needs_review,
             "api_calls": api_calls,
             "failures": failures,
             "token_usage": token_usage,
