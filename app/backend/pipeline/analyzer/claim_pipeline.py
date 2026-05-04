@@ -315,10 +315,11 @@ def verify_lecture_content(
     # ── 슬라이드 오타 검사 ──
     from analyzer.slide_typo_checker import detect_slide_typos
 
-    slide_typos, typo_calls, slide_typo_failures, typo_token_usage = detect_slide_typos(
+    slide_typos, slide_typo_needs_review, typo_calls, slide_typo_failures, typo_token_usage = detect_slide_typos(
         slides, img_dir=img_dir, max_workers=max_workers,
     )
     result["slide_typos"] = slide_typos
+    result["slide_typo_needs_review"] = slide_typo_needs_review
     result["api_calls"] = result.get("api_calls", 0) + typo_calls
     result["slide_typo_failures"] = slide_typo_failures
     result["token_usage"] = cc._merge_token_usage(result.get("token_usage"), typo_token_usage)
@@ -362,6 +363,7 @@ def verify_lecture_content(
         "verifier_grounding_model": cc._resolve_stage_model("grounding"),
         "total_claims_extracted": result.get("total_claims_extracted", 0),
         "slide_typo_count": len(result.get("slide_typos", [])),
+        "slide_typo_needs_review_count": len(result.get("slide_typo_needs_review", [])),
         "token_usage_total": result.get("token_usage", {}).get("total", {}),
     }
     if VERIFIER_REQUIRE_COMPLETE and not result.get("is_complete", True):
