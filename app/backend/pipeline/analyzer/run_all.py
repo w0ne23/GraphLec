@@ -81,10 +81,10 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
     )
     needs_clarification = any(marker in normalized for marker in clarification_markers)
     is_ambiguous = any(marker in normalized for marker in ambiguity_markers)
-    # Reserved for a future LLM/structure-based classifier. Keep null rather
-    # than polluting analysis counts with low-confidence keyword guesses.
-    issue_pattern = None
-    issue_pattern_reason = None
+    # issue_pattern is filled by the optional LLM/structure-based classifier.
+    # Keep existing classifier output if present; otherwise leave it null.
+    issue_pattern = issue.get("issue_pattern")
+    issue_pattern_reason = issue.get("issue_pattern_reason")
 
     if is_ambiguous:
         category = "ambiguous"
@@ -639,6 +639,7 @@ def _reorder_result_for_output(result: dict) -> dict:
         "cross_recheck_verified_count",
         "cross_recheck_inconclusive_count",
         "confirmed_count",
+        "issue_pattern_classifier",
         "issues",
         "crosscheck_rejected_issues",
         "crosscheck_inconclusive_issues",
@@ -690,6 +691,7 @@ def run_all_analyzers(
     current_date: str | None = None,
     skip_slide_typo: bool = False,
     resume: bool = False,
+    skip_issue_pattern_classifier: bool = False,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
@@ -732,6 +734,32 @@ def run_all_analyzers(
     claims_log_path = _write_claims_jsonl(claims_for_log, result_json_path)
     if claims_log_path:
         verification_result["claims_log_path"] = claims_log_path
+
+    if skip_issue_pattern_classifier:
+        verification_result["issue_pattern_classifier"] = {
+            "status": "skipped",
+            "issue_count": 0,
+            "classified_count": 0,
+            "null_count": 0,
+            "failed": False,
+        }
+    else:
+        from .issue_pattern_classifier import classify_issue_patterns
+
+        classifier_result = classify_issue_patterns(
+            verification_result,
+            cache_dir=out_dir / "_verifier_cache",
+            resume=resume,
+        )
+        classifier_usage = classifier_result.pop("token_usage", None)
+        if classifier_usage:
+            from . import claim_common as cc
+
+            verification_result["token_usage"] = cc._merge_token_usage(
+                verification_result.get("token_usage"),
+                classifier_usage,
+            )
+        verification_result["issue_pattern_classifier"] = classifier_result
 
     verification_result = _augment_decision_flow(verification_result, merged_file)
     verification_result = _reorder_result_for_output(verification_result)
@@ -777,6 +805,7 @@ def main():
     parser.add_argument("--cross-batch-size", type=int, default=20)
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
+    parser.add_argument("--skip-issue-pattern-classifier", action="store_true", help="LLM 기반 issue_pattern 분류를 건너뜀")
     parser.add_argument("--resume", action="store_true", help="output-dir의 중간 캐시를 재사용해 실패 지점부터 재개")
     args = parser.parse_args()
 
@@ -794,6 +823,7 @@ def main():
         current_date=args.date,
         skip_slide_typo=args.skip_slide_typo,
         resume=args.resume,
+        skip_issue_pattern_classifier=args.skip_issue_pattern_classifier,
     )
 
     print("\n=== Verifier 완료 ===")
