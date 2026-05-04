@@ -42,6 +42,7 @@ def _resolve_stage_model(stage: str) -> str:
     cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
     slide_recheck_model = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", VERIFIER_SLIDE_RECHECK_MODEL).strip()
     grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
+    issue_pattern_model = os.getenv("VERIFIER_ISSUE_PATTERN_MODEL", VERIFIER_ISSUE_PATTERN_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
@@ -54,6 +55,8 @@ def _resolve_stage_model(stage: str) -> str:
         return slide_recheck_model or strong
     if stage == "grounding":
         return grounding_model or strong
+    if stage == "issue_pattern":
+        return issue_pattern_model or strong
     return base
 
 
@@ -95,7 +98,7 @@ def _is_anthropic_model(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = ("extract", "judge", "recheck", "grounding", "cross_recheck")
+TOKEN_USAGE_STAGES = ("extract", "judge", "recheck", "grounding", "cross_recheck", "issue_pattern")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -408,6 +411,9 @@ VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
 VERIFIER_CROSS_RECHECK_MODEL = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", "")
 VERIFIER_SLIDE_RECHECK_MODEL = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", "")
 VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
+VERIFIER_ISSUE_PATTERN_MODEL = os.getenv("VERIFIER_ISSUE_PATTERN_MODEL", "")
+VERIFIER_ISSUE_PATTERN_BATCH_SIZE = int(os.getenv("VERIFIER_ISSUE_PATTERN_BATCH_SIZE", "12"))
+VERIFIER_ISSUE_PATTERN_MAX_TOKENS = int(os.getenv("VERIFIER_ISSUE_PATTERN_MAX_TOKENS", "8192"))
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ALLOWED_ISSUE_TYPES = {"factual_error", "outdated"}
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
