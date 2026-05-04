@@ -377,11 +377,14 @@ def _call_llm(
     last_exc = None
     for idx, (client_name, client) in enumerate(client_sequence):
         try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(**cfg_kwargs),
-            )
+            def call_api():
+                return client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config=types.GenerateContentConfig(**cfg_kwargs),
+                )
+
+            resp = api_call_with_retry(call_api)
             return resp.text or "", _extract_gemini_usage(resp, model, stage)
         except Exception as e:
             last_exc = e

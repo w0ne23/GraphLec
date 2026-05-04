@@ -27,6 +27,20 @@ def _token_overlap_ratio(a: str, b: str) -> float:
     return len(a_tokens & b_tokens) / max(1, min(len(a_tokens), len(b_tokens)))
 
 
+def _char_bigram_overlap_ratio(a: str, b: str) -> float:
+    def grams(text: str) -> set[str]:
+        compact = "".join(str(text or "").split())
+        if len(compact) < 2:
+            return {compact} if compact else set()
+        return {compact[i:i + 2] for i in range(len(compact) - 1)}
+
+    a_grams = grams(a)
+    b_grams = grams(b)
+    if not a_grams or not b_grams:
+        return 0.0
+    return len(a_grams & b_grams) / max(1, min(len(a_grams), len(b_grams)))
+
+
 def _time_distance_sec(a: dict, b: dict) -> float:
     try:
         return abs(float(a.get("start_time", 0) or 0) - float(b.get("start_time", 0) or 0))
@@ -76,8 +90,22 @@ def _same_contextual_issue(a: dict, b: dict) -> bool:
         local_threshold = 0.4 if _time_distance_sec(a, b) <= 5.0 else 0.55
         if _token_overlap_ratio(a_issue, b_issue) >= (local_threshold if same_local_context else 0.8):
             return True
+        if same_local_context and _char_bigram_overlap_ratio(a_issue, b_issue) >= 0.5:
+            return True
 
     if same_local_context:
+        combined_a = _compact_issue_text(" ".join([
+            str(a.get("claim_text", "") or ""),
+            str(a.get("issue", "") or ""),
+            str(a.get("correct_info", "") or ""),
+        ]))
+        combined_b = _compact_issue_text(" ".join([
+            str(b.get("claim_text", "") or ""),
+            str(b.get("issue", "") or ""),
+            str(b.get("correct_info", "") or ""),
+        ]))
+        if _char_bigram_overlap_ratio(combined_a, combined_b) >= 0.45:
+            return True
         a_correct = _compact_issue_text(a.get("correct_info", ""))
         b_correct = _compact_issue_text(b.get("correct_info", ""))
         if a_correct and b_correct and _token_overlap_ratio(a_correct, b_correct) >= 0.55:
@@ -127,7 +155,45 @@ def _merge_issue_payload(dst: dict, src: dict) -> dict:
         }
         merged = dict(src)
         merged.update(keep_lists)
+    merged["evidence_sources"] = list(
+        dict.fromkeys(
+            [
+                *(dst.get("evidence_sources", []) or []),
+                *(src.get("evidence_sources", []) or []),
+                *(merged.get("evidence_sources", []) or []),
+            ]
+        )
+    )
+    merged["crosscheck_details"] = _merge_crosscheck_details(
+        dst.get("crosscheck_details", []),
+        src.get("crosscheck_details", []),
+        merged.get("crosscheck_details", []),
+    )
+    merged["merged_issue_count"] = int(dst.get("merged_issue_count", 1) or 1) + int(src.get("merged_issue_count", 1) or 1)
+    if not merged.get("grounding_reason"):
+        merged["grounding_reason"] = dst.get("grounding_reason") or src.get("grounding_reason") or ""
+    if merged.get("grounding_status") != "verified_error":
+        for candidate in (dst, src):
+            if candidate.get("grounding_status") == "verified_error":
+                merged["grounding_status"] = "verified_error"
+                merged["grounding_verified"] = True
+                break
     return merged
+
+
+def _merge_crosscheck_details(*detail_lists) -> list[dict]:
+    by_model: dict[str, dict] = {}
+    unnamed: list[dict] = []
+    for details in detail_lists:
+        for row in details or []:
+            if not isinstance(row, dict):
+                continue
+            model = str(row.get("model") or row.get("resolved_model") or "").strip()
+            if not model:
+                unnamed.append(row)
+                continue
+            by_model[model] = {**by_model.get(model, {}), **row}
+    return [*by_model.values(), *unnamed]
 
 
 def _cluster_contextual_issues(issues: list[dict]) -> list[dict]:
