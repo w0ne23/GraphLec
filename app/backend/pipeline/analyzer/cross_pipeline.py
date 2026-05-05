@@ -44,7 +44,7 @@ _CACHE_VERSION = 1
 _STAGE_POLICY_VERSIONS = {
     "phase2_judge": 2,
     "phase3_cross_recheck": 2,
-    "phase4_slide_grounding": 3,
+    "phase4_slide_grounding": 4,
 }
 
 
@@ -404,6 +404,7 @@ def cross_verify(
             agree_count = 0
             disagree_count = 0
             any_inconclusive = False
+            candidate_status = issue.get("candidate_status") or "confirmed_error"
             for model in models:
                 model_result = cross_recheck_by_model.get(model, {}).get(
                     key,
@@ -425,7 +426,14 @@ def cross_verify(
             issue["crosscheck_details"] = verdict_rows
             if all_agree:
                 issue["cross_model_agreement"] = len(models)
-                cross_recheck_verified.append(issue)
+                if candidate_status == "needs_review":
+                    issue["cross_recheck"] = True
+                    issue["review_stage"] = "텍스트+문맥 교차검증"
+                    issue["review_reason_code"] = "judge_review_candidate"
+                    issue["review_reason"] = "1차 판정에서 검토 필요 후보로 올라왔고 교차검증에서 유지됨"
+                    cross_recheck_needs_review.append(issue)
+                else:
+                    cross_recheck_verified.append(issue)
             else:
                 issue["cross_recheck"] = None if any_inconclusive else False
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
@@ -433,6 +441,13 @@ def cross_verify(
                 if agree_count == 0 and disagree_count == len(models) and not any_inconclusive:
                     issue["rejection_reason_code"] = "model_disagreement"
                     cross_recheck_rejected.append(issue)
+                elif candidate_status == "needs_review":
+                    if any_inconclusive:
+                        issue["rejection_reason_code"] = "crosscheck_inconclusive"
+                        cross_recheck_inconclusive.append(issue)
+                    else:
+                        issue["rejection_reason_code"] = "weak_review_candidate"
+                        cross_recheck_rejected.append(issue)
                 else:
                     issue.pop("rejection_stage", None)
                     issue.pop("rejection_reason_code", None)
@@ -614,7 +629,6 @@ def cross_verify(
         "overall_assessment": {
             "has_issues": len(final["issues"]) > 0,
             "total_issues": len(final["issues"]),
-            "severity_breakdown": _count_severity(final["issues"]),
         },
         "crosscheck_filtered": len(cross_recheck_rejected),
         "crosscheck_inconclusive_filtered": len(cross_recheck_inconclusive),
@@ -637,15 +651,20 @@ def cross_verify(
     except Exception as e:
         print(f"  ⚠️ 로그 기록 실패: {e}")
 
+    for issue_list_key in (
+        "issues",
+        "needs_review_issues",
+        "rejected_issues",
+        "crosscheck_rejected_issues",
+        "crosscheck_needs_review_issues",
+        "crosscheck_inconclusive_issues",
+        "slide_rejected_issues",
+        "grounding_rejected_issues",
+    ):
+        for issue in result.get(issue_list_key, []) or []:
+            issue.pop("severity", None)
+
     return result
-
-
-def _count_severity(issues):
-    bd = {}
-    for i in issues:
-        s = i.get("severity", "minor")
-        bd[s] = bd.get(s, 0) + 1
-    return bd
 
 
 # ── 기존 독립 실행 ──────────────────────────────────────
@@ -713,7 +732,7 @@ def print_cross_result(result: dict):
         print(f"  ✅ 최종 확정 이슈: {len(issues)}건")
         for i, issue in enumerate(issues):
             src = "양쪽" if issue.get("cross_model_agreement", 0) >= 2 else f"교차검증({issue.get('cross_recheck_model','?')} 동의)"
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} conf={issue.get('confidence',0):.2f} ({src})")
+            print(f"    [{i+1}] {issue['type']} conf={issue.get('confidence',0):.2f} ({src})")
             print(f"        {issue.get('claim_text','')[:100]}")
             print(f"        → {issue.get('issue','')[:100]}")
     else:
@@ -728,7 +747,7 @@ def print_cross_result(result: dict):
         print(f"\n  ❌ 텍스트+문맥 교차검증 기각: {len(crosscheck_rejected)}건")
         for i, issue in enumerate(crosscheck_rejected):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 유지되지 않음")
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
+            print(f"    [{i+1}] {issue['type']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
@@ -737,7 +756,7 @@ def print_cross_result(result: dict):
         print(f"\n  ⚠️ 텍스트+문맥 교차검증 불확실: {len(crosscheck_inconclusive)}건")
         for i, issue in enumerate(crosscheck_inconclusive):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 확정 판단 실패")
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
+            print(f"    [{i+1}] {issue['type']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
@@ -746,7 +765,7 @@ def print_cross_result(result: dict):
         print(f"\n  ❌ grounding 기각: {len(grounding_rejected)}건")
         for i, issue in enumerate(grounding_rejected):
             reason = issue.get("grounding_reason", "")
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
+            print(f"    [{i+1}] {issue['type']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             if reason:
@@ -757,7 +776,7 @@ def print_cross_result(result: dict):
         for i, issue in enumerate(needs_review):
             reason = issue.get("grounding_reason", "")
             status = issue.get("grounding_status", "needs_review")
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} status={status}")
+            print(f"    [{i+1}] {issue['type']} status={status}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             if reason:

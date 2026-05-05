@@ -34,9 +34,6 @@ def format_verification_report(result: dict) -> str:
     lines = ["=" * 60, "강의 내용 검증 리포트 (claim 파이프라인)", "=" * 60]
     a = result["overall_assessment"]
     lines.append(f"\n전체: {'문제 발견' if a['has_issues'] else '문제 없음'} ({a['total_issues']}건)")
-    if a["total_issues"] > 0:
-        b = a["severity_breakdown"]
-        lines.append(f"  Critical: {b['critical']} / Major: {b['major']} / Minor: {b['minor']}")
     lines.append(f"요약: {result.get('summary', 'N/A')}")
     if not result.get("is_complete", True):
         lines.append(f"경고: {result.get('completion_warning', 'verification_incomplete')}")
@@ -64,7 +61,7 @@ def format_verification_report(result: dict) -> str:
 
     for i, issue in enumerate(result.get("issues", []), 1):
         t = format_timestamp(issue.get("start_time", 0))
-        lines.append(f"\n[{i}] {issue['severity'].upper()} - {issue['type']}")
+        lines.append(f"\n[{i}] {issue['type']}")
         lines.append(f"  시간: {t} ({issue.get('start_time', 0):.1f}초)")
         if issue.get("claim_text"):
             lines.append(f"  claim: {issue['claim_text']}")
