@@ -45,6 +45,7 @@ def combine_emphasis_simple(
             'keywords_by_method': {},
             'topic_keywords': [],
             'importance_keywords': [],
+            'audio_topic_total_count_sum': 0,
             'audio_detail': None,
         }
 
@@ -66,6 +67,10 @@ def combine_emphasis_simple(
             if topic_kws:
                 info['keywords_by_method'][method] = topic_kws
                 info['topic_keywords'].extend(topic_kws)
+                info['audio_topic_total_count_sum'] = max(
+                    int(info.get('audio_topic_total_count_sum', 0) or 0),
+                    int(det.get('audio_topic_total_count_sum', 0) or 0),
+                )
             if importance_kws:
                 info['keywords_by_method'][method] = importance_kws
                 info['importance_keywords'].extend(importance_kws)
@@ -113,6 +118,7 @@ def combine_emphasis_simple(
                     'topic_keywords': topic_keywords,
                     'importance_keywords': importance_keywords,
                     'all_keywords': merged_keywords,
+                    'audio_topic_total_count_sum': int(info.get('audio_topic_total_count_sum', 0) or 0),
                     'by_method': kw_by_method,
                 },
                 'methods': seg['emphasis_methods'],

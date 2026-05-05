@@ -360,6 +360,8 @@ def stage3b_audio(
         detect_emphasis_by_keywords_weighted,
         detect_emphasis_by_topic_keyword_repetition,
         get_topic_keywords_filtered_v2,
+        get_topic_keyword_count_map,
+        topic_keyword_count_items,
     )
     from .emphasis_combiner import combine_emphasis_simple
 
@@ -537,6 +539,7 @@ def stage3b_audio(
     scenes_structure = None
     emphasis_sections: list[dict] = []
     topic_kw_set: set[str] = set()
+    topic_keyword_counts: dict[str, int] = {}
     try:
         y, sr = librosa.load(audio_path_temp, sr=16000)
         if slide_ranges:
@@ -551,12 +554,23 @@ def stage3b_audio(
             groups, min_freq=5, max_keywords=20, max_segment_ratio=1.0,
             min_keyword_len=2, candidate_pool_size=80, use_llm_filter=True,
         )
+        topic_keyword_counts = get_topic_keyword_count_map(
+            groups,
+            min_freq=5,
+            max_keywords=20,
+            max_segment_ratio=1.0,
+            min_keyword_len=2,
+            candidate_pool_size=80,
+            use_llm_filter=False,
+            _topic_keywords_override=topic_kw_set,
+        )
         audio_emphasis = detect_emphasis_by_std(y, sr, groups)
         keyword_emphasis = detect_emphasis_by_keywords_weighted(groups)
         topic_emphasis = detect_emphasis_by_topic_keyword_repetition(
             groups, window=2, min_keyword_len=2, max_segment_ratio=1.0,
             min_freq=5, max_keywords=20, use_llm_filter=False, min_keyword_count=1,
             _topic_keywords_override=topic_kw_set,
+            _topic_keyword_count_map=topic_keyword_counts,
         )
         annotated_groups, emphasis_sections = combine_emphasis_simple(
             audio_emphasis, keyword_emphasis + topic_emphasis, groups,
@@ -573,6 +587,7 @@ def stage3b_audio(
                     "keywords": sorted(topic_kw_set),
                     "count": len(topic_kw_set),
                 },
+                "audio_topic_keywords": topic_keyword_count_items(topic_keyword_counts),
             },
             "statistics": {
                 "total_count": len(emphasis_sections),
