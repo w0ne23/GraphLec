@@ -41,11 +41,11 @@ def _build_grounding_prompt(
     domain_label = hint.get("label", "일반")
     lecture_context = _build_grounding_context(issue, slide_ctx, slides)
 
-    return f"""당신은 강의 내용 검증 시스템의 최종 검증 단계입니다.
+    return f"""당신은 강의 내용 검증 시스템의 외부 근거 확인 단계입니다.
 강의 도메인: {domain_label}
 
 아래는 강의에서 발견된 잠재적 오류입니다.
-Google Search 결과를 근거로, 이 지적이 **타당한지** 판단해주세요.
+Google Search 결과를 근거로, 이 지적을 뒷받침하거나 반박하는 외부 근거가 있는지 판단해주세요.
 
 강의 문맥:
 {lecture_context}
@@ -59,7 +59,7 @@ Google Search 결과를 근거로, 이 지적이 **타당한지** 판단해주�
 2. claim이나 지적 내용이 발화 원문보다 넓게 일반화되었다면, 원문과 주변 문맥의 범위로 좁혀 판단하세요.
 3. 검색 결과에서 그 문맥화된 지적 내용을 뒷받침하는 근거를 찾으세요.
 4. 검색 결과가 오히려 발화 원문이 맞다고 지지하면, 이 지적은 기각합니다.
-5. 검색 결과가 불충분하거나 모호하면, 이 지적은 리뷰 필요로 보류합니다.
+5. 검색 결과가 불충분하거나 모호하면, 이 지적 자체를 기각하지 말고 외부 근거가 부족하다고 표시합니다.
 6. 슬라이드가 같은 교육적 단순화를 명시하고 발화가 이를 설명하는 경우, 강의 범위 밖의 고급 예외만으로 오류 처리하지 마세요.
 7. 입문 운영체제 강의의 계층 구조 설명을 펌웨어, DMA, 하이퍼바이저, 장치 내부 컨트롤러 같은 예외만으로 반박하지 마세요.
 
@@ -82,12 +82,13 @@ Google Search 결과를 근거로, 이 지적이 **타당한지** 판단해주�
 status 기준:
 - verified_error: 검색 근거로 이 오류 지적이 타당함
 - rejected_by_evidence: 검색 근거상 발화/claim이 맞거나 이슈가 아님
-- insufficient_evidence: 검색 근거가 부족하거나 모호함
-- grounding_unavailable: 검색/도구 문제로 판단할 수 없음
+- insufficient_evidence: 검색 근거가 부족하거나 모호하지만, 이슈를 반박하지는 못함
+- grounding_unavailable: 검색/도구 문제로 외부 근거를 확인할 수 없음
 
 호환 규칙:
 - status가 verified_error이면 is_valid는 true
-- status가 rejected_by_evidence 또는 insufficient_evidence이면 is_valid는 false
+- status가 rejected_by_evidence이면 is_valid는 false
+- status가 insufficient_evidence 또는 grounding_unavailable이면 is_valid는 true
 - status가 grounding_unavailable이면 is_valid는 true로 두고 reason에 한계를 설명
 
 JSON 외 텍스트를 출력하지 마세요.
@@ -124,21 +125,17 @@ def _normalize_grounding_status(payload: dict, is_valid: bool) -> str:
 
 
 def _classify_grounding_result(issue: dict) -> str:
-    """grounding 결과를 최종 확정/기각/리뷰 필요 중 하나로 분류."""
+    """grounding은 최종 판정이 아니라 외부 근거 첨부/반박 확인 단계로 사용한다."""
     status = str(issue.get("grounding_status") or "").strip().lower()
-    if status == "verified_error":
+    if status in {"verified_error", "insufficient_evidence", "grounding_unavailable"}:
         return "verified"
     if status == "rejected_by_evidence":
         return "rejected"
-    if status in {"insufficient_evidence", "grounding_unavailable"}:
-        return "needs_review"
 
     verified = issue.get("grounding_verified")
-    if verified is True:
-        return "verified"
     if verified is False:
         return "rejected"
-    return "needs_review"
+    return "verified"
 
 
 def _ground_verify_issue(
@@ -227,11 +224,15 @@ def ground_verify_all_issues(
                     rejected.append(result)
                     print(f"      ❌ 근거로 기각: {result.get('grounding_reason', '')[:80]}")
                 elif classification == "needs_review":
-                    needs_review.append(result)
-                    print(f"      ⚠️ 리뷰 필요: {result.get('grounding_reason', '')[:80]}")
+                    verified.append(result)
+                    print(f"      ✅ 근거 미확정: {result.get('grounding_reason', '')[:80]}")
                 else:
                     verified.append(result)
-                    print(f"      ✅ 확인")
+                    status = str(result.get("grounding_status") or "")
+                    if status in {"insufficient_evidence", "grounding_unavailable"}:
+                        print(f"      ✅ 확정 유지(외부 근거 미확정): {result.get('grounding_reason', '')[:80]}")
+                    else:
+                        print(f"      ✅ 확인")
             except Exception as e:
                 idx = futures[f]
                 issue_copy = issues[idx].copy()
@@ -239,7 +240,7 @@ def ground_verify_all_issues(
                 issue_copy["grounding_verified"] = None
                 issue_copy["grounding_reason"] = f"grounding 실패: {e}"
                 issue_copy["grounding_api_failed"] = True
-                needs_review.append(issue_copy)
+                verified.append(issue_copy)
                 failed_calls += 1
 
     verified.sort(key=lambda x: float(x.get("start_time", 0) or 0))
