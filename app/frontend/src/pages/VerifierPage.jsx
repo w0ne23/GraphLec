@@ -63,6 +63,35 @@ function countIssueTypes(items) {
   )
 }
 
+function groupTyposBySlide(items) {
+  const groups = new Map()
+  asArray(items).forEach((typo, idx) => {
+    const slideNumber = typo.slide_number ?? 'unknown'
+    const key = String(slideNumber)
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        slideNumber,
+        imageUrl: typo.slide_image_url || '',
+        items: [],
+      })
+    }
+
+    const group = groups.get(key)
+    if (!group.imageUrl && typo.slide_image_url) {
+      group.imageUrl = typo.slide_image_url
+    }
+    group.items.push({ ...typo, _typoIndex: idx })
+  })
+
+  return Array.from(groups.values()).sort((a, b) => {
+    const aNumber = Number(a.slideNumber)
+    const bNumber = Number(b.slideNumber)
+    if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) return aNumber - bNumber
+    return String(a.slideNumber).localeCompare(String(b.slideNumber))
+  })
+}
+
 function SummaryMetric({ label, value, tone = '', active = false, onClick }) {
   return (
     <button
@@ -220,11 +249,11 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   )
 }
 
-function TypoCard({ typo, review = false }) {
+function TypoItem({ typo }) {
   const candidates = asArray(typo.correction_candidates)
   const runCount = Number(typo.run_count || 0)
   return (
-    <article className={`vf-typo-card ${review ? 'vf-typo-card--review' : ''}`}>
+    <div className="vf-typo-item">
       <div className="vf-typo-main">
         <div>
           <div className="vf-typo-title">
@@ -233,7 +262,6 @@ function TypoCard({ typo, review = false }) {
           <div className="vf-typo-reason">{compactText(typo.reason, '')}</div>
         </div>
         <div className="vf-typo-meta">
-          <span>slide {typo.slide_number ?? '-'}</span>
           {typo.confidence !== undefined && <span>{formatPercent(typo.confidence)}</span>}
           {runCount > 1 && <span>{typo.support_count || 0}/{runCount}</span>}
         </div>
@@ -247,6 +275,34 @@ function TypoCard({ typo, review = false }) {
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+function SlideTypoCard({ group, review = false }) {
+  return (
+    <article className={`vf-typo-slide-card ${review ? 'vf-typo-slide-card--review' : ''}`}>
+      <div className={`vf-typo-slide-layout ${group.imageUrl ? '' : 'vf-typo-slide-layout--no-image'}`}>
+        {group.imageUrl && (
+          <div className="vf-typo-slide-image">
+            <img src={group.imageUrl} alt={`Slide ${group.slideNumber}`} loading="lazy" />
+          </div>
+        )}
+        <div className="vf-typo-slide-panel">
+          <div className="vf-typo-slide-head">
+            <strong>slide {group.slideNumber}</strong>
+            <span>{group.items.length}건</span>
+          </div>
+          <div className="vf-typo-items">
+            {group.items.map((typo) => (
+              <TypoItem
+                key={`${group.key}-${typo.problematic_text}-${typo.corrected_text}-${typo._typoIndex}`}
+                typo={typo}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
     </article>
   )
 }
@@ -323,7 +379,6 @@ export default function VerifierPage() {
       finalClaims,
       needsReview,
       slideTypos: asArray(verifier?.slide_typos),
-      slideTypoReview: asArray(verifier?.slide_typo_needs_review),
       filtered: [
         ...crossRejected,
         ...inconclusive,
@@ -338,7 +393,6 @@ export default function VerifierPage() {
   const finalCount = counts.final_confirmed ?? verifier?.final_confirmed_claim_count ?? sections.finalClaims.length
   const reviewCount = counts.needs_review ?? sections.needsReview.length
   const typoCount = counts.slide_typos ?? sections.slideTypos.length
-  const typoReviewCount = counts.slide_typo_needs_review ?? sections.slideTypoReview.length
   const filteredCount = sections.filtered.length + sections.firstStageRejected.length
 
   function selectTab(tab) {
@@ -375,6 +429,16 @@ export default function VerifierPage() {
     )
   }
 
+  function renderTypoGroups(items, review = false) {
+    return (
+      <div className="vf-typo-list">
+        {groupTyposBySlide(items).map((group) => (
+          <SlideTypoCard key={`${review ? 'review' : 'typo'}-${group.key}`} group={group} review={review} />
+        ))}
+      </div>
+    )
+  }
+
   function renderActivePanel() {
     if (activeTab === 'review') {
       return (
@@ -391,33 +455,14 @@ export default function VerifierPage() {
 
     if (activeTab === 'typos') {
       return (
-        <>
-          <Section
-            title="슬라이드 오타"
-            count={sections.slideTypos.length}
-            tone="typo"
-            empty="확정된 슬라이드 오타가 없습니다."
-          >
-            <div className="vf-typo-list">
-              {sections.slideTypos.map((typo, idx) => (
-                <TypoCard key={`typo-${typo.slide_number}-${idx}`} typo={typo} />
-              ))}
-            </div>
-          </Section>
-
-          <Section
-            title="검토가 필요한 슬라이드 오타"
-            count={sections.slideTypoReview.length}
-            tone="review"
-            empty="검토가 필요한 슬라이드 오타가 없습니다."
-          >
-            <div className="vf-typo-list">
-              {sections.slideTypoReview.map((typo, idx) => (
-                <TypoCard key={`typo-review-${typo.slide_number}-${idx}`} typo={typo} review />
-              ))}
-            </div>
-          </Section>
-        </>
+        <Section
+          title="슬라이드 오타"
+          count={sections.slideTypos.length}
+          tone="typo"
+          empty="확정된 슬라이드 오타가 없습니다."
+        >
+          {renderTypoGroups(sections.slideTypos)}
+        </Section>
       )
     }
 
@@ -524,7 +569,7 @@ export default function VerifierPage() {
             />
             <SummaryMetric
               label="슬라이드 오타"
-              value={typoCount + typoReviewCount}
+              value={typoCount}
               tone="typo"
               active={activeTab === 'typos'}
               onClick={() => selectTab('typos')}
