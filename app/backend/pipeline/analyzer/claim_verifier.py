@@ -230,13 +230,11 @@ def _judge_claims(
                 issue["problematic_content"] = ref["text"][:80]
             if not isinstance(issue.get("evidence_sources"), list):
                 issue["evidence_sources"] = []
-            if "severity" not in issue:
-                issue["severity"] = "minor" if candidate_status == "needs_review" else "major"
             if candidate_status == "needs_review":
                 issue.setdefault("review_stage", "claim_judge")
                 issue.setdefault("review_reason_code", "judge_review_candidate")
 
-            cv._normalize_severity(issue)
+            issue.pop("severity", None)
             if cv._is_asr_artifact(issue, utt_map):
                 continue
             issues.append(issue)

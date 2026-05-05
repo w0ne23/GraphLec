@@ -291,10 +291,6 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
           <div className="vf-chip-row">
             <span className="vf-chip vf-chip--stage">{labelForStage(claim.stage || section)}</span>
             {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
-            {claim.issue_pattern && (
-              <span className="vf-chip vf-chip--pattern">{claim.issue_pattern}</span>
-            )}
-            {claim.severity && <span className="vf-chip">{claim.severity}</span>}
           </div>
         </div>
         <div className="vf-claim-meta">
@@ -311,7 +307,7 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
             <DetailRow label="Issue" value={claim.issue} />
             <DetailRow label="Correct Info" value={claim.correct_info} />
-            <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label, claim.issue_pattern].filter(Boolean).join(' / ')} />
+            <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="Slide Recheck" value={slideRecheck.status || slideRecheck.reason || claim.slide_recheck_status} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
@@ -461,6 +457,10 @@ export default function VerifierPage() {
       finalClaims,
       needsReview,
       slideTypos: asArray(verifier?.slide_typos),
+      crossRejected,
+      inconclusive,
+      slideRejected,
+      groundingRejected,
       filtered: [
         ...crossRejected,
         ...inconclusive,
@@ -526,6 +526,15 @@ export default function VerifierPage() {
     )
   }
 
+  function renderFilteredSection({ title, items, section, empty, tone = '' }) {
+    if (!items.length) return null
+    return (
+      <Section key={section} title={title} count={items.length} tone={tone} empty={empty}>
+        {renderClaimList(items, section)}
+      </Section>
+    )
+  }
+
   function renderActivePanel() {
     if (activeTab === 'review') {
       const filteredReview = filterIssueClaims(sections.needsReview)
@@ -564,15 +573,47 @@ export default function VerifierPage() {
     }
 
     if (activeTab === 'filtered') {
+      const filteredGroups = [
+        {
+          title: '문맥상 맞음',
+          items: sections.slideRejected,
+          section: 'slide_rejected',
+          empty: '슬라이드/발화 문맥상 맞는 설명으로 판단되어 제외된 후보가 없습니다.',
+        },
+        {
+          title: '교차검증 기각',
+          items: sections.crossRejected,
+          section: 'crosscheck_rejected',
+          empty: '두 모델 모두 검토 가치가 낮다고 본 후보가 없습니다.',
+        },
+        {
+          title: '교차검증 불확실',
+          items: sections.inconclusive,
+          section: 'crosscheck_inconclusive',
+          empty: '교차검증에서 불확실로 남은 후보가 없습니다.',
+          tone: 'review',
+        },
+        {
+          title: '근거 기각',
+          items: sections.groundingRejected,
+          section: 'grounding_rejected',
+          empty: '외부 근거로 기각된 후보가 없습니다.',
+        },
+      ]
+      const hasDetailedFiltered = filteredGroups.some((group) => group.items.length > 0)
       return (
         <>
-          <Section
-            title="필터링된 내용 후보"
-            count={sections.filtered.length}
-            empty="필터링된 내용 후보가 없습니다."
-          >
-            {renderClaimList(sections.filtered, 'filtered')}
-          </Section>
+          {hasDetailedFiltered
+            ? filteredGroups
+              .filter((group) => group.items.length > 0)
+              .map((group) => renderFilteredSection(group))
+            : (
+              <Section
+                title="필터링된 내용 후보"
+                count={0}
+                empty="문맥상 맞음, 교차검증 기각, 근거 기각 후보가 없습니다."
+              />
+            )}
 
           <Section
             title="1차 판정에서 제외된 claim"
