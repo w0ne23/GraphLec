@@ -382,6 +382,82 @@ def get_topic_keywords_filtered_v2(
     return set(repr_sorted)
 
 
+def get_topic_keyword_count_map(
+    segments: list[dict],
+    *,
+    min_freq: int = 5,
+    max_keywords: int = 20,
+    max_segment_ratio: float = 1.0,
+    min_keyword_len: int = 2,
+    candidate_pool_size: int = 80,
+    use_llm_filter: bool = True,
+    _topic_keywords_override: Optional[Set[str]] = None,
+) -> dict[str, int]:
+    """
+    주제 키워드별 전체 등장 횟수를 반환.
+
+    반환값은 최종 주제 키워드로 살아남은 단어만 포함한다.
+    개별 context/slide 집계에서는 같은 키워드가 여러 번 등장해도 이 total_count를 한 번만 더한다.
+    """
+    if not segments:
+        return {}
+
+    counter: Counter = Counter()
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        words = _extract_content_words(text, min_length=min_keyword_len)
+        for s in words:
+            counter[s] += 1
+
+    if _topic_keywords_override is not None:
+        topic_keywords = set(_topic_keywords_override)
+    else:
+        topic_keywords = get_topic_keywords_filtered_v2(
+            segments,
+            min_freq=min_freq,
+            max_keywords=max_keywords,
+            max_segment_ratio=max_segment_ratio,
+            min_keyword_len=min_keyword_len,
+            candidate_pool_size=candidate_pool_size,
+            use_llm_filter=use_llm_filter,
+        )
+
+    return {
+        kw: int(counter.get(kw, 0))
+        for kw in sorted(topic_keywords, key=lambda w: (-counter.get(w, 0), w))
+        if counter.get(kw, 0) >= min_freq
+    }
+
+
+def topic_keyword_count_items(topic_count_map: dict[str, int]) -> list[dict]:
+    """JSON 저장용 [{keyword,total_count}] 목록으로 변환."""
+    return [
+        {"keyword": kw, "total_count": int(total)}
+        for kw, total in sorted(topic_count_map.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def summarize_topic_keyword_counts_for_text(
+    text: str,
+    topic_count_map: dict[str, int],
+    *,
+    min_keyword_len: int = 2,
+) -> dict:
+    """
+    특정 text에 포함된 반복 키워드와 그 키워드들의 total_count 합을 반환.
+
+    같은 text 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
+    """
+    if not text or not topic_count_map:
+        return {"keywords": [], "total_count_sum": 0}
+    words = set(_extract_content_words(text, min_length=min_keyword_len))
+    keywords = sorted(words & set(topic_count_map), key=lambda w: (-topic_count_map[w], w))
+    return {
+        "keywords": keywords,
+        "total_count_sum": int(sum(topic_count_map[kw] for kw in keywords)),
+    }
+
+
 def get_topic_keywords_list(
     segments: list[dict],
     *,
@@ -416,6 +492,7 @@ def detect_emphasis_by_topic_keyword_repetition(
     use_llm_filter: bool = True,
     min_keyword_count: int = 1,
     _topic_keywords_override: Optional[Set[str]] = None,
+    _topic_keyword_count_map: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """
     전사문 전체에서 반복되는 주제 키워드가 등장하는 구간을 강조로 표시.
@@ -454,12 +531,17 @@ def detect_emphasis_by_topic_keyword_repetition(
             continue
         repeated_words = sorted(here)
         score = min(25 + len(repeated_words) * 5 + sum(len(w) for w in repeated_words[:5]), 55)
+        topic_total_count_sum = 0
+        if _topic_keyword_count_map:
+            # 같은 context 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
+            topic_total_count_sum = int(sum(_topic_keyword_count_map.get(w, 0) for w in repeated_words))
         emphasis_segments.append({
             "start": seg["start"],
             "end": seg["end"],
             "text": seg["text"],
             "emphasis_score": float(score),
             "repeated_topic_keywords": repeated_words[:10],
+            "audio_topic_total_count_sum": topic_total_count_sum,
             "detection_method": "topic_keyword_repeat",
         })
 
