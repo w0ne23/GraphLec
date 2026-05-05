@@ -56,19 +56,23 @@ def _build_judge_prompt(
 도메인 참고: {hint.get('outdated_guidance', '')}
 
 아래는 강의 발화에서 추출된 사실 주장(claim) 목록입니다.
-각 claim에는 빠른 1차 판정을 위한 주변 발화 문맥이 함께 제공됩니다.
+각 claim에는 빠른 1차 판정과 검토 후보 선별을 위한 주변 발화 문맥이 함께 제공됩니다.
 
 판정 대상 claim 목록:
 {chr(10).join(claim_lines)}
 
 ### 판정 기준
 
-각 claim에 대해 딱 하나만 판단하세요:
+각 claim에 대해 다음 셋 중 하나로 판단하세요:
 
-**"학생이 이 발화를 그대로 믿고 실무/시험에 적용했을 때, 객관적으로 틀린 결과가 나오는가?"**
+1. confirmed_error
+   **"학생이 이 발화를 그대로 믿고 실무/시험에 적용했을 때, 객관적으로 틀린 결과가 나오는가?"**
 
-- 예 → 이슈로 보고
-- 아니오 → 보고하지 않음
+2. needs_review
+   객관적 오류로 확정하기는 이르지만, 교수자/검수자가 확인할 만한 오해 가능성이 있는가?
+
+3. no_issue
+   문제가 없거나 검토할 가치가 낮은가?
 
 "틀린 결과"란: 코드 에러, 오답, 사실과 반대되는 이해를 말합니다.
 
@@ -103,6 +107,16 @@ def _build_judge_prompt(
 3. **범주 오귀속**: A에 속하는 것을 B에 속한다고 하는 경우
 4. **수량/범위 왜곡**: "모든/항상/반드시"로 단정했는데 실제로는 일부/조건부인 경우. 단, 교육적 관례 소개와 구분할 것.
 
+### 검토 필요 후보로 보고
+
+아래 경우는 확정 오류가 아니더라도 `candidate_status: "needs_review"`로 보고하세요:
+
+- 표현이 과장되어 학생이 범위/예외/조건을 놓칠 가능성이 있는 경우
+- 교육적 단순화인지 실제 오류인지 문맥만으로 확정하기 어려운 경우
+- 용어가 비슷하지만 다른 개념으로 오해될 가능성이 있는 경우
+- 슬라이드나 주변 발화와 함께 보면 확인이 필요한 생략/지시/범위 문제가 있는 경우
+- outdated 의심은 있으나 현재 날짜 기준 근거 확인이 필요한 경우
+
 ### 보고 안 하는 경우
 
 - 표현이 비표준적이지만 학생이 결과적으로 맞는 이해를 갖게 되는 경우
@@ -129,6 +143,7 @@ def _build_judge_prompt(
     {{
       "utterance_id": "U0001",
       "type": "factual_error" | "outdated",
+      "candidate_status": "confirmed_error" | "needs_review",
       "claim_text": "판정한 claim 원문",
       "problematic_content": "문제 발화 원문 (80자 이내)",
       "issue": "학생이 어떤 틀린 지식을 갖게 되는지",
@@ -142,10 +157,11 @@ def _build_judge_prompt(
 ```
 
 지침:
-1. confidence 0.7 미만은 출력하지 마세요.
-2. 동일 개념 문제는 한 건만.
-3. 문제가 없으면 {{"issues": []}}만.
-4. JSON 외 텍스트 금지.
+1. confirmed_error는 confidence 0.70 이상일 때만 출력하세요.
+2. needs_review는 confidence 0.55 이상일 때만 출력하세요.
+3. 동일 개념 문제는 한 건만.
+4. 문제가 없으면 {{"issues": []}}만.
+5. JSON 외 텍스트 금지.
 """
 
 
@@ -196,12 +212,17 @@ def _judge_claims(
                 conf = float(issue.get("confidence", 0) or 0)
             except Exception:
                 conf = 0.0
-            if conf < 0.70:
+            candidate_status = str(issue.get("candidate_status", "") or "").lower().strip()
+            if candidate_status not in {"confirmed_error", "needs_review"}:
+                candidate_status = "confirmed_error" if conf >= 0.70 else "needs_review"
+            min_confidence = 0.55 if candidate_status == "needs_review" else 0.70
+            if conf < min_confidence:
                 continue
 
             ref = utt_map[uid]
             issue["utterance_id"] = uid
             issue["type"] = issue_type
+            issue["candidate_status"] = candidate_status
             issue["start_time"] = ref["start_time"]
             issue["timestamp"] = f"[{ref['start_time']:.1f}s]"
             issue["slide_number"] = ref["slide_number"]
@@ -210,7 +231,10 @@ def _judge_claims(
             if not isinstance(issue.get("evidence_sources"), list):
                 issue["evidence_sources"] = []
             if "severity" not in issue:
-                issue["severity"] = "major"
+                issue["severity"] = "minor" if candidate_status == "needs_review" else "major"
+            if candidate_status == "needs_review":
+                issue.setdefault("review_stage", "claim_judge")
+                issue.setdefault("review_reason_code", "judge_review_candidate")
 
             cv._normalize_severity(issue)
             if cv._is_asr_artifact(issue, utt_map):

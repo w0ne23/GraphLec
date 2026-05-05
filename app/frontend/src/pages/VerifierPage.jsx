@@ -7,6 +7,17 @@ import VideoPlayer from '../components/watch/VideoPlayer'
 import '../styles/verifier.css'
 
 const VERIFIER_POLL_MS = 5000
+const ISSUE_FILTERS = [
+  { key: 'all', label: '전체' },
+  { key: 'simple_factual_error', label: '단순 사실 오류' },
+  { key: 'scope_error', label: '범위 오류' },
+  { key: 'outdated', label: '현행성 오류' },
+]
+const ISSUE_FILTER_DESCRIPTIONS = {
+  simple_factual_error: '문장 자체의 개념, 인과관계, 용어 연결이 부정확한 경우입니다. 범위 표현의 과장보다는 핵심 사실 관계가 틀린 항목을 모았습니다.',
+  scope_error: '항상, 모든, 오직, 반드시 같은 표현 때문에 예외나 조건이 사라져 오해될 수 있는 경우입니다. 강의 맥락상 맞는 설명이어도 범위가 과하게 들리면 여기에 포함됩니다.',
+  outdated: '현재 날짜 기준으로 더 이상 유효하지 않거나 폐기된 정보를 현재도 맞는 것처럼 설명한 경우입니다.',
+}
 
 function asArray(value) {
   return Array.isArray(value) ? value : []
@@ -52,6 +63,23 @@ function labelForIssueType(type) {
   return labels[type] || compactText(type)
 }
 
+function labelForIssueSubtype(type) {
+  const labels = {
+    simple_factual_error: '단순 사실 오류',
+    scope_error: '범위 오류',
+    outdated: '현행성 오류',
+  }
+  return labels[type] || compactText(type)
+}
+
+function getIssueSubtype(item) {
+  if (item.issue_subtype) return item.issue_subtype
+  if (item.issue_pattern === 'scope_overstatement') return 'scope_error'
+  if ((item.issue_type || item.type) === 'outdated') return 'outdated'
+  if ((item.issue_type || item.type) === 'factual_error') return 'simple_factual_error'
+  return ''
+}
+
 function countIssueTypes(items) {
   return items.reduce(
     (acc, item) => {
@@ -61,6 +89,47 @@ function countIssueTypes(items) {
     },
     { factual_error: 0, outdated: 0 }
   )
+}
+
+function countIssueSubtypes(items) {
+  return items.reduce((acc, item) => {
+    const subtype = getIssueSubtype(item)
+    if (!subtype || subtype === 'outdated') return acc
+    acc[subtype] = (acc[subtype] || 0) + 1
+    return acc
+  }, { simple_factual_error: 0, scope_error: 0 })
+}
+
+function countIssueFilters(items) {
+  const typeCounts = countIssueTypes(items)
+  const subtypeCounts = countIssueSubtypes(items)
+  return {
+    all: items.length,
+    factual_error: typeCounts.factual_error || 0,
+    outdated: typeCounts.outdated || 0,
+    scope_error: subtypeCounts.scope_error || 0,
+    simple_factual_error: subtypeCounts.simple_factual_error || 0,
+  }
+}
+
+function matchesIssueFilter(item, filter) {
+  if (!filter || filter === 'all') return true
+  if (filter === 'factual_error' || filter === 'outdated') {
+    return (item.issue_type || item.type) === filter
+  }
+  return getIssueSubtype(item) === filter
+}
+
+function claimDisplayIssueKey(claim) {
+  const issueType = claim.issue_type || claim.type
+  if (issueType === 'outdated') return 'outdated'
+  return getIssueSubtype(claim) || issueType
+}
+
+function labelForClaimIssue(claim) {
+  const key = claimDisplayIssueKey(claim)
+  if (key === 'outdated') return labelForIssueType('outdated')
+  return labelForIssueSubtype(key) || labelForIssueType(key)
 }
 
 function groupTyposBySlide(items) {
@@ -116,27 +185,35 @@ function Section({ title, count, tone = '', empty, children }) {
   )
 }
 
-function IssueTypeBreakdown({ items }) {
-  const counts = countIssueTypes(items)
-  const extraTypes = Object.keys(counts).filter(
-    (type) => !['factual_error', 'outdated'].includes(type)
-  )
+function IssueTypeBreakdown({ items, activeFilter = 'all', onFilterChange }) {
+  const counts = countIssueFilters(items)
   return (
     <div className="vf-type-breakdown">
-      <div className="vf-type-pill vf-type-pill--factual">
-        <span>{labelForIssueType('factual_error')}</span>
-        <strong>{counts.factual_error || 0}</strong>
-      </div>
-      <div className={`vf-type-pill vf-type-pill--outdated ${counts.outdated ? '' : 'vf-type-pill--empty'}`}>
-        <span>{labelForIssueType('outdated')}</span>
-        <strong>{counts.outdated ? counts.outdated : '없음'}</strong>
-      </div>
-      {extraTypes.map((type) => (
-        <div className="vf-type-pill" key={type}>
-          <span>{labelForIssueType(type)}</span>
-          <strong>{counts[type]}</strong>
-        </div>
-      ))}
+      {ISSUE_FILTERS.map((filter) => {
+        const count = counts[filter.key] || 0
+        return (
+          <button
+            className={`vf-type-pill ${activeFilter === filter.key ? 'vf-type-pill--active' : ''} ${count ? '' : 'vf-type-pill--empty'}`}
+            key={filter.key}
+            onClick={() => onFilterChange?.(activeFilter === filter.key ? 'all' : filter.key)}
+          >
+            <span>{filter.label}</span>
+            <strong>{count || '없음'}</strong>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function IssueFilterDescription({ filter }) {
+  const description = ISSUE_FILTER_DESCRIPTIONS[filter]
+  if (!description) return null
+  const label = ISSUE_FILTERS.find((item) => item.key === filter)?.label || filter
+  return (
+    <div className="vf-filter-description">
+      <strong>{label}</strong>
+      <span>{description}</span>
     </div>
   )
 }
@@ -200,6 +277,8 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   const canWatch = Number.isFinite(startTime)
   const grounding = claim.grounding || {}
   const slideRecheck = claim.slide_recheck || {}
+  const displayIssueKey = claimDisplayIssueKey(claim)
+  const displayIssueLabel = labelForClaimIssue(claim)
   const sources = asArray(grounding.evidence_sources).length
     ? grounding.evidence_sources
     : asArray(claim.evidence_sources)
@@ -210,10 +289,12 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
         <div className="vf-claim-copy">
           <div className="vf-claim-title">{title}</div>
           <div className="vf-chip-row">
-            <span>{labelForStage(claim.stage || section)}</span>
-            {claim.issue_type && <span>{labelForIssueType(claim.issue_type)}</span>}
-            {claim.issue_pattern && <span>{claim.issue_pattern}</span>}
-            {claim.severity && <span>{claim.severity}</span>}
+            <span className="vf-chip vf-chip--stage">{labelForStage(claim.stage || section)}</span>
+            {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
+            {claim.issue_pattern && (
+              <span className="vf-chip vf-chip--pattern">{claim.issue_pattern}</span>
+            )}
+            {claim.severity && <span className="vf-chip">{claim.severity}</span>}
           </div>
         </div>
         <div className="vf-claim-meta">
@@ -318,6 +399,7 @@ export default function VerifierPage() {
   const [verifier, setVerifier] = useState(null)
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
   const [activeTab, setActiveTab] = useState('confirmed')
+  const [activeIssueFilter, setActiveIssueFilter] = useState('all')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
 
@@ -397,6 +479,7 @@ export default function VerifierPage() {
 
   function selectTab(tab) {
     setActiveTab(tab)
+    setActiveIssueFilter('all')
     setExpandedClaimKey('')
   }
 
@@ -429,6 +512,10 @@ export default function VerifierPage() {
     )
   }
 
+  function filterIssueClaims(items) {
+    return items.filter((item) => matchesIssueFilter(item, activeIssueFilter))
+  }
+
   function renderTypoGroups(items, review = false) {
     return (
       <div className="vf-typo-list">
@@ -441,6 +528,7 @@ export default function VerifierPage() {
 
   function renderActivePanel() {
     if (activeTab === 'review') {
+      const filteredReview = filterIssueClaims(sections.needsReview)
       return (
         <Section
           title="검토가 필요한 내용 이슈"
@@ -448,7 +536,16 @@ export default function VerifierPage() {
           tone="review"
           empty="검토가 필요한 내용 이슈가 없습니다."
         >
-          {renderClaimList(sections.needsReview, 'needs_review')}
+          <IssueTypeBreakdown
+            items={sections.needsReview}
+            section="needs_review"
+            activeFilter={activeIssueFilter}
+            onFilterChange={setActiveIssueFilter}
+          />
+          <IssueFilterDescription filter={activeIssueFilter} />
+          {filteredReview.length > 0
+            ? renderClaimList(filteredReview, 'needs_review')
+            : <div className="vf-empty">선택한 유형의 검토 필요 이슈가 없습니다.</div>}
         </Section>
       )
     }
@@ -488,6 +585,7 @@ export default function VerifierPage() {
       )
     }
 
+    const filteredFinal = filterIssueClaims(sections.finalClaims)
     return (
       <Section
         title="확정된 내용 이슈"
@@ -495,8 +593,16 @@ export default function VerifierPage() {
         tone="danger"
         empty="확정된 내용 이슈가 없습니다."
       >
-        <IssueTypeBreakdown items={sections.finalClaims} />
-        {renderClaimList(sections.finalClaims, 'final_confirmed')}
+        <IssueTypeBreakdown
+          items={sections.finalClaims}
+          section="final_confirmed"
+          activeFilter={activeIssueFilter}
+          onFilterChange={setActiveIssueFilter}
+        />
+        <IssueFilterDescription filter={activeIssueFilter} />
+        {filteredFinal.length > 0
+          ? renderClaimList(filteredFinal, 'final_confirmed')
+          : <div className="vf-empty">선택한 유형의 확정 이슈가 없습니다.</div>}
       </Section>
     )
   }

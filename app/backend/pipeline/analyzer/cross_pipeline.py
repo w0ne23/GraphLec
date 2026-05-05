@@ -41,6 +41,11 @@ from .cross_workers import (
 
 
 _CACHE_VERSION = 1
+_STAGE_POLICY_VERSIONS = {
+    "phase2_judge": 2,
+    "phase3_cross_recheck": 2,
+    "phase4_slide_grounding": 3,
+}
 
 
 def _safe_cache_name(value: str) -> str:
@@ -68,6 +73,7 @@ def _cache_meta(
         merged_mtime_ns = None
     meta = {
         "cache_version": _CACHE_VERSION,
+        "stage_policy_version": _STAGE_POLICY_VERSIONS.get(stage, 1),
         "stage": stage,
         "merged_path": str(merged_file),
         "merged_mtime_ns": merged_mtime_ns,
@@ -331,6 +337,7 @@ def cross_verify(
     cross_recheck_verified = []
     cross_recheck_rejected = []
     cross_recheck_inconclusive = []
+    cross_recheck_needs_review = []
     cross_recheck_usage_per_model = {m: _empty_token_usage() for m in models}
     if total_union > 0 and len(models) >= 2:
         print(f"\n{'='*60}")
@@ -394,6 +401,8 @@ def cross_verify(
             verdict_rows = []
             reasons = []
             all_agree = True
+            agree_count = 0
+            disagree_count = 0
             any_inconclusive = False
             for model in models:
                 model_result = cross_recheck_by_model.get(model, {}).get(
@@ -405,6 +414,10 @@ def cross_verify(
                 verdict_rows.append({"model": model, **model_result})
                 if verdict != "agree":
                     all_agree = False
+                else:
+                    agree_count += 1
+                if verdict == "disagree":
+                    disagree_count += 1
                 if verdict == "inconclusive":
                     any_inconclusive = True
                 reasons.append(f"[{model}] {verdict}: {reason}")
@@ -417,16 +430,22 @@ def cross_verify(
                 issue["cross_recheck"] = None if any_inconclusive else False
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = " / ".join(reasons)
-                if any_inconclusive:
-                    issue["rejection_reason_code"] = "crosscheck_inconclusive"
-                    cross_recheck_inconclusive.append(issue)
-                else:
+                if agree_count == 0 and disagree_count == len(models) and not any_inconclusive:
                     issue["rejection_reason_code"] = "model_disagreement"
                     cross_recheck_rejected.append(issue)
+                else:
+                    issue.pop("rejection_stage", None)
+                    issue.pop("rejection_reason_code", None)
+                    issue["review_stage"] = "텍스트+문맥 교차검증"
+                    issue["review_reason_code"] = "crosscheck_inconclusive" if any_inconclusive else "model_disagreement"
+                    cross_recheck_needs_review.append(issue)
 
         if cross_recheck_verified:
             cross_recheck_verified = _cluster_contextual_issues(cross_recheck_verified)
             print(f"\n    ✅ 텍스트+문맥 교차검증 통과: {len(cross_recheck_verified)}건")
+        if cross_recheck_needs_review:
+            cross_recheck_needs_review = _cluster_contextual_issues(cross_recheck_needs_review)
+            print(f"    ⚠️ 텍스트+문맥 교차검증 리뷰 필요: {len(cross_recheck_needs_review)}건")
         if cross_recheck_rejected:
             print(f"    ❌ 텍스트+문맥 교차검증 거부: {len(cross_recheck_rejected)}건")
         if cross_recheck_inconclusive:
@@ -477,6 +496,11 @@ def cross_verify(
         final["needs_review"] = _cluster_contextual_issues([
             *(final.get("needs_review", []) or []),
             *missing_evidence_review,
+        ])
+    if cross_recheck_needs_review:
+        final["needs_review"] = _cluster_contextual_issues([
+            *(final.get("needs_review", []) or []),
+            *cross_recheck_needs_review,
         ])
 
     # ── 별도: 슬라이드 오타 검사 ──
@@ -566,6 +590,7 @@ def cross_verify(
         "exclusive_count": total_exclusive,
         "intersected_count": len(intersected),
         "cross_recheck_verified_count": len(cross_recheck_verified),
+        "cross_recheck_needs_review_count": len(cross_recheck_needs_review),
         "cross_recheck_inconclusive_count": len(cross_recheck_inconclusive),
         "confirmed_count": len(all_confirmed),
         "issues": final["issues"],
@@ -575,6 +600,7 @@ def cross_verify(
         "slide_typo_status": "skipped" if slide_typo_result.get("skipped") else "completed",
         "slide_typo_skip_reason": slide_typo_result.get("skip_reason", ""),
         "crosscheck_rejected_issues": cross_recheck_rejected,
+        "crosscheck_needs_review_issues": cross_recheck_needs_review,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
         "slide_recheck_status": final.get("slide_recheck_status", "completed"),
         "slide_recheck_reason": final.get("slide_recheck_reason", ""),

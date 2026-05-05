@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 _CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
 _CROSSCHECK_PARSE_RETRIES = 1
+_SLIDE_RECHECK_CLASSIFICATIONS = {"confirmed_error", "needs_review", "rejected"}
 _SLIDE_SUPPORT_STATUSES = {"supports", "contradicts", "neutral", "insufficient"}
 _ERROR_ORIGINS = {"speech_error", "slide_error", "slide_speech_mismatch", "unclear"}
 
@@ -153,6 +154,7 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
     uid = issue.get("utterance_id", "")
     claim_text = issue.get("claim_text", "")
     issue_desc = issue.get("issue", "")
+    candidate_status = issue.get("candidate_status", "")
 
     utterances = ctx["utterances"]
     slides = ctx["slides"]
@@ -195,17 +197,19 @@ def judge_single_claim(issue: dict, ctx: dict) -> tuple[str, str, dict]:
 ## 지적 내용
 - claim: {claim_text}
 - 문제: {issue_desc}
+- 후보 상태: {candidate_status or "unknown"}
 
 ## 판정 기준
 - 학생이 이 발화를 따라했을 때 실제로 틀린 지식을 갖게 되는가?
-- 슬라이드 텍스트와 발화가 직접적으로 모순되는가?
+- 객관적 오류로 확정하기는 이르지만 교수자/검수자가 확인할 만한 오해 가능성이 있는가?
+- 슬라이드 텍스트와 발화가 직접적으로 모순되거나, 둘 사이의 관계가 애매해서 확인이 필요한가?
 - claim이나 문제 제기가 발화 원문보다 넓게 일반화되었다면, 발화 원문과 주변 문맥의 범위로 다시 좁혀 판단하세요.
 - 슬라이드가 같은 교육적 단순화를 명시하고 있고 발화가 이를 설명하는 경우, 강의 범위 밖의 고급 예외만으로 오류로 보지 마세요.
 - 입문 강의의 운영체제 계층 구조 설명을 펌웨어, DMA, 하이퍼바이저, 장치 내부 컨트롤러 같은 예외만으로 반박하지 마세요.
 - 대상 발화가 예시 문장("예를 들어", "이에 해당합니다")이면, 반드시 바로 앞뒤 정의 문장과 연결해서 해석하세요.
 - 슬라이드 텍스트에 표, 수식, 데이터가 포함되어 있으면 직접 계산하여 발화와 비교하세요.
 
-위 기준 중 하나라도 YES면 "agree", 모두 NO면 "disagree"로 답하세요.
+위 기준 중 하나라도 YES면 "agree", 검토할 가치도 없으면 "disagree"로 답하세요.
 확신이 부족하거나 응답 형식을 지키기 어렵다면 "inconclusive"를 선택하세요.
 
 응답 규칙:
@@ -348,8 +352,11 @@ def _build_slide_recheck_prompt(
    - 일반적 표현이 잘못된 상위 범주이거나, 슬라이드의 구체 대상을 배제하거나, 직접 모순될 때만 이슈를 유지하세요.
 
 결론:
-- 슬라이드 전체 맥락을 봐도 여전히 틀리면 → "valid": true
-- 슬라이드 맥락을 보면 실제로는 맞는 설명이었으면 → "valid": false
+- 슬라이드 전체 맥락을 봐도 여전히 객관적으로 틀린 사실이면 → "classification": "confirmed_error"
+- 슬라이드 맥락을 보면 실제로는 맞는 설명이면 → "classification": "rejected"
+- 슬라이드가 같은 표현을 뒷받침하거나 강의 맥락상 대체로 맞지만, 표현 때문에 범위/예외/조건을 오해할 수 있으면 → "classification": "needs_review"
+- 특히 "오직", "독점", "반드시", "모든", "항상" 같은 표현이 슬라이드에도 명시되어 있고 입문 강의의 교육적 단순화로 보이면,
+  객관적 사실 오류로 확정하지 말고 "needs_review"로 분류하세요.
 - supporting_slide_status:
   - "supports": 슬라이드가 발화/claim을 뒷받침함
   - "contradicts": 슬라이드가 발화/claim과 직접 충돌함
@@ -364,6 +371,7 @@ def _build_slide_recheck_prompt(
 응답 (JSON만):
 ```json
 {{
+  "classification": "confirmed_error" | "needs_review" | "rejected",
   "valid": true | false,
   "reason": "슬라이드 맥락을 참고한 판단 이유",
   "supporting_slide_status": "supports" | "contradicts" | "neutral" | "insufficient",
@@ -393,6 +401,17 @@ def _normalize_choice(value: str, allowed: set[str], default: str) -> str:
     return normalized if normalized in allowed else default
 
 
+def _normalize_slide_recheck_classification(payload: dict, valid: bool) -> str:
+    classification = _normalize_choice(
+        payload.get("classification"),
+        _SLIDE_RECHECK_CLASSIFICATIONS,
+        "",
+    )
+    if classification:
+        return classification
+    return "confirmed_error" if valid else "rejected"
+
+
 def _slide_recheck_issue(
     issue: dict,
     slide_ctx: dict,
@@ -413,8 +432,11 @@ def _slide_recheck_issue(
         )
         payload = json.loads(cv._strip_json_fence(text.strip()))
         valid = _coerce_bool(payload.get("valid", True), default=True)
+        classification = _normalize_slide_recheck_classification(payload, valid)
+        valid = classification != "rejected"
         reason = str(payload.get("reason", "") or "")
         issue["slide_recheck_status"] = "completed"
+        issue["slide_recheck_classification"] = classification
         issue["slide_recheck_valid"] = valid
         issue["slide_recheck_reason"] = reason
         issue["supporting_slide_status"] = _normalize_choice(
@@ -433,6 +455,7 @@ def _slide_recheck_issue(
         return issue, token_usage
     except Exception as e:
         issue["slide_recheck_status"] = "failed"
+        issue["slide_recheck_classification"] = "confirmed_error"
         issue["slide_recheck_valid"] = True
         issue["slide_recheck_reason"] = f"재검증 호출 실패: {e}"
         issue["supporting_slide_status"] = "insufficient"
@@ -447,15 +470,15 @@ def slide_recheck_all_issues(
     slides: list[dict],
     hint: dict,
     max_workers: int = 4,
-) -> tuple[list[dict], list[dict], int, int, dict]:
+) -> tuple[list[dict], list[dict], list[dict], int, int, dict]:
     """모든 이슈를 슬라이드 맥락으로 재검증, 통과/기각 분류."""
     from . import claim_common as cv
 
     if not issues:
-        return [], [], 0, 0, cv._empty_token_usage()
+        return [], [], [], 0, 0, cv._empty_token_usage()
 
     print(f"\n  ── 3단계: 슬라이드 맥락 재검증 ({len(issues)}건) ──")
-    verified, rejected = [], []
+    verified, rejected, needs_review = [], [], []
     api_calls = 0
     failed_calls = 0
     token_usage = cv._empty_token_usage()
@@ -474,9 +497,17 @@ def slide_recheck_all_issues(
                 token_usage = cv._merge_token_usage(token_usage, call_usage)
                 if result.get("slide_recheck_api_failed"):
                     failed_calls += 1
-                if result.get("slide_recheck_valid") is False:
+                classification = result.get("slide_recheck_classification") or (
+                    "rejected" if result.get("slide_recheck_valid") is False else "confirmed_error"
+                )
+                if classification == "rejected":
                     rejected.append(result)
                     print(f"      ❌ 기각: {result.get('slide_recheck_reason', '')[:80]}")
+                elif classification == "needs_review":
+                    result.setdefault("review_stage", "슬라이드 재검증")
+                    result.setdefault("review_reason_code", "slide_context_needs_review")
+                    needs_review.append(result)
+                    print(f"      ⚠️ 검토 필요: {result.get('slide_recheck_reason', '')[:80]}")
                 else:
                     verified.append(result)
                     print(f"      ✅ 유지")
@@ -494,5 +525,6 @@ def slide_recheck_all_issues(
 
     verified.sort(key=lambda x: float(x.get("start_time", 0) or 0))
     rejected.sort(key=lambda x: float(x.get("start_time", 0) or 0))
-    print(f"  슬라이드 재검증 결과: {len(verified)}건 유지, {len(rejected)}건 기각")
-    return verified, rejected, api_calls, failed_calls, token_usage
+    needs_review.sort(key=lambda x: float(x.get("start_time", 0) or 0))
+    print(f"  슬라이드 재검증 결과: {len(verified)}건 유지, {len(needs_review)}건 리뷰 필요, {len(rejected)}건 기각")
+    return verified, rejected, needs_review, api_calls, failed_calls, token_usage

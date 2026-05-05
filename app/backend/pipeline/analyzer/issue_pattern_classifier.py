@@ -21,6 +21,7 @@ ISSUE_LIST_KEYS = (
     "grounding_rejected_issues",
     "slide_rejected_issues",
     "crosscheck_rejected_issues",
+    "crosscheck_needs_review_issues",
     "crosscheck_inconclusive_issues",
 )
 
