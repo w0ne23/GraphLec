@@ -705,6 +705,54 @@ def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
     return filtered
 
 
+def _slide_number_key(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_slide_image_url_map(output_dir: Path) -> dict[int, str]:
+    classified_paths = list(output_dir.glob("*_slide_classified.json"))
+    if not classified_paths:
+        return {}
+
+    try:
+        with open(classified_paths[0], "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+
+    image_urls: dict[int, str] = {}
+    for slide in data.get("slides", []) or []:
+        if not isinstance(slide, dict):
+            continue
+
+        slide_number = _slide_number_key(slide.get("slide_number"))
+        image_url = make_file_url(slide.get("image_path"))
+        if slide_number is not None and image_url:
+            image_urls[slide_number] = image_url
+
+    return image_urls
+
+
+def _attach_slide_image_urls(items: list[dict], image_urls: dict[int, str]) -> list[dict]:
+    enriched = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+
+        copied = dict(item)
+        slide_number = _slide_number_key(copied.get("slide_number"))
+        if slide_number is not None and not copied.get("slide_image_url"):
+            image_url = image_urls.get(slide_number)
+            if image_url:
+                copied["slide_image_url"] = image_url
+        enriched.append(copied)
+
+    return enriched
+
+
 async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     """verifier 결과 조회 (Lecture ID 기준)."""
     detail = await get_lecture_detail(db, lecture_id)
@@ -737,8 +785,15 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
     slide_rejected_claims = flow.get("slide_rejected_claims", []) or []
     grounding_rejected_claims = flow.get("grounding_rejected_claims", []) or []
     first_stage_rejected_claims = flow.get("first_stage_rejected_claims", []) or []
-    slide_typos = _filter_served_slide_typos(data.get("slide_typos", []) or [])
-    slide_typo_needs_review = _filter_served_slide_typos(data.get("slide_typo_needs_review", []) or [])
+    slide_image_urls = _load_slide_image_url_map(output_dir)
+    slide_typos = _attach_slide_image_urls(
+        _filter_served_slide_typos(data.get("slide_typos", []) or []),
+        slide_image_urls,
+    )
+    slide_typo_needs_review = _attach_slide_image_urls(
+        _filter_served_slide_typos(data.get("slide_typo_needs_review", []) or []),
+        slide_image_urls,
+    )
 
     return {
         "lecture_id": str(detail["id"]),

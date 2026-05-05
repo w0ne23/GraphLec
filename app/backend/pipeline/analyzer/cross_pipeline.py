@@ -100,7 +100,7 @@ def _slide_typo_settings(env_vars: dict) -> dict:
         return max(0.0, min(1.0, value))
 
     return {
-        "slide_typo_filter_version": 2,
+        "slide_typo_filter_version": 3,
         "slide_typo_runs": parse_int("VERIFIER_SLIDE_TYPO_RUNS", 1),
         "slide_typo_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_MIN_RATE", 1.0),
         "slide_typo_review_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", 0.5),
