@@ -172,7 +172,7 @@ def _slide_recheck_all_issues(
     slides: list[dict],
     hint: dict,
     max_workers: int = 4,
-) -> tuple[list[dict], list[dict], int, int, dict]:
+) -> tuple[list[dict], list[dict], list[dict], int, int, dict]:
     from analyzer.claim_crosscheck import slide_recheck_all_issues
     return slide_recheck_all_issues(issues, slide_ctx, slides, hint, max_workers=max_workers)
 
