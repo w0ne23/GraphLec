@@ -41,7 +41,7 @@ def update_job_stage_sync(job_id: str, current_stages: list, current_stage_text:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE jobs SET pipeline_stages = %s, current_stage = %s WHERE id = %s",
+                    "UPDATE processing_jobs SET pipeline_stages = %s, current_stage = %s WHERE id = %s",
                     (Json(current_stages), current_stage_text, job_id),
                 )
         conn.close()
@@ -49,7 +49,7 @@ def update_job_stage_sync(job_id: str, current_stages: list, current_stage_text:
         print(f"--- [Worker Sync DB Error] Failed to update stage: {e} ---", flush=True)
 
 
-def pipeline_process(job_id: str, input_path: str):
+def pipeline_process(job_id: str, lecture_id: str, input_path: str):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
 
     print(f"--- [Child Process {job_id}] Setting sys.path to: {pipeline_path} ---", flush=True)
@@ -64,7 +64,7 @@ def pipeline_process(job_id: str, input_path: str):
 
         print(f"--- [Child Process {job_id}] Target video: {video_path} ---", flush=True)
 
-        output_dir    = Path(LOCAL_STORAGE_DIR) / "results" / job_id
+        output_dir    = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id
         slides_dir    = output_dir / "slides"
         log_file_path = output_dir / "pipeline.log"
 
@@ -115,7 +115,7 @@ def pipeline_process(job_id: str, input_path: str):
         import traceback
         error_details = traceback.format_exc()
         print(f"--- [Child Process {job_id}] FAILED: {e} ---", flush=True)
-        log_file_path = Path(LOCAL_STORAGE_DIR) / "results" / job_id / "pipeline.log"
+        log_file_path = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id / "pipeline.log"
         if log_file_path.parent.exists():
             with open(log_file_path, "a", encoding="utf-8") as log_file:
                 log_file.write(f"\n[{job_id}] Pipeline failed: {error_details}\n")
@@ -129,7 +129,7 @@ async def worker_loop():
 
         async with AsyncSessionLocal() as db:
             result = await db.execute(text(
-                "UPDATE jobs SET status = 'error', error_message = '서버 재시작으로 인해 분석이 중단되었습니다.' "
+                "UPDATE processing_jobs SET status = 'error', error_message = '서버 재시작으로 인해 분석이 중단되었습니다.' "
                 "WHERE status = 'running'"
             ))
             count = result.rowcount
@@ -142,12 +142,15 @@ async def worker_loop():
         while True:
             try:
                 job_id_val = None
+                job_lecture_id = None
                 job_input_path = None
 
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(text("""
-                        SELECT id, input_path FROM jobs
-                        WHERE status = 'pending'
+                        SELECT pj.id, pj.lecture_id, l.video_path
+                        FROM processing_jobs pj
+                        JOIN lectures l ON l.id = pj.lecture_id
+                        WHERE pj.status = 'pending'
                         FOR UPDATE SKIP LOCKED
                         LIMIT 1
                     """))
@@ -155,10 +158,11 @@ async def worker_loop():
 
                     if job:
                         job_id_val     = job["id"]
-                        job_input_path = job["input_path"]
+                        job_lecture_id = job["lecture_id"]
+                        job_input_path = job["video_path"]
                         await db.execute(text("""
-                            UPDATE jobs
-                            SET status = 'running', current_stage = 'Starting pipeline', updated_at = now()
+                            UPDATE processing_jobs
+                            SET status = 'running', current_stage = 'Starting pipeline'
                             WHERE id = :id
                         """), {"id": job_id_val})
                         await db.commit()
@@ -167,13 +171,14 @@ async def worker_loop():
                     await asyncio.sleep(5)
                     continue
 
-                job_id_str = str(job_id_val)
-                print(f"--- [Worker] Starting pipeline: {job_id_str} ---", flush=True)
+                job_id_str     = str(job_id_val)
+                job_lecture_str = str(job_lecture_id)
+                print(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}) ---", flush=True)
 
                 try:
                     loop = asyncio.get_running_loop()
                     success, output_dir, error = await loop.run_in_executor(
-                        executor, pipeline_process, job_id_str, job_input_path
+                        executor, pipeline_process, job_id_str, job_lecture_str, job_input_path
                     )
                 except concurrent.futures.process.BrokenProcessPool as bp_err:
                     print(f"--- [Worker EXECUTOR BROKEN] {job_id_str}: {bp_err} ---", flush=True)
@@ -195,21 +200,15 @@ async def worker_loop():
                 async with AsyncSessionLocal() as db:
                     if success:
                         await db.execute(text("""
-                            UPDATE lectures
-                            SET output_dir = :out_dir
-                            WHERE job_id = :id
-                        """), {"out_dir": output_dir, "id": job_id_val})
-                        await db.execute(text("""
-                            UPDATE jobs
-                            SET status = 'done', current_stage = 'Finished', updated_at = now()
+                            UPDATE processing_jobs
+                            SET status = 'done', current_stage = 'Finished'
                             WHERE id = :id
                         """), {"id": job_id_val})
                     else:
                         print(f"--- [Worker ERROR] {job_id_str}: {error} ---", flush=True)
                         await db.execute(text("""
-                            UPDATE jobs
-                            SET status = 'error', error_message = :err,
-                                current_stage = 'Failed', updated_at = now()
+                            UPDATE processing_jobs
+                            SET status = 'error', error_message = :err, current_stage = 'Failed'
                             WHERE id = :id
                         """), {"id": job_id_val, "err": error})
                     await db.commit()

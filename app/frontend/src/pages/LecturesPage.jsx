@@ -150,7 +150,7 @@ export default function LecturesPage({ onNavigate }) {
       closeSSE()
       // 단일 작업에 대해 에러 표시
       setLectures(prev => prev.map(lec => 
-        lec.id === job_id ? { ...lec, status: 'error', error_message: '서버와의 연결이 끊어졌습니다.' } : lec
+        lec.job_id === job_id ? { ...lec, status: 'error', error_message: '서버와의 연결이 끊어졌습니다.' } : lec
       ))
     }
   }
