@@ -143,12 +143,13 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 - 이미지에서 명백하게 보이는 한글 철자 오타
 - 영문 철자 오류
 - 숫자/단위 오기
+- 단어 내부가 글자 단위로 잘못 끊긴 띄어쓰기 오류
 
 보고하지 말 것:
 - OCR이 잘못 읽은 텍스트 자체
 - 용어 선택/문체/표현 선호
 - 사실 오류나 개념 오류
-- 띄어쓰기, 줄바꿈, 글자 간격, 디자인 문제
+- 일반 띄어쓰기, 줄바꿈, 글자 간격, 디자인 문제
 - 약어, 고유명사, 표기 관례처럼 오타로 단정하기 어려운 것
 - 복합어 띄어쓰기 관례
 - 조사/어미/접속 표현 교정
@@ -171,7 +172,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 ```
 
 지침:
-1. 확신이 0.80 미만이면 출력하지 마세요.
+1. 확신이 0.90 미만이면 출력하지 마세요.
 2. "더 자연스럽다", "더 적절하다" 수준이면 출력하지 마세요.
 3. 오타가 없으면 {{"typos": []}}만 출력하세요.
 4. JSON 외 텍스트 금지.
@@ -180,6 +181,11 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 
 def _compact_no_space(value: str) -> str:
     return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _has_broken_internal_space(value: str) -> bool:
+    tokens = [token for token in str(value or "").split() if token]
+    return len(tokens) >= 2 and any(len(token) == 1 for token in tokens)
 
 
 def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "") -> bool:
@@ -193,9 +199,7 @@ def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "")
     p_compact = _compact_no_space(p)
     c_compact = _compact_no_space(c)
     if not p_compact or p_compact == c_compact:
-        return False
-    if re.sub(r"\S+", "", p) != re.sub(r"\S+", "", c):
-        return False
+        return p.count(" ") > c.count(" ") and _has_broken_internal_space(p)
 
     style_markers = (
         "더 적절",
@@ -215,10 +219,6 @@ def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "")
         "쉼표",
         "구분",
         "별개",
-        "띄어쓰기",
-        "공백",
-        "줄바꿈",
-        "글자 간격",
     )
     if any(marker in r for marker in style_markers):
         return False
@@ -228,7 +228,7 @@ def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "")
     return True
 
 
-def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict], bool, int, dict]:
+def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1) -> tuple[list[dict], bool, int, dict]:
     from . import claim_common as cc
 
     slide_no = int(slide.get("slide_number", 0) or 0)

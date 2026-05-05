@@ -768,8 +768,12 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
 
-
 def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
+    try:
+        from pipeline.analyzer.slide_typo_checker import is_reportable_slide_typo
+    except Exception:
+        is_reportable_slide_typo = None
+
     filtered = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -777,6 +781,12 @@ def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
         problematic = str(item.get("problematic_text", "") or "").strip()
         corrected = str(item.get("corrected_text", "") or "").strip()
         if not problematic or not corrected or problematic == corrected:
+            continue
+        if is_reportable_slide_typo and not is_reportable_slide_typo(
+            problematic,
+            corrected,
+            str(item.get("reason", "") or ""),
+        ):
             continue
         filtered.append(item)
     return filtered
