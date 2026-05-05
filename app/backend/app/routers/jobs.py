@@ -10,7 +10,7 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import Job, Lecture
+from app.models import Lecture, ProcessingJob
 from app.services import job_service
 
 logger = logging.getLogger(__name__)
@@ -30,10 +30,10 @@ async def stream_job_status(job_id: str, request: Request):
                     yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
                     break
                 payload = {
-                    "job_id":          str(job.id),
-                    "lecture_status":  job.status,
-                    "current_stage":   job.current_stage,
-                    "error_message":   job.error_message,
+                    "job_id": str(job.id),
+                    "lecture_status": job.status,
+                    "current_stage": job.current_stage,
+                    "error_message": job.error_message,
                     "pipeline_stages": job.pipeline_stages or [],
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
@@ -63,7 +63,7 @@ async def get_job_detail(job_id: str, db: AsyncSession = Depends(get_db)):
     job_detail = await job_service.get_job_detail(db, job_id)
     if not job_detail:
         raise HTTPException(status_code=404, detail="Job not found")
-    job_detail["video_url"] = job_service.make_file_url(job_detail.get("input_path"))
+    job_detail["video_url"] = job_service.make_file_url(job_detail.get("video_path"))
     return job_detail
 
 
@@ -75,18 +75,16 @@ async def create_job(
     description: str = Form(""),
     db: AsyncSession = Depends(get_db),
 ):
-    job_id   = str(uuid.uuid4())
+    lecture_id = uuid.uuid4()
     base_dir = Path(job_service.LOCAL_STORAGE_DIR)
 
-    input_dir  = base_dir / "inputs"  / job_id
-    output_dir = base_dir / "results" / job_id
+    input_dir = base_dir / "inputs" / str(lecture_id)
+    output_dir = base_dir / "results" / str(lecture_id)
 
-    # 원본 파일명 보존 및 안전한 파일명(UUID) 생성
     original_stem = Path(video.filename).stem
     extension = Path(video.filename).suffix
-    safe_filename = f"{job_id}{extension}"
-    
-    # title이 비어있으면 원본 파일명으로 대체
+    safe_filename = f"{lecture_id}{extension}"
+
     final_title = title.strip() if title and title.strip() else original_stem
 
     try:
@@ -96,44 +94,40 @@ async def create_job(
             shutil.copyfileobj(video.file, f)
     except Exception as e:
         shutil.rmtree(input_dir, ignore_errors=True)
-        logger.error(f"File save failed for job {job_id}: {e}")
+        logger.error(f"File save failed for lecture {lecture_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to save uploaded file")
 
     try:
-        new_job = Job(
-            id=job_id,
-            input_path=str(input_path),
-            status="pending",
-        )
-        db.add(new_job)
-
-        # 시스템 전반에서 쓰이는 stem은 고유한 job_id(UUID)를 사용하여 충돌을 방지함
-        lecture_id = uuid.uuid4()
         new_lecture = Lecture(
             id=lecture_id,
-            job_id=job_id,
-            stem=job_id,
             title=final_title,
             category=category,
             description=description,
             video_path=str(input_path),
             output_dir=str(output_dir),
-            graphrag_workspace=str(output_dir / "graphrag"),
         )
         db.add(new_lecture)
+
+        job_id = uuid.uuid4()
+        new_job = ProcessingJob(
+            id=job_id,
+            lecture_id=lecture_id,
+            status="pending",
+        )
+        db.add(new_job)
         await db.commit()
     except Exception as e:
         await db.rollback()
         shutil.rmtree(input_dir, ignore_errors=True)
-        logger.error(f"DB commit failed for job {job_id}: {e}")
+        logger.error(f"DB commit failed for lecture {lecture_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to create job")
 
-    return {"job_id": job_id, "lecture_id": str(lecture_id)}
+    return {"job_id": str(job_id), "lecture_id": str(lecture_id)}
 
 
 @router.delete("/{job_id}")
 async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.delete_job_and_content(db, job_id)
+    success = await job_service.delete_lecture_by_job(db, job_id)
     if not success:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "success"}
