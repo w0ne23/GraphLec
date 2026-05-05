@@ -570,15 +570,6 @@ def _dedupe_issues(issues: list[dict]) -> list[dict]:
     return sorted(dedup.values(), key=lambda x: float(x.get("start_time", 0) or 0))
 
 
-def _normalize_severity(issue: dict) -> None:
-    severity = str(issue.get("severity", "")).lower()
-    if severity not in {"critical", "major", "minor"}:
-        severity = "major"
-    if severity == "critical" and float(issue.get("confidence", 0) or 0) < 0.9:
-        severity = "major"
-    issue["severity"] = severity
-
-
 def _is_asr_artifact(issue: dict, utt_map: dict) -> bool:
     uid = issue.get("utterance_id", "")
     ref = utt_map.get(uid)
@@ -610,11 +601,6 @@ def _make_result(
         "overall_assessment": {
             "has_issues": len(issues) > 0,
             "total_issues": len(issues),
-            "severity_breakdown": {
-                "critical": sum(1 for i in issues if i.get("severity") == "critical"),
-                "major": sum(1 for i in issues if i.get("severity") == "major"),
-                "minor": sum(1 for i in issues if i.get("severity") == "minor"),
-            },
         },
         "issues": issues,
         "api_calls": api_calls,
@@ -675,10 +661,6 @@ def merge_multiple_runs(
         "overall_assessment": {
             "has_issues": len(filtered) > 0,
             "total_issues": len(filtered),
-            "severity_breakdown": {
-                s: sum(1 for i in filtered if i.get("severity") == s)
-                for s in ("critical", "major", "minor")
-            },
         },
         "issues": filtered,
         "summary": f"{num_runs}회 판정, 합의 기준 {min_detection_rate:.0%} (시간 창 {time_window_sec:.0f}초). 총 {len(all_issues)}개 후보 중 {len(filtered)}개 확정 ({dropped}개 제외).",

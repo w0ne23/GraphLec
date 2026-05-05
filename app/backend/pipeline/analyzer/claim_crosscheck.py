@@ -354,9 +354,11 @@ def _build_slide_recheck_prompt(
 결론:
 - 슬라이드 전체 맥락을 봐도 여전히 객관적으로 틀린 사실이면 → "classification": "confirmed_error"
 - 슬라이드 맥락을 보면 실제로는 맞는 설명이면 → "classification": "rejected"
-- 슬라이드가 같은 표현을 뒷받침하거나 강의 맥락상 대체로 맞지만, 표현 때문에 범위/예외/조건을 오해할 수 있으면 → "classification": "needs_review"
+- 슬라이드가 같은 표현을 뒷받침하고 주변 발화가 의도한 의미를 충분히 설명한다면, 더 엄밀한 표현이 가능하더라도 → "classification": "rejected"
+- 표현 때문에 범위/예외/조건을 오해할 수 있고, 슬라이드/주변 발화만으로도 그 오해가 해소되지 않을 때만 → "classification": "needs_review"
 - 특히 "오직", "독점", "반드시", "모든", "항상" 같은 표현이 슬라이드에도 명시되어 있고 입문 강의의 교육적 단순화로 보이면,
-  객관적 사실 오류로 확정하지 말고 "needs_review"로 분류하세요.
+  객관적 사실 오류나 검토 필요로 유지하지 말고 "rejected"로 분류하세요.
+- "needs_review"는 기본값이 아닙니다. 확정 오류라고 말할 수는 없지만 강의자가 실제로 표현을 검토해야 할 정도로 모호성이 남는 경우에만 사용하세요.
 - supporting_slide_status:
   - "supports": 슬라이드가 발화/claim을 뒷받침함
   - "contradicts": 슬라이드가 발화/claim과 직접 충돌함

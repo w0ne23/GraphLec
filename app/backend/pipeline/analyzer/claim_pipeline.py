@@ -302,10 +302,6 @@ def verify_lecture_content(
         result["overall_assessment"] = {
             "has_issues": len(verified) > 0,
             "total_issues": len(verified),
-            "severity_breakdown": {
-                s: sum(1 for i in verified if i.get("severity") == s)
-                for s in ("critical", "major", "minor")
-            },
         }
     else:
         result["overall_assessment"]["total_issues"] = 0

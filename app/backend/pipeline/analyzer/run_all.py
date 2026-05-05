@@ -348,7 +348,6 @@ def _claim_record_from_issue(
             "candidate_status": issue.get("candidate_status", ""),
             "issue": issue.get("issue", ""),
             "correct_info": issue.get("correct_info", ""),
-            "severity": issue.get("severity", ""),
             "confidence": issue.get("confidence", 0),
             "model_verdicts": _model_verdicts_from_issue(issue),
             "slide_recheck": _slide_recheck_from_issue(issue),
