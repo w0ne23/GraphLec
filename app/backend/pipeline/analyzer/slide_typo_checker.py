@@ -23,10 +23,10 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 {slide_text[:3000]}
 
 보고할 것:
-- 이미지에서 명백하게 보이는 한글 오타
+- 이미지에서 명백하게 보이는 한글 철자 오타
 - 영문 철자 오류
 - 숫자/단위 오기
-- 의미를 해치는 띄어쓰기 오류
+- 단어 내부가 글자 단위로 잘못 끊긴 띄어쓰기 오류
 
 보고하지 말 것:
 - OCR이 잘못 읽은 텍스트 자체
@@ -34,6 +34,10 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 - 사실 오류나 개념 오류
 - 줄바꿈, 글자 간격, 디자인 문제
 - 약어, 고유명사, 표기 관례처럼 오타로 단정하기 어려운 것
+- 복합어 띄어쓰기 관례
+- 조사/어미/접속 표현 교정
+- 외래어를 한국어로 순화하는 교정
+- 쉼표 추가, 문장 자연화, 더 좋은 표현 제안
 
 출력 형식은 JSON만 허용합니다.
 
@@ -51,10 +55,60 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 ```
 
 지침:
-1. 확신이 0.80 미만이면 출력하지 마세요.
-2. 오타가 없으면 {{"typos": []}}만 출력하세요.
-3. JSON 외 텍스트 금지.
+1. 확신이 0.90 미만이면 출력하지 마세요.
+2. "더 자연스럽다", "더 적절하다" 수준이면 출력하지 마세요.
+3. 오타가 없으면 {{"typos": []}}만 출력하세요.
+4. JSON 외 텍스트 금지.
 """
+
+
+def _compact_no_space(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "").strip().lower())
+
+
+def _has_broken_internal_space(value: str) -> bool:
+    tokens = [token for token in str(value or "").split() if token]
+    return len(tokens) >= 2 and any(len(token) == 1 for token in tokens)
+
+
+def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "") -> bool:
+    """True only for visually clear typos; reject style/terminology polish."""
+    p = str(problematic or "").strip()
+    c = str(corrected or "").strip()
+    r = str(reason or "").strip().lower()
+    if not p or not c or p == c:
+        return False
+
+    p_compact = _compact_no_space(p)
+    c_compact = _compact_no_space(c)
+    if not p_compact or p_compact == c_compact:
+        return p.count(" ") > c.count(" ") and _has_broken_internal_space(p)
+
+    style_markers = (
+        "더 적절",
+        "더 자연",
+        "자연스럽",
+        "어색",
+        "문법",
+        "조사",
+        "순화",
+        "용어",
+        "표현 선호",
+        "더 좋은 표현",
+        "문체",
+        "선택의 의미",
+        "나열",
+        "병렬",
+        "쉼표",
+        "구분",
+        "별개",
+    )
+    if any(marker in r for marker in style_markers):
+        return False
+    if "중복" in r and re.search(r"(을|를|이|가|은|는)\s+\S+(을|를|이|가|은|는)", p):
+        return False
+
+    return True
 
 
 def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1) -> tuple[list[dict], bool, int, dict]:
@@ -112,6 +166,8 @@ def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1)
                 corrected = str(item.get("corrected_text", "") or "").strip()
                 reason = str(item.get("reason", "") or "").strip()
                 if not problematic or not corrected:
+                    continue
+                if not is_reportable_slide_typo(problematic, corrected, reason):
                     continue
                 cleaned.append({
                     "slide_number": slide_no,
