@@ -85,6 +85,15 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
     # Keep existing classifier output if present; otherwise leave it null.
     issue_pattern = issue.get("issue_pattern")
     issue_pattern_reason = issue.get("issue_pattern_reason")
+    if issue.get("type") == "outdated":
+        issue_subtype = "outdated"
+        issue_subtype_label = "현행성 오류"
+    elif issue_pattern == "scope_overstatement":
+        issue_subtype = "scope_error"
+        issue_subtype_label = "범위 오류"
+    else:
+        issue_subtype = "simple_factual_error"
+        issue_subtype_label = "사실 오류"
 
     if is_ambiguous:
         category = "ambiguous"
@@ -112,6 +121,8 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         "issue_category_reason": rationale,
         "issue_pattern": issue_pattern,
         "issue_pattern_reason": issue_pattern_reason,
+        "issue_subtype": issue_subtype,
+        "issue_subtype_label": issue_subtype_label,
     }
 
 
@@ -263,6 +274,7 @@ def _grounding_from_issue(issue: dict) -> dict:
 def _slide_recheck_from_issue(issue: dict) -> dict:
     return {
         "status": issue.get("slide_recheck_status", "not_applicable"),
+        "classification": issue.get("slide_recheck_classification", ""),
         "valid": issue.get("slide_recheck_valid"),
         "reason": issue.get("slide_recheck_reason", ""),
         "supporting_slide_status": issue.get("supporting_slide_status", ""),
@@ -333,6 +345,7 @@ def _claim_record_from_issue(
     record.update(
         {
             "issue_type": issue.get("type", ""),
+            "candidate_status": issue.get("candidate_status", ""),
             "issue": issue.get("issue", ""),
             "correct_info": issue.get("correct_info", ""),
             "severity": issue.get("severity", ""),
@@ -639,11 +652,13 @@ def _reorder_result_for_output(result: dict) -> dict:
         "exclusive_count",
         "intersected_count",
         "cross_recheck_verified_count",
+        "cross_recheck_needs_review_count",
         "cross_recheck_inconclusive_count",
         "confirmed_count",
         "issue_pattern_classifier",
         "issues",
         "crosscheck_rejected_issues",
+        "crosscheck_needs_review_issues",
         "crosscheck_inconclusive_issues",
         "slide_recheck_status",
         "slide_recheck_reason",
