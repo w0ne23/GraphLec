@@ -686,6 +686,25 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
 
 
+def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
+    try:
+        from pipeline.analyzer.slide_typo_checker import is_reportable_slide_typo
+    except Exception:
+        return items
+
+    filtered = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if is_reportable_slide_typo(
+            str(item.get("problematic_text", "") or ""),
+            str(item.get("corrected_text", "") or ""),
+            str(item.get("reason", "") or ""),
+        ):
+            filtered.append(item)
+    return filtered
+
+
 async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     """verifier 결과 조회 (Lecture ID 기준)."""
     detail = await get_lecture_detail(db, lecture_id)
@@ -718,8 +737,8 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
     slide_rejected_claims = flow.get("slide_rejected_claims", []) or []
     grounding_rejected_claims = flow.get("grounding_rejected_claims", []) or []
     first_stage_rejected_claims = flow.get("first_stage_rejected_claims", []) or []
-    slide_typos = data.get("slide_typos", []) or []
-    slide_typo_needs_review = data.get("slide_typo_needs_review", []) or []
+    slide_typos = _filter_served_slide_typos(data.get("slide_typos", []) or [])
+    slide_typo_needs_review = _filter_served_slide_typos(data.get("slide_typo_needs_review", []) or [])
 
     return {
         "lecture_id": str(detail["id"]),
