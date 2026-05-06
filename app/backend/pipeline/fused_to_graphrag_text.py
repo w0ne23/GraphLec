@@ -224,7 +224,7 @@ def fused_to_graphrag_text(
     keyword_min_score: float = 0.0,
     include_keyword_scores: bool = True,
 ) -> str:
-    slides = fused.get("scenes") or fused.get("slides") or []
+    slides = fused.get("scenes") or []
     metadata = fused.get("metadata") or {}
     lecture_name = stem or _clean_inline(metadata.get("stem")) or "lecture"
 
@@ -311,12 +311,12 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
 
-    scene_count = len(fused.get("scenes") or fused.get("slides") or [])
+    scene_count = len(fused.get("scenes") or [])
     slide_count = fused.get("slide_count")
     if not isinstance(slide_count, int):
         slide_count = len({
             scene.get("slide_number")
-            for scene in (fused.get("scenes") or fused.get("slides") or [])
+            for scene in (fused.get("scenes") or [])
             if scene.get("slide_number") is not None
         })
     print(f"wrote {output_path} ({scene_count} scenes, {slide_count} slides, {len(text):,} chars)")

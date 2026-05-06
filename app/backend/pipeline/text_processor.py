@@ -295,10 +295,10 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
     seen: set[int] = set()
 
     for entry in metadata:
-        scene_no = entry.get("scene_index", entry.get("slide_index"))
+        scene_no = entry.get("scene_index")
         logical_slide_no = entry.get("slide_number")
-        start_sec = entry.get("slide_start_sec")
-        end_sec = entry.get("slide_end_sec")
+        start_sec = entry.get("scene_start_sec")
+        end_sec = entry.get("scene_end_sec")
         if not isinstance(scene_no, int) or scene_no in seen:
             continue
         if start_sec is None or end_sec is None:
@@ -325,7 +325,7 @@ def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
     for entry in metadata:
         if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
             continue
-        scene_idx = entry.get("scene_index", entry.get("slide_index"))
+        scene_idx = entry.get("scene_index")
         if not isinstance(scene_idx, int) or scene_idx in scene_meta:
             continue
         slide_number = entry.get("slide_number", entry.get("slide_canonical_index"))
@@ -353,7 +353,7 @@ def _load_integrated_slide_texts(
     scene_meta_by_index: Optional[dict[int, dict]] = None,
 ) -> dict[int, dict]:
     result: dict[int, dict] = {}
-    for slide in integrated_data.get("slides", []):
+    for slide in integrated_data.get("scenes", []):
         scene_no = slide.get("scene_number", slide.get("slide_number"))
         slide_no = slide.get("slide_number")
         if scene_meta_by_index and isinstance(scene_no, int):
@@ -645,7 +645,7 @@ def correct_segments_two_pass(
     seg_scene: dict[int, int] = {}
     seg_logical_slide: dict[int, int] = {}
     for i, seg in enumerate(segments):
-        scene_no = seg.get("scene_index", seg.get("slide_index"))
+        scene_no = seg.get("scene_index")
         if isinstance(scene_no, int):
             seg_scene[i] = scene_no
             logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
@@ -753,7 +753,6 @@ def correct_segments_two_pass(
         corrected = seg.copy()
         scene_idx = seg_scene.get(i)
         if isinstance(scene_idx, int):
-            corrected["slide_index"] = scene_idx  # 하위 호환: 기존 pipeline은 scene을 slide_index로 본다.
             corrected["scene_index"] = scene_idx
             scene_meta = scene_meta_by_index.get(scene_idx, {})
             logical_slide_no = scene_meta.get("slide_number")

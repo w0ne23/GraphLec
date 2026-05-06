@@ -6,10 +6,10 @@ Gemini Vision을 통해 텍스트로 변환합니다.
 
 Input:
   - output_slides/ 폴더: slide_extractor.py 출력 디렉토리
-    ├── slide_001_base.jpg         ← annot 없을 때 사용
-    ├── slide_001_annot_01.jpg
-    ├── slide_001_build_NN.jpg     ← PPT 애니메이션 clean 전개 상태
-    ├── slide_001_annot_NN.jpg     ← 교수 필기/강조 프레임
+    ├── scene_001_base.jpg         ← annot 없을 때 사용
+    ├── scene_001_annot_01.jpg
+    ├── scene_001_build_NN.jpg     ← PPT 애니메이션 clean 전개 상태
+    ├── scene_001_annot_NN.jpg     ← 교수 필기/강조 프레임
     ├── metadata.json
     └── ...
 
@@ -246,7 +246,7 @@ class SlideLoader:
         annot_entries: Dict[int, List[dict]] = {}
 
         for entry in metadata:
-            idx = entry.get("scene_index", entry.get("slide_index"))
+            idx = entry.get("scene_index")
             if idx is None:
                 continue
             if entry.get("capture_type") == "base":
@@ -390,7 +390,7 @@ class SlideLoader:
 
         by_scene: dict[int, list[dict]] = defaultdict(list)
         for item in metadata:
-            scene_idx = item.get("scene_index", item.get("slide_index"))
+            scene_idx = item.get("scene_index")
             if isinstance(scene_idx, int):
                 by_scene[scene_idx].append(item)
 
@@ -399,7 +399,7 @@ class SlideLoader:
             items = by_scene[scene_idx]
             base = next((x for x in items if x.get("capture_type") == "base"), items[0])
             canonical = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
-            ts = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
+            ts = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
             ordered_pairs.append((ts, canonical))
 
         lookup: dict[int, int] = {}
@@ -776,7 +776,7 @@ class TextualizationPipeline:
                 "total_scenes":    len(slides),
                 "total_slides":    len({s.get("slide_canonical_number", s["slide_number"]) for s in slides}),
             },
-            "slides": [
+            "scenes": [
                 {
                     "slide_id":            s["slide_id"],
                     "scene_id":            s.get("scene_id"),

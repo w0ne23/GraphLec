@@ -33,7 +33,7 @@ def default_lance_root() -> Path:
 
 def build_chunks_from_fused(fused: Dict[str, Any], stem: str) -> List[Dict[str, Any]]:
     """슬라이드 본문 + 세그먼트 전사를 검색용 청크로 만든다."""
-    slides = fused.get("scenes") or fused.get("slides") or []
+    slides = fused.get("scenes") or []
     chunks: List[Dict[str, Any]] = []
     seg_idx = 0
 
