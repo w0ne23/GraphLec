@@ -151,7 +151,14 @@ class SlideIntegrator:
 
         return {
             "slide_id":            slide["slide_id"],
+            "scene_id":            slide.get("scene_id"),
+            "scene_number":        slide.get("scene_number"),
+            "scene_index":         slide.get("scene_index", slide.get("scene_number")),
             "slide_number":        slide["slide_number"],
+            "slide_canonical_number": slide.get("slide_canonical_number", slide["slide_number"]),
+            "slide_visit_order":   slide.get("slide_visit_order", 1),
+            "slide_is_revisit":    slide.get("slide_is_revisit", False),
+            "representative_scene_number": slide.get("representative_scene_number"),
             "timestamp":           slide["timestamp"],
             "timestamp_formatted": slide.get("timestamp_formatted", ""),
             "image_path":          slide.get("image_path", ""),
@@ -441,6 +448,7 @@ class IntegrationPipeline:
 
         for slide in extracted_data["slides"]:
             slide_num = slide["slide_number"]
+            scene_num = slide.get("scene_number", slide.get("scene_index", slide_num))
             annot_entries = annot_grouped.get(slide_num)
 
             integrated = integrator.integrate(slide, annot_entries)
@@ -448,7 +456,7 @@ class IntegrationPipeline:
 
             status = f"{len(integrated['emphasized'])}개 강조" if integrated["has_annotation"] else "강조 없음"
             logger.info(
-                f"  [{slide_num:03d}] {integrated['title'][:30]:<30} | {status}"
+                f"  [scene {scene_num:03d} / slide {slide_num:03d}] {integrated['title'][:30]:<30} | {status}"
             )
 
         # Stage 3: cross-slide discount 적용

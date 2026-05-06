@@ -402,28 +402,49 @@ def expand_group_annotations_to_segments(
 
 def load_slide_ranges(metadata_path: str, duration_sec: float) -> list[dict]:
     """
-    metadata.json에서 슬라이드별 시간 구간 계산.
+    metadata.json에서 scene occurrence별 시간 구간 계산.
     같은 scene_index의 base(annot_index=0)가 한 scene 시작.
-    반환: [ {"slide_index": 1, "start_sec": 0.07, "end_sec": 46.73}, ... ]
+    반환: [ {"scene_index": 1, "slide_index": 1, "slide_number": 1, "start_sec": 0.07, "end_sec": 46.73}, ... ]
+    slide_index는 기존 소비 코드 호환용으로 scene_index와 같은 값을 유지한다.
     """
     with open(metadata_path, "r", encoding="utf-8") as f:
         items = json.load(f)
     bases = [x for x in items if x.get("annot_index") == 0 or x.get("capture_type") == "base"]
-    bases = sorted(bases, key=lambda x: (x.get("scene_index", x["slide_index"]), x["timestamp_sec"]))
+    def _scene_index(item: dict):
+        return item.get("scene_index") if item.get("scene_index") is not None else item.get("slide_index")
+
+    bases = sorted(bases, key=lambda x: (_scene_index(x), x["timestamp_sec"]))
     seen = set()
     unique_bases = []
     for b in bases:
-        scene_idx = b.get("scene_index", b["slide_index"])
+        scene_idx = _scene_index(b)
         if scene_idx in seen:
             continue
         seen.add(scene_idx)
-        unique_bases.append({"slide_index": scene_idx, "timestamp_sec": b["timestamp_sec"]})
+        unique_bases.append({
+            "scene_index": scene_idx,
+            "slide_index": scene_idx,
+            "slide_number": b.get("slide_number"),
+            "slide_canonical_index": b.get("slide_canonical_index", b.get("same_slide_canonical")),
+            "slide_visit_order": b.get("slide_visit_order", b.get("same_slide_visit_order", 1)),
+            "slide_is_revisit": bool(b.get("slide_is_revisit", b.get("same_slide_is_revisit", False))),
+            "timestamp_sec": b["timestamp_sec"],
+        })
     unique_bases.sort(key=lambda x: x["timestamp_sec"])
     ranges = []
     for i, b in enumerate(unique_bases):
         start = b["timestamp_sec"]
         end = unique_bases[i + 1]["timestamp_sec"] if i + 1 < len(unique_bases) else duration_sec
-        ranges.append({"slide_index": b["slide_index"], "start_sec": start, "end_sec": end})
+        ranges.append({
+            "scene_index": b["scene_index"],
+            "slide_index": b["scene_index"],
+            "slide_number": b.get("slide_number"),
+            "slide_canonical_index": b.get("slide_canonical_index"),
+            "slide_visit_order": b.get("slide_visit_order", 1),
+            "slide_is_revisit": b.get("slide_is_revisit", False),
+            "start_sec": start,
+            "end_sec": end,
+        })
     return ranges
 
 
@@ -436,12 +457,12 @@ def group_segments_by_slide_and_context(
     use_pause_sentence: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """
-    먼저 슬라이드별로 세그먼트를 나누고, 각 슬라이드 내부에서 LLM 의미 병합으로 컨텍스트 구성.
+    먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 LLM 의미 병합으로 컨텍스트 구성.
     use_pause_sentence: True면 침묵/문장끝 기준 분할 추가 (나중에 사용할 옵션).
 
     반환: (groups_flat, slides_structure)
-    - groups_flat: 강조 분석용 그룹 리스트 (start, end, text, segment_indices, slide_index, context_index_in_slide)
-    - slides_structure: 최종 JSON용 [ { slide_index, start_sec, end_sec, text, contexts: [ { context_index, start, end, text, segment_indices, segments: [...] } ] } ]
+    - groups_flat: 강조 분석용 그룹 리스트 (start, end, text, segment_indices, scene_index, slide_index, context_index_in_slide)
+    - slides_structure: 최종 JSON용 [ { scene_index, slide_index, slide_number, start_sec, end_sec, text, contexts: [...] } ]
     """
     if not segments or not slide_ranges:
         return [], []
@@ -449,29 +470,42 @@ def group_segments_by_slide_and_context(
     seg_to_slide = []
     for i, seg in enumerate(segments):
         t = seg["start"]
-        slide_idx = None
+        scene_idx = None
         for r in slide_ranges:
             if r["start_sec"] <= t < r["end_sec"]:
-                slide_idx = r["slide_index"]
+                scene_idx = r.get("scene_index") if r.get("scene_index") is not None else r["slide_index"]
                 break
-        if slide_idx is None and slide_ranges:
+        if scene_idx is None and slide_ranges:
             if t < slide_ranges[0]["start_sec"]:
-                slide_idx = slide_ranges[0]["slide_index"]
+                scene_idx = (
+                    slide_ranges[0].get("scene_index")
+                    if slide_ranges[0].get("scene_index") is not None
+                    else slide_ranges[0]["slide_index"]
+                )
             else:
-                slide_idx = slide_ranges[-1]["slide_index"]
-        seg_to_slide.append(slide_idx)
+                scene_idx = (
+                    slide_ranges[-1].get("scene_index")
+                    if slide_ranges[-1].get("scene_index") is not None
+                    else slide_ranges[-1]["slide_index"]
+                )
+        seg_to_slide.append(scene_idx)
 
     slides_structure = []
     groups_flat = []
 
     for r in slide_ranges:
-        sidx = r["slide_index"]
+        sidx = r.get("scene_index") if r.get("scene_index") is not None else r["slide_index"]
         start_sec = r["start_sec"]
         end_sec = r["end_sec"]
         indices_in_slide = [i for i in range(len(segments)) if seg_to_slide[i] == sidx]
         if not indices_in_slide:
             slides_structure.append({
+                "scene_index": sidx,
                 "slide_index": sidx,
+                "slide_number": r.get("slide_number"),
+                "slide_canonical_index": r.get("slide_canonical_index"),
+                "slide_visit_order": r.get("slide_visit_order", 1),
+                "slide_is_revisit": r.get("slide_is_revisit", False),
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "text": "",
@@ -529,7 +563,9 @@ def group_segments_by_slide_and_context(
                 "end": g["end"],
                 "text": g["text"],
                 "segment_indices": g["segment_indices"],
+                "scene_index": sidx,
                 "slide_index": sidx,
+                "slide_number": r.get("slide_number"),
                 "context_index_in_slide": cix,
             }
             groups_flat.append(g_flat)
@@ -546,7 +582,12 @@ def group_segments_by_slide_and_context(
                 "segments": segs_in_context,
             })
         slides_structure.append({
+            "scene_index": sidx,
             "slide_index": sidx,
+            "slide_number": r.get("slide_number"),
+            "slide_canonical_index": r.get("slide_canonical_index"),
+            "slide_visit_order": r.get("slide_visit_order", 1),
+            "slide_is_revisit": r.get("slide_is_revisit", False),
             "start_sec": start_sec,
             "end_sec": end_sec,
             "text": slide_text,

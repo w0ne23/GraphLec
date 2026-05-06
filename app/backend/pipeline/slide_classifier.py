@@ -448,11 +448,11 @@ class ClassificationPipeline:
 
         silences = silence_data.get("silences", [])
 
-        # base 항목만 추출 (slide_index 기준 중복 제거 — base가 여러 개면 첫 번째 우선)
+        # base 항목만 추출 (scene_index 기준 중복 제거 — base가 여러 개면 첫 번째 우선)
         base_entries: Dict[int, dict] = {}
         for entry in raw_meta:
             if entry.get("capture_type") == "base":
-                idx = entry["slide_index"]
+                idx = entry.get("scene_index") if entry.get("scene_index") is not None else entry["slide_index"]
                 if idx not in base_entries:
                     base_entries[idx] = entry
 
@@ -475,7 +475,7 @@ class ClassificationPipeline:
 
         # ── 분류 ─────────────────────────────────────────────────────────── #
         classifier  = SlideClassifier(silences)
-        class_map:  Dict[int, dict] = {}   # slide_index → classification
+        class_map:  Dict[int, dict] = {}   # scene_index → classification
 
         for group in dup_groups:
             result = classifier.classify_group(group, base_entries)
@@ -494,8 +494,10 @@ class ClassificationPipeline:
         role_counter: Dict[str, int] = defaultdict(int)
 
         for slide in tex_data["slides"]:
-            num   = slide["slide_number"]
-            cls   = class_map.get(num, {
+            scene_num = slide.get("scene_number", slide.get("scene_index", slide["slide_number"]))
+            slide_num = slide["slide_number"]
+            scene_label = int(scene_num) if isinstance(scene_num, int) else int(slide_num)
+            cls   = class_map.get(scene_num, {
                 "role":          "core",
                 "score":         None,
                 "revisited":     False,
@@ -521,10 +523,10 @@ class ClassificationPipeline:
                 "continuous":    cls.get("continuous", False),
             }
             classified_slides.append(classified_slide)
-            role_counter[cls["role"]] += 1
+            role_counter[final_role] += 1
 
             logger.info(
-                f"  slide_{num:03d} | {cls['role']:<12} | "
+                f"  scene_{scene_label:03d} / slide_{slide_num:03d} | {final_role:<12} | "
                 f"score={str(round(cls['score'], 3)) if cls.get('score') is not None else '-':>5} | "
                 f"revisited={cls.get('revisited', False)} | "
                 f"continuous={cls.get('continuous', False)}"

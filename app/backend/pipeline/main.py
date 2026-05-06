@@ -13,7 +13,7 @@ main.py
                      text_processor    — 2-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
   [병렬] Stage 4A: slide_classifier    — 슬라이드 역할 분류
-         Stage 4B: by_slide 구조 저장  — (3B 결과 기반)
+         Stage 4B: by_scene 구조 저장  — (3B 결과 기반)
   [직렬] Stage 5 : fusion              — 최종 통합
   [직렬] Stage 6 : 그래프 Parquet       — json_to_graph_triples
   [직렬] Stage 7 : lance_ingest          — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
@@ -209,7 +209,10 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
     _save_json(scene_slide_map_path, build_scene_slide_map(metadata))
     _save_json(canonical_slide_annotations_path, build_canonical_slide_annotations(metadata))
 
-    scene_count = len({m.get("scene_index", m["slide_index"]) for m in metadata})
+    scene_count = len({
+        m.get("scene_index") if m.get("scene_index") is not None else m["slide_index"]
+        for m in metadata
+    })
     _done(f"scene {scene_count}개, 프레임 {len(metadata)}개 추출", elapsed)
     return {
         "meta_path": str(meta_path),
@@ -366,21 +369,24 @@ def stage3b_audio(
     segments_path = output_dir / f"{stem}_segments.json"
     silences_path = output_dir / f"{stem}_silences.json"
     emphasis_path = output_dir / f"{stem}_emphasis.json"
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
     by_slide_path = output_dir / f"{stem}_by_slide.json"
 
-    def _by_slide_has_emphasis_schema(path: Path) -> bool:
+    def _scene_audio_has_emphasis_schema(path: Path) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            for slide in payload.get("slides", []):
-                for ctx in slide.get("contexts", []):
+            scenes = payload.get("scenes") or payload.get("slides") or []
+            for scene in scenes:
+                for ctx in scene.get("contexts", []):
                     if "emphasis" not in ctx:
                         return False
             return True
         except Exception:
             return False
 
-    # 세그먼트만 있고 by_slide가 없으면(파일 삭제·불완전 실행) 스킵하면 Stage 4B·5가 깨짐 → 3B 전체 재실행
+    # 세그먼트만 있고 scene 오디오 구조가 없으면(파일 삭제·불완전 실행)
+    # 스킵 시 Stage 4B·5가 깨지므로 Stage 3B 전체 재실행
     seg_ok = (
         not args.force
         and segments_path.exists()
@@ -388,22 +394,30 @@ def stage3b_audio(
     )
     silences_ok = silences_path.exists() and silences_path.stat().st_size > 0
     emphasis_ok = emphasis_path.exists() and emphasis_path.stat().st_size > 0
-    by_slide_ok = (
+    by_scene_ok = (
+        by_scene_path.exists()
+        and by_scene_path.stat().st_size > 0
+        and _scene_audio_has_emphasis_schema(by_scene_path)
+    )
+    legacy_by_slide_ok = (
         by_slide_path.exists()
         and by_slide_path.stat().st_size > 0
-        and _by_slide_has_emphasis_schema(by_slide_path)
+        and _scene_audio_has_emphasis_schema(by_slide_path)
     )
-    if seg_ok and silences_ok and emphasis_ok and by_slide_ok:
+    scene_audio_ok = by_scene_ok or legacy_by_slide_ok
+    if seg_ok and silences_ok and emphasis_ok and scene_audio_ok:
         print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
         print(f"     {segments_path}")
-        print(f"     {by_slide_path}")
+        print(f"     {by_scene_path if by_scene_ok else by_slide_path}")
         print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
         slides_structure = None
-        if by_slide_path.exists():
+        scene_audio_path = by_scene_path if by_scene_ok else by_slide_path
+        if scene_audio_path.exists():
             try:
-                with open(by_slide_path) as f:
-                    slides_structure = json.load(f).get("slides")
+                with open(scene_audio_path) as f:
+                    payload = json.load(f)
+                    slides_structure = payload.get("scenes") or payload.get("slides")
             except Exception:
                 pass
 
@@ -435,12 +449,13 @@ def stage3b_audio(
         log.warning(
             "Stage 3B 캐시가 불완전하여 재실행합니다 "
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
-            f"emphasis={emphasis_path.exists()}, by_slide={by_slide_path.exists()})"
+            f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()}, "
+            f"by_slide={by_slide_path.exists()})"
         )
 
-    if seg_ok and not by_slide_ok:
+    if seg_ok and not scene_audio_ok:
         print(
-            f"\n  ⚠️  {by_slide_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
+            f"\n  ⚠️  {by_scene_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
             "Stage 3B 전체를 다시 실행합니다."
         )
         print("─" * 70)
@@ -624,6 +639,7 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
     from .segment_grouper import group_segments_by_slide_and_context
 
     stem = Path(args.input).stem
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
     by_slide_path = output_dir / f"{stem}_by_slide.json"
 
     slides_structure = audio_result.get("slides_structure")
@@ -636,24 +652,83 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            for slide in payload.get("slides", []):
-                for ctx in slide.get("contexts", []):
+            scenes = payload.get("scenes") or payload.get("slides") or []
+            for scene in scenes:
+                for ctx in scene.get("contexts", []):
                     if "emphasis" not in ctx:
                         return False
             return True
         except Exception:
             return False
 
+    def _to_public_scene_entry(scene: dict) -> dict:
+        clean = json.loads(json.dumps(scene))
+        if clean.get("scene_id") is None and clean.get("scene_index") is not None:
+            clean["scene_id"] = f"scene/{int(clean['scene_index']):04d}"
+        legacy_slide_index = clean.pop("slide_index", None)
+        if legacy_slide_index is not None:
+            clean["legacy_slide_index"] = legacy_slide_index
+        return clean
+
+    def _scene_payload(scenes: list[dict]) -> dict:
+        public_scenes = [_to_public_scene_entry(scene) for scene in scenes]
+        slide_numbers = {
+            scene.get("slide_number")
+            for scene in public_scenes
+            if scene.get("slide_number") is not None
+        }
+        return {
+            "unit": "scene",
+            "scene_count": len(public_scenes),
+            "slide_count": len(slide_numbers),
+            "scenes": public_scenes,
+            "slides": public_scenes,
+        }
+
+    def _legacy_by_slide_payload(scenes: list[dict]) -> dict:
+        slide_numbers = {
+            scene.get("slide_number")
+            for scene in scenes
+            if scene.get("slide_number") is not None
+        }
+        return {
+            "unit": "scene",
+            "deprecated_name": True,
+            "replacement": by_scene_path.name,
+            "scene_count": len(scenes),
+            "slide_count": len(slide_numbers),
+            "slides": scenes,
+        }
+
+    def _ensure_by_scene_alias_from_legacy() -> None:
+        if by_scene_path.exists() and by_scene_path.stat().st_size > 0:
+            return
+        if not by_slide_path.exists() or by_slide_path.stat().st_size <= 0:
+            return
+        with open(by_slide_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        scenes = payload.get("scenes") or payload.get("slides") or []
+        if scenes:
+            _save_json(by_scene_path, _scene_payload(scenes))
+
     if not slide_ranges:
-        if by_slide_path.exists() and by_slide_path.stat().st_size > 0 and _has_emphasis_schema(by_slide_path):
+        if by_scene_path.exists() and by_scene_path.stat().st_size > 0 and _has_emphasis_schema(by_scene_path):
             return {
+                "by_scene_path": str(by_scene_path),
+                "by_slide_path": str(by_slide_path) if by_slide_path.exists() else "",
+                "elapsed": 0.0,
+            }
+        if by_slide_path.exists() and by_slide_path.stat().st_size > 0 and _has_emphasis_schema(by_slide_path):
+            _ensure_by_scene_alias_from_legacy()
+            return {
+                "by_scene_path": str(by_scene_path),
                 "by_slide_path": str(by_slide_path),
                 "elapsed": 0.0,
             }
-        raise RuntimeError("Stage 4B by_slide 저장 실패: slide_ranges가 비어 있습니다.")
+        raise RuntimeError("Stage 4B by_scene 저장 실패: slide_ranges가 비어 있습니다.")
 
     if not slides_structure and annotated_segments:
-        log.warning("Stage 4B by_slide 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
+        log.warning("Stage 4B by_scene 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
         try:
             _, slides_structure = group_segments_by_slide_and_context(
                 annotated_segments,
@@ -663,23 +738,25 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
                 use_llm_merge=False,
             )
         except Exception as exc:
-            raise RuntimeError(f"Stage 4B by_slide 재구성 실패: {exc}") from exc
+            raise RuntimeError(f"Stage 4B by_scene 재구성 실패: {exc}") from exc
 
     if not slides_structure:
         raise RuntimeError(
-            "Stage 4B by_slide 저장 실패: slides_structure가 비어 있습니다. "
+            "Stage 4B by_scene 저장 실패: slides_structure가 비어 있습니다. "
             "Stage 3B 오디오 후처리 결과를 확인해주세요."
         )
 
-    if _is_done(by_slide_path, "Stage 4B by_slide 저장", args.force):
+    if _is_done(by_slide_path, "Stage 4B by_scene/by_slide 저장", args.force):
         if _has_emphasis_schema(by_slide_path):
+            _ensure_by_scene_alias_from_legacy()
             return {
+                "by_scene_path": str(by_scene_path),
                 "by_slide_path": str(by_slide_path),
                 "elapsed": 0.0,
             }
         log.warning("기존 by_slide.json에 emphasis 스키마가 없어 재생성합니다.")
 
-    _banner("Stage 4B  —  by_slide 구조 저장")
+    _banner("Stage 4B  —  by_scene 구조 저장")
     t0 = time.time()
 
     slides_with_emphasis = json.loads(json.dumps(slides_structure))
@@ -710,11 +787,13 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
             ordered_ctx["segments"] = ctx.get("segments", [])
             new_contexts.append(ordered_ctx)
         slide["contexts"] = new_contexts
-    _save_json(by_slide_path, {"slides": slides_with_emphasis})
+    _save_json(by_scene_path, _scene_payload(slides_with_emphasis))
+    _save_json(by_slide_path, _legacy_by_slide_payload(slides_with_emphasis))
 
     elapsed = time.time() - t0
-    _done("by_slide 구조 저장", elapsed)
+    _done("by_scene 구조 저장", elapsed)
     return {
+        "by_scene_path": str(by_scene_path),
         "by_slide_path": str(by_slide_path),
         "elapsed": elapsed,
     }
@@ -731,6 +810,8 @@ def stage5_fusion(
 
     stem = Path(args.input).stem
     fused_path = output_dir / f"{stem}_fused.json"
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
+    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
     if _is_done(fused_path, "Stage 5 퓨전", args.force):
         return {"fused_path": str(fused_path), "elapsed": 0.0}
@@ -742,26 +823,34 @@ def stage5_fusion(
         stem=stem,
         output_dir=output_dir,
         slides_dir=Path(args.slides),
-        audio_path=output_dir / f"{stem}_by_slide.json",
+        audio_path=by_scene_path if by_scene_path.exists() else by_slide_path,
         classified_path=output_dir / f"{stem}_slide_classified.json",
         annotation_path=Path(annotation_path),
         output_path=fused_path,
     )
     fused_output = run_fusion(cfg)
+    fused_scenes = fused_output.get("scenes") or fused_output.get("slides", [])
+    logical_slide_count = len({
+        scene.get("slide_number")
+        for scene in fused_scenes
+        if scene.get("slide_number") is not None
+    })
 
     # run_fusion 반환 스키마를 메인 파이프라인 출력 형식에 맞게 감싼다.
     _save_json(
         fused_path,
         {
             "video_path": args.input,
-            "description": "영상(slide+annotation) + 오디오 퓨전 결과",
-            "slide_count": len(fused_output.get("slides", [])),
+            "description": "영상(scene+slide+annotation) + 오디오 퓨전 결과",
+            "scene_count": len(fused_scenes),
+            "slide_count": logical_slide_count,
             "fusion_metadata": fused_output.get("metadata", {}),
-            "slides": fused_output.get("slides", []),
+            "scenes": fused_scenes,
+            "slides": fused_scenes,
         },
     )
     elapsed = time.time() - t0
-    _done(f"슬라이드 {len(fused_output.get('slides', []))}개 퓨전", elapsed)
+    _done(f"scene {len(fused_scenes)}개 / slide {logical_slide_count}개 퓨전", elapsed)
     return {"fused_path": str(fused_path), "elapsed": elapsed}
 
 
@@ -1494,7 +1583,7 @@ def run_pipeline(args, progress_callback=None):
         print("─" * 70)
 
         # ── Stage 4 (병렬 C/D) ──
-        _banner("Stage 4  —  병렬 실행 (classifier + by_slide 저장)")
+        _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
         t_parallel = time.time()
         classified_result: dict = {}
         by_slide_result: dict = {}
@@ -1513,7 +1602,7 @@ def run_pipeline(args, progress_callback=None):
                     timings["Stage 4A 분류"] = classified_result.get("elapsed", 0.0)
                 else:
                     by_slide_result = future.result()
-                    timings["Stage 4B by_slide 저장"] = by_slide_result.get("elapsed", 0.0)
+                    timings["Stage 4B by_scene 저장"] = by_slide_result.get("elapsed", 0.0)
 
         timings["Stage 4 병렬 총"] = time.time() - t_parallel
         print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
@@ -1598,6 +1687,7 @@ def run_pipeline(args, progress_callback=None):
             annotation_path,
             textualized_path,
             classified_result.get("classified_path", ""),
+            by_slide_result.get("by_scene_path", ""),
             by_slide_result.get("by_slide_path", ""),
             r5.get("fused_path", ""),
             r6.get("triples_parquet", ""),
