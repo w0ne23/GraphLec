@@ -2,31 +2,39 @@
 교차 검증 (Cross-Model Verification)
 
 1단계 claim 추출 → gemini-2.5-flash 단일 추출
-2단계 claim 판정 → 다중 모델 후보 합집합
+2단계 claim 판정 → GPT/Claude 다중 모델 후보 합집합
 3단계 텍스트+문맥 교차검증 → 각 모델이 합집합 이슈를 재판정
 4단계 grounding → 통과한 이슈만 primary 모델로 재검증
 
 사용법:
     python -m analyzer.cross_pipeline <merged_clean.json>
-    python -m analyzer.cross_pipeline <merged_clean.json> --models gemini-2.5-flash gpt-5.4
+    python -m analyzer.cross_pipeline <merged_clean.json> --models gpt-5.4 claude-sonnet-4.5
     python -m analyzer.cross_pipeline <merged_clean.json> --mode independent
 """
 
 import argparse
 import json
+import os
 import re
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from datetime import datetime
 from pathlib import Path
 
-from .cross_merge import _cluster_contextual_issues, _issue_match_key, rebuild_claim_batches, union_claims, union_issues
+from . import claim_common as cv
+from .cross_merge import (
+    _issue_match_key,
+    canonicalize_issues_with_llm,
+    rebuild_claim_batches,
+    union_claims,
+    union_issues,
+)
 from .cross_utils import (
     CLAIM_EXTRACT_MODEL,
     _ROOT,
     _collect_env_vars,
     _empty_token_usage,
     _format_token_summary,
+    _load_claims_jsonl,
     _merge_token_usage,
     _write_claims_jsonl,
 )
@@ -40,126 +48,136 @@ from .cross_workers import (
 )
 
 
-_CACHE_VERSION = 1
-_STAGE_POLICY_VERSIONS = {
-    "phase2_judge": 2,
-    "phase3_cross_recheck": 2,
-    "phase4_slide_grounding": 5,
-}
-
-
-def _safe_cache_name(value: str) -> str:
-    text = str(value or "").strip()
-    return re.sub(r"[^A-Za-z0-9_.-]+", "_", text).strip("_") or "default"
-
-
-def _cache_meta(
-    stage: str,
-    merged_path: str,
-    models: list[str],
-    current_date: str,
-    num_runs: int,
-    min_rate: float,
-    batch_size: int,
-    judge_batch_size: int | None,
-    *,
-    model: str | None = None,
-    extra: dict | None = None,
-) -> dict:
-    merged_file = Path(merged_path).resolve()
-    try:
-        merged_mtime_ns = merged_file.stat().st_mtime_ns
-    except OSError:
-        merged_mtime_ns = None
-    meta = {
-        "cache_version": _CACHE_VERSION,
-        "stage_policy_version": _STAGE_POLICY_VERSIONS.get(stage, 1),
-        "stage": stage,
-        "merged_path": str(merged_file),
-        "merged_mtime_ns": merged_mtime_ns,
-        "models": list(models),
-        "model": model or "",
-        "current_date": current_date,
-        "num_runs": num_runs,
-        "min_rate": min_rate,
-        "batch_size": batch_size,
-        "judge_batch_size": judge_batch_size,
-        "claim_extract_model": CLAIM_EXTRACT_MODEL,
-    }
-    if extra:
-        meta.update(extra)
-    return meta
-
-
-def _slide_typo_settings(env_vars: dict) -> dict:
-    def parse_int(name: str, default: int) -> int:
-        try:
-            return max(1, int(env_vars.get(name, default) or default))
-        except Exception:
-            return default
-
-    def parse_rate(name: str, default: float) -> float:
-        try:
-            value = float(env_vars.get(name, default) or default)
-        except Exception:
-            value = default
-        return max(0.0, min(1.0, value))
-
-    return {
-        "slide_typo_filter_version": 3,
-        "slide_typo_runs": parse_int("VERIFIER_SLIDE_TYPO_RUNS", 1),
-        "slide_typo_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_MIN_RATE", 1.0),
-        "slide_typo_review_min_rate": parse_rate("VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", 0.5),
-    }
-
-
-def _cache_path(cache_dir: str | Path | None, name: str) -> Path | None:
-    if not cache_dir:
-        return None
-    return Path(cache_dir) / f"{name}.json"
-
-
-def _load_cache(
-    cache_dir: str | Path | None,
-    name: str,
-    expected_meta: dict,
-    *,
-    resume: bool,
-) -> dict | None:
-    path = _cache_path(cache_dir, name)
-    if not resume or path is None or not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as e:
-        print(f"  ⚠️ 캐시 로드 실패, 재실행: {path} ({e})")
-        return None
-    if payload.get("meta") != expected_meta:
-        print(f"  ⚠️ 캐시 설정 불일치, 재실행: {path.name}")
-        return None
-    print(f"  ↻ 캐시 사용: {path.name}")
-    return payload.get("payload")
-
-
-def _save_cache(cache_dir: str | Path | None, name: str, meta: dict, payload: dict) -> None:
-    path = _cache_path(cache_dir, name)
-    if path is None:
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(
-        json.dumps({"meta": meta, "payload": payload}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    tmp_path.replace(path)
-
-
-def _dedupe_stage_issues(final: dict) -> None:
-    for key in ("issues", "slide_rejected", "grounding_rejected", "needs_review"):
-        final[key] = _cluster_contextual_issues(final.get(key, []) or [])
-
-
 # ── 교차 검증 메인 ────────────────────────────────────────
+
+
+_CROSSCHECK_FEEDBACK_FIELDS = (
+    "issue",
+    "correct_info",
+    "why_wrong",
+    "counterexample",
+    "issue_basis",
+    "student_error",
+    "counterexample_or_condition",
+    "context_resolution",
+    "evidence_in_context",
+    "student_misunderstanding",
+    "why_it_matters",
+    "suggested_rephrase",
+    "teaching_note",
+    "recommendation",
+)
+
+DEFAULT_CROSSCHECK_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+def _split_model_specs(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part for part in re.split(r"[\s,]+", str(value).strip()) if part]
+
+
+def _default_verifier_models() -> list[str]:
+    configured = _split_model_specs(os.getenv("CROSS_VERIFY_MODELS"))
+    if configured:
+        return configured
+    legacy = _split_model_specs(os.getenv("CROSS_VERIFY_MODEL"))
+    if legacy:
+        return legacy
+    return ["gpt-5.4", "claude-sonnet-4.5"]
+
+
+def _is_strong_feedback_model(model: str) -> bool:
+    lowered = str(model or "").lower()
+    return lowered.startswith(("gpt", "o1", "o3")) or "claude" in lowered or "sonnet" in lowered or "opus" in lowered
+
+
+def _is_gemini_model(model: str) -> bool:
+    return "gemini" in str(model or "").lower()
+
+
+def _crosscheck_model_for(model: str) -> str:
+    if not _is_gemini_model(model):
+        return model
+    configured = str(os.getenv("VERIFIER_CROSSCHECK_GEMINI_MODEL", "") or "").strip()
+    return configured or DEFAULT_CROSSCHECK_GEMINI_MODEL
+
+
+def _best_crosscheck_detail(details: list[dict], verdict: str = "agree") -> dict:
+    candidates = [row for row in details if row.get("verdict") == verdict]
+    if not candidates:
+        return {}
+    strong = [row for row in candidates if _is_strong_feedback_model(row.get("model", ""))]
+    return (strong or candidates)[0]
+
+
+def _ordered_crosscheck_details(details: list[dict]) -> list[dict]:
+    ordered = []
+    for verdict in ("agree", "inconclusive", "disagree"):
+        candidates = [row for row in details if row.get("verdict") == verdict]
+        strong = [row for row in candidates if _is_strong_feedback_model(row.get("model", ""))]
+        weak = [row for row in candidates if row not in strong]
+        ordered.extend(strong + weak)
+    return ordered
+
+
+def _combined_crosscheck_reasons(details: list[dict], *, include_disagree: bool = False) -> str:
+    allowed = {"agree", "inconclusive"}
+    if include_disagree:
+        allowed.add("disagree")
+    parts = []
+    for row in details:
+        verdict = str(row.get("verdict", "") or "")
+        reason = str(row.get("reason", "") or "").strip()
+        if verdict in allowed and reason:
+            parts.append(f"[{row.get('model')}] {verdict}: {reason}")
+    return " / ".join(parts)
+
+
+def _apply_crosscheck_feedback_fields(issue: dict, details: list[dict], *, professor_check: bool = False) -> None:
+    sources = _ordered_crosscheck_details(details)
+    if not sources:
+        return
+    for field in _CROSSCHECK_FEEDBACK_FIELDS:
+        for source in sources:
+            value = str(source.get(field, "") or "").strip()
+            if value:
+                issue[field] = value
+                break
+
+    if not issue.get("why_wrong"):
+        combined_reason = _combined_crosscheck_reasons(details, include_disagree=professor_check)
+        if combined_reason:
+            issue["why_wrong"] = combined_reason
+    if not issue.get("evidence_in_context"):
+        combined_evidence = " / ".join(
+            f"[{row.get('model')}] {row.get('evidence_in_context')}"
+            for row in details
+            if row.get("verdict") in {"agree", "inconclusive"} and row.get("evidence_in_context")
+        )
+        if combined_evidence:
+            issue["evidence_in_context"] = combined_evidence
+        elif issue.get("why_wrong"):
+            issue["evidence_in_context"] = issue["why_wrong"]
+    if not issue.get("context_resolution") and all(row.get("verdict") == "agree" for row in details):
+        issue["context_resolution"] = "해소 안 됨"
+
+    if professor_check:
+        reason_parts = [
+            f"[{row.get('model')}] {row.get('verdict')}: {row.get('reason', '')}"
+            for row in details
+        ]
+        issue["issue_basis"] = "교수 확인 필요"
+        issue["context_resolution"] = "모델 간 판단 불일치"
+        issue["why_wrong"] = (
+            "확정 오류로 단정하지 않았습니다. "
+            + " / ".join(reason_parts)
+        )
+        if not issue.get("issue"):
+            issue["issue"] = "모델 간 판단이 갈린 교수 확인 후보입니다."
+        if not issue.get("recommendation"):
+            issue["recommendation"] = "교수자가 실제 의도와 강의 문맥을 확인해 표시 여부를 결정하세요."
+
 
 def cross_verify(
     merged_path: str,
@@ -169,71 +187,64 @@ def cross_verify(
     batch_size: int,
     env_vars: dict,
     judge_batch_size: int | None = None,
-    current_date: str | None = None,
-    skip_slide_typo: bool = False,
-    resume: bool = False,
-    cache_dir: str | None = None,
+    claims_jsonl: str | None = None,
 ) -> dict:
     root = str(_ROOT)
-    current_date = current_date or datetime.now().strftime("%Y-%m-%d")
-    if cache_dir:
-        print(f"  중간 캐시: {cache_dir} ({'resume' if resume else 'save-only'})")
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
-    print(f"  Phase 1: claim 추출 (단일) — {CLAIM_EXTRACT_MODEL}")
+    phase1_title = f"claim 재사용 — {claims_jsonl}" if claims_jsonl else f"claim 추출 (단일) — {CLAIM_EXTRACT_MODEL}"
+    print(f"  Phase 1: {phase1_title}")
     print(f"{'='*60}")
 
-    extract_meta = _cache_meta(
-        "phase1_extract",
-        merged_path,
-        models,
-        current_date,
-        num_runs,
-        min_rate,
-        batch_size,
-        judge_batch_size,
-        model=CLAIM_EXTRACT_MODEL,
-    )
-    extract_args = (
-        merged_path,
-        CLAIM_EXTRACT_MODEL,
-        batch_size,
-        root,
-        env_vars,
-        current_date,
-        cache_dir,
-        resume,
-        extract_meta,
-    )
+    if claims_jsonl:
+        from .claim_pipeline import prepare_verification
 
-    extract_result = _load_cache(cache_dir, "phase1_extract", extract_meta, resume=resume)
-    if extract_result is None:
+        loaded_claims = _load_claims_jsonl(claims_jsonl)
+        ctx = prepare_verification(merged_path)
+        unique_utts = ctx["utterances"]
+        extract_result = {
+            "model": f"claims_jsonl:{claims_jsonl}",
+            "claims_by_batch": [{"batch": unique_utts, "claims": loaded_claims}],
+            "api_calls": 0,
+            "token_usage": _empty_token_usage(),
+        }
+        merged_claims = union_claims([extract_result])
+        extract_claim_count = len(loaded_claims)
+        print(f"  기존 claim 파일 사용: {claims_jsonl}")
+    else:
+        extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars)
+
         try:
             extract_result = extract_worker(extract_args)
-            _save_cache(cache_dir, "phase1_extract", extract_meta, extract_result)
         except Exception as e:
-            raise RuntimeError(f"[{CLAIM_EXTRACT_MODEL}] claim 추출 실패. 재실행 시 --resume을 사용할 수 있습니다.\n{e}") from e
+            print(f"  ❌ [{CLAIM_EXTRACT_MODEL}] 추출 실패: {e}")
+            extract_result = {
+                "model": CLAIM_EXTRACT_MODEL,
+                "claims_by_batch": [],
+                "api_calls": 0,
+                "token_usage": _empty_token_usage(),
+            }
 
-    merged_claims = union_claims([extract_result])
-    extract_claim_count = sum(len(item["claims"]) for item in extract_result["claims_by_batch"])
+        merged_claims = union_claims([extract_result])
+        extract_claim_count = sum(len(item["claims"]) for item in extract_result["claims_by_batch"])
 
-    print(f"\n  ── claim 추출 결과 ──")
-    print(f"    [{CLAIM_EXTRACT_MODEL}]: {extract_claim_count}개")
+        # utterances 복원 (첫 모델의 배치에서)
+        utterances = []
+        for item in extract_result["claims_by_batch"]:
+            utterances.extend(item["batch"])
+        # dedupe utterances by id
+        seen_uids = set()
+        unique_utts = []
+        for u in utterances:
+            uid = u.get("utterance_id")
+            if uid not in seen_uids:
+                seen_uids.add(uid)
+                unique_utts.append(u)
+
+    print(f"\n  ── claim 입력 결과 ──")
+    print(f"    [{extract_result['model']}]: {extract_claim_count}개")
     print(f"    판정 입력 claim 수: {len(merged_claims)}개")
-
-    # utterances 복원 (첫 모델의 배치에서)
-    utterances = []
-    for item in extract_result["claims_by_batch"]:
-        utterances.extend(item["batch"])
-    # dedupe utterances by id
-    seen_uids = set()
-    unique_utts = []
-    for u in utterances:
-        uid = u.get("utterance_id")
-        if uid not in seen_uids:
-            seen_uids.add(uid)
-            unique_utts.append(u)
 
     merged_batches = rebuild_claim_batches(merged_claims, unique_utts, judge_batch_size or batch_size)
 
@@ -243,56 +254,33 @@ def cross_verify(
     print(f"{'='*60}")
 
     judge_args = [
-        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars, current_date)
+        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars)
         for model in models
     ]
 
     judge_results = {}
-    missing_judge_args = []
-    for arg in judge_args:
-        model = arg[1]
-        meta = _cache_meta(
-            "phase2_judge",
-            merged_path,
-            models,
-            current_date,
-            num_runs,
-            min_rate,
-            batch_size,
-            judge_batch_size,
-            model=model,
-        )
-        cache_name = f"phase2_judge_{_safe_cache_name(model)}"
-        cached = _load_cache(cache_dir, cache_name, meta, resume=resume)
-        if cached is not None:
-            judge_results[model] = cached
-        else:
-            missing_judge_args.append((arg, meta, cache_name))
-
-    judge_failures = []
-    if missing_judge_args:
-        with ProcessPoolExecutor(max_workers=len(missing_judge_args)) as executor:
-            futures = {executor.submit(judge_worker, a): (a, meta, cache_name) for a, meta, cache_name in missing_judge_args}
-            for future in as_completed(futures):
-                arg, meta, cache_name = futures[future]
-                model = arg[1]
-                try:
-                    result = future.result()
-                    judge_results[model] = result
-                    _save_cache(cache_dir, cache_name, meta, result)
-                except Exception as e:
-                    print(f"  ❌ [{model}] 판정 실패: {e}")
-                    judge_failures.append(model)
-    if judge_failures:
-        raise RuntimeError(
-            "claim 판정 실패: "
-            + ", ".join(judge_failures)
-            + ". 성공한 모델 결과는 캐시에 저장했습니다. 재실행 시 --resume을 사용하세요."
-        )
+    with ProcessPoolExecutor(max_workers=len(models)) as executor:
+        futures = {executor.submit(judge_worker, a): a[1] for a in judge_args}
+        for future in as_completed(futures):
+            model = futures[future]
+            try:
+                judge_results[model] = future.result()
+            except Exception as e:
+                print(f"  ❌ [{model}] 판정 실패: {e}")
+                judge_results[model] = {
+                    "model": model,
+                    "issues": [],
+                    "api_calls": 0,
+                    "token_usage": _empty_token_usage(),
+                }
 
     # 합집합 + 공통/단독 탐지 분류
     judge_list = [{"model": m, "issues": r["issues"]} for m, r in judge_results.items()]
-    unioned, intersected, exclusive = union_issues(judge_list)
+    raw_unioned, raw_intersected, raw_exclusive = union_issues(judge_list)
+    unioned, intersected, exclusive, issue_cluster_token_usage = canonicalize_issues_with_llm(
+        raw_unioned,
+        models,
+    )
 
     total_union = len(unioned)
     total_exclusive = sum(len(v) for v in exclusive.values())
@@ -300,143 +288,182 @@ def cross_verify(
     print(f"\n  ── 이슈 분류 (합집합 {total_union}건) ──")
     for model, result in judge_results.items():
         print(f"    [{model}]: {len(result['issues'])}건 탐지")
+    if len(raw_unioned) != len(unioned) or len(raw_intersected) != len(intersected):
+        print(
+            f"    LLM issue 묶음: {len(raw_unioned)}건 → {len(unioned)}건 "
+            f"(공통 {len(raw_intersected)}건 → {len(intersected)}건)"
+        )
 
     agreement_label = "양쪽 모두 탐지" if len(models) == 2 else "모든 모델 1차 탐지"
-    print(f"    {agreement_label}: {len(intersected)}건 → 자동 확정")
+    print(f"    {agreement_label}: {len(intersected)}건 → 공통 탐지 후보")
     for model, issues in exclusive.items():
         if issues:
             print(f"    [{model}] 단독 {len(issues)}건")
             for issue in issues:
                 print(f"      • {issue.get('claim_text','')[:80]}")
 
-    # ── Phase 3: 합집합 전체 → 두 모델 모두 텍스트+문맥 crosscheck ──
+    # ── Phase 3: 합집합 전체 → 각 모델이 독립 crosscheck ──
     cross_recheck_verified = []
     cross_recheck_rejected = []
     cross_recheck_inconclusive = []
-    cross_recheck_needs_review = []
     cross_recheck_usage_per_model = {m: _empty_token_usage() for m in models}
-    if total_union > 0 and len(models) >= 2:
+    crosscheck_mode = "independent_model_agreement"
+    crosscheck_model_map = {model: _crosscheck_model_for(model) for model in models}
+    crosscheck_models = list(dict.fromkeys(crosscheck_model_map.values()))
+    if total_union > 0 and models:
         print(f"\n{'='*60}")
-        print(f"  Phase 3: 텍스트+문맥 교차검증 — 합집합 {total_union}건을 두 모델이 재검증")
+        print(f"  Phase 3: 텍스트+문맥 교차검증 — 모델별 독립 판정")
         print(f"{'='*60}")
+        if any(source != target for source, target in crosscheck_model_map.items()):
+            print("  crosscheck 실행 모델:")
+            for source, target in crosscheck_model_map.items():
+                if source == target:
+                    print(f"    [{source}]")
+                else:
+                    print(f"    [{source}] → [{target}]")
 
-        recheck_args = [(unioned, merged_path, m, root, env_vars, current_date) for m in models]
-        cross_recheck_by_model = {}
-        missing_recheck_args = []
-        for arg in recheck_args:
-            model = arg[2]
-            meta = _cache_meta(
-                "phase3_cross_recheck",
-                merged_path,
-                models,
-                current_date,
-                num_runs,
-                min_rate,
-                batch_size,
-                judge_batch_size,
-                model=model,
-            )
-            cache_name = f"phase3_cross_recheck_{_safe_cache_name(model)}"
-            cached = _load_cache(cache_dir, cache_name, meta, resume=resume)
-            if cached is not None:
-                cross_recheck_by_model[cached["model"]] = cached["verdicts"]
-                cross_recheck_usage_per_model[cached["model"]] = _merge_token_usage(
-                    cross_recheck_usage_per_model[cached["model"]],
-                    cached.get("token_usage"),
-                )
-            else:
-                missing_recheck_args.append((arg, meta, cache_name))
-
-        recheck_failures = []
-        if missing_recheck_args:
-            with ProcessPoolExecutor(max_workers=len(missing_recheck_args)) as executor:
-                futures = {executor.submit(cross_recheck_worker, a): (a, meta, cache_name) for a, meta, cache_name in missing_recheck_args}
-                for future in as_completed(futures):
-                    arg, meta, cache_name = futures[future]
-                    model = arg[2]
-                    try:
-                        result = future.result()
-                        cross_recheck_by_model[result["model"]] = result["verdicts"]
-                        cross_recheck_usage_per_model[result["model"]] = _merge_token_usage(
-                            cross_recheck_usage_per_model[result["model"]],
-                            result.get("token_usage"),
-                        )
-                        _save_cache(cache_dir, cache_name, meta, result)
-                    except Exception as e:
-                        print(f"  ❌ [{model}] 교차 재검증 실패: {e}")
-                        recheck_failures.append(model)
-        if recheck_failures:
-            raise RuntimeError(
-                "텍스트+문맥 교차검증 실패: "
-                + ", ".join(recheck_failures)
-                + ". 성공한 모델 결과는 캐시에 저장했습니다. 재실행 시 --resume을 사용하세요."
-            )
+        cross_results = {}
+        cross_args_by_source = {
+            source_model: (unioned, merged_path, cross_model, root, env_vars)
+            for source_model, cross_model in crosscheck_model_map.items()
+        }
+        with ProcessPoolExecutor(max_workers=len(models)) as executor:
+            futures = {
+                executor.submit(cross_recheck_worker, args): source_model
+                for source_model, args in cross_args_by_source.items()
+            }
+            for future in as_completed(futures):
+                model = futures[future]
+                cross_model = crosscheck_model_map.get(model, model)
+                try:
+                    result_for_model = future.result()
+                    cross_results[model] = result_for_model
+                    cross_recheck_usage_per_model[model] = _merge_token_usage(
+                        cross_recheck_usage_per_model[model],
+                        result_for_model.get("token_usage"),
+                    )
+                except Exception as e:
+                    print(f"  ❌ [{model}] 텍스트+문맥 교차검증 실패: {e}")
+                    cross_results[model] = {
+                        "model": cross_model,
+                        "verdicts": {},
+                        "token_usage": _empty_token_usage(),
+                    }
 
         for issue in unioned:
+            cv.normalize_issue_metadata(issue)
             key = _issue_match_key(issue)
-            verdict_rows = []
-            reasons = []
-            all_agree = True
-            agree_count = 0
-            disagree_count = 0
-            any_inconclusive = False
-            candidate_status = issue.get("candidate_status") or "confirmed_error"
-            for model in models:
-                model_result = cross_recheck_by_model.get(model, {}).get(
-                    key,
-                    {"verdict": "inconclusive", "reason": "crosscheck 결과 없음", "resolved_model": model},
-                )
-                verdict = model_result.get("verdict", "inconclusive")
-                reason = model_result.get("reason", "")
-                verdict_rows.append({"model": model, **model_result})
-                if verdict != "agree":
-                    all_agree = False
-                else:
-                    agree_count += 1
-                if verdict == "disagree":
-                    disagree_count += 1
-                if verdict == "inconclusive":
-                    any_inconclusive = True
-                reasons.append(f"[{model}] {verdict}: {reason}")
+            details = []
+            agree_models = []
+            disagree_models = []
+            inconclusive_models = []
 
-            issue["crosscheck_details"] = verdict_rows
-            if all_agree:
-                issue["cross_model_agreement"] = len(models)
-                if candidate_status == "needs_review":
+            for model in models:
+                cross_model = crosscheck_model_map.get(model, model)
+                verdict_row = cross_results.get(model, {}).get("verdicts", {}).get(key, {
+                    "verdict": "inconclusive",
+                    "reason": "crosscheck 결과 없음",
+                    "resolved_model": cross_model,
+                })
+                verdict = str(verdict_row.get("verdict", "inconclusive") or "inconclusive")
+                resolved_model = str(
+                    verdict_row.get("resolved_model")
+                    or cross_results.get(model, {}).get("model")
+                    or cross_model
+                )
+                detail = {
+                    "model": resolved_model,
+                    "source_model": model,
+                    "stage": "independent_crosscheck",
+                    **verdict_row,
+                }
+                detail["model"] = resolved_model
+                detail["resolved_model"] = resolved_model
+                details.append(detail)
+
+                if verdict == "agree":
+                    agree_models.append(resolved_model)
+                elif verdict == "disagree":
+                    disagree_models.append(resolved_model)
+                else:
+                    inconclusive_models.append(resolved_model)
+
+            issue["crosscheck_details"] = details
+            crosscheck_context_text = next(
+                (
+                    str(row.get("crosscheck_context_text", "") or "")
+                    for row in details
+                    if row.get("crosscheck_context_text")
+                ),
+                "",
+            )
+            if crosscheck_context_text:
+                issue["crosscheck_context_text"] = crosscheck_context_text
+            issue["crosscheck_verdicts"] = {
+                row["model"]: row.get("verdict", "inconclusive")
+                for row in details
+            }
+            issue["cross_model_agreement"] = len(agree_models)
+            issue["cross_recheck_model"] = ", ".join(agree_models)
+
+            reasons = [
+                f"[{row['model']}] {row.get('verdict', 'inconclusive')}: {row.get('reason', '')}"
+                for row in details
+            ]
+            combined_reason = " / ".join(reasons)
+
+            if len(agree_models) == len(models):
+                if cv.should_route_issue_to_professor_check(issue):
+                    _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
+                    issue["cross_recheck"] = None
+                    issue["rejection_stage"] = "텍스트+문맥 교차검증"
+                    issue["rejection_reason"] = f"{cv.metadata_review_reason(issue)} / {combined_reason}"
+                    issue["professor_check_reason"] = issue["rejection_reason"]
+                    cross_recheck_inconclusive.append(issue)
+                else:
+                    _apply_crosscheck_feedback_fields(issue, details)
                     issue["cross_recheck"] = True
-                    issue["review_stage"] = "텍스트+문맥 교차검증"
-                    issue["review_reason_code"] = "judge_review_candidate"
-                    issue["review_reason"] = "1차 판정에서 검토 필요 후보로 올라왔고 교차검증에서 유지됨"
-                    cross_recheck_needs_review.append(issue)
-                else:
+                    issue["cross_recheck_reason"] = combined_reason
                     cross_recheck_verified.append(issue)
-            else:
-                issue["cross_recheck"] = None if any_inconclusive else False
+            elif agree_models:
+                _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
+                issue["cross_recheck"] = None
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
-                issue["rejection_reason"] = " / ".join(reasons)
-                if agree_count == 0 and disagree_count == len(models) and not any_inconclusive:
-                    issue["rejection_reason_code"] = "model_disagreement"
-                    cross_recheck_rejected.append(issue)
-                elif candidate_status == "needs_review":
-                    if any_inconclusive:
-                        issue["rejection_reason_code"] = "crosscheck_inconclusive"
-                        cross_recheck_inconclusive.append(issue)
-                    else:
-                        issue["rejection_reason_code"] = "weak_review_candidate"
-                        cross_recheck_rejected.append(issue)
-                else:
-                    issue.pop("rejection_stage", None)
-                    issue.pop("rejection_reason_code", None)
-                    issue["review_stage"] = "텍스트+문맥 교차검증"
-                    issue["review_reason_code"] = "crosscheck_inconclusive" if any_inconclusive else "model_disagreement"
-                    cross_recheck_needs_review.append(issue)
+                issue["rejection_reason"] = (
+                    f"일부 모델만 이슈를 유지했습니다. "
+                    f"동의={', '.join(agree_models)}; "
+                    f"비동의={', '.join(disagree_models) or '없음'}; "
+                    f"불확실={', '.join(inconclusive_models) or '없음'}"
+                    f" / {combined_reason}"
+                )
+                issue["professor_check_reason"] = issue["rejection_reason"]
+                cross_recheck_inconclusive.append(issue)
+            elif inconclusive_models:
+                _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
+                issue["cross_recheck"] = None
+                issue["rejection_stage"] = "텍스트+문맥 교차검증"
+                issue["rejection_reason"] = (
+                    f"동의한 crosscheck 모델은 없지만 일부 모델이 불확실로 판단했습니다. "
+                    f"동의=없음; "
+                    f"비동의={', '.join(disagree_models) or '없음'}; "
+                    f"불확실={', '.join(inconclusive_models)}"
+                    f" / {combined_reason}"
+                )
+                issue["professor_check_reason"] = issue["rejection_reason"]
+                cross_recheck_inconclusive.append(issue)
+            else:
+                issue["cross_recheck"] = False
+                issue["rejection_stage"] = "텍스트+문맥 교차검증"
+                issue["rejection_reason"] = (
+                    f"동의한 crosscheck 모델이 없습니다. "
+                    f"비동의={', '.join(disagree_models) or '없음'}; "
+                    f"불확실={', '.join(inconclusive_models) or '없음'}"
+                    f" / {combined_reason}"
+                )
+                cross_recheck_rejected.append(issue)
 
         if cross_recheck_verified:
-            cross_recheck_verified = _cluster_contextual_issues(cross_recheck_verified)
             print(f"\n    ✅ 텍스트+문맥 교차검증 통과: {len(cross_recheck_verified)}건")
-        if cross_recheck_needs_review:
-            cross_recheck_needs_review = _cluster_contextual_issues(cross_recheck_needs_review)
-            print(f"    ⚠️ 텍스트+문맥 교차검증 리뷰 필요: {len(cross_recheck_needs_review)}건")
         if cross_recheck_rejected:
             print(f"    ❌ 텍스트+문맥 교차검증 거부: {len(cross_recheck_rejected)}건")
         if cross_recheck_inconclusive:
@@ -451,99 +478,33 @@ def cross_verify(
         print(f"  Phase 4: grounding — [{primary}]")
         print(f"{'='*60}")
 
-        final_meta = _cache_meta(
-            "phase4_slide_grounding",
-            merged_path,
-            models,
-            current_date,
-            num_runs,
-            min_rate,
-            batch_size,
-            judge_batch_size,
-            model=primary,
-        )
-        final = _load_cache(cache_dir, "phase4_slide_grounding", final_meta, resume=resume)
-        if final is None:
-            with ProcessPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(stages_3_4_worker,
-                                         (merged_path, primary, all_confirmed, root, env_vars, current_date))
-                final = future.result()
-            _save_cache(cache_dir, "phase4_slide_grounding", final_meta, final)
+        with ProcessPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(stages_3_4_worker,
+                                     (merged_path, primary, all_confirmed, root, env_vars))
+            final = future.result()
     else:
         final = {
             "issues": [],
             "slide_rejected": [],
-            "slide_recheck_status": "skipped_no_issues",
-            "slide_recheck_reason": "crosscheck 통과 이슈가 없어 슬라이드 문맥 재검증을 건너뜀",
-            "slide_recheck_failures": 0,
             "grounding_rejected": [],
-            "needs_review": [],
-            "grounding_failures": 0,
             "token_usage": _empty_token_usage(),
         }
-    _dedupe_stage_issues(final)
-    if cross_recheck_needs_review:
-        final["needs_review"] = _cluster_contextual_issues([
-            *(final.get("needs_review", []) or []),
-            *cross_recheck_needs_review,
-        ])
 
     # ── 별도: 슬라이드 오타 검사 ──
     slide_typo_result = {
         "model": primary,
         "slide_typos": [],
-        "slide_typo_needs_review": [],
         "api_calls": 0,
         "failures": 0,
         "token_usage": _empty_token_usage(),
     }
-    typo_settings = _slide_typo_settings(env_vars)
-    if skip_slide_typo:
-        print(f"\n  ⏭  슬라이드 오타 검사 스킵 (--skip-slide-typo)")
-        slide_typo_result["skipped"] = True
-        slide_typo_result["skip_reason"] = "skip_slide_typo"
-    else:
-        typo_meta = _cache_meta(
-            "slide_typo",
-            merged_path,
-            models,
-            current_date,
-            num_runs,
-            min_rate,
-            batch_size,
-            judge_batch_size,
-            model=primary,
-            extra=typo_settings,
-        )
-        slide_typo_result = _load_cache(cache_dir, "slide_typo", typo_meta, resume=resume)
-        if slide_typo_result is None:
-            try:
-                slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars, current_date))
-                _save_cache(cache_dir, "slide_typo", typo_meta, slide_typo_result)
-            except Exception as e:
-                print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
-                slide_typo_result = {
-                    "model": primary,
-                    "slide_typos": [],
-                    "slide_typo_needs_review": [],
-                    "api_calls": 0,
-                    "failures": 1,
-                    "token_usage": _empty_token_usage(),
-                }
+    try:
+        slide_typo_result = slide_typo_worker((merged_path, primary, root, env_vars))
+    except Exception as e:
+        print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
 
     # ── 결과 조합 ──
-    for issue in final["slide_rejected"]:
-        issue.setdefault("rejection_stage", "슬라이드 재검증")
-        issue.setdefault("rejection_reason_code", "slide_context_rejected")
-    for issue in final["grounding_rejected"]:
-        issue.setdefault("rejection_stage", "grounding")
-        issue.setdefault("rejection_reason_code", "grounding_rejected")
-    for issue in final.get("needs_review", []):
-        status = str(issue.get("grounding_status") or "").strip() or "grounding_unavailable"
-        issue.setdefault("review_stage", "grounding")
-        issue.setdefault("review_reason_code", status)
-
-    all_rejected = final["slide_rejected"] + final["grounding_rejected"] + cross_recheck_rejected + cross_recheck_inconclusive
+    all_rejected = final["slide_rejected"] + final["grounding_rejected"] + cross_recheck_rejected
     token_usage_per_model = {m: _empty_token_usage() for m in models}
     extract_token_usage = extract_result.get("token_usage")
     for m in models:
@@ -557,57 +518,59 @@ def cross_verify(
         final.get("token_usage"),
         slide_typo_result.get("token_usage"),
     )
-    total_token_usage = _merge_token_usage(extract_token_usage, *(token_usage_per_model.values()))
+    total_token_usage = _merge_token_usage(
+        extract_token_usage,
+        issue_cluster_token_usage,
+        *(token_usage_per_model.values()),
+    )
     result = {
         "mode": "cross_verification",
-        "verification_date": current_date,
+        "crosscheck_mode": crosscheck_mode,
+        "crosscheck_context_mode": os.getenv("VERIFIER_CROSSCHECK_CONTEXT_MODE", "expanded") or "expanded",
+        "crosscheck_focus_window": os.getenv("VERIFIER_CROSSCHECK_FOCUS_WINDOW", "5") or "5",
         "models": models,
+        "crosscheck_models": crosscheck_models,
+        "crosscheck_model_map": crosscheck_model_map,
         "primary_model": primary,
-        "resume_enabled": resume,
-        "resume_cache_dir": str(cache_dir or ""),
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
+        "claims_source_path": claims_jsonl or "",
         "claims_per_model": {CLAIM_EXTRACT_MODEL: extract_claim_count},
         "merged_claims_count": len(merged_claims),
         "merged_claims": merged_claims,
         "issues_per_model": {m: len(r["issues"]) for m, r in judge_results.items()},
         "issue_detection_total": sum(len(r["issues"]) for r in judge_results.values()),
         "issue_union_count": total_union,
+        "issue_union_raw_count": len(raw_unioned),
+        "issue_clustered_count": total_union,
+        "issue_cluster_reduced_count": max(0, len(raw_unioned) - total_union),
         "exclusive_count": total_exclusive,
         "intersected_count": len(intersected),
+        "intersected_raw_count": len(raw_intersected),
         "cross_recheck_verified_count": len(cross_recheck_verified),
-        "cross_recheck_needs_review_count": len(cross_recheck_needs_review),
         "cross_recheck_inconclusive_count": len(cross_recheck_inconclusive),
         "confirmed_count": len(all_confirmed),
         "issues": final["issues"],
         "slide_typos": slide_typo_result.get("slide_typos", []),
-        "slide_typo_needs_review": slide_typo_result.get("slide_typo_needs_review", []),
-        "slide_typo_consensus": typo_settings,
-        "slide_typo_status": "skipped" if slide_typo_result.get("skipped") else "completed",
-        "slide_typo_skip_reason": slide_typo_result.get("skip_reason", ""),
         "crosscheck_rejected_issues": cross_recheck_rejected,
-        "crosscheck_needs_review_issues": cross_recheck_needs_review,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
-        "slide_recheck_status": final.get("slide_recheck_status", "completed"),
-        "slide_recheck_reason": final.get("slide_recheck_reason", ""),
         "slide_rejected_issues": final["slide_rejected"],
         "grounding_rejected_issues": final["grounding_rejected"],
-        "needs_review_issues": final.get("needs_review", []),
         "rejected_issues": all_rejected,
         "claim_extract_token_usage": extract_token_usage,
+        "issue_cluster_token_usage": issue_cluster_token_usage,
         "token_usage_per_model": token_usage_per_model,
         "token_usage": total_token_usage,
         "overall_assessment": {
             "has_issues": len(final["issues"]) > 0,
             "total_issues": len(final["issues"]),
+            "severity_breakdown": _count_severity(final["issues"]),
         },
         "crosscheck_filtered": len(cross_recheck_rejected),
         "crosscheck_inconclusive_filtered": len(cross_recheck_inconclusive),
         "slide_recheck_filtered": len(final["slide_rejected"]),
         "grounding_filtered": len(final["grounding_rejected"]),
-        "needs_review_count": len(final.get("needs_review", [])),
-        "slide_typo_needs_review_count": len(slide_typo_result.get("slide_typo_needs_review", []) or []),
-        "slide_recheck_failures": int(final.get("slide_recheck_failures", 0) or 0),
-        "grounding_failures": int(final.get("grounding_failures", 0) or 0),
+        "slide_recheck_failures": len(final["slide_rejected"]),
+        "grounding_failures": len(final["grounding_rejected"]),
         "slide_typo_failures": int(slide_typo_result.get("failures", 0) or 0),
     }
 
@@ -621,20 +584,15 @@ def cross_verify(
     except Exception as e:
         print(f"  ⚠️ 로그 기록 실패: {e}")
 
-    for issue_list_key in (
-        "issues",
-        "needs_review_issues",
-        "rejected_issues",
-        "crosscheck_rejected_issues",
-        "crosscheck_needs_review_issues",
-        "crosscheck_inconclusive_issues",
-        "slide_rejected_issues",
-        "grounding_rejected_issues",
-    ):
-        for issue in result.get(issue_list_key, []) or []:
-            issue.pop("severity", None)
-
     return result
+
+
+def _count_severity(issues):
+    bd = {}
+    for i in issues:
+        s = i.get("severity", "minor")
+        bd[s] = bd.get(s, 0) + 1
+    return bd
 
 
 # ── 기존 독립 실행 ──────────────────────────────────────
@@ -654,6 +612,11 @@ def print_cross_result(result: dict):
     confirmed = result.get("confirmed_count", 0)
 
     print(f"  모델: {', '.join(models)}")
+    if result.get("crosscheck_mode"):
+        print(f"  crosscheck: {result.get('crosscheck_mode')}")
+    crosscheck_models = result.get("crosscheck_models") or models
+    if crosscheck_models != models:
+        print(f"  crosscheck 모델: {', '.join(crosscheck_models)}")
     extract_model = result.get("claim_extract_model", CLAIM_EXTRACT_MODEL)
     extract_counts = result.get("claims_per_model", {})
     print(f"  claim 추출: [{extract_model}] {extract_counts.get(extract_model, result['merged_claims_count'])}개")
@@ -667,30 +630,33 @@ def print_cross_result(result: dict):
     exclusive = result.get("exclusive_count", max(issue_union - inter, 0))
     agreement_label = "양쪽 1차 탐지" if len(models) == 2 else "모든 모델 1차 탐지"
     print(f"    총 탐지 수: {detection_total}건")
-    print(f"    이슈 합집합: {issue_union}건")
+    raw_union = result.get("issue_union_raw_count", issue_union)
+    reduced = result.get("issue_cluster_reduced_count", 0)
+    if reduced:
+        print(f"    이슈 합집합: {raw_union}건 → LLM 묶음 후 {issue_union}건")
+    else:
+        print(f"    이슈 합집합: {issue_union}건")
     print(f"    ├─ {agreement_label}: {inter}건")
     print(f"    ├─ 단독 1차 탐지: {exclusive}건")
     print(f"    ├─ 텍스트+문맥 교차검증 통과: {xr}건")
     print(f"    ├─ 텍스트+문맥 교차검증 불확실: {xi}건")
     print(f"    └─ 확정 이슈 (grounding 진입): {confirmed}건")
 
-    sr = result.get("slide_recheck_filtered", 0)
-    gr = result.get("grounding_filtered", 0)
-    nr = result.get("needs_review_count", 0)
-    if sr or gr or nr:
-        print(f"    → 슬라이드 재검증 기각: {sr}건, grounding 기각: {gr}건, 리뷰 필요: {nr}건")
     sf = result.get("slide_recheck_failures", 0)
     gf = result.get("grounding_failures", 0)
     if sf or gf:
-        print(f"    → 검사 실패: 슬라이드 재검증 {sf}건, grounding {gf}건")
+        print(f"    → 슬라이드 재검증 기각: {sf}건, grounding 기각: {gf}건")
     print()
 
     token_usage_per_model = result.get("token_usage_per_model", {})
     extract_usage = result.get("claim_extract_token_usage", {})
+    cluster_usage = result.get("issue_cluster_token_usage", {})
     if token_usage_per_model:
         print(f"  ── 토큰 사용량 ──")
         if extract_usage:
             print(f"    [claim 추출:{extract_model}] {_format_token_summary({'total': extract_usage.get('total', {})}) if 'total' in extract_usage else _format_token_summary(extract_usage)}")
+        if cluster_usage and cluster_usage.get("total", {}).get("total_tokens", 0):
+            print(f"    [issue 묶음] {_format_token_summary(cluster_usage)}")
         for model in models:
             usage = token_usage_per_model.get(model, {})
             print(f"    [{model}] {_format_token_summary(usage)}")
@@ -702,22 +668,27 @@ def print_cross_result(result: dict):
         print(f"  ✅ 최종 확정 이슈: {len(issues)}건")
         for i, issue in enumerate(issues):
             src = "양쪽" if issue.get("cross_model_agreement", 0) >= 2 else f"교차검증({issue.get('cross_recheck_model','?')} 동의)"
-            print(f"    [{i+1}] {issue['type']} conf={issue.get('confidence',0):.2f} ({src})")
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} conf={issue.get('confidence',0):.2f} ({src})")
             print(f"        {issue.get('claim_text','')[:100]}")
             print(f"        → {issue.get('issue','')[:100]}")
+            confirmation_reason = str(issue.get("cross_recheck_reason", "") or issue.get("why_wrong", "") or "").strip()
+            if confirmation_reason:
+                print(f"        확정 사유: {confirmation_reason[:260]}")
+            evidence_in_context = str(issue.get("evidence_in_context", "") or "").strip()
+            if evidence_in_context:
+                print(f"        문맥 근거: {evidence_in_context[:260]}")
     else:
         print(f"  최종 이슈: 0건")
 
     crosscheck_rejected = result.get("crosscheck_rejected_issues", [])
     crosscheck_inconclusive = result.get("crosscheck_inconclusive_issues", [])
     grounding_rejected = result.get("grounding_rejected_issues", [])
-    needs_review = result.get("needs_review_issues", [])
 
     if crosscheck_rejected:
         print(f"\n  ❌ 텍스트+문맥 교차검증 기각: {len(crosscheck_rejected)}건")
         for i, issue in enumerate(crosscheck_rejected):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 유지되지 않음")
-            print(f"    [{i+1}] {issue['type']}")
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
@@ -726,7 +697,7 @@ def print_cross_result(result: dict):
         print(f"\n  ⚠️ 텍스트+문맥 교차검증 불확실: {len(crosscheck_inconclusive)}건")
         for i, issue in enumerate(crosscheck_inconclusive):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 확정 판단 실패")
-            print(f"    [{i+1}] {issue['type']}")
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
@@ -735,18 +706,7 @@ def print_cross_result(result: dict):
         print(f"\n  ❌ grounding 기각: {len(grounding_rejected)}건")
         for i, issue in enumerate(grounding_rejected):
             reason = issue.get("grounding_reason", "")
-            print(f"    [{i+1}] {issue['type']}")
-            print(f"        claim: {issue.get('claim_text','')[:100]}")
-            print(f"        issue: {issue.get('issue','')[:100]}")
-            if reason:
-                print(f"        사유: {reason[:120]}")
-
-    if needs_review:
-        print(f"\n  ⚠️ 리뷰 필요: {len(needs_review)}건")
-        for i, issue in enumerate(needs_review):
-            reason = issue.get("grounding_reason", "")
-            status = issue.get("grounding_status", "needs_review")
-            print(f"    [{i+1}] {issue['type']} status={status}")
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
             print(f"        claim: {issue.get('claim_text','')[:100]}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             if reason:
@@ -760,15 +720,6 @@ def print_cross_result(result: dict):
                 f"    [{i}] 슬라이드 {typo.get('slide_number', '?')} | "
                 f"{typo.get('problematic_text', '')} -> {typo.get('corrected_text', '')}"
             )
-    slide_typo_needs_review = result.get("slide_typo_needs_review", [])
-    if slide_typo_needs_review:
-        print(f"\n  ⚠️ 슬라이드 오타 리뷰 필요: {len(slide_typo_needs_review)}건")
-        for i, typo in enumerate(slide_typo_needs_review[:10], 1):
-            print(
-                f"    [{i}] 슬라이드 {typo.get('slide_number', '?')} | "
-                f"{typo.get('problematic_text', '')} -> {typo.get('corrected_text', '')} "
-                f"({typo.get('support_count', 0)}/{typo.get('run_count', 0)})"
-            )
     if result.get("slide_typo_failures", 0):
         print(f"  ⚠️ 슬라이드 오타 검사 실패: {result['slide_typo_failures']}건")
 
@@ -779,17 +730,14 @@ def main():
     parser = argparse.ArgumentParser(description="교차 검증 / 모델 비교")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--models", nargs="+",
-                        default=["gemini-2.5-flash", "gpt-5.4"],
-                        help="판정/검증에 사용할 모델 (기본: gemini-2.5-flash gpt-5.4)")
+                        default=None,
+                        help="판정/검증에 사용할 모델 (기본: CROSS_VERIFY_MODELS)")
     parser.add_argument("--mode", choices=["cross", "independent"], default="cross",
                         help="cross=교차검증(기본), independent=독립비교")
     parser.add_argument("--num-runs", type=int, default=1, help="1차 judge 반복 횟수 (기본 1)")
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--batch-size", type=int, default=20)
-    parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
-    parser.add_argument("--skip-slide-typo", action="store_true", help="슬라이드 오타 검사를 건너뛰고 claim verifier만 실행")
-    parser.add_argument("--resume", action="store_true", help="중간 캐시를 재사용해 실패 지점부터 재개")
-    parser.add_argument("--cache-dir", default=None, help="중간 캐시 저장 디렉토리")
+    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -798,25 +746,25 @@ def main():
         sys.exit(1)
 
     env_vars = _collect_env_vars()
+    models = args.models or _default_verifier_models()
+    if len(models) < 2:
+        raise RuntimeError("cross verifier는 최소 2개 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --models를 확인하세요.")
 
     if args.mode == "cross":
         result = cross_verify(
-            args.merged_path, args.models, args.num_runs,
+            args.merged_path, models, args.num_runs,
             args.min_rate, args.batch_size, env_vars,
-            current_date=args.date,
-            skip_slide_typo=args.skip_slide_typo,
-            resume=args.resume,
-            cache_dir=args.cache_dir or (str(Path(args.output).with_suffix("")) + "_cache" if args.output else None),
+            claims_jsonl=args.claims_jsonl,
         )
         print_cross_result(result)
     else:
         # 기존 독립 비교 모드
         worker_args = [
             (args.merged_path, m, args.num_runs, args.min_rate, str(_ROOT), env_vars)
-            for m in args.models
+            for m in models
         ]
         results = {}
-        with ProcessPoolExecutor(max_workers=len(args.models)) as executor:
+        with ProcessPoolExecutor(max_workers=len(models)) as executor:
             futures = {executor.submit(independent_worker, a): a[1] for a in worker_args}
             for future in as_completed(futures):
                 model = futures[future]
@@ -824,7 +772,7 @@ def main():
                     results[model] = future.result()
                 except Exception as e:
                     print(f"  ❌ [{model}] 실패: {e}")
-        result = {m: results[m] for m in args.models if m in results}
+        result = {m: results[m] for m in models if m in results}
 
     if args.output:
         claims_log_path = None

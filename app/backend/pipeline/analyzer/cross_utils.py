@@ -30,39 +30,57 @@ _ENV_KEYS = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "GROQ_API_KEY",
+    "CROSS_VERIFY_MODELS",
     "CROSS_VERIFY_MODEL",
     "VERIFIER_MODEL",
     "VERIFIER_CLAIM_EXTRACT_MODEL",
     "VERIFIER_CLAIM_JUDGE_MODEL",
     "VERIFIER_CROSS_RECHECK_MODEL",
+    "VERIFIER_CROSSCHECK_GEMINI_MODEL",
     "VERIFIER_SLIDE_RECHECK_MODEL",
     "VERIFIER_GROUNDING_MODEL",
-    "VERIFIER_ISSUE_PATTERN_MODEL",
-    "VERIFIER_ISSUE_PATTERN_BATCH_SIZE",
-    "VERIFIER_ISSUE_PATTERN_MAX_TOKENS",
-    "VERIFIER_SLIDE_TYPO_RUNS",
-    "VERIFIER_SLIDE_TYPO_MIN_RATE",
-    "VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE",
     "VERIFIER_BATCH_SIZE",
     "VERIFIER_TEMPERATURE",
     "VERIFIER_PARSE_RETRIES",
     "VERIFIER_BATCH_RECOVERY_RETRIES",
     "VERIFIER_REQUIRE_COMPLETE",
-    "VERIFIER_API_MAX_RETRIES",
-    "VERIFIER_API_INITIAL_WAIT",
+    "VERIFIER_CROSSCHECK_CONTEXT_MODE",
+    "VERIFIER_CROSSCHECK_FOCUS_WINDOW",
+    "VERIFIER_OPENAI_PROMPT_CACHE_KEY",
+    "VERIFIER_OPENAI_PROMPT_CACHE_RETENTION",
+    "OPENAI_PROMPT_CACHE_KEY",
+    "OPENAI_PROMPT_CACHE_RETENTION",
+    "VERIFIER_ANTHROPIC_PROMPT_CACHE",
+    "VERIFIER_ANTHROPIC_PROMPT_CACHE_TTL",
+    "ANTHROPIC_PROMPT_CACHE",
+    "ANTHROPIC_PROMPT_CACHE_TTL",
+    "VERIFIER_LLM_ISSUE_CLUSTERING",
+    "VERIFIER_ISSUE_CLUSTER_MODEL",
+    "VERIFIER_ISSUE_CLUSTER_MAX",
 ]
 
-CLAIM_EXTRACT_MODEL = "gemini-2.5-flash"
+CLAIM_EXTRACT_MODEL = (
+    os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "").strip()
+    or os.getenv("VERIFIER_MODEL", "").strip()
+    or "gemini-2.5-flash"
+)
 
 
 def _format_token_summary(usage: dict) -> str:
     total = (usage or {}).get("total", {})
-    return (
-        f"input {int(total.get('input_tokens', 0) or 0):,} / "
-        f"output {int(total.get('output_tokens', 0) or 0):,} / "
-        f"reasoning {int(total.get('reasoning_tokens', 0) or 0):,} / "
-        f"total {int(total.get('total_tokens', 0) or 0):,}"
-    )
+    parts = [
+        f"input {int(total.get('input_tokens', 0) or 0):,}",
+        f"output {int(total.get('output_tokens', 0) or 0):,}",
+        f"reasoning {int(total.get('reasoning_tokens', 0) or 0):,}",
+        f"total {int(total.get('total_tokens', 0) or 0):,}",
+    ]
+    cached = int(total.get("cached_input_tokens", 0) or 0)
+    if cached:
+        parts.append(f"cached {cached:,}")
+    cache_write = int(total.get("cache_creation_input_tokens", 0) or 0)
+    if cache_write:
+        parts.append(f"cache_write {cache_write:,}")
+    return " / ".join(parts)
 
 
 def _collect_env_vars() -> dict:
@@ -86,6 +104,24 @@ def _write_claims_jsonl(claims: list[dict], output_json_path: str | Path) -> str
         for claim in claims:
             f.write(json.dumps(claim, ensure_ascii=False) + "\n")
     return str(out_path)
+
+
+def _load_claims_jsonl(path: str | Path) -> list[dict]:
+    jsonl_path = Path(path)
+    if not jsonl_path.exists():
+        raise FileNotFoundError(f"claims jsonl 파일 없음: {jsonl_path}")
+
+    claims = []
+    for line in jsonl_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            claims.append(payload)
+    return claims
 
 
 def _setup_worker(root: str, env_vars: dict, model: str):
