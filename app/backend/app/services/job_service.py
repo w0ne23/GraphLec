@@ -201,7 +201,7 @@ def _session_expired(cutoff: datetime):
 async def _cleanup_stale_sessions(db: AsyncSession, lecture_id) -> int:
     cutoff = _utcnow() - timedelta(seconds=GRAPH_SESSION_TTL_SEC)
     q = select(GraphSession).where(
-        GraphSession.stem == lecture_id,
+        GraphSession.stem == str(lecture_id),
         _session_expired(cutoff),
     )
     res = await db.execute(q)
@@ -216,7 +216,7 @@ async def _cleanup_stale_sessions(db: AsyncSession, lecture_id) -> int:
 async def _active_session_count(db: AsyncSession, lecture_id) -> int:
     await _cleanup_stale_sessions(db, lecture_id)
     q = select(GraphSession).where(
-        GraphSession.stem == lecture_id,
+        GraphSession.stem == str(lecture_id),
         GraphSession.ended_at.is_(None),
     )
     res = await db.execute(q)
@@ -237,7 +237,7 @@ async def _touch_or_create_graph_session(
     q = (
         select(GraphSession)
         .where(
-            GraphSession.stem == lecture_id,
+            GraphSession.lecture_id == lecture_id,
             GraphSession.session_id == session_id,
         )
         .order_by(GraphSession.created_at.desc(), GraphSession.id.desc())
@@ -249,6 +249,7 @@ async def _touch_or_create_graph_session(
         db.add(
             GraphSession(
                 lecture_id=lecture_id,
+                stem=str(lecture_id),
                 session_id=session_id,
                 last_heartbeat_at=now,
                 ended_at=None,
@@ -705,7 +706,7 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
 
     stem = str(lecture.id)
     q = select(GraphSession).where(
-        GraphSession.stem == lecture.id,
+        GraphSession.lecture_id == lecture.id,
         GraphSession.session_id == session_id,
         GraphSession.ended_at.is_(None),
     )
