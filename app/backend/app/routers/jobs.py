@@ -116,13 +116,20 @@ async def create_job(
         )
         db.add(new_job)
         await db.commit()
+        await db.refresh(new_lecture)
+        await db.refresh(new_job)
+
     except Exception as e:
         await db.rollback()
         shutil.rmtree(input_dir, ignore_errors=True)
         logger.error(f"DB commit failed for lecture {lecture_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to create job")
 
-    return {"job_id": str(job_id), "lecture_id": str(lecture_id)}
+    return {
+        "job_id": str(job_id),
+        "lecture_id": str(lecture_id),
+        "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
+    }
 
 
 @router.delete("/{job_id}")
