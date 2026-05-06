@@ -156,6 +156,8 @@ def slide_to_block(
     include_keyword_scores: bool = True,
 ) -> str:
     slide_id = _clean_inline(slide.get("slide_id"))
+    scene_id = _clean_inline(slide.get("scene_id"))
+    scene_number = slide.get("scene_number", slide.get("scene_index"))
     slide_number = slide.get("slide_number")
     title = _clean_inline(slide.get("title"))
     role = _clean_inline(slide.get("role"))
@@ -172,6 +174,10 @@ def slide_to_block(
         tag_parts = []
         if slide_id:
             tag_parts.append(f"id={slide_id}")
+        if scene_id:
+            tag_parts.append(f"scene_id={scene_id}")
+        elif scene_number is not None:
+            tag_parts.append(f"scene={scene_number}")
         if start and end:
             tag_parts.append(f"time={start}~{end}")
         elif start:
@@ -218,7 +224,7 @@ def fused_to_graphrag_text(
     keyword_min_score: float = 0.0,
     include_keyword_scores: bool = True,
 ) -> str:
-    slides = fused.get("slides") or []
+    slides = fused.get("scenes") or fused.get("slides") or []
     metadata = fused.get("metadata") or {}
     lecture_name = stem or _clean_inline(metadata.get("stem")) or "lecture"
 
@@ -305,8 +311,15 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(text, encoding="utf-8")
 
-    slide_count = len(fused.get("slides") or [])
-    print(f"wrote {output_path} ({slide_count} slides, {len(text):,} chars)")
+    scene_count = len(fused.get("scenes") or fused.get("slides") or [])
+    slide_count = fused.get("slide_count")
+    if not isinstance(slide_count, int):
+        slide_count = len({
+            scene.get("slide_number")
+            for scene in (fused.get("scenes") or fused.get("slides") or [])
+            if scene.get("slide_number") is not None
+        })
+    print(f"wrote {output_path} ({scene_count} scenes, {slide_count} slides, {len(text):,} chars)")
 
 
 if __name__ == "__main__":

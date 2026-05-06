@@ -238,6 +238,8 @@ class SlideLoader:
         with open(metadata_path, encoding="utf-8") as f:
             metadata = json.load(f)
 
+        slide_number_lookup = self._build_slide_number_lookup(metadata)
+
         # scene_index 기준으로 base / build / annot 분류
         base_entries: Dict[int, dict] = {}
         build_entries: Dict[int, List[dict]] = {}
@@ -292,9 +294,13 @@ class SlideLoader:
                 or base.get("same_slide_canonical")
                 or scene_num
             )
+            slide_number = base.get("slide_number")
+            if not isinstance(slide_number, int):
+                slide_number = slide_number_lookup.get(int(canonical), int(canonical))
             scene_records.append({
                 "scene_number": scene_num,
-                "slide_number": scene_num,  # 하위 호환
+                "scene_index": scene_num,
+                "slide_number": slide_number,
                 "slide_canonical_number": canonical,
                 "slide_visit_order": base.get("slide_visit_order", base.get("same_slide_visit_order", 1)),
                 "slide_is_revisit": bool(base.get("slide_is_revisit", base.get("same_slide_is_revisit", False))),
@@ -350,6 +356,7 @@ class SlideLoader:
 
             slides.append({
                 "scene_number":  record["scene_number"],
+                "scene_index":   record["scene_index"],
                 "slide_number":  record["slide_number"],
                 "slide_canonical_number": canonical,
                 "slide_visit_order": record["slide_visit_order"],
@@ -366,7 +373,7 @@ class SlideLoader:
                 "text_source":    rep["text_source"],
             })
 
-        slides.sort(key=lambda x: x["slide_number"])
+        slides.sort(key=lambda x: x["scene_number"])
         last_annot_count = sum(1 for s in slides if "annot" in s["text_source"])
         build_count = sum(1 for s in slides if "clean_final" in s["text_source"])
         logger.info(
@@ -376,6 +383,30 @@ class SlideLoader:
             f"base: {len(slides)-build_count-last_annot_count})"
         )
         return slides
+
+    @staticmethod
+    def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
+        from collections import defaultdict
+
+        by_scene: dict[int, list[dict]] = defaultdict(list)
+        for item in metadata:
+            scene_idx = item.get("scene_index", item.get("slide_index"))
+            if isinstance(scene_idx, int):
+                by_scene[scene_idx].append(item)
+
+        ordered_pairs: list[tuple[float, int]] = []
+        for scene_idx in sorted(by_scene):
+            items = by_scene[scene_idx]
+            base = next((x for x in items if x.get("capture_type") == "base"), items[0])
+            canonical = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
+            ts = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
+            ordered_pairs.append((ts, canonical))
+
+        lookup: dict[int, int] = {}
+        for _, canonical in sorted(ordered_pairs, key=lambda x: x[0]):
+            if canonical not in lookup:
+                lookup[canonical] = len(lookup) + 1
+        return lookup
 
     def _load_from_filenames(self) -> List[Dict]:
         """
@@ -426,7 +457,13 @@ class SlideLoader:
                 text_image_has_annot = False
 
             slides.append({
+                "scene_number": slide_num,
+                "scene_index": slide_num,
                 "slide_number": slide_num,
+                "slide_canonical_number": slide_num,
+                "slide_visit_order": 1,
+                "slide_is_revisit": False,
+                "representative_scene_number": slide_num,
                 "timestamp":    0.0,
                 "image_path":   str(target_path),
                 "image":        Image.open(target_path).convert("RGB"),
@@ -728,6 +765,7 @@ class TextualizationPipeline:
             hrs, mins = divmod(mins, 60)
             slide["timestamp_formatted"] = f"{int(hrs):02d}:{int(mins):02d}:{secs:05.2f}"
             slide["slide_id"] = f"slide_{slide['slide_number']:03d}"
+            slide["scene_id"] = f"scene/{int(slide.get('scene_number', slide['slide_number'])):04d}"
 
         total_time = time.time() - start_time
 
@@ -741,7 +779,9 @@ class TextualizationPipeline:
             "slides": [
                 {
                     "slide_id":            s["slide_id"],
+                    "scene_id":            s.get("scene_id"),
                     "scene_number":        s.get("scene_number", s["slide_number"]),
+                    "scene_index":         s.get("scene_index", s.get("scene_number", s["slide_number"])),
                     "slide_number":        s["slide_number"],
                     "slide_canonical_number": s.get("slide_canonical_number", s["slide_number"]),
                     "slide_visit_order":   s.get("slide_visit_order", 1),

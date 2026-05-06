@@ -1602,29 +1602,165 @@ def _save(frame: np.ndarray, path: Path):
     cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
 
 
+def _read_frame_by_number(cap: cv2.VideoCapture, frame_no: int) -> np.ndarray | None:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_no - 1))
+    ret, frame = cap.read()
+    if not ret or frame is None:
+        return None
+    return frame
+
+
+def _read_frame_by_timestamp_opencv(input_path: str, timestamp_sec: float) -> np.ndarray | None:
+    cap = cv2.VideoCapture(input_path)
+    if not cap.isOpened():
+        return None
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, timestamp_sec) * 1000.0)
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            return None
+        return frame
+    finally:
+        cap.release()
+
+
+def _read_frame_by_timestamp_ffmpeg(input_path: str, timestamp_sec: float) -> np.ndarray | None:
+    if shutil.which("ffmpeg") is None:
+        return None
+
+    timestamp_sec = max(0.0, float(timestamp_sec))
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{timestamp_sec:.6f}",
+                "-i",
+                input_path,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                "-y",
+                str(tmp_path),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size <= 0:
+            return None
+        frame = cv2.imread(str(tmp_path), cv2.IMREAD_COLOR)
+        return frame if frame is not None else None
+    except Exception:
+        return None
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _materialize_frame_with_fallback(
+    input_path: str,
+    cap: cv2.VideoCapture,
+    frame_no: int,
+    timestamp_sec: float | None,
+) -> np.ndarray | None:
+    frame = _read_frame_by_number(cap, frame_no)
+    if frame is not None:
+        return frame
+
+    if timestamp_sec is None:
+        return None
+
+    # Some VFR or slightly damaged MP4s report a frame count that OpenCV cannot
+    # seek to near the tail. In that case, timestamp-based extraction is safer.
+    offsets = (0.0, -0.05, 0.05, -0.2, 0.2, -0.5, 0.5, -1.0)
+    for offset in offsets:
+        ts = max(0.0, timestamp_sec + offset)
+        frame = _read_frame_by_timestamp_ffmpeg(input_path, ts)
+        if frame is not None:
+            if abs(offset) > 0.0:
+                log.warning(
+                    "frame_no=%s 원본 추출을 timestamp %.3fs 보정값으로 복구했습니다.",
+                    frame_no,
+                    ts,
+                )
+            return frame
+
+    for offset in offsets:
+        ts = max(0.0, timestamp_sec + offset)
+        frame = _read_frame_by_timestamp_opencv(input_path, ts)
+        if frame is not None:
+            if abs(offset) > 0.0:
+                log.warning(
+                    "frame_no=%s 원본 추출을 OpenCV timestamp %.3fs 보정값으로 복구했습니다.",
+                    frame_no,
+                    ts,
+                )
+            return frame
+
+    return None
+
+
 def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list[dict]):
     for stale in out_path.glob("slide_*.jpg"):
         stale.unlink(missing_ok=True)
 
-    frame_targets: dict[int, list[str]] = {}
+    frame_targets: dict[int, list[dict]] = {}
     for item in metadata:
         frame_no = int(item.get("frame_no", 0) or 0)
         if frame_no <= 0:
             raise ValueError(f"frame_no가 없는 metadata 항목입니다: {item}")
-        frame_targets.setdefault(frame_no, []).append(item["filename"])
+        frame_targets.setdefault(frame_no, []).append(item)
 
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"영상 파일을 열 수 없습니다: {input_path}")
 
     try:
-        for frame_no in sorted(frame_targets):
-            cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_no - 1))
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                raise RuntimeError(f"frame_no={frame_no} 원본 프레임을 추출하지 못했습니다.")
-            for fname in frame_targets[frame_no]:
-                _save(frame, out_path / fname)
+        fallback_count = 0
+        for frame_no, targets in sorted(frame_targets.items()):
+            timestamp_sec = None
+            timestamps = [
+                float(item["timestamp_sec"])
+                for item in targets
+                if item.get("timestamp_sec") is not None
+            ]
+            if timestamps:
+                timestamp_sec = min(timestamps)
+
+            direct_frame = _read_frame_by_number(cap, frame_no)
+            frame = direct_frame
+            if frame is None:
+                frame = _materialize_frame_with_fallback(input_path, cap, frame_no, timestamp_sec)
+                if frame is not None:
+                    fallback_count += 1
+                    log.warning(
+                        "frame_no=%s 원본 프레임 seek 실패를 timestamp_sec=%s 기반으로 복구했습니다.",
+                        frame_no,
+                        f"{timestamp_sec:.3f}" if timestamp_sec is not None else "None",
+                    )
+
+            if frame is None:
+                detail = (
+                    f"timestamp_sec={timestamp_sec:.3f}"
+                    if timestamp_sec is not None
+                    else "timestamp_sec 없음"
+                )
+                raise RuntimeError(f"frame_no={frame_no} 원본 프레임을 추출하지 못했습니다. ({detail})")
+
+            for item in targets:
+                _save(frame, out_path / item["filename"])
+
+        if fallback_count:
+            log.warning("원본 프레임 timestamp fallback 복구: %s개 frame_no", fallback_count)
     finally:
         cap.release()
 
@@ -1640,7 +1776,9 @@ def _meta(
 ) -> dict:
     return {
         "filename":      fname,
-        "slide_index":   slide_idx,
+        "slide_index":   slide_idx,  # legacy: scene occurrence index
+        "legacy_slide_index": slide_idx,
+        "scene_number":  slide_idx,
         "scene_index":   slide_idx,
         "timestamp_sec": round(timestamp, 2),
         "annot_index":   int(annot_index),

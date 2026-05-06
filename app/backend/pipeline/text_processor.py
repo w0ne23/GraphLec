@@ -179,18 +179,18 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
         return {"domain": "", "subdomain": ""}
 
 
-def _build_occurrence_index(slide_occurrences: dict[int, list[dict]]) -> list[dict]:
+def _build_occurrence_index(scene_occurrences: dict[int, list[dict]]) -> list[dict]:
     occ_index = []
-    for slide_no, occs in slide_occurrences.items():
+    for scene_no, occs in scene_occurrences.items():
         for occ in occs:
             occ_index.append(
                 {
-                    "slide_no": int(slide_no),
+                    "scene_no": int(scene_no),
                     "start_sec": float(occ["start_sec"]),
                     "end_sec": float(occ["end_sec"]),
                 }
             )
-    occ_index.sort(key=lambda item: (item["start_sec"], item["end_sec"], item["slide_no"]))
+    occ_index.sort(key=lambda item: (item["start_sec"], item["end_sec"], item["scene_no"]))
     return occ_index
 
 
@@ -290,15 +290,16 @@ def extract_glossary_terms(slide_texts: dict[int, dict]) -> list[str]:
 
 
 def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[int, list[dict]], dict[int, int]]:
-    slide_occurrences: dict[int, list[dict]] = {}
-    slide_det_no: dict[int, int] = {}
+    scene_occurrences: dict[int, list[dict]] = {}
+    scene_to_slide_no: dict[int, int] = {}
     seen: set[int] = set()
 
     for entry in metadata:
-        slide_no = entry.get("scene_index", entry.get("slide_index"))
+        scene_no = entry.get("scene_index", entry.get("slide_index"))
+        logical_slide_no = entry.get("slide_number")
         start_sec = entry.get("slide_start_sec")
         end_sec = entry.get("slide_end_sec")
-        if not isinstance(slide_no, int) or slide_no in seen:
+        if not isinstance(scene_no, int) or scene_no in seen:
             continue
         if start_sec is None or end_sec is None:
             continue
@@ -306,16 +307,17 @@ def _load_slide_occurrences_from_metadata(metadata: list[dict]) -> tuple[dict[in
         end = float(end_sec)
         if end < start:
             end = start
-        slide_occurrences[slide_no] = [{
+        scene_occurrences[scene_no] = [{
             "start_sec": start,
             "end_sec": end,
             "duration": round(end - start, 3),
             "is_dup": False,
         }]
-        slide_det_no[slide_no] = slide_no
-        seen.add(slide_no)
+        if isinstance(logical_slide_no, int):
+            scene_to_slide_no[scene_no] = logical_slide_no
+        seen.add(scene_no)
 
-    return slide_occurrences, slide_det_no
+    return scene_occurrences, scene_to_slide_no
 
 
 def _build_scene_metadata_index(metadata: list[dict]) -> dict[int, dict]:
@@ -631,7 +633,7 @@ def correct_segments_two_pass(
     if not segments:
         return []
 
-    slide_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
+    scene_occurrences, _ = _load_slide_occurrences_from_metadata(metadata)
     scene_meta_by_index = _build_scene_metadata_index(metadata)
     extracted_slide_texts = _load_integrated_slide_texts(
         textualized_data,
@@ -639,7 +641,7 @@ def correct_segments_two_pass(
         scene_meta_by_index=scene_meta_by_index,
     )
 
-    occ_index = _build_occurrence_index(slide_occurrences)
+    occ_index = _build_occurrence_index(scene_occurrences)
     seg_scene: dict[int, int] = {}
     seg_logical_slide: dict[int, int] = {}
     for i, seg in enumerate(segments):
@@ -652,7 +654,7 @@ def correct_segments_two_pass(
             continue
         occ_idx = _assign_segment_occurrence(seg, occ_index)
         if occ_idx is not None:
-            scene_no = occ_index[occ_idx]["slide_no"]
+            scene_no = occ_index[occ_idx]["scene_no"]
             seg_scene[i] = scene_no
             logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
             if isinstance(logical_slide_no, int):

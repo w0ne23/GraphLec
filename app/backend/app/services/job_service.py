@@ -776,6 +776,7 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
                 "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
                 "text":         s.get("title") or f"Slide {s.get('slide_number')}",
                 "image_url":    img_url,
+                "scene_number": s.get("scene_number", s.get("scene_index")),
                 "slide_number": s.get("slide_number"),
             })
         return scenes
