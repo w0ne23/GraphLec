@@ -371,7 +371,9 @@ def _clean_answer_text(text: str) -> str:
         text = re.sub(r"\([^()]*GraphRAG[^()]*\)", "", text)
     text = re.sub(r"\(음성 발췌\)", "", text)
     text = re.sub(r"\s*,\s*(?=[),])", "", text)
-    text = re.sub(r"\s{2,}", " ", text)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = "\n".join(re.sub(r"[ \t]{2,}", " ", line).strip() for line in text.split("\n"))
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
@@ -452,9 +454,10 @@ def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedC
     cleaned = _clean_answer_text(raw)
     cleaned = cleaned.replace("**", "")
 
-    cleaned = re.sub(r"\s+[*-]\s+([^:：\n]{1,40})[:：]\s*", r"\n- \1: ", cleaned)
+    cleaned = re.sub(r"[ \t]+[*-]\s+([^:：\n]{1,40})[:：]\s*", r"\n- \1: ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
+    cleaned = re.sub(r"\n*\s*출처\s*\n(?:\s*[-*].*(?:\n|$))+\s*$", "", cleaned).strip()
 
     source_block = _format_source_block(sources)
     if source_block:
