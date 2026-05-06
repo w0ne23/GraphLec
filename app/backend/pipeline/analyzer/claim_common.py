@@ -16,7 +16,6 @@ if str(_ROOT) not in sys.path:
 from google.genai import types
 
 from config import (
-    OPENAI_SDK_IMPORT_ERROR,
     get_anthropic_client,
     get_gemini_client_sequence,
     get_openai_client,
@@ -42,7 +41,6 @@ def _resolve_stage_model(stage: str) -> str:
     cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
     slide_recheck_model = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", VERIFIER_SLIDE_RECHECK_MODEL).strip()
     grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
-    issue_pattern_model = os.getenv("VERIFIER_ISSUE_PATTERN_MODEL", VERIFIER_ISSUE_PATTERN_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
@@ -55,8 +53,6 @@ def _resolve_stage_model(stage: str) -> str:
         return slide_recheck_model or strong
     if stage == "grounding":
         return grounding_model or strong
-    if stage == "issue_pattern":
-        return issue_pattern_model or strong
     return base
 
 
@@ -98,13 +94,14 @@ def _is_anthropic_model(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = ("extract", "judge", "recheck", "grounding", "cross_recheck", "issue_pattern")
+TOKEN_USAGE_STAGES = ("extract", "judge", "recheck", "grounding", "cross_recheck")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
     "reasoning_tokens",
     "tool_input_tokens",
     "cached_input_tokens",
+    "cache_creation_input_tokens",
     "total_tokens",
 )
 
@@ -128,10 +125,79 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _usage_value(obj, *names) -> int:
+    for name in names:
+        if isinstance(obj, dict):
+            value = obj.get(name)
+        else:
+            value = getattr(obj, name, None)
+        if value is not None:
+            return _safe_int(value)
+    return 0
+
+
+def _openai_prompt_cache_key(stage: str) -> str | None:
+    base = (
+        os.getenv("VERIFIER_OPENAI_PROMPT_CACHE_KEY", "")
+        or os.getenv("OPENAI_PROMPT_CACHE_KEY", "")
+        or "graphlec-verifier"
+    ).strip()
+    if base.lower() in {"", "0", "false", "off", "none"}:
+        return None
+    safe_base = re.sub(r"[^A-Za-z0-9_.:-]+", "-", base).strip("-") or "graphlec-verifier"
+    safe_stage = re.sub(r"[^A-Za-z0-9_.:-]+", "-", str(stage or "default")).strip("-") or "default"
+    return f"{safe_base}:{safe_stage}"[:128]
+
+
+def _openai_prompt_cache_retention() -> str | None:
+    raw = (
+        os.getenv("VERIFIER_OPENAI_PROMPT_CACHE_RETENTION", "")
+        or os.getenv("OPENAI_PROMPT_CACHE_RETENTION", "")
+    ).strip().lower()
+    if not raw or raw in {"0", "false", "off", "none"}:
+        return None
+    aliases = {
+        "in_memory": "in-memory",
+        "in-memory": "in-memory",
+        "memory": "in-memory",
+        "24h": "24h",
+        "extended": "24h",
+    }
+    return aliases.get(raw)
+
+
+def _anthropic_prompt_cache_control() -> dict | None:
+    raw = (
+        os.getenv("VERIFIER_ANTHROPIC_PROMPT_CACHE", "")
+        or os.getenv("ANTHROPIC_PROMPT_CACHE", "")
+        or "1"
+    ).strip().lower()
+    if raw in {"0", "false", "off", "none"}:
+        return None
+    ttl = (
+        os.getenv("VERIFIER_ANTHROPIC_PROMPT_CACHE_TTL", "")
+        or os.getenv("ANTHROPIC_PROMPT_CACHE_TTL", "")
+        or "5m"
+    ).strip().lower()
+    control = {"type": "ephemeral"}
+    if ttl == "1h":
+        control["ttl"] = "1h"
+    return control
+
+
+def _join_system_and_prompt(system_prompt: str | None, prompt: str) -> str:
+    if not system_prompt:
+        return prompt
+    return f"{system_prompt.rstrip()}\n\n{prompt.lstrip()}"
+
+
 def _merge_token_usage(*usages: dict) -> dict:
     merged = _empty_token_usage()
     for usage in usages:
         if not isinstance(usage, dict):
+            continue
+        if usage.get("stage"):
+            _add_call_usage(merged, usage)
             continue
         for stage in TOKEN_USAGE_STAGES:
             bucket = usage.get(stage)
@@ -140,6 +206,7 @@ def _merge_token_usage(*usages: dict) -> dict:
             for field in TOKEN_USAGE_FIELDS:
                 merged[stage][field] += _safe_int(bucket.get(field))
 
+    merged["total"] = _new_token_bucket()
     for stage in TOKEN_USAGE_STAGES:
         for field in TOKEN_USAGE_FIELDS:
             merged["total"][field] += merged[stage][field]
@@ -173,12 +240,13 @@ def _extract_openai_usage(resp, model: str, stage: str) -> dict:
         "provider": "openai",
         "model": model,
         "stage": stage,
-        "input_tokens": _safe_int(getattr(usage, "prompt_tokens", None)),
-        "output_tokens": _safe_int(getattr(usage, "completion_tokens", None)),
-        "reasoning_tokens": _safe_int(getattr(completion_details, "reasoning_tokens", None)),
+        "input_tokens": _usage_value(usage, "prompt_tokens"),
+        "output_tokens": _usage_value(usage, "completion_tokens"),
+        "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
         "tool_input_tokens": 0,
-        "cached_input_tokens": _safe_int(getattr(prompt_details, "cached_tokens", None)),
-        "total_tokens": _safe_int(getattr(usage, "total_tokens", None)),
+        "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
+        "cache_creation_input_tokens": 0,
+        "total_tokens": _usage_value(usage, "total_tokens"),
     }
 
 
@@ -213,19 +281,26 @@ def _extract_gemini_usage(resp, model: str, stage: str) -> dict:
 
 def _extract_anthropic_usage(resp, model: str, stage: str) -> dict:
     usage = getattr(resp, "usage", None)
-    input_tokens = _safe_int(getattr(usage, "input_tokens", None))
-    output_tokens = _safe_int(getattr(usage, "output_tokens", None))
-    call_bucket = _new_token_bucket()
-    call_bucket["input_tokens"] = input_tokens
-    call_bucket["output_tokens"] = output_tokens
-    call_bucket["total_tokens"] = input_tokens + output_tokens
-    merged = _empty_token_usage()
-    merged[stage] = call_bucket
-    merged["total"] = dict(call_bucket)
-    return merged
+    input_tokens = _usage_value(usage, "input_tokens")
+    output_tokens = _usage_value(usage, "output_tokens")
+    cached_tokens = _usage_value(usage, "cache_read_input_tokens")
+    cache_creation_tokens = _usage_value(usage, "cache_creation_input_tokens")
+    return {
+        "provider": "anthropic",
+        "model": model,
+        "stage": stage,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": 0,
+        "tool_input_tokens": 0,
+        "cached_input_tokens": cached_tokens,
+        "cache_creation_input_tokens": cache_creation_tokens,
+        "total_tokens": input_tokens + output_tokens + cached_tokens + cache_creation_tokens,
+    }
 
 def _call_llm(
     prompt: str,
+    system_prompt: str = None,
     max_tokens: int = 8192,
     temperature: float = None,
     image_bytes: bytes = None,
@@ -247,15 +322,7 @@ def _call_llm(
         import base64
         client = get_openai_client()
         if client is None:
-            if OPENAI_SDK_IMPORT_ERROR is not None:
-                raise RuntimeError(
-                    "openai 패키지가 설치되지 않았습니다. "
-                    "venv/bin/python -m pip install -r app/backend/pipeline/requirements.txt "
-                    "또는 venv/bin/python -m pip install 'openai>=1.0.0' 실행 후 다시 시도하세요."
-                )
-            if not os.getenv("OPENAI_API_KEY"):
-                raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
-            raise RuntimeError("OpenAI client 초기화에 실패했습니다.")
+            raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
 
         image_payloads = []
         if image_bytes_list:
@@ -263,15 +330,19 @@ def _call_llm(
         elif image_bytes:
             image_payloads.append(image_bytes)
 
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
         if image_payloads:
             content = []
             for img in image_payloads:
                 b64 = base64.b64encode(img).decode()
                 content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
             content.append({"type": "text", "text": prompt})
-            messages = [{"role": "user", "content": content}]
+            messages.append({"role": "user", "content": content})
         else:
-            messages = [{"role": "user", "content": prompt}]
+            messages.append({"role": "user", "content": prompt})
 
         def call_api():
             kwargs = dict(
@@ -279,13 +350,26 @@ def _call_llm(
                 messages=messages,
                 max_completion_tokens=max_tokens,
             )
+            prompt_cache_key = _openai_prompt_cache_key(stage)
+            if prompt_cache_key:
+                kwargs["prompt_cache_key"] = prompt_cache_key
+            prompt_cache_retention = _openai_prompt_cache_retention()
+            if prompt_cache_retention:
+                kwargs["prompt_cache_retention"] = prompt_cache_retention
             if _should_send_openai_temperature(model, reasoning_effort):
                 kwargs["temperature"] = temp
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            return client.chat.completions.create(**kwargs)
+            try:
+                return client.chat.completions.create(**kwargs)
+            except TypeError as e:
+                if "prompt_cache_" not in str(e):
+                    raise
+                kwargs.pop("prompt_cache_key", None)
+                kwargs.pop("prompt_cache_retention", None)
+                return client.chat.completions.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
         return resp.choices[0].message.content or "", _extract_openai_usage(resp, model, stage)
@@ -333,6 +417,12 @@ def _call_llm(
                 temperature=temp,
                 messages=[{"role": "user", "content": content}],
             )
+            if system_prompt:
+                system_block = {"type": "text", "text": system_prompt}
+                cache_control = _anthropic_prompt_cache_control()
+                if cache_control:
+                    system_block["cache_control"] = cache_control
+                kwargs["system"] = [system_block]
             return client.messages.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
@@ -351,7 +441,7 @@ def _call_llm(
                 contents.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
     elif image_bytes:
         contents.append(types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"))
-    contents.append(types.Part.from_text(text=prompt))
+    contents.append(types.Part.from_text(text=_join_system_and_prompt(system_prompt, prompt)))
 
     cfg_kwargs: dict = dict(temperature=temp, max_output_tokens=max_tokens)
     if use_grounding:
@@ -380,14 +470,11 @@ def _call_llm(
     last_exc = None
     for idx, (client_name, client) in enumerate(client_sequence):
         try:
-            def call_api():
-                return client.models.generate_content(
-                    model=model,
-                    contents=contents,
-                    config=types.GenerateContentConfig(**cfg_kwargs),
-                )
-
-            resp = api_call_with_retry(call_api)
+            resp = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
             return resp.text or "", _extract_gemini_usage(resp, model, stage)
         except Exception as e:
             last_exc = e
@@ -404,128 +491,251 @@ def _call_llm(
 
 # ── 설정 ──────────────────────────────────────────────────
 
-BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "20"))
+BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "15"))
 VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
 VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
 VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
 VERIFIER_CROSS_RECHECK_MODEL = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", "")
 VERIFIER_SLIDE_RECHECK_MODEL = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", "")
 VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
-VERIFIER_ISSUE_PATTERN_MODEL = os.getenv("VERIFIER_ISSUE_PATTERN_MODEL", "")
-VERIFIER_ISSUE_PATTERN_BATCH_SIZE = int(os.getenv("VERIFIER_ISSUE_PATTERN_BATCH_SIZE", "12"))
-VERIFIER_ISSUE_PATTERN_MAX_TOKENS = int(os.getenv("VERIFIER_ISSUE_PATTERN_MAX_TOKENS", "8192"))
-VERIFIER_SLIDE_TYPO_RUNS = int(os.getenv("VERIFIER_SLIDE_TYPO_RUNS", "1"))
-VERIFIER_SLIDE_TYPO_MIN_RATE = float(os.getenv("VERIFIER_SLIDE_TYPO_MIN_RATE", "1.0"))
-VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE = float(os.getenv("VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", "0.5"))
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
-ALLOWED_ISSUE_TYPES = {"factual_error", "outdated"}
+ISSUE_TYPE_LABELS = {
+    "factual_error": "발언 자체 오류",
+    "temporal_error": "시대적 오류",
+    "confusing_explanation": "혼동 가능 설명",
+    "scope_overclaim": "범위 과잉 단정",
+}
+FACT_GROUNDED_ISSUE_TYPES = {"factual_error", "temporal_error", "scope_overclaim"}
+PEDAGOGICAL_ISSUE_TYPES = {"confusing_explanation"}
+ALLOWED_ISSUE_TYPES = set(ISSUE_TYPE_LABELS)
+ISSUE_VERIFICATION_BASIS_VALUES = {
+    "external_factual",
+    "temporal_factual",
+    "lecture_context",
+    "pedagogical_risk",
+    "insufficient_context",
+}
+ISSUE_EVIDENCE_NEED_VALUES = {"external_grounding", "lecture_context_only", "professor_check"}
+ISSUE_CLAIM_SCOPE_VALUES = {"explicit", "contextualized", "overgeneralized_from_context"}
+ISSUE_REVIEW_PRIORITY_VALUES = {"high", "medium", "low"}
+ISSUE_METADATA_FIELDS = (
+    "verification_basis",
+    "evidence_need",
+    "claim_scope",
+    "review_priority",
+)
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
 VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES", "1"))
 VERIFIER_REQUIRE_COMPLETE = os.getenv("VERIFIER_REQUIRE_COMPLETE", "1") != "0"
 
 
+def normalize_issue_type(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    aliases = {
+        "outdated": "temporal_error",
+        "currentness_error": "temporal_error",
+        "temporal": "temporal_error",
+        "missing_condition": "scope_overclaim",
+        "clarification_needed": "scope_overclaim",
+        "needs_clarification": "scope_overclaim",
+        "overgeneralization": "scope_overclaim",
+        "overclaim": "scope_overclaim",
+        "ambiguous_expression": "confusing_explanation",
+        "misleading_explanation": "confusing_explanation",
+        "misconception_risk": "confusing_explanation",
+        "ambiguous": "confusing_explanation",
+        "ambiguity": "confusing_explanation",
+        "misleading": "confusing_explanation",
+        "misunderstanding_risk": "confusing_explanation",
+        "student_misunderstanding": "confusing_explanation",
+    }
+    return aliases.get(raw, raw)
+
+
+def issue_type_label(issue_type: str) -> str:
+    return ISSUE_TYPE_LABELS.get(normalize_issue_type(issue_type), str(issue_type or "unknown"))
+
+
+def normalize_issue_metadata(issue: dict, issue_type: str | None = None) -> dict:
+    """Normalize stage-to-stage metadata so old/partial judge outputs do not break later phases."""
+    if not isinstance(issue, dict):
+        issue = {}
+    normalized_type = normalize_issue_type(issue_type if issue_type is not None else issue.get("type", ""))
+
+    basis_aliases = {
+        "fact": "external_factual",
+        "factual": "external_factual",
+        "external": "external_factual",
+        "temporal": "temporal_factual",
+        "currentness": "temporal_factual",
+        "context": "lecture_context",
+        "pedagogical": "pedagogical_risk",
+        "teaching": "pedagogical_risk",
+        "review": "insufficient_context",
+        "insufficient": "insufficient_context",
+        "uncertain": "insufficient_context",
+    }
+    evidence_aliases = {
+        "grounding": "external_grounding",
+        "external": "external_grounding",
+        "search": "external_grounding",
+        "context": "lecture_context_only",
+        "lecture": "lecture_context_only",
+        "review": "professor_check",
+        "human": "professor_check",
+        "manual": "professor_check",
+    }
+    scope_aliases = {
+        "explicit_claim": "explicit",
+        "context": "contextualized",
+        "contextual": "contextualized",
+        "overgeneralized": "overgeneralized_from_context",
+        "too_broad": "overgeneralized_from_context",
+    }
+
+    basis = str(issue.get("verification_basis", "") or "").strip().lower()
+    basis = basis_aliases.get(basis, basis)
+    evidence_need = str(issue.get("evidence_need", "") or "").strip().lower()
+    evidence_need = evidence_aliases.get(evidence_need, evidence_need)
+    claim_scope = str(issue.get("claim_scope", "") or "").strip().lower()
+    claim_scope = scope_aliases.get(claim_scope, claim_scope)
+    review_priority = str(issue.get("review_priority", "") or "").strip().lower()
+
+    if basis not in ISSUE_VERIFICATION_BASIS_VALUES:
+        if normalized_type == "temporal_error":
+            basis = "temporal_factual"
+        elif normalized_type in {"factual_error", "scope_overclaim"}:
+            basis = "external_factual"
+        elif normalized_type in PEDAGOGICAL_ISSUE_TYPES:
+            basis = "pedagogical_risk"
+        else:
+            basis = "lecture_context"
+
+    if evidence_need not in ISSUE_EVIDENCE_NEED_VALUES:
+        if basis in {"external_factual", "temporal_factual"}:
+            evidence_need = "external_grounding"
+        elif basis == "insufficient_context":
+            evidence_need = "professor_check"
+        else:
+            evidence_need = "lecture_context_only"
+
+    if claim_scope not in ISSUE_CLAIM_SCOPE_VALUES:
+        claim_scope = "explicit"
+
+    if review_priority not in ISSUE_REVIEW_PRIORITY_VALUES:
+        review_priority = "high"
+
+    issue["verification_basis"] = basis
+    issue["evidence_need"] = evidence_need
+    issue["claim_scope"] = claim_scope
+    issue["review_priority"] = review_priority
+    return issue
+
+
+def should_drop_issue_by_metadata(issue: dict) -> bool:
+    normalize_issue_metadata(issue)
+    return issue.get("review_priority") == "low"
+
+
+def should_route_issue_to_professor_check(issue: dict) -> bool:
+    normalize_issue_metadata(issue)
+    return (
+        issue.get("verification_basis") == "insufficient_context"
+        or issue.get("evidence_need") == "professor_check"
+        or issue.get("claim_scope") == "overgeneralized_from_context"
+    )
+
+
+def is_pedagogical_or_context_issue(issue: dict) -> bool:
+    normalize_issue_metadata(issue)
+    issue_type = normalize_issue_type(issue.get("type", ""))
+    return (
+        issue_type in PEDAGOGICAL_ISSUE_TYPES
+        or issue.get("verification_basis") in {"pedagogical_risk", "lecture_context"}
+        or issue.get("evidence_need") == "lecture_context_only"
+    )
+
+
+def should_review_single_model_pedagogical_issue(issue: dict, total_models: int) -> bool:
+    normalize_issue_metadata(issue)
+    detected_by = issue.get("detected_by_models")
+    if not isinstance(detected_by, list):
+        detected_by = []
+    if total_models <= 1 or len(set(detected_by)) != 1:
+        return False
+    return is_pedagogical_or_context_issue(issue)
+
+
+def is_fact_grounded_issue(issue: dict) -> bool:
+    normalize_issue_metadata(issue)
+    return normalize_issue_type(issue.get("type", "")) in FACT_GROUNDED_ISSUE_TYPES
+
+
+def copy_issue_metadata(dst: dict, src: dict) -> dict:
+    """Copy normalized issue metadata without overwriting already meaningful destination values."""
+    if not isinstance(dst, dict):
+        dst = {}
+    if not isinstance(src, dict):
+        return dst
+    normalize_issue_metadata(src)
+    for field in ISSUE_METADATA_FIELDS:
+        if not dst.get(field) and src.get(field):
+            dst[field] = src[field]
+    return normalize_issue_metadata(dst)
+
+
+def metadata_review_reason(issue: dict) -> str:
+    normalize_issue_metadata(issue)
+    reasons = []
+    if issue.get("verification_basis") == "insufficient_context":
+        reasons.append("문맥 부족")
+    if issue.get("evidence_need") == "professor_check":
+        reasons.append("교수 확인 필요")
+    if issue.get("claim_scope") == "overgeneralized_from_context":
+        reasons.append("원문보다 넓게 일반화된 claim")
+    return ", ".join(reasons) or "자동 확정보다 교수 확인이 필요한 후보"
+
+
+
+def build_verification_question(claim: dict) -> str:
+    """후속 판정에서 살아남은 claim에만 짧은 검증 질문을 생성."""
+    text = str(
+        claim.get("resolved_claim")
+        or claim.get("claim_text")
+        or claim.get("problematic_content")
+        or ""
+    ).strip()
+    if not text:
+        return ""
+
+    text = " ".join(text.split()).strip(" \t\r\n.。?？!！")
+    if not text:
+        return ""
+
+    claim_type = str(claim.get("claim_type", "") or "").strip()
+    if claim_type == "numeric":
+        return f"'{text}'라는 수치나 기준이 정확한가?"
+    if claim_type == "causal":
+        return f"'{text}'라는 인과 또는 작동 방식 설명이 타당한가?"
+    if claim_type == "relationship":
+        return f"'{text}'라는 개념 간 관계 설명이 타당한가?"
+    if claim_type == "currentness":
+        return f"'{text}'라는 현행성 설명이 현재 기준으로 타당한가?"
+    return f"'{text}'라는 설명이 타당한가?"
+
+
 # ── 도메인 힌트 ──────────────────────────────────────────
-
-DOMAIN_HINTS = {
-    ("공학", "CS"): {
-        "label": "공학 > 컴퓨터공학",
-        "concept_examples": "운영체제, 자료구조, 알고리즘, 네트워크 프로토콜, 프로세스, 메모리 관리",
-        "outdated_guidance": (
-            "아키텍처/모델 설명에 사용되는 고유명사(32비트, x86, 16비트 세그먼트 등)는 "
-            "개념 설명용이므로 outdated로 잡지 마세요. "
-            "단, 특정 소프트웨어/OS 버전을 설치·사용하라고 권장하는 맥락이면 검출 대상입니다."
-        ),
-    },
-    ("공학", "전자공학"): {
-        "label": "공학 > 전자공학",
-        "concept_examples": "회로, 신호처리, 반도체, 전력, 제어 시스템",
-        "outdated_guidance": "구형 부품/규격을 개념 설명용으로 언급하는 것은 outdated가 아닙니다.",
-    },
-    ("자연과학", "물리학"): {
-        "label": "자연과학 > 물리학",
-        "concept_examples": "뉴턴 역학, 열역학, 전자기학, 양자역학, 상대성이론",
-        "outdated_guidance": "고전 물리 법칙을 교육적으로 설명하는 것은 outdated가 아닙니다.",
-    },
-    ("자연과학", "화학"): {
-        "label": "자연과학 > 화학",
-        "concept_examples": "원자 구조, 화학 결합, 반응 속도론, 유기화학, 열화학",
-        "outdated_guidance": "고전 모델(보어 모델 등)을 개념 도입용으로 설명하는 것은 outdated가 아닙니다.",
-    },
-    ("자연과학", "생물학"): {
-        "label": "자연과학 > 생물학",
-        "concept_examples": "세포, 유전, 진화, 생태계, 분자생물학",
-        "outdated_guidance": "과거 실험/발견을 역사적으로 소개하는 것은 outdated가 아닙니다.",
-    },
-    ("인문학", "역사학"): {
-        "label": "인문학 > 역사학",
-        "concept_examples": "사건, 인물, 시대, 사료, 역사 해석",
-        "outdated_guidance": "역사적 사실의 서술은 outdated 대상이 아닙니다. 현행 학술 합의가 바뀐 해석만 해당됩니다.",
-    },
-    ("인문학", "철학"): {
-        "label": "인문학 > 철학",
-        "concept_examples": "존재론, 인식론, 윤리학, 논리학, 사상가",
-        "outdated_guidance": "고전 철학 이론의 소개는 outdated가 아닙니다.",
-    },
-    ("사회과학", "경제학"): {
-        "label": "사회과학 > 경제학",
-        "concept_examples": "수요·공급, GDP, 인플레이션, 통화정책, 시장 구조",
-        "outdated_guidance": "경제 모델의 교육적 설명은 outdated가 아닙니다. 변경된 법률·세율·기준금리 등은 검출 대상입니다.",
-    },
-    ("사회과학", "정치학"): {
-        "label": "사회과학 > 정치학",
-        "concept_examples": "정치체제, 선거, 정당, 국제관계, 정책",
-        "outdated_guidance": "정치 이론의 설명은 outdated가 아닙니다. 변경된 법률·제도·현직 인물 정보는 검출 대상입니다.",
-    },
-    ("예술", "음악"): {
-        "label": "예술 > 음악",
-        "concept_examples": "음악 이론, 작곡, 악기, 장르, 음악사",
-        "outdated_guidance": "과거 음악 양식/작곡 기법의 설명은 outdated가 아닙니다.",
-    },
-}
-
-DEFAULT_HINT = {
-    "label": "일반",
-    "concept_examples": "",
-    "outdated_guidance": "개념 설명용 언급과 실제 사용 권장을 구분하세요.",
-}
-
-SUBDOMAIN_ALIASES = {
-    "cs": "CS",
-    "computer_science": "CS",
-    "컴퓨터공학": "CS",
-    "컴공": "CS",
-    "전자공학": "전자공학",
-    "electrical_engineering": "전자공학",
-    "물리학": "물리학",
-    "physics": "물리학",
-    "화학": "화학",
-    "chemistry": "화학",
-    "생물학": "생물학",
-    "biology": "생물학",
-    "역사학": "역사학",
-    "history": "역사학",
-    "철학": "철학",
-    "philosophy": "철학",
-    "경제학": "경제학",
-    "economics": "경제학",
-    "정치학": "정치학",
-    "politics": "정치학",
-    "political_science": "정치학",
-    "음악": "음악",
-    "music": "음악",
-}
 
 
 def _normalize_sub_domain(value: str) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    return SUBDOMAIN_ALIASES.get(raw, SUBDOMAIN_ALIASES.get(raw.lower(), raw))
+    return str(value or "").strip()
 
 
 def _get_domain_hint(domain: str, sub_domain: str) -> dict:
-    key = (domain.strip(), _normalize_sub_domain(sub_domain))
-    return DOMAIN_HINTS.get(key, DEFAULT_HINT)
+    domain_value = str(domain or "").strip()
+    sub_domain_value = _normalize_sub_domain(sub_domain)
+    label_parts = [part for part in (domain_value, sub_domain_value) if part]
+    return {"label": " > ".join(label_parts) if label_parts else "일반"}
 
 
 def _resolve_domain_fields(merged: dict) -> tuple[str, str]:
@@ -570,6 +780,15 @@ def _dedupe_issues(issues: list[dict]) -> list[dict]:
     return sorted(dedup.values(), key=lambda x: float(x.get("start_time", 0) or 0))
 
 
+def _normalize_severity(issue: dict) -> None:
+    severity = str(issue.get("severity", "")).lower()
+    if severity not in {"critical", "major", "minor"}:
+        severity = "major"
+    if severity == "critical" and float(issue.get("confidence", 0) or 0) < 0.9:
+        severity = "major"
+    issue["severity"] = severity
+
+
 def _is_asr_artifact(issue: dict, utt_map: dict) -> bool:
     uid = issue.get("utterance_id", "")
     ref = utt_map.get(uid)
@@ -601,6 +820,11 @@ def _make_result(
         "overall_assessment": {
             "has_issues": len(issues) > 0,
             "total_issues": len(issues),
+            "severity_breakdown": {
+                "critical": sum(1 for i in issues if i.get("severity") == "critical"),
+                "major": sum(1 for i in issues if i.get("severity") == "major"),
+                "minor": sum(1 for i in issues if i.get("severity") == "minor"),
+            },
         },
         "issues": issues,
         "api_calls": api_calls,
@@ -661,6 +885,10 @@ def merge_multiple_runs(
         "overall_assessment": {
             "has_issues": len(filtered) > 0,
             "total_issues": len(filtered),
+            "severity_breakdown": {
+                s: sum(1 for i in filtered if i.get("severity") == s)
+                for s in ("critical", "major", "minor")
+            },
         },
         "issues": filtered,
         "summary": f"{num_runs}회 판정, 합의 기준 {min_detection_rate:.0%} (시간 창 {time_window_sec:.0f}초). 총 {len(all_issues)}개 후보 중 {len(filtered)}개 확정 ({dropped}개 제외).",
@@ -766,7 +994,7 @@ def _parse_grounding_payload(text: str) -> dict:
     grounding 응답을 최대한 복구해서 파싱.
     1) strict JSON
     2) object 블록 추출 + trailing comma 정리
-    3) 최소 필드(status/is_valid/reason/evidence_sources) regex 복구
+    3) 최소 필드(is_valid/reason/evidence_sources) regex 복구
     """
     cleaned = _strip_json_fence((text or "").strip())
     candidates = [cleaned]
@@ -792,10 +1020,6 @@ def _parse_grounding_payload(text: str) -> dict:
                 pass
 
     recovered = {}
-    status = _extract_json_like_string_field(cleaned, "status").lower().strip()
-    if status:
-        recovered["status"] = status
-
     is_valid = _extract_json_like_bool_field(
         cleaned,
         ["is_valid", "issue_is_valid", "claim_is_true", "claim_is_valid"],

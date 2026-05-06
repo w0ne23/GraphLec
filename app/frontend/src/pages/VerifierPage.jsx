@@ -9,14 +9,16 @@ import '../styles/verifier.css'
 const VERIFIER_POLL_MS = 5000
 const ISSUE_FILTERS = [
   { key: 'all', label: '전체' },
-  { key: 'simple_factual_error', label: '단순 사실 오류' },
-  { key: 'scope_error', label: '범위 오류' },
-  { key: 'outdated', label: '현행성 오류' },
+  { key: 'factual_error', label: '발언 자체 오류' },
+  { key: 'temporal_error', label: '시대적 오류' },
+  { key: 'scope_overclaim', label: '범위 과잉 단정' },
+  { key: 'confusing_explanation', label: '혼동 가능 설명' },
 ]
 const ISSUE_FILTER_DESCRIPTIONS = {
-  simple_factual_error: '문장 자체의 개념, 인과관계, 용어 연결이 부정확한 경우입니다. 범위 표현의 과장보다는 핵심 사실 관계가 틀린 항목을 모았습니다.',
-  scope_error: '항상, 모든, 오직, 반드시 같은 표현 때문에 예외나 조건이 사라져 오해될 수 있는 경우입니다. 강의 맥락상 맞는 설명이어도 범위가 과하게 들리면 여기에 포함됩니다.',
-  outdated: '현재 날짜 기준으로 더 이상 유효하지 않거나 폐기된 정보를 현재도 맞는 것처럼 설명한 경우입니다.',
+  factual_error: '문장 자체의 개념, 인과관계, 용어 연결, 수치가 강의 문맥을 봐도 틀린 경우입니다.',
+  temporal_error: '현재 시점 기준으로 더 이상 유효하지 않거나 시대착오적인 정보를 현재도 맞는 것처럼 설명한 경우입니다.',
+  scope_overclaim: '반례나 예외가 있는데도 항상, 모든, 오직, 반드시처럼 범위를 과하게 닫아 말한 경우입니다.',
+  confusing_explanation: '발언 자체가 명백히 틀렸다고 단정하기보다, 학생이 핵심 개념이나 주체/과정을 잘못 외울 가능성이 큰 설명입니다.',
 }
 
 function asArray(value) {
@@ -44,8 +46,12 @@ function compactText(value, fallback = '-') {
 
 function labelForStage(stage) {
   const labels = {
+    confirmed: '확정',
+    professor_check: '교수 확인',
+    review_needed: '교수 확인',
+    rejected: '기각',
     final_confirmed: '확정',
-    needs_review: '검토 필요',
+    needs_review: '교수 확인',
     crosscheck_rejected: '교차검증 기각',
     crosscheck_inconclusive: '교차검증 불확실',
     slide_rejected: '슬라이드 기각',
@@ -57,14 +63,23 @@ function labelForStage(stage) {
 
 function labelForIssueType(type) {
   const labels = {
-    factual_error: '사실 오류',
+    factual_error: '발언 자체 오류',
+    temporal_error: '시대적 오류',
+    scope_overclaim: '범위 과잉 단정',
+    confusing_explanation: '혼동 가능 설명',
     outdated: '현행성 오류',
+    simple_factual_error: '단순 사실 오류',
+    scope_error: '범위 오류',
   }
   return labels[type] || compactText(type)
 }
 
 function labelForIssueSubtype(type) {
   const labels = {
+    factual_error: '발언 자체 오류',
+    temporal_error: '시대적 오류',
+    scope_overclaim: '범위 과잉 단정',
+    confusing_explanation: '혼동 가능 설명',
     simple_factual_error: '단순 사실 오류',
     scope_error: '범위 오류',
     outdated: '현행성 오류',
@@ -73,62 +88,38 @@ function labelForIssueSubtype(type) {
 }
 
 function getIssueSubtype(item) {
-  if (item.issue_subtype) return item.issue_subtype
-  if (item.issue_pattern === 'scope_overstatement') return 'scope_error'
-  if ((item.issue_type || item.type) === 'outdated') return 'outdated'
-  if ((item.issue_type || item.type) === 'factual_error') return 'simple_factual_error'
+  const direct = item.feedback_type || item.issue_type || item.type || item.issue_subtype
+  if (direct === 'temporal_error') return 'temporal_error'
+  if (direct === 'outdated') return 'temporal_error'
+  if (direct === 'scope_overclaim') return 'scope_overclaim'
+  if (direct === 'scope_error') return 'scope_overclaim'
+  if (direct === 'confusing_explanation') return 'confusing_explanation'
+  if (direct === 'factual_error') return 'factual_error'
+  if (direct === 'simple_factual_error') return 'factual_error'
+  if (item.issue_pattern === 'scope_overstatement') return 'scope_overclaim'
   return ''
 }
 
-function countIssueTypes(items) {
-  return items.reduce(
-    (acc, item) => {
-      const type = item.issue_type || item.type || 'unknown'
-      acc[type] = (acc[type] || 0) + 1
-      return acc
-    },
-    { factual_error: 0, outdated: 0 }
-  )
-}
-
-function countIssueSubtypes(items) {
-  return items.reduce((acc, item) => {
-    const subtype = getIssueSubtype(item)
-    if (!subtype || subtype === 'outdated') return acc
-    acc[subtype] = (acc[subtype] || 0) + 1
-    return acc
-  }, { simple_factual_error: 0, scope_error: 0 })
-}
-
 function countIssueFilters(items) {
-  const typeCounts = countIssueTypes(items)
-  const subtypeCounts = countIssueSubtypes(items)
-  return {
-    all: items.length,
-    factual_error: typeCounts.factual_error || 0,
-    outdated: typeCounts.outdated || 0,
-    scope_error: subtypeCounts.scope_error || 0,
-    simple_factual_error: subtypeCounts.simple_factual_error || 0,
-  }
+  return items.reduce((acc, item) => {
+    const key = getIssueSubtype(item) || 'unknown'
+    acc.all += 1
+    acc[key] = (acc[key] || 0) + 1
+    return acc
+  }, { all: 0, factual_error: 0, temporal_error: 0, scope_overclaim: 0, confusing_explanation: 0 })
 }
 
 function matchesIssueFilter(item, filter) {
   if (!filter || filter === 'all') return true
-  if (filter === 'factual_error' || filter === 'outdated') {
-    return (item.issue_type || item.type) === filter
-  }
   return getIssueSubtype(item) === filter
 }
 
 function claimDisplayIssueKey(claim) {
-  const issueType = claim.issue_type || claim.type
-  if (issueType === 'outdated') return 'outdated'
-  return getIssueSubtype(claim) || issueType
+  return getIssueSubtype(claim) || claim.feedback_type || claim.issue_type || claim.type
 }
 
 function labelForClaimIssue(claim) {
   const key = claimDisplayIssueKey(claim)
-  if (key === 'outdated') return labelForIssueType('outdated')
   return labelForIssueSubtype(key) || labelForIssueType(key)
 }
 
@@ -141,14 +132,18 @@ function groupTyposBySlide(items) {
       groups.set(key, {
         key,
         slideNumber,
-        imageUrl: typo.slide_image_url || '',
+        title: typo.slide_title || '',
+        imageUrl: typo.slide_image_url || typo.image_url || '',
         items: [],
       })
     }
 
     const group = groups.get(key)
-    if (!group.imageUrl && typo.slide_image_url) {
-      group.imageUrl = typo.slide_image_url
+    if (!group.imageUrl && (typo.slide_image_url || typo.image_url)) {
+      group.imageUrl = typo.slide_image_url || typo.image_url
+    }
+    if (!group.title && typo.slide_title) {
+      group.title = typo.slide_title
     }
     group.items.push({ ...typo, _typoIndex: idx })
   })
@@ -159,6 +154,124 @@ function groupTyposBySlide(items) {
     if (Number.isFinite(aNumber) && Number.isFinite(bNumber)) return aNumber - bNumber
     return String(a.slideNumber).localeCompare(String(b.slideNumber))
   })
+}
+
+function uniqueStrings(values) {
+  return [...new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
+function sortUtteranceIds(values) {
+  return uniqueStrings(values).sort((a, b) => {
+    const left = /^U\d+$/.test(a) ? Number(a.slice(1)) : Number.MAX_SAFE_INTEGER
+    const right = /^U\d+$/.test(b) ? Number(b.slice(1)) : Number.MAX_SAFE_INTEGER
+    return left - right || a.localeCompare(b)
+  })
+}
+
+function extractUtteranceIds(text) {
+  if (!text) return []
+  return uniqueStrings(String(text).match(/\bU\d{4,}\b/g) || [])
+}
+
+function getItemLocation(item, sourceClaim = {}) {
+  return item.location || sourceClaim.location || {}
+}
+
+function getItemStartTime(item, sourceClaim = {}) {
+  const location = getItemLocation(item, sourceClaim)
+  const value = Number(location.start_time ?? item.start_time ?? sourceClaim.start_time)
+  return Number.isFinite(value) ? value : undefined
+}
+
+function getFeedbackUtteranceIds(item, sourceClaim = {}) {
+  const evidence = item.evidence || {}
+  const sourceIssues = asArray(evidence.source_issues)
+  return sortUtteranceIds([
+    ...asArray(item.utterance_ids),
+    ...asArray(item.related_utterance_ids),
+    ...asArray(evidence.related_utterance_ids),
+    item.utterance_id,
+    sourceClaim.utterance_id,
+    ...sourceIssues.map((issue) => issue?.utterance_id),
+    ...extractUtteranceIds(evidence.evidence_in_context),
+    ...extractUtteranceIds(item.confirmation_reason || evidence.confirmation_reason),
+  ])
+}
+
+function getConfirmationReason(item) {
+  const direct =
+    item.confirmation_reason ||
+    item.evidence?.confirmation_reason ||
+    item.cross_recheck_reason
+  if (direct) return direct
+
+  const modelResults = item.checks?.crosscheck?.model_results
+  if (!Array.isArray(modelResults)) return ''
+  return modelResults
+    .filter((row) => row?.verdict === 'agree' && row?.reason)
+    .map((row) => `[${row.model || 'model'}] ${row.reason}`)
+    .join(' / ')
+}
+
+function getRejectionReason(item) {
+  return (
+    item.rejection_reason ||
+    item.professor_check_reason ||
+    item.review_reason ||
+    item.evidence?.rejection_reason ||
+    item.checks?.crosscheck?.reason ||
+    ''
+  )
+}
+
+function feedbackItemToClaim(item, claimById) {
+  const sourceClaim = claimById.get(item.source_claim_id) || {}
+  const problem = item.problem || {}
+  const feedback = item.professor_feedback || {}
+  const evidence = item.evidence || {}
+  const location = getItemLocation(item, sourceClaim)
+  const utteranceIds = getFeedbackUtteranceIds(item, sourceClaim)
+  const status = item.status === 'review_needed' ? 'professor_check' : item.status
+  const title =
+    problem.problematic_content ||
+    item.claim_text ||
+    sourceClaim.claim_text ||
+    item.resolved_claim ||
+    sourceClaim.resolved_claim ||
+    problem.summary ||
+    '-'
+
+  return {
+    ...item,
+    stage: status || 'professor_check',
+    utterance_id: utteranceIds.join(', ') || item.utterance_id || sourceClaim.utterance_id,
+    utterance_ids: utteranceIds,
+    start_time: getItemStartTime(item, sourceClaim),
+    slide_number: location.slide_number ?? evidence.slide_number,
+    claim_text: title,
+    resolved_claim: item.resolved_claim || sourceClaim.resolved_claim,
+    issue: problem.summary || feedback.summary,
+    correct_info: problem.correct_info,
+    issue_type: item.feedback_type || item.issue_type || item.type,
+    issue_category_label: item.feedback_label || item.issue_category_label,
+    student_misunderstanding: feedback.student_misunderstanding,
+    why_it_matters: feedback.why_it_matters,
+    suggested_rephrase: feedback.suggested_rephrase,
+    teaching_note: feedback.teaching_note,
+    why_wrong: problem.why_wrong || feedback.why_wrong,
+    issue_basis: problem.issue_basis || feedback.issue_basis,
+    student_error: problem.student_error || feedback.student_error,
+    counterexample_or_condition:
+      problem.counterexample_or_condition ||
+      evidence.counterexample_or_condition ||
+      feedback.counterexample_or_condition,
+    context_resolution: problem.context_resolution || evidence.context_resolution || feedback.context_resolution,
+    recommendation: problem.recommendation || feedback.teaching_note,
+    evidence_in_context: evidence.evidence_in_context || feedback.evidence_in_context,
+    confirmation_reason: status === 'confirmed' ? getConfirmationReason(item) : '',
+    rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
+    evidence_sources: evidence.evidence_sources || item.evidence_sources,
+  }
 }
 
 function SummaryMetric({ label, value, tone = '', active = false, onClick }) {
@@ -304,11 +417,26 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
         <div className="vf-claim-detail">
           <dl>
             <DetailRow label="등장 시각" value={canWatch ? `${formatTime(startTime)} (${startTime.toFixed(2)}s)` : '-'} />
+            <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
+            <DetailRow label="상태" value={labelForStage(claim.stage || section)} />
             <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
-            <DetailRow label="Issue" value={claim.issue} />
-            <DetailRow label="Correct Info" value={claim.correct_info} />
-            <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
+            <DetailRow label="문제 유형" value={displayIssueLabel} />
+            <DetailRow label="문제점" value={claim.issue} />
+            <DetailRow label="문제 근거" value={claim.issue_basis} />
+            <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
+            <DetailRow label="왜 문제인가" value={claim.why_wrong} />
+            <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
+            <DetailRow label="문맥 해소 여부" value={claim.context_resolution} />
+            <DetailRow label="학생 오해 가능성" value={claim.student_misunderstanding} />
+            <DetailRow label="올바른 정보/보충 조건" value={claim.correct_info} />
+            <DetailRow label="왜 중요한가" value={claim.why_it_matters} />
+            <DetailRow label="권장 수정" value={claim.recommendation || claim.teaching_note} />
+            <DetailRow label="대체 표현" value={claim.suggested_rephrase} />
+            <DetailRow label="문맥 근거" value={claim.evidence_in_context} />
+            <DetailRow label="확정 사유" value={claim.confirmation_reason} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
+            <DetailRow label="기각 단계" value={claim.rejection_stage} />
+            <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
             <DetailRow label="Slide Recheck" value={slideRecheck.status || slideRecheck.reason || claim.slide_recheck_status} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
@@ -445,7 +573,35 @@ export default function VerifierPage() {
     }
   }, [id])
 
+  const claimById = useMemo(() => {
+    const map = new Map()
+    for (const claim of asArray(verifier?.claims)) {
+      if (claim?.claim_id) map.set(claim.claim_id, claim)
+    }
+    return map
+  }, [verifier])
+
   const sections = useMemo(() => {
+    const feedbackItems = asArray(verifier?.feedback_items)
+    if (feedbackItems.length > 0) {
+      const normalized = feedbackItems.map((item) => feedbackItemToClaim(item, claimById))
+      const finalClaims = normalized.filter((item) => item.stage === 'confirmed')
+      const needsReview = normalized.filter((item) => item.stage === 'professor_check' || item.stage === 'review_needed')
+      const rejected = normalized.filter((item) => item.stage === 'rejected')
+      return {
+        finalClaims,
+        needsReview,
+        slideTypos: asArray(verifier?.slide_typos),
+        crossRejected: rejected,
+        inconclusive: [],
+        slideRejected: [],
+        groundingRejected: [],
+        filtered: rejected,
+        firstStageRejected: [],
+        usesFeedbackItems: true,
+      }
+    }
+
     const finalClaims = asArray(verifier?.final_confirmed_claims)
     const needsReview = asArray(verifier?.needs_review_claims)
     const crossRejected = asArray(verifier?.crosscheck_rejected_claims)
@@ -468,14 +624,15 @@ export default function VerifierPage() {
         ...groundingRejected,
       ],
       firstStageRejected,
+      usesFeedbackItems: false,
     }
-  }, [verifier])
+  }, [claimById, verifier])
 
   const counts = verifier?.counts || {}
   const finalCount = counts.final_confirmed ?? verifier?.final_confirmed_claim_count ?? sections.finalClaims.length
-  const reviewCount = counts.needs_review ?? sections.needsReview.length
+  const reviewCount = counts.needs_review ?? counts.professor_check ?? sections.needsReview.length
   const typoCount = counts.slide_typos ?? sections.slideTypos.length
-  const filteredCount = sections.filtered.length + sections.firstStageRejected.length
+  const filteredCount = counts.rejected ?? sections.filtered.length + sections.firstStageRejected.length
 
   function selectTab(tab) {
     setActiveTab(tab)
@@ -540,10 +697,10 @@ export default function VerifierPage() {
       const filteredReview = filterIssueClaims(sections.needsReview)
       return (
         <Section
-          title="검토가 필요한 내용 이슈"
+          title="교수 확인이 필요한 내용 이슈"
           count={sections.needsReview.length}
           tone="review"
-          empty="검토가 필요한 내용 이슈가 없습니다."
+          empty="교수 확인이 필요한 내용 이슈가 없습니다."
         >
           <IssueTypeBreakdown
             items={sections.needsReview}
@@ -554,7 +711,7 @@ export default function VerifierPage() {
           <IssueFilterDescription filter={activeIssueFilter} />
           {filteredReview.length > 0
             ? renderClaimList(filteredReview, 'needs_review')
-            : <div className="vf-empty">선택한 유형의 검토 필요 이슈가 없습니다.</div>}
+            : <div className="vf-empty">선택한 유형의 교수 확인 이슈가 없습니다.</div>}
         </Section>
       )
     }
@@ -573,6 +730,18 @@ export default function VerifierPage() {
     }
 
     if (activeTab === 'filtered') {
+      if (sections.usesFeedbackItems) {
+        return (
+          <Section
+            title="기각된 내용 후보"
+            count={sections.filtered.length}
+            empty="기각된 내용 후보가 없습니다."
+          >
+            {renderClaimList(sections.filtered, 'rejected')}
+          </Section>
+        )
+      }
+
       const filteredGroups = [
         {
           title: '문맥상 맞음',
@@ -708,7 +877,7 @@ export default function VerifierPage() {
               onClick={() => selectTab('confirmed')}
             />
             <SummaryMetric
-              label="검토 필요"
+              label="교수 확인"
               value={reviewCount}
               tone="review"
               active={activeTab === 'review'}
@@ -722,7 +891,7 @@ export default function VerifierPage() {
               onClick={() => selectTab('typos')}
             />
             <SummaryMetric
-              label="필터링됨"
+              label="기각"
               value={filteredCount}
               active={activeTab === 'filtered'}
               onClick={() => selectTab('filtered')}

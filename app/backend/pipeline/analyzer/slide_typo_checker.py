@@ -7,6 +7,123 @@ from pathlib import Path
 from typing import Optional
 
 
+def _norm_text(value: object) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _existing_path(raw_path: object) -> Optional[Path]:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path))
+    candidates = [path]
+    if str(path).startswith("/pipeline/"):
+        try:
+            candidates.append(Path.cwd() / path.relative_to("/pipeline"))
+        except ValueError:
+            pass
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return path if path.is_absolute() else None
+
+
+def _find_slide_image(img_dir: str, slide_no: int) -> Optional[Path]:
+    base = Path(img_dir)
+    candidates = (
+        base / f"slide_{slide_no:03d}_base.jpg",
+        base / f"slide_{slide_no:03d}_base.png",
+        base / f"slide_{slide_no:03d}_start.jpg",
+        base / f"slide_{slide_no:03d}_start.png",
+        base / f"slide_{slide_no:03d}_end.jpg",
+        base / f"slide_{slide_no:03d}_end.png",
+    )
+    return next((path for path in candidates if path.exists()), None)
+
+
+def _load_textualized_slides(merged_path: str | Path | None) -> list[dict]:
+    if not merged_path:
+        return []
+    base = Path(merged_path).resolve().parent
+    files = sorted(base.glob("*_slide_textualized.json"))
+    for path in files:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                payload = json.load(f)
+            slides = payload.get("slides", [])
+            if isinstance(slides, list):
+                return [s for s in slides if isinstance(s, dict)]
+        except Exception:
+            continue
+    return []
+
+
+def attach_slide_image_paths(slides: list[dict], merged_path: str | Path | None) -> list[dict]:
+    """Attach actual slide image paths from slide_textualized.json when merged_clean lacks them.
+
+    merged_clean.slide_number can be a logical slide number, while slide_### image files are
+    scene indices. Matching by title/text avoids sending the wrong scene image to the typo model.
+    """
+    textualized = _load_textualized_slides(merged_path)
+    if not textualized:
+        return slides
+
+    candidates: list[dict] = []
+    for item in textualized:
+        image_path = str(item.get("image_path", "") or "").strip()
+        if not image_path:
+            continue
+        title = _norm_text(item.get("title"))
+        text = _norm_text("\n".join(
+            part for part in (
+                str(item.get("t1", "") or ""),
+                str(item.get("t1_structure", "") or ""),
+            )
+            if part
+        ))
+        candidates.append({
+            "title": title,
+            "text": text,
+            "image_path": image_path,
+        })
+
+    if not candidates:
+        return slides
+
+    enriched: list[dict] = []
+    for slide in slides:
+        if not isinstance(slide, dict):
+            enriched.append(slide)
+            continue
+        item = dict(slide)
+        if item.get("image_path"):
+            enriched.append(item)
+            continue
+
+        title = _norm_text(item.get("title") or item.get("slide_title"))
+        slide_text = _norm_text(item.get("slide_text") or item.get("text"))
+        matches = [c for c in candidates if c["title"] == title]
+        if not matches:
+            enriched.append(item)
+            continue
+
+        def score(candidate: dict) -> tuple[int, int]:
+            candidate_text = candidate["text"]
+            overlap = 0
+            if candidate_text and (candidate_text in slide_text or slide_text in candidate_text):
+                overlap = max(len(candidate_text), len(slide_text))
+            else:
+                slide_tokens = set(slide_text.split())
+                candidate_tokens = set(candidate_text.split())
+                overlap = len(slide_tokens & candidate_tokens)
+            return (overlap, len(candidate_text))
+
+        best = max(matches, key=score)
+        item["image_path"] = best["image_path"]
+        enriched.append(item)
+
+    return enriched
+
+
 def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
     return f"""당신은 강의 슬라이드에서 눈에 보이는 오타를 찾는 교정자입니다.
 
@@ -111,7 +228,7 @@ def is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "")
     return True
 
 
-def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1) -> tuple[list[dict], bool, int, dict]:
+def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict], bool, int, dict]:
     from . import claim_common as cc
 
     slide_no = int(slide.get("slide_number", 0) or 0)
@@ -119,12 +236,11 @@ def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1)
     slide_text = str(slide.get("slide_text", "") or "")
 
     img_bytes = None
-    if img_dir:
-        start_path = Path(img_dir) / f"slide_{slide_no:03d}_start.jpg"
-        end_path = Path(img_dir) / f"slide_{slide_no:03d}_end.jpg"
-        img_path = start_path if start_path.exists() else end_path
-        if img_path.exists():
-            img_bytes = img_path.read_bytes()
+    img_path = _existing_path(slide.get("image_path"))
+    if not img_path and img_dir:
+        img_path = _find_slide_image(img_dir, slide_no)
+    if img_path and img_path.exists():
+        img_bytes = img_path.read_bytes()
 
     prompt = _build_slide_typo_prompt(slide_no, title, slide_text)
     model = str(cc._resolve_stage_model("recheck") or "").strip()
@@ -160,7 +276,7 @@ def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1)
                     conf = float(item.get("confidence", 0) or 0)
                 except Exception:
                     conf = 0.0
-                if conf < 0.80:
+                if conf < 0.90:
                     continue
                 problematic = str(item.get("problematic_text", "") or "").strip()
                 corrected = str(item.get("corrected_text", "") or "").strip()
@@ -176,7 +292,6 @@ def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1)
                     "corrected_text": corrected,
                     "reason": reason,
                     "confidence": conf,
-                    "run_index": run_index,
                 })
             return cleaned, False, api_calls, token_usage
         except Exception:
@@ -185,182 +300,33 @@ def _check_single_slide(slide: dict, img_dir: Optional[str], run_index: int = 1)
     return [], True, api_calls, token_usage
 
 
-def _safe_rate(value, default: float) -> float:
-    try:
-        rate = float(value)
-    except Exception:
-        rate = default
-    return max(0.0, min(1.0, rate))
-
-
-def _normalize_text(value: str) -> str:
-    return re.sub(r"\s+", " ", str(value or "").strip().lower())
-
-
-def _typo_key(typo: dict) -> tuple:
-    # Future: consider conservative prefix/substring grouping for problematic_text.
-    # Avoid semantic/fuzzy merging here because typo reporting favors precision.
-    return (
-        int(typo.get("slide_number", 0) or 0),
-        _normalize_text(typo.get("problematic_text", "")),
-    )
-
-
-def _meets_rate(support_count: int, run_count: int, threshold: float) -> bool:
-    if run_count <= 0:
-        return False
-    return round(support_count / run_count, 2) >= threshold
-
-
-def _collect_reasons(items: list[dict]) -> list[str]:
-    reasons = []
-    for item in items:
-        reason = str(item.get("reason", "") or "").strip()
-        if reason and reason not in reasons:
-            reasons.append(reason)
-    return reasons
-
-
-def _correction_candidates(group: list[dict]) -> list[dict]:
-    grouped: dict[str, list[dict]] = {}
-    for item in group:
-        grouped.setdefault(_normalize_text(item.get("corrected_text", "")), []).append(item)
-
-    candidates = []
-    for items in grouped.values():
-        best = max(items, key=lambda item: float(item.get("confidence", 0) or 0))
-        confidences = [float(item.get("confidence", 0) or 0) for item in items]
-        run_indices = sorted({
-            int(item.get("run_index", 0) or 0)
-            for item in items
-            if int(item.get("run_index", 0) or 0) > 0
-        })
-        reasons = _collect_reasons(items)
-        candidate = {
-            "corrected_text": best.get("corrected_text", ""),
-            "support_count": len(run_indices),
-            "confidence": max(confidences) if confidences else 0.0,
-            "average_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
-            "supporting_runs": run_indices,
-        }
-        if reasons:
-            candidate["reason"] = reasons[0]
-        if len(reasons) > 1:
-            candidate["reasons"] = reasons
-        candidates.append(candidate)
-
-    return sorted(
-        candidates,
-        key=lambda item: (
-            -int(item.get("support_count", 0) or 0),
-            -float(item.get("confidence", 0) or 0),
-            str(item.get("corrected_text", "")),
-        ),
-    )
-
-
-def _merge_typo_group(group: list[dict], *, run_count: int, status: str) -> dict:
-    best = max(group, key=lambda item: float(item.get("confidence", 0) or 0))
-    confidences = [float(item.get("confidence", 0) or 0) for item in group]
-    reasons = _collect_reasons(group)
-    candidates = _correction_candidates(group)
-    top_candidate = candidates[0] if candidates else {}
-    run_indices = sorted({
-        int(item.get("run_index", 0) or 0)
-        for item in group
-        if int(item.get("run_index", 0) or 0) > 0
-    })
-    support_count = len(run_indices)
-    merged = {
-        "slide_number": best.get("slide_number"),
-        "slide_title": best.get("slide_title", ""),
-        "problematic_text": best.get("problematic_text", ""),
-        "corrected_text": top_candidate.get("corrected_text") or best.get("corrected_text", ""),
-        "correction_candidates": candidates,
-        "reason": top_candidate.get("reason") or (reasons[0] if reasons else str(best.get("reason", "") or "")),
-        "confidence": max(confidences) if confidences else 0.0,
-        "average_confidence": sum(confidences) / len(confidences) if confidences else 0.0,
-        "support_count": support_count,
-        "run_count": run_count,
-        "detection_rate": support_count / run_count if run_count else 0.0,
-        "supporting_runs": run_indices,
-        "consensus_status": status,
-    }
-    if len(reasons) > 1:
-        merged["reasons"] = reasons
-    return merged
-
-
-def _split_by_consensus(
-    typos: list[dict],
-    *,
-    run_count: int,
-    min_detection_rate: float,
-    review_min_detection_rate: float,
-) -> tuple[list[dict], list[dict]]:
-    grouped: dict[tuple, list[dict]] = {}
-    for typo in typos:
-        grouped.setdefault(_typo_key(typo), []).append(typo)
-
-    confirmed: list[dict] = []
-    needs_review: list[dict] = []
-    for group in grouped.values():
-        support_count = len({
-            int(item.get("run_index", 0) or 0)
-            for item in group
-            if int(item.get("run_index", 0) or 0) > 0
-        })
-        if _meets_rate(support_count, run_count, min_detection_rate):
-            confirmed.append(_merge_typo_group(group, run_count=run_count, status="confirmed"))
-        elif _meets_rate(support_count, run_count, review_min_detection_rate):
-            review_item = _merge_typo_group(group, run_count=run_count, status="needs_review")
-            review_item["review_stage"] = "slide_typo"
-            review_item["review_reason_code"] = "low_typo_consensus"
-            needs_review.append(review_item)
-
-    sort_key = lambda x: (
-        int(x.get("slide_number", 0) or 0),
-        -float(x.get("detection_rate", 0) or 0),
-        -float(x.get("confidence", 0) or 0),
-    )
-    return sorted(confirmed, key=sort_key), sorted(needs_review, key=sort_key)
-
-
 def detect_slide_typos(
     slides: list[dict],
     img_dir: Optional[str] = None,
     max_workers: int = 4,
-) -> tuple[list[dict], list[dict], int, int, dict]:
+    merged_path: str | Path | None = None,
+) -> tuple[list[dict], int, int, dict]:
     from . import claim_common as cc
 
     if not slides:
-        return [], [], 0, 0, cc._empty_token_usage()
+        return [], 0, 0, cc._empty_token_usage()
+
+    slides = attach_slide_image_paths(slides, merged_path)
 
     results: list[dict] = []
     api_calls = 0
     failures = 0
     token_usage = cc._empty_token_usage()
-    num_runs = max(1, int(getattr(cc, "VERIFIER_SLIDE_TYPO_RUNS", 1) or 1))
-    min_detection_rate = _safe_rate(getattr(cc, "VERIFIER_SLIDE_TYPO_MIN_RATE", 1.0), 1.0)
-    review_min_detection_rate = _safe_rate(
-        getattr(cc, "VERIFIER_SLIDE_TYPO_REVIEW_MIN_RATE", 0.5),
-        0.5,
-    )
-    review_min_detection_rate = min(review_min_detection_rate, min_detection_rate)
 
-    def process(slide: dict, run_index: int):
+    def process(slide: dict):
         sn = slide.get("slide_number", "?")
-        suffix = f" ({run_index}/{num_runs})" if num_runs > 1 else ""
-        print(f"    슬라이드 오타 검사 [{sn}]{suffix}")
-        return _check_single_slide(slide, img_dir, run_index=run_index)
+        print(f"    슬라이드 오타 검사 [{sn}]")
+        return _check_single_slide(slide, img_dir)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {
-            ex.submit(process, slide, run_index): (slide, run_index)
-            for slide in slides
-            for run_index in range(1, num_runs + 1)
-        }
+        futures = {ex.submit(process, slide): slide for slide in slides}
         for future in as_completed(futures):
+            slide = futures[future]
             try:
                 typos, parse_failed, calls, usage = future.result()
                 results.extend(typos)
@@ -371,10 +337,19 @@ def detect_slide_typos(
             except Exception:
                 failures += 1
 
-    confirmed, needs_review = _split_by_consensus(
-        results,
-        run_count=num_runs,
-        min_detection_rate=min_detection_rate,
-        review_min_detection_rate=review_min_detection_rate,
+    dedup = {}
+    for typo in results:
+        key = (
+            typo.get("slide_number"),
+            typo.get("problematic_text", "").strip().lower(),
+            typo.get("corrected_text", "").strip().lower(),
+        )
+        prev = dedup.get(key)
+        if prev is None or float(typo.get("confidence", 0) or 0) > float(prev.get("confidence", 0) or 0):
+            dedup[key] = typo
+
+    final = sorted(
+        dedup.values(),
+        key=lambda x: (int(x.get("slide_number", 0) or 0), -float(x.get("confidence", 0) or 0)),
     )
-    return confirmed, needs_review, api_calls, failures, token_usage
+    return final, api_calls, failures, token_usage

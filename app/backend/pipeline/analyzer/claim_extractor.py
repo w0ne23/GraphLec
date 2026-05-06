@@ -71,8 +71,6 @@ def _build_extract_prompt(utterances: list[dict], current_date: str, hint: dict,
     return f"""당신은 강의 발화에서 검증 가능한 사실 주장(claim)을 추출하는 전문가입니다.
 오늘 날짜: {current_date}
 강의 도메인: {hint['label']}
-{f"주요 개념: {hint['concept_examples']}" if hint.get('concept_examples') else ""}
-도메인 참고: {hint.get('outdated_guidance', '')}
 
 아래는 슬라이드 참조 정보와, 각 대상 발화별 로컬 문맥입니다.
 강의자는 슬라이드를 보여주면서 발화합니다. 학생은 슬라이드와 발화를 동시에 받습니다.
@@ -84,11 +82,11 @@ def _build_extract_prompt(utterances: list[dict], current_date: str, hint: dict,
 {utterance_cards}
 
 ### 추출 대상
-- definition: 권위 있는 정의/의미/기호 정의 확인. 예: "프로세스는 실행 중인 프로그램이다"
-- numeric: 정확한 수치/단위/기준값/정량 확인. 예: "파인트는 320g이다"
-- causal: 인과 방향/메커니즘 확인. 예: "임의 접근하면 충돌이 생긴다"
-- relationship: 분류/포함/비교/상하위/대응 관계 확인. 예: "디바이스 드라이버는 OS에 포함된다"
-- currentness: 현재 시점 유효성/현행성 확인. 예: "Linux는 현재 사용되고 있다"
+- definition: 정의, 의미, 용어, 기호, 개념 설명
+- numeric: 수치, 단위, 기준값, 정량적 비교
+- causal: 원인, 결과, 메커니즘, 작동 방식
+- relationship: 분류, 포함, 비교, 상하위, 대응 관계
+- currentness: 현재 시점의 유효성, 현행성, 주류성, 최신성
 
 ### 추출 제외
 - 의견/감상, 교육적 지시, 구어적 필러
@@ -101,29 +99,34 @@ def _build_extract_prompt(utterances: list[dict], current_date: str, hint: dict,
 - 주변 문맥에 있는 더 강한 일반 명제를 현재 발화에 덧씌우지 마세요.
 - 현재 발화가 예시/가정/비유/수사적 요약이면, resolved_claim에도 그 범위를 유지하세요.
 - 현재 발화가 특정 예시를 설명하는 문장인데 이를 일반 법칙처럼 바꾸지 마세요.
-- 특히 "보통", "항상", "모든", "전부", "확률이라는 의미", "정해져 있다" 같은 표현은, 문맥상
+- 특히 "보통", "항상", "모든", "전부", "정해져 있다" 같은 표현은, 문맥상
   예시 설명/강조/요약인지 먼저 확인한 뒤에만 일반 claim으로 추출하세요.
 
 ### 지시어 해소 + 슬라이드 반영
-- "이 함수", "여기" 같은 지시어는 슬라이드/앞뒤 발화를 참고하여 구체적 이름으로 바꿔 resolved_claim을 작성하세요. 해소 불가능하면 추출하지 마세요.
-- "그게", "이거", "그래서", "~은요"처럼 바로 앞 발화를 이어받는 조각 문장은 직전 발화를 이용해 주어를 복원할 수 있으면 추출하세요.
-- 슬라이드의 구체적 조건(코드, 수식, 다이어그램)도 resolved_claim에 반영하세요.
-예:
-  발화: "이 프로토콜은 비연결형입니다" / 슬라이드: TCP vs UDP 비교표
-  → resolved_claim: "UDP는 비연결형 프로토콜이다"
+- "이것", "여기", "해당 항목", "얘", "이거", "그거" 같은 지시어는 슬라이드/앞뒤 발화를 참고하되,
+  **단일 선행사가 확실할 때만** 구체적 대상으로 바꿔 resolved_claim을 작성하세요.
+- 지시어가 슬라이드의 기호/행/도형/목록 항목을 가리킬 수도 있고 직전 발화의 용어를 가리킬 수도 있는 경우,
+  직전 발화의 용어 하나로 과하게 확정하지 마세요. 슬라이드에 보이는 대상이 더 자연스러우면
+  "슬라이드의 σ 기호", "슬라이드의 해당 항목"처럼 시각 자료 기준으로 좁혀 쓰세요.
+- 둘 이상의 합리적 해석이 가능하면 특정 개념으로 단정하지 말고, 원문이 실제로 말한 범위만 유지하세요.
+  이 경우 resolved_claim에는 "직전 용어 A 자체가 B다"처럼 강한 동일시 문장을 만들지 마세요.
+- "그게", "이거", "그래서", "~은요"처럼 바로 앞 발화를 이어받는 조각 문장은 직전 발화를 이용해 주어를 복원할 수 있으면 추출하되,
+  복원 결과가 슬라이드 표기나 발화 흐름과 충돌하면 원문 범위를 보존하세요.
+- 슬라이드의 구체적 조건, 표기, 구조, 자료 범위도 resolved_claim에 반영하세요.
+
+예시:
+- 원문: "얘를 시그마라고 하는 건데 이거는 모수고요."
+  슬라이드에 모수 행의 "σ"가 보이면 resolved_claim은 "슬라이드의 σ 기호는 모수 항목이다."처럼 작성하세요.
+  직전 발화에 "분산"이 있었다는 이유만으로 "분산의 모수는 σ다"라고 확정하지 마세요.
+
 ### 복수 claim 추출
 하나의 발화에 여러 주장이 섞여 있으면 반드시 각각 별도 claim으로 추출하세요.
 특히 "요즘/현재/최근/추세/주류" 표현은 별도 currentness claim으로 추출하세요.
 하나의 발화 안에 수치가 2개 이상 나오면, 각각이 독립적으로 검증 가능한 값인지 확인하고 가능한 한 분리하세요.
 문장이 불완전해 보여도 직전 발화와 결합하면 검증 가능한 수치/기준 claim이 되면 추출하세요.
-예:
-  발화: "사실 요즘은 A 방식이 주류입니다. 이 코드에서는 X가 Y입니다."
-  → claim 1: "요즘은 A 방식이 주류이다" (currentness)
-  → claim 2: "X가 Y이다" (definition)
-  ❌ claim 2만 추출하고 claim 1을 누락하지 마세요.
 
 주의: 말실수나 용어 착각으로 보이더라도, 학생이 그대로 믿으면 틀린 지식이 되는 경우는 추출 대상입니다.
-주의: 강의자가 예시 상황을 설명하면서 "보통 200ml여야 한다", "파인트는 320g이다"처럼 기준값/정량을 말하면 단순 예시가 아니라 검증 가능한 claim입니다.
+주의: 강의자가 예시 상황 안에서 기준값이나 정량적 조건을 말하면, 그 예시 범위 안의 검증 가능한 claim으로 추출하세요.
 주의: 문장이 질문형으로 시작하더라도, 뒤에서 강의자가 특정 값이나 기준을 제시하면 그 제시된 값/기준은 claim으로 추출하세요.
 주의: 다만 예시 속 기준값을 일반 상식/보편 법칙으로 확대 해석하지 마세요. 예시의 범위가 드러나면 resolved_claim에도 그 예시 범위를 남기세요.
 
@@ -136,7 +139,6 @@ def _build_extract_prompt(utterances: list[dict], current_date: str, hint: dict,
       "claim_type": "definition",
       "claim_text": "claim 원문 (발화 그대로)",
       "resolved_claim": "지시어 해소 + 슬라이드 조건 반영한 claim",
-      "verification_question": "이 claim을 검증하기 위한 질문",
       "is_approximate": false
     }}
   ]
@@ -147,6 +149,7 @@ def _build_extract_prompt(utterances: list[dict], current_date: str, hint: dict,
 - 검증 불가능한 주장은 추출하지 마세요.
 - 하나의 발화에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
+- verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
 - JSON 외 텍스트를 출력하지 마세요.
 """
@@ -177,7 +180,7 @@ def _normalize_claim_type(value: str) -> str | None:
             "numeric", "numerical", "number", "quantity", "quantitative",
             "specification", "standard", "example_numeric", "standard/quantity",
         ))
-        or korean in {"수치", "규격/정량/기준값", "실무 예시 속 사실 주장"}
+        or korean in {"수치", "정량/기준값", "실무 예시 속 사실 주장"}
     ):
         return "numeric"
 
@@ -223,6 +226,8 @@ def _extract_claims(
                 if normalized is None:
                     continue
                 c["claim_type"] = normalized
+                c.pop("verification_question", None)
+                c.pop("verificationQuestion", None)
                 cleaned.append(c)
             return cleaned, False, api_calls, token_usage
         except (json.JSONDecodeError, AttributeError):
