@@ -5,15 +5,14 @@ PPT 기반 강의 영상에서 scene + 필기 완료 시점 프레임을 추출�
 
 용어:
   - scene: 영상 타임라인에서 연속적으로 등장하는 하나의 방문 구간
-           (기존 slide_index 의미)
   - slide: 원본 장표 identity
            (재방문 / 애니메이션 분리 scene들을 하나로 묶는 논리 단위)
 
 Input : input/lecture.mp4
 Output: output_slides/
-        ├── slide_001_base.jpg      # 슬라이드 최초 등장 프레임
-        ├── slide_001_annot_01.jpg  # 필기 안정화 캡처
-        ├── slide_002_build_01.jpg  # PPT 애니메이션으로 추가된 clean content state
+        ├── scene_001_base.jpg      # scene 최초 등장 프레임
+        ├── scene_001_annot_01.jpg  # 필기 안정화 캡처
+        ├── scene_002_build_01.jpg  # PPT 애니메이션으로 추가된 clean content state
         └── ...
 
 슬라이드 idx가 증가하는 경우:
@@ -87,7 +86,7 @@ class Config:
     ANNOT_INSTANT_RATIO          = 0.0001  # 직전 프레임 대비 변화 → 펜 움직임 여부
 
     # ── PPT 애니메이션 감지 (새 텍스트/이미지 등장 → build) ────────────
-    # 안정화 완료 시 같은 slide_idx의 build 파일로 저장한다.
+    # 안정화 완료 시 같은 scene_idx의 build 파일로 저장한다.
     # 애니메이션을 새 scene/base로 승격하면 downstream에서 중간 상태가
     # 별도 슬라이드처럼 처리되므로 금지한다.
     # 튜닝: --tune 모드에서 누적 diff p99 이상 값 참고
@@ -738,7 +737,7 @@ class AnnotationStabilityDetector:
 
       대규모 변화 (ratio ≥ ANIM_RATIO)
         → PPT 애니메이션 → NEW_BASE
-          → main loop에서 같은 slide_idx의 build로 저장
+          → main loop에서 같은 scene_idx의 build로 저장
 
     상태 머신:
       STABLE    → (ratio ≥ ANIM_RATIO)  → ANIMATING
@@ -771,7 +770,7 @@ class AnnotationStabilityDetector:
         """
         반환값:
           "CAPTURE_ANNOT"  - 필기 안정화 완료 → annot_XX 저장
-          "NEW_BASE"       - 애니메이션 안정화 완료 → 같은 slide_idx의 build 저장
+          "NEW_BASE"       - 애니메이션 안정화 완료 → 같은 scene_idx의 build 저장
           "NONE"
         """
         if self.base_frame is None or self.prev_frame is None:
@@ -851,7 +850,7 @@ def _run_slide_decision_pass(
     slide_detector = SlideChangeDetector(cfg, fps)
     annot_detector = AnnotationStabilityDetector(cfg, fps)
 
-    slide_idx   = 0
+    scene_idx   = 0
     annot_idx   = 0
     build_idx   = 0
     processed_frames = 0
@@ -866,16 +865,16 @@ def _run_slide_decision_pass(
 
     def register_new_base(frame_no, small, timestamp, reason, extra: dict | None = None):
         """진짜 scene 전환 → 새 scene(base) 메타 저장 공통 처리."""
-        nonlocal slide_idx, annot_idx, build_idx
-        slide_idx += 1
+        nonlocal scene_idx, annot_idx, build_idx
+        scene_idx += 1
         annot_idx  = 0
         build_idx  = 0
-        fname = f"slide_{slide_idx:03d}_base.jpg"
-        item = _meta(fname, slide_idx, timestamp, "base", annot_index=0, frame_no=frame_no)
+        fname = f"scene_{scene_idx:03d}_base.jpg"
+        item = _meta(fname, scene_idx, timestamp, "base", annot_index=0, frame_no=frame_no)
         if extra:
             item.update(extra)
         metadata.append(item)
-        log.info(f"[씬 {slide_idx}] base ({reason}) @ {timestamp:.2f}s")
+        log.info(f"[씬 {scene_idx}] base ({reason}) @ {timestamp:.2f}s")
         slide_detector.reset(small)
         annot_detector.reset(base_frame=small)
 
@@ -884,13 +883,13 @@ def _run_slide_decision_pass(
         if annot_detector.state == "WRITING" \
                 and annot_detector.writing_count >= annot_detector.min_annot_frames:
             annot_idx += 1
-            fname = f"slide_{slide_idx:03d}_annot_{annot_idx:02d}.jpg"
+            fname = f"scene_{scene_idx:03d}_annot_{annot_idx:02d}.jpg"
             capture_frame_no = annot_detector.get_capture_frame_no(frame_no)
             capture_ts = annot_detector.get_capture_timestamp(timestamp)
             metadata.append(
                 _meta(
                     fname,
-                    slide_idx,
+                    scene_idx,
                     capture_ts,
                     "annotation",
                     annot_index=annot_idx,
@@ -902,14 +901,14 @@ def _run_slide_decision_pass(
     def register_build_frame(frame_no, small, timestamp, reason):
         """PPT 애니메이션으로 전개된 clean content state를 같은 scene의 build로 저장."""
         nonlocal build_idx
-        if slide_idx <= 0:
+        if scene_idx <= 0:
             return
         build_idx += 1
-        fname = f"slide_{slide_idx:03d}_build_{build_idx:02d}.jpg"
+        fname = f"scene_{scene_idx:03d}_build_{build_idx:02d}.jpg"
         metadata.append(
             _meta(
                 fname,
-                slide_idx,
+                scene_idx,
                 timestamp,
                 "build",
                 annot_index=0,
@@ -1057,7 +1056,7 @@ def _run_slide_decision_pass(
 
         if slide_change_detected:
             first_frame = False
-            if slide_idx <= 0:
+            if scene_idx <= 0:
                 register_new_base(frame_no, small, timestamp, "first_frame")
             else:
                 _start_pending_scene(frame_no, timestamp, small, curr_phash, "slide_change")
@@ -1070,11 +1069,11 @@ def _run_slide_decision_pass(
             annot_idx += 1
             capture_frame_no = annot_detector.get_capture_frame_no(frame_no)
             capture_ts = annot_detector.get_capture_timestamp(timestamp)
-            fname = f"slide_{slide_idx:03d}_annot_{annot_idx:02d}.jpg"
+            fname = f"scene_{scene_idx:03d}_annot_{annot_idx:02d}.jpg"
             metadata.append(
                 _meta(
                     fname,
-                    slide_idx,
+                    scene_idx,
                     capture_ts,
                     "annotation",
                     annot_index=annot_idx,
@@ -1314,16 +1313,16 @@ def _ordered_sampled_frames(manifest_paths: list[Path]):
 def _group_chunk_metadata(metadata: list[dict], source_dir: Path) -> list[list[dict]]:
     groups: list[list[dict]] = []
     current: list[dict] = []
-    current_slide_idx = None
+    current_scene_idx = None
     for item in metadata:
         normalized = dict(item)
         normalized["_source_dir"] = str(source_dir)
-        slide_idx = item["slide_index"]
-        if current_slide_idx is None or slide_idx != current_slide_idx:
+        scene_idx = item["scene_index"]
+        if current_scene_idx is None or scene_idx != current_scene_idx:
             if current:
                 groups.append(current)
             current = [normalized]
-            current_slide_idx = slide_idx
+            current_scene_idx = scene_idx
         else:
             current.append(normalized)
     if current:
@@ -1391,26 +1390,28 @@ def _merge_group_frames(prev_group: list[dict], curr_group: list[dict]) -> list[
 def _copy_merged_groups(merged_groups: list[list[dict]], out_path: Path) -> list[dict]:
     for stale in out_path.glob("slide_*.jpg"):
         stale.unlink(missing_ok=True)
+    for stale in out_path.glob("scene_*.jpg"):
+        stale.unlink(missing_ok=True)
 
     metadata: list[dict] = []
-    for new_slide_idx, group in enumerate(merged_groups, start=1):
+    for new_scene_idx, group in enumerate(merged_groups, start=1):
         annot_idx = 0
         build_idx = 0
         for item in sorted(group, key=lambda x: (x["timestamp_sec"], 0 if x["capture_type"] == "base" else 1)):
             capture_type = item["capture_type"]
             if capture_type == "base":
-                fname = f"slide_{new_slide_idx:03d}_base.jpg"
+                fname = f"scene_{new_scene_idx:03d}_base.jpg"
             elif capture_type == "build":
                 build_idx += 1
-                fname = f"slide_{new_slide_idx:03d}_build_{build_idx:02d}.jpg"
+                fname = f"scene_{new_scene_idx:03d}_build_{build_idx:02d}.jpg"
             else:
                 annot_idx += 1
-                fname = f"slide_{new_slide_idx:03d}_annot_{annot_idx:02d}.jpg"
+                fname = f"scene_{new_scene_idx:03d}_annot_{annot_idx:02d}.jpg"
             shutil.copy2(_item_source_path(item), out_path / fname)
             metadata.append(
                 _meta(
                     fname,
-                    new_slide_idx,
+                    new_scene_idx,
                     item["timestamp_sec"],
                     capture_type,
                     annot_index=annot_idx if capture_type == "annotation" else 0,
@@ -1712,6 +1713,8 @@ def _materialize_frame_with_fallback(
 def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list[dict]):
     for stale in out_path.glob("slide_*.jpg"):
         stale.unlink(missing_ok=True)
+    for stale in out_path.glob("scene_*.jpg"):
+        stale.unlink(missing_ok=True)
 
     frame_targets: dict[int, list[dict]] = {}
     for item in metadata:
@@ -1767,7 +1770,7 @@ def _materialize_metadata_frames(input_path: str, out_path: Path, metadata: list
 
 def _meta(
     fname: str,
-    slide_idx: int,
+    scene_idx: int,
     timestamp: float,
     capture_type: str,
     annot_index: int = 0,
@@ -1776,10 +1779,8 @@ def _meta(
 ) -> dict:
     return {
         "filename":      fname,
-        "slide_index":   slide_idx,  # legacy: scene occurrence index
-        "legacy_slide_index": slide_idx,
-        "scene_number":  slide_idx,
-        "scene_index":   slide_idx,
+        "scene_number":  scene_idx,
+        "scene_index":   scene_idx,
         "timestamp_sec": round(timestamp, 2),
         "annot_index":   int(annot_index),
         "build_index":   int(build_index),
@@ -1789,7 +1790,7 @@ def _meta(
 
 
 # ──────────────────────────────────────────────
-# 후처리: 슬라이드 단위 시간 구간 추가
+# 후처리: scene 단위 시간 구간 추가
 # ──────────────────────────────────────────────
 def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
     """
@@ -1797,33 +1798,29 @@ def add_slide_time_ranges(metadata: list, video_duration: float) -> list:
 
     - scene_start_sec : 해당 scene_index의 base 프레임 타임스탬프
     - scene_end_sec   : 다음 scene_index의 시작 시각 (마지막 scene은 영상 길이)
-    - slide_start_sec / slide_end_sec 는 기존 호환 필드로 유지
-
     slide_classifier에서 오디오 침묵 구간과 교차할 때 이 구간을 기준으로 사용한다.
     """
-    # slide_index → base 타임스탬프 수집
-    slide_starts: dict[int, float] = {}
+    # scene_index → base 타임스탬프 수집
+    scene_starts: dict[int, float] = {}
     for m in metadata:
-        idx = m["slide_index"]
-        if m["capture_type"] == "base" and idx not in slide_starts:
-            slide_starts[idx] = m["timestamp_sec"]
+        idx = m["scene_index"]
+        if m["capture_type"] == "base" and idx not in scene_starts:
+            scene_starts[idx] = m["timestamp_sec"]
 
-    sorted_indices = sorted(slide_starts.keys())
+    sorted_indices = sorted(scene_starts.keys())
 
-    # 각 슬라이드의 종료 시각 = 다음 슬라이드 시작 시각
-    slide_ends: dict[int, float] = {}
+    # 각 scene의 종료 시각 = 다음 scene 시작 시각
+    scene_ends: dict[int, float] = {}
     for i, idx in enumerate(sorted_indices):
         if i + 1 < len(sorted_indices):
-            slide_ends[idx] = slide_starts[sorted_indices[i + 1]]
+            scene_ends[idx] = scene_starts[sorted_indices[i + 1]]
         else:
-            slide_ends[idx] = round(video_duration, 2)
+            scene_ends[idx] = round(video_duration, 2)
 
     for m in metadata:
-        idx = m["slide_index"]
-        m["scene_start_sec"] = slide_starts.get(idx)
-        m["scene_end_sec"]   = slide_ends.get(idx)
-        m["slide_start_sec"] = slide_starts.get(idx)
-        m["slide_end_sec"]   = slide_ends.get(idx)
+        idx = m["scene_index"]
+        m["scene_start_sec"] = scene_starts.get(idx)
+        m["scene_end_sec"]   = scene_ends.get(idx)
 
     return metadata
 
@@ -1840,7 +1837,7 @@ def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
     for item in metadata:
-        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+        by_scene[int(item.get("scene_index", 0) or 0)].append(item)
 
     for _, items in by_scene.items():
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
@@ -1870,12 +1867,12 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     전체 쌍(all-pairs)을 비교하여 같은 슬라이드 그룹을 표시한다.
 
     프레임 풀 구성:
-      - 각 slide_index 별로 base 프레임 + clean_final(build 또는 base) + last_annot 프레임(있으면) 수집
+      - 각 scene_index 별로 base 프레임 + clean_final(build 또는 base) + last_annot 프레임(있으면) 수집
       - 레이블: "base{idx}" / "clean{idx}" / "annot{idx}"
 
     비교:
       - 풀 내 모든 쌍을 phash(256비트) 비교
-      - 동일 slide_index 간 쌍은 건너뜀
+      - 동일 scene_index 간 쌍은 건너뜀
       - dist < DUPLICATE_HASH_THRESHOLD(현재 30) → 같은 슬라이드로 간주
 
     여기서 "같은 slide"는 애니메이션 단계/재등장(revisit)을 포함한
@@ -1883,12 +1880,12 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     """
     from collections import defaultdict
 
-    # slide_index별 프레임 그룹화
+    # scene_index별 프레임 그룹화
     groups: dict[int, list] = defaultdict(list)
     for m in metadata:
-        groups[m["slide_index"]].append(m)
+        groups[m["scene_index"]].append(m)
 
-    # 프레임 풀 구성: label → (slide_index, filename)
+    # 프레임 풀 구성: label → (scene_index, filename)
     pool: dict[str, tuple[int, str]] = {}
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
@@ -1912,9 +1909,9 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         else:
             log.warning(f"  [중복 감지] 이미지 로드 실패: {fname}")
 
-    # 전체 쌍 비교 — slide_index별 같은 슬라이드 관계 수집
+    # 전체 쌍 비교 — scene_index별 같은 슬라이드 관계 수집
     labels = sorted(phashes.keys())
-    # duplicate_map[idx] = 이 슬라이드와 같은 슬라이드로 판정된 다른 slide_index 집합
+    # duplicate_map[idx] = 이 scene과 같은 슬라이드로 판정된 다른 scene_index 집합
     duplicate_map: dict[int, set[int]] = defaultdict(set)
 
     log.info("\n──────── 슬라이드 간 phash 거리 전체 비교 (같은 슬라이드 판정용) ────────")
@@ -1985,10 +1982,9 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             family_prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
             family_next_visit[idx] = ordered[pos] if pos < len(ordered) else None
 
-    # 호환성을 위해 duplicate_of는 유지하되,
-    # 의미는 "같은 슬라이드 계열의 다른 slide_index"로 본다.
+    # duplicate_of는 "같은 슬라이드 계열의 다른 scene_index"를 뜻한다.
     for m in metadata:
-        idx = m["slide_index"]
+        idx = m["scene_index"]
         members = sorted(group_of.get(idx, {idx}))
         others = [x for x in members if x != idx]
         m["duplicate_of"] = others
@@ -2028,21 +2024,21 @@ def finalize_scene_slide_metadata(metadata: list[dict]) -> list[dict]:
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
     for item in metadata:
-        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+        by_scene[int(item.get("scene_index", 0) or 0)].append(item)
 
-    by_slide: dict[int, list[tuple[int, list[dict]]]] = defaultdict(list)
+    by_logical_slide: dict[int, list[tuple[int, list[dict]]]] = defaultdict(list)
     for scene_idx, items in by_scene.items():
         slide_idx = int(
             items[0].get("slide_canonical_index")
             or items[0].get("same_slide_canonical")
             or scene_idx
         )
-        by_slide[slide_idx].append((scene_idx, items))
+        by_logical_slide[slide_idx].append((scene_idx, items))
 
     scene_ranges: dict[int, tuple[int, int]] = {}
     slide_totals: dict[int, int] = {}
 
-    for slide_idx, scene_groups in by_slide.items():
+    for slide_idx, scene_groups in by_logical_slide.items():
         scene_groups.sort(key=lambda pair: min(float(x.get("timestamp_sec", 0.0) or 0.0) for x in pair[1]))
         cumulative = 0
         for scene_idx, items in scene_groups:
@@ -2091,14 +2087,14 @@ def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
     for item in metadata:
-        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+        by_scene[int(item.get("scene_index", 0) or 0)].append(item)
 
     ordered_pairs: list[tuple[float, int]] = []
     for scene_idx in sorted(by_scene):
         items = by_scene[scene_idx]
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
         slide_idx = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
-        ts = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
+        ts = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
         ordered_pairs.append((ts, slide_idx))
 
     lookup: dict[int, int] = {}
@@ -2152,7 +2148,7 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
     for item in metadata:
-        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+        by_scene[int(item.get("scene_index", 0) or 0)].append(item)
 
     slide_number_lookup = _build_slide_number_lookup(metadata)
 
@@ -2162,8 +2158,8 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
         slide_idx = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
         slide_number = int(base.get("slide_number", slide_number_lookup.get(slide_idx, slide_idx)) or slide_idx)
-        scene_start = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
-        scene_end = float(base.get("scene_end_sec", base.get("slide_end_sec", scene_start)) or scene_start)
+        scene_start = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
+        scene_end = float(base.get("scene_end_sec", scene_start) or scene_start)
         mappings.append({
             "scene_index": scene_idx,
             "slide_number": slide_number,
@@ -2212,22 +2208,22 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
 
     by_scene: dict[int, list[dict]] = defaultdict(list)
     for item in metadata:
-        by_scene[int(item.get("scene_index", item.get("slide_index", 0)) or 0)].append(item)
+        by_scene[int(item.get("scene_index", 0) or 0)].append(item)
 
     slide_number_lookup = _build_slide_number_lookup(metadata)
 
-    by_slide: dict[int, list[dict]] = defaultdict(list)
+    by_logical_slide: dict[int, list[dict]] = defaultdict(list)
     for scene_idx, items in by_scene.items():
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
         slide_idx = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
-        by_slide[slide_idx].append(items)
+        by_logical_slide[slide_idx].append(items)
 
     slides_payload: list[dict] = []
     total_annotations = 0
 
-    for slide_idx in sorted(by_slide):
+    for slide_idx in sorted(by_logical_slide):
         scene_groups = sorted(
-            by_slide[slide_idx],
+            by_logical_slide[slide_idx],
             key=lambda items: min(float(x.get("timestamp_sec", 0.0) or 0.0) for x in items),
         )
         slide_number = slide_number_lookup.get(slide_idx, slide_idx)
@@ -2237,7 +2233,7 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
 
         for items in scene_groups:
             base = next((x for x in items if x.get("capture_type") == "base"), items[0])
-            scene_idx = int(base.get("scene_index", base.get("slide_index", 0)) or 0)
+            scene_idx = int(base.get("scene_index", 0) or 0)
             builds = sorted(
                 [x for x in items if x.get("capture_type") == "build"],
                 key=lambda x: (
@@ -2257,10 +2253,10 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
                 "slide_number": slide_number,
                 "visit_order": int(base.get("slide_visit_order", base.get("same_slide_visit_order", 1)) or 1),
                 "is_revisit": bool(base.get("slide_is_revisit", base.get("same_slide_is_revisit", False))),
-                "scene_start_sec": float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0),
-                "scene_end_sec": float(base.get("scene_end_sec", base.get("slide_end_sec", base.get("timestamp_sec", 0.0))) or 0.0),
-                "scene_start_formatted": _fmt_hms(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0)))),
-                "scene_end_formatted": _fmt_hms(base.get("scene_end_sec", base.get("slide_end_sec", base.get("timestamp_sec", 0.0)))),
+                "scene_start_sec": float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0),
+                "scene_end_sec": float(base.get("scene_end_sec", base.get("timestamp_sec", 0.0)) or 0.0),
+                "scene_start_formatted": _fmt_hms(base.get("scene_start_sec", base.get("timestamp_sec", 0.0))),
+                "scene_end_formatted": _fmt_hms(base.get("scene_end_sec", base.get("timestamp_sec", 0.0))),
                 "base_filename": base.get("filename"),
                 "clean_final_filename": base.get("clean_final_filename", base.get("filename")),
                 "clean_final_capture_type": base.get("clean_final_capture_type", "base"),

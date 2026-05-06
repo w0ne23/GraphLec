@@ -62,12 +62,12 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
     with open(meta_path, encoding="utf-8") as f:
         metadata = json.load(f)
 
-    # slide_index별 그룹화
+    # scene_index별 그룹화
     groups: dict[int, list] = defaultdict(list)
     for m in metadata:
-        groups[m["slide_index"]].append(m)
+        groups[m["scene_index"]].append(m)
 
-    # 프레임 풀 구성: label → (slide_index, filename)
+    # 프레임 풀 구성: label → (scene_index, filename)
     pool: dict[str, tuple[int, str]] = {}
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
@@ -128,7 +128,7 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
     if duplicate_map:
         print(f"\n  중복 관계 요약:")
         for idx in sorted(duplicate_map.keys()):
-            print(f"    slide_{idx:03d}  →  duplicate_of {sorted(duplicate_map[idx])}")
+            print(f"    scene_{idx:03d}  →  duplicate_of {sorted(duplicate_map[idx])}")
     else:
         print(f"\n  threshold={threshold} 기준 중복 후보 없음")
 
@@ -148,7 +148,7 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
     # metadata.json 업데이트 (--update-metadata 옵션)
     if update_metadata:
         for m in metadata:
-            idx = m["slide_index"]
+            idx = m["scene_index"]
             m["duplicate_of"] = sorted(duplicate_map[idx])
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)

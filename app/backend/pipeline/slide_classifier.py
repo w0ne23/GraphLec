@@ -248,9 +248,9 @@ class SlideClassifier:
         self.silences = silences
 
     def _slide_stats(self, entry: dict) -> dict:
-        """슬라이드 1개의 기본 통계 계산."""
-        start = entry["slide_start_sec"]
-        end   = entry["slide_end_sec"]
+        """scene occurrence 1개의 기본 통계 계산."""
+        start = entry["scene_start_sec"]
+        end   = entry["scene_end_sec"]
         dwell = end - start
         silence_sec, silence_ratio = compute_silence_stats(start, end, self.silences)
         speech_ratio = max(0.0, 1.0 - silence_ratio)
@@ -273,9 +273,9 @@ class SlideClassifier:
             - 시간상 뒤쪽 : 재방문 (revisited=True)
           transitional 슬라이드는 revisited 판단 대상 외.
 
-        Returns: {slide_index: classification_dict}
+        Returns: {scene_index: classification_dict}
         """
-        # 각 슬라이드 통계 계산 (order = slide_start_sec, 시간 순서 기준)
+        # 각 scene occurrence 통계 계산 (order = scene_start_sec, 시간 순서 기준)
         members = []
         for idx in sorted(group):
             if idx not in base_entries:
@@ -283,9 +283,9 @@ class SlideClassifier:
             entry = base_entries[idx]
             stats = self._slide_stats(entry)
             members.append({
-                "slide_index":   idx,
-                "order":         entry["slide_start_sec"],
-                "slide_end_sec": entry["slide_end_sec"],
+                "scene_index":   idx,
+                "order":         entry["scene_start_sec"],
+                "scene_end_sec": entry["scene_end_sec"],
                 **stats,
             })
 
@@ -317,7 +317,7 @@ class SlideClassifier:
 
         for m in members:
             trans = is_transitional(m["dwell_sec"], m["silence_ratio"])
-            idx   = m["slide_index"]
+            idx   = m["scene_index"]
             if trans:
                 roles[idx] = "transitional"
             elif not core_assigned:
@@ -334,7 +334,7 @@ class SlideClassifier:
         revisited_map: Dict[int, bool] = {}
 
         for m in members:
-            idx = m["slide_index"]
+            idx = m["scene_index"]
             if roles[idx] == "transitional":
                 revisited_map[idx] = False   # transitional은 재방문 개념 없음
             elif not first_non_trans_seen:
@@ -353,7 +353,7 @@ class SlideClassifier:
         prev_non_trans_end: float = None   # 직전 비-transitional 슬라이드의 종료 시점
 
         for m in members:
-            idx = m["slide_index"]
+            idx = m["scene_index"]
             if roles[idx] == "transitional":
                 continuous_map[idx] = False
                 continue
@@ -361,7 +361,7 @@ class SlideClassifier:
             if not revisited_map[idx]:
                 # 첫 방문 — continuous 해당 없음
                 continuous_map[idx] = False
-                prev_non_trans_end = m["slide_end_sec"]
+                prev_non_trans_end = m["scene_end_sec"]
             else:
                 # 재방문 — gap 구간 침묵 계산
                 if prev_non_trans_end is not None:
@@ -371,12 +371,12 @@ class SlideClassifier:
                     continuous_map[idx] = gap_silence < GAP_CONTINUOUS_MAX_SEC
                 else:
                     continuous_map[idx] = False
-                prev_non_trans_end = m["slide_end_sec"]
+                prev_non_trans_end = m["scene_end_sec"]
 
         # ── 4단계: 결과 조립 ───────────────────────────────────────────────── #
         result: Dict[int, dict] = {}
         for m in members:
-            idx = m["slide_index"]
+            idx = m["scene_index"]
             result[idx] = {
                 "role":          roles[idx],
                 "score":         m["score"],
@@ -452,12 +452,14 @@ class ClassificationPipeline:
         base_entries: Dict[int, dict] = {}
         for entry in raw_meta:
             if entry.get("capture_type") == "base":
-                idx = entry.get("scene_index") if entry.get("scene_index") is not None else entry["slide_index"]
+                idx = entry.get("scene_index")
+                if idx is None:
+                    continue
                 if idx not in base_entries:
                     base_entries[idx] = entry
 
         logger.info(
-            f"✓ 슬라이드: {len(tex_data['slides'])}개 | "
+            f"✓ scene: {len(tex_data['scenes'])}개 | "
             f"base entries: {len(base_entries)}개 | "
             f"침묵 구간: {len(silences)}개"
         )
@@ -490,10 +492,10 @@ class ClassificationPipeline:
         print("Stage 3: slide_textualized 계승 + 분류 결과 병합")
         print("-"*70)
 
-        classified_slides = []
+        classified_scenes = []
         role_counter: Dict[str, int] = defaultdict(int)
 
-        for slide in tex_data["slides"]:
+        for slide in tex_data["scenes"]:
             scene_num = slide.get("scene_number", slide.get("scene_index", slide["slide_number"]))
             slide_num = slide["slide_number"]
             scene_label = int(scene_num) if isinstance(scene_num, int) else int(slide_num)
@@ -514,7 +516,7 @@ class ClassificationPipeline:
             ) and not _is_instructor_intro_slide(title_lower, slide_text)
             final_role = "objectives" if is_objectives else cls["role"]
 
-            classified_slide = {
+            classified_scene = {
                 **slide,                          # textualized 전체 필드 계승
                 "role":          final_role,
                 "score":         cls.get("score"),
@@ -522,7 +524,7 @@ class ClassificationPipeline:
                 "revisit_count": cls.get("revisit_count", 0),
                 "continuous":    cls.get("continuous", False),
             }
-            classified_slides.append(classified_slide)
+            classified_scenes.append(classified_scene)
             role_counter[final_role] += 1
 
             logger.info(
@@ -554,7 +556,7 @@ class ClassificationPipeline:
                     "weights": {"speech": W_SPEECH, "dwell": W_DWELL, "order": W_ORDER},
                 },
             },
-            "slides": classified_slides,
+            "scenes": classified_scenes,
         }
 
         with open(self.output_path, "w", encoding="utf-8") as f:
@@ -565,10 +567,10 @@ class ClassificationPipeline:
         print("✅ 분류 완료!")
         print("="*70)
         print(f"\n📊 결과:")
-        print(f"  • 전체 슬라이드: {len(classified_slides)}개")
+        print(f"  • 전체 scene: {len(classified_scenes)}개")
         for role in ["core", "elaborated", "transitional", "silent_new", "objectives"]:
             print(f"  • {role:<12}: {role_counter.get(role, 0)}개")
-        revisited_count = sum(1 for s in classified_slides if s.get("revisited"))
+        revisited_count = sum(1 for s in classified_scenes if s.get("revisited"))
         print(f"  • revisited    : {revisited_count}개")
         print(f"\n📁 생성된 파일:")
         print(f"  • {self.output_path}")
@@ -594,7 +596,7 @@ def classify_slides(
         silence_path=Path(silences_path),
         output_path=Path(output_path),
     ).run()
-    return result.get("slides", [])
+    return result.get("scenes", [])
 
 
 # ============================================================================ #

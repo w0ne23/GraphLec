@@ -46,16 +46,14 @@ class Config:
             from .config import output_paths
             paths = output_paths(self.stem, self.output_dir, self.slides_dir)
             if self.audio_path is None:
-                by_scene = paths.get("by_scene")
-                self.audio_path = by_scene if by_scene and by_scene.exists() else paths["by_slide"]
+                self.audio_path = paths["by_scene"]
             if self.classified_path is None: self.classified_path = paths["classified"]
             if self.annotation_path is None: self.annotation_path = paths["annotation"]
             if self.output_path     is None: self.output_path     = paths["fused"]
         except ImportError:
             d, s = self.output_dir, self.stem
             if self.audio_path is None:
-                by_scene = d / f"{s}_by_scene.json"
-                self.audio_path = by_scene if by_scene.exists() else d / f"{s}_by_slide.json"
+                self.audio_path = d / f"{s}_by_scene.json"
             if self.classified_path is None: self.classified_path = d / f"{s}_slide_classified.json"
             if self.annotation_path is None: self.annotation_path = d / f"{s}_annotation.json"
             if self.output_path     is None: self.output_path     = d / f"{s}_fused.json"
@@ -273,8 +271,6 @@ def build_annotation_index(annotation_data: list[dict]) -> dict[int, list[dict]]
     for event in annotation_data:
         sid = event.get("slide_number")
         if sid is None:
-            sid = event.get("slide_index")
-        if sid is None:
             continue
         if sid not in index:
             index[sid] = []
@@ -468,20 +464,6 @@ def calc_both_bonus(
 
 
 # ============================================================================
-#  슬라이드 ID 변환
-# ============================================================================
-
-def slide_index_to_id(idx: int) -> str:
-    """2 → 'slide_002'"""
-    return f"slide_{idx:03d}"
-
-
-def slide_id_to_index(sid: str) -> int:
-    """'slide_002' → 2"""
-    return int(sid.split("_")[-1])
-
-
-# ============================================================================
 #  메인 퓨전 로직
 # ============================================================================
 
@@ -494,15 +476,15 @@ def run_fusion(cfg: Config) -> dict:
     with open(cfg.annotation_path, encoding="utf-8") as f:
         annotation_data = json.load(f)
 
-    audio_slides      = audio_data.get("scenes") or audio_data["slides"]
-    classified_slides = classified_data["slides"]
+    audio_slides      = audio_data["scenes"]
+    classified_slides = classified_data["scenes"]
     annot_index       = build_annotation_index(annotation_data)
 
-    # audio를 scene_index 기준으로 인덱싱 (slide_index는 과거 호환용 scene_index)
+    # audio를 scene_index 기준으로 인덱싱
     audio_index: dict[int, dict] = {
-        (s.get("scene_index") if s.get("scene_index") is not None else s.get("slide_index")): s
+        s.get("scene_index"): s
         for s in audio_slides
-        if (s.get("scene_index") if s.get("scene_index") is not None else s.get("slide_index")) is not None
+        if s.get("scene_index") is not None
     }
 
     # classified를 slide_id 기준으로 인덱싱
@@ -729,7 +711,6 @@ def run_fusion(cfg: Config) -> dict:
             },
         },
         "scenes": fused_slides,
-        "slides": fused_slides,
     }
 
     return output
@@ -777,10 +758,10 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     elapsed = time.time() - start
-    total_kw = sum(len(s["emphasized_keywords"]) for s in output["slides"])
+    total_kw = sum(len(s["emphasized_keywords"]) for s in output["scenes"])
     total_deictic = sum(
         1
-        for s in output["slides"]
+        for s in output["scenes"]
         for ctx in s["contexts"]
         for seg in ctx["segments"]
         if seg.get("deictic_target")

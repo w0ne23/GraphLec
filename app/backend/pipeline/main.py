@@ -143,7 +143,7 @@ def _format_emphasis_reason(ann: dict) -> dict:
 # 전사 헬퍼
 # ──────────────────────────────────────────────────────────────
 
-def _transcribe_by_slide(
+def _transcribe_by_scene(
     video_path: str,
     duration: float,
     meta_path: Optional[str],
@@ -155,7 +155,7 @@ def _transcribe_by_slide(
 
     Returns:
         {
-            "segments": [{"start","end","text","words","slide_index"?}, ...],
+            "segments": [{"start","end","text","words","scene_index"?}, ...],
             "silences": [{"start","end","duration"}, ...]   # 영상 절대 시간
         }
     """
@@ -209,10 +209,7 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
     _save_json(scene_slide_map_path, build_scene_slide_map(metadata))
     _save_json(canonical_slide_annotations_path, build_canonical_slide_annotations(metadata))
 
-    scene_count = len({
-        m.get("scene_index") if m.get("scene_index") is not None else m["slide_index"]
-        for m in metadata
-    })
+    scene_count = len({m["scene_index"] for m in metadata if m.get("scene_index") is not None})
     _done(f"scene {scene_count}개, 프레임 {len(metadata)}개 추출", elapsed)
     return {
         "meta_path": str(meta_path),
@@ -283,7 +280,8 @@ def stage2_textualize(args, slides_dir: Path, output_dir: Path) -> dict:
     text_result = TextualizationPipeline(text_config).run()
     elapsed = time.time() - t0
 
-    _done(f"슬라이드 {text_result['metadata']['total_slides']}개 텍스트화", elapsed)
+    meta = text_result["metadata"]
+    _done(f"scene {meta['total_scenes']}개 / slide {meta['total_slides']}개 텍스트화", elapsed)
     return {"textualized_path": str(textualized_path), "elapsed": elapsed}
 
 
@@ -299,7 +297,7 @@ def stage2b_transcribe(args, meta_path: str, duration: float, output_dir: Path) 
     _banner("Stage 2B  —  전체 전사  (Groq Whisper)")
     t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-    transcribe_result = _transcribe_by_slide(args.input, duration, meta_path, slide_ranges, output_dir)
+    transcribe_result = _transcribe_by_scene(args.input, duration, meta_path, slide_ranges, output_dir)
     payload = {
         "video_path": args.input,
         "segment_count": len(transcribe_result.get("segments", [])),
@@ -353,7 +351,7 @@ def stage3b_audio(
     from .segment_grouper import (
         load_slide_ranges,
         group_segments_by_context,
-        group_segments_by_slide_and_context,
+        group_segments_by_scene_and_context,
         expand_group_annotations_to_segments,
     )
     from .audio_analyzer import extract_audio_from_video
@@ -370,14 +368,12 @@ def stage3b_audio(
     silences_path = output_dir / f"{stem}_silences.json"
     emphasis_path = output_dir / f"{stem}_emphasis.json"
     by_scene_path = output_dir / f"{stem}_by_scene.json"
-    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
     def _scene_audio_has_emphasis_schema(path: Path) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            scenes = payload.get("scenes") or payload.get("slides") or []
-            for scene in scenes:
+            for scene in payload.get("scenes", []):
                 for ctx in scene.get("contexts", []):
                     if "emphasis" not in ctx:
                         return False
@@ -399,25 +395,18 @@ def stage3b_audio(
         and by_scene_path.stat().st_size > 0
         and _scene_audio_has_emphasis_schema(by_scene_path)
     )
-    legacy_by_slide_ok = (
-        by_slide_path.exists()
-        and by_slide_path.stat().st_size > 0
-        and _scene_audio_has_emphasis_schema(by_slide_path)
-    )
-    scene_audio_ok = by_scene_ok or legacy_by_slide_ok
-    if seg_ok and silences_ok and emphasis_ok and scene_audio_ok:
+    if seg_ok and silences_ok and emphasis_ok and by_scene_ok:
         print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
         print(f"     {segments_path}")
-        print(f"     {by_scene_path if by_scene_ok else by_slide_path}")
+        print(f"     {by_scene_path}")
         print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
-        slides_structure = None
-        scene_audio_path = by_scene_path if by_scene_ok else by_slide_path
-        if scene_audio_path.exists():
+        scenes_structure = None
+        if by_scene_path.exists():
             try:
-                with open(scene_audio_path) as f:
+                with open(by_scene_path) as f:
                     payload = json.load(f)
-                    slides_structure = payload.get("scenes") or payload.get("slides")
+                    scenes_structure = payload.get("scenes")
             except Exception:
                 pass
 
@@ -441,7 +430,7 @@ def stage3b_audio(
             "emphasis_path": str(emphasis_path),
             "annotated_segments": annotated_segments,
             "annotated_groups": [],
-            "slides_structure": slides_structure,
+            "scenes_structure": scenes_structure,
             "slide_ranges": slide_ranges,
             "duration": duration,
         }
@@ -449,11 +438,10 @@ def stage3b_audio(
         log.warning(
             "Stage 3B 캐시가 불완전하여 재실행합니다 "
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
-            f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()}, "
-            f"by_slide={by_slide_path.exists()})"
+            f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()})"
         )
 
-    if seg_ok and not scene_audio_ok:
+    if seg_ok and not by_scene_ok:
         print(
             f"\n  ⚠️  {by_scene_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
             "Stage 3B 전체를 다시 실행합니다."
@@ -465,7 +453,7 @@ def stage3b_audio(
     _banner("Stage 3B  —  오디오 파이프라인")
 
     # 슬라이드 텍스트화 데이터 로드
-    textualized_data: dict = {"slides": []}
+    textualized_data: dict = {"scenes": []}
     if textualized_path and Path(textualized_path).is_file():
         with open(textualized_path, "r", encoding="utf-8") as f:
             textualized_data = json.load(f)
@@ -488,7 +476,7 @@ def stage3b_audio(
     else:
         print("  [3B-1] 전체 전사 폴백 실행...")
         t0 = time.time()
-        transcribe_result = _transcribe_by_slide(video_path, duration, meta_path, slide_ranges, output_dir)
+        transcribe_result = _transcribe_by_scene(video_path, duration, meta_path, slide_ranges, output_dir)
         segments_raw = transcribe_result.get("segments", [])
         detected_silences = transcribe_result.get("silences", [])
         print(f"    ✓ {len(segments_raw)}개 세그먼트, 무음 {len(detected_silences)}개  ({time.time()-t0:.1f}초)")
@@ -546,18 +534,18 @@ def stage3b_audio(
     extract_audio_from_video(video_path, audio_path_temp)
     annotated_segments: list[dict] = []
     annotated_groups: list[dict] = []
-    slides_structure = None
+    scenes_structure = None
     emphasis_sections: list[dict] = []
     topic_kw_set: set[str] = set()
     try:
         y, sr = librosa.load(audio_path_temp, sr=16000)
         if slide_ranges:
-            groups, slides_structure = group_segments_by_slide_and_context(
+            groups, scenes_structure = group_segments_by_scene_and_context(
                 segments_clean, slide_ranges, duration, use_pause_sentence=False, use_llm_merge=True
             )
         else:
             groups = group_segments_by_context(segments_clean)
-            slides_structure = None
+            scenes_structure = None
 
         topic_kw_set = get_topic_keywords_filtered_v2(
             groups, min_freq=5, max_keywords=20, max_segment_ratio=1.0,
@@ -605,7 +593,7 @@ def stage3b_audio(
         "emphasis_path": str(emphasis_path),
         "annotated_segments": annotated_segments,
         "annotated_groups": annotated_groups,
-        "slides_structure": slides_structure,
+        "scenes_structure": scenes_structure,
         "slide_ranges": slide_ranges,
         "duration": duration,
     }
@@ -635,14 +623,13 @@ def stage4a_classify(
     return {"classified_path": str(classified_path), "elapsed": elapsed}
 
 
-def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
-    from .segment_grouper import group_segments_by_slide_and_context
+def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
+    from .segment_grouper import group_segments_by_scene_and_context
 
     stem = Path(args.input).stem
     by_scene_path = output_dir / f"{stem}_by_scene.json"
-    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
-    slides_structure = audio_result.get("slides_structure")
+    scenes_structure = audio_result.get("scenes_structure")
     annotated_segments = audio_result.get("annotated_segments", [])
     annotated_groups = audio_result.get("annotated_groups", [])
     slide_ranges = audio_result.get("slide_ranges", [])
@@ -652,8 +639,7 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            scenes = payload.get("scenes") or payload.get("slides") or []
-            for scene in scenes:
+            for scene in payload.get("scenes", []):
                 for ctx in scene.get("contexts", []):
                     if "emphasis" not in ctx:
                         return False
@@ -665,9 +651,6 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
         clean = json.loads(json.dumps(scene))
         if clean.get("scene_id") is None and clean.get("scene_index") is not None:
             clean["scene_id"] = f"scene/{int(clean['scene_index']):04d}"
-        legacy_slide_index = clean.pop("slide_index", None)
-        if legacy_slide_index is not None:
-            clean["legacy_slide_index"] = legacy_slide_index
         return clean
 
     def _scene_payload(scenes: list[dict]) -> dict:
@@ -682,55 +665,20 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
             "scene_count": len(public_scenes),
             "slide_count": len(slide_numbers),
             "scenes": public_scenes,
-            "slides": public_scenes,
         }
-
-    def _legacy_by_slide_payload(scenes: list[dict]) -> dict:
-        slide_numbers = {
-            scene.get("slide_number")
-            for scene in scenes
-            if scene.get("slide_number") is not None
-        }
-        return {
-            "unit": "scene",
-            "deprecated_name": True,
-            "replacement": by_scene_path.name,
-            "scene_count": len(scenes),
-            "slide_count": len(slide_numbers),
-            "slides": scenes,
-        }
-
-    def _ensure_by_scene_alias_from_legacy() -> None:
-        if by_scene_path.exists() and by_scene_path.stat().st_size > 0:
-            return
-        if not by_slide_path.exists() or by_slide_path.stat().st_size <= 0:
-            return
-        with open(by_slide_path, encoding="utf-8") as f:
-            payload = json.load(f)
-        scenes = payload.get("scenes") or payload.get("slides") or []
-        if scenes:
-            _save_json(by_scene_path, _scene_payload(scenes))
 
     if not slide_ranges:
         if by_scene_path.exists() and by_scene_path.stat().st_size > 0 and _has_emphasis_schema(by_scene_path):
             return {
                 "by_scene_path": str(by_scene_path),
-                "by_slide_path": str(by_slide_path) if by_slide_path.exists() else "",
-                "elapsed": 0.0,
-            }
-        if by_slide_path.exists() and by_slide_path.stat().st_size > 0 and _has_emphasis_schema(by_slide_path):
-            _ensure_by_scene_alias_from_legacy()
-            return {
-                "by_scene_path": str(by_scene_path),
-                "by_slide_path": str(by_slide_path),
                 "elapsed": 0.0,
             }
         raise RuntimeError("Stage 4B by_scene 저장 실패: slide_ranges가 비어 있습니다.")
 
-    if not slides_structure and annotated_segments:
+    if not scenes_structure and annotated_segments:
         log.warning("Stage 4B by_scene 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
         try:
-            _, slides_structure = group_segments_by_slide_and_context(
+            _, scenes_structure = group_segments_by_scene_and_context(
                 annotated_segments,
                 slide_ranges,
                 duration,
@@ -740,30 +688,26 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
         except Exception as exc:
             raise RuntimeError(f"Stage 4B by_scene 재구성 실패: {exc}") from exc
 
-    if not slides_structure:
+    if not scenes_structure:
         raise RuntimeError(
-            "Stage 4B by_scene 저장 실패: slides_structure가 비어 있습니다. "
+            "Stage 4B by_scene 저장 실패: scenes_structure가 비어 있습니다. "
             "Stage 3B 오디오 후처리 결과를 확인해주세요."
         )
 
-    if _is_done(by_slide_path, "Stage 4B by_scene/by_slide 저장", args.force):
-        if _has_emphasis_schema(by_slide_path):
-            _ensure_by_scene_alias_from_legacy()
-            return {
-                "by_scene_path": str(by_scene_path),
-                "by_slide_path": str(by_slide_path),
-                "elapsed": 0.0,
-            }
-        log.warning("기존 by_slide.json에 emphasis 스키마가 없어 재생성합니다.")
+    if _is_done(by_scene_path, "Stage 4B by_scene 저장", args.force):
+        return {
+            "by_scene_path": str(by_scene_path),
+            "elapsed": 0.0,
+        }
 
     _banner("Stage 4B  —  by_scene 구조 저장")
     t0 = time.time()
 
-    slides_with_emphasis = json.loads(json.dumps(slides_structure))
+    scenes_with_emphasis = json.loads(json.dumps(scenes_structure))
     annot_by_start = {g.get("start"): g for g in annotated_groups}
-    for slide in slides_with_emphasis:
+    for scene in scenes_with_emphasis:
         new_contexts = []
-        for ctx in slide.get("contexts", []):
+        for ctx in scene.get("contexts", []):
             ann = annot_by_start.get(ctx.get("start"))
             ordered_ctx = {
                 "context_index": ctx.get("context_index"),
@@ -786,15 +730,13 @@ def stage4b_save_by_slide(args, audio_result: dict, output_dir: Path) -> dict:
             ordered_ctx["segment_indices"] = ctx.get("segment_indices", [])
             ordered_ctx["segments"] = ctx.get("segments", [])
             new_contexts.append(ordered_ctx)
-        slide["contexts"] = new_contexts
-    _save_json(by_scene_path, _scene_payload(slides_with_emphasis))
-    _save_json(by_slide_path, _legacy_by_slide_payload(slides_with_emphasis))
+        scene["contexts"] = new_contexts
+    _save_json(by_scene_path, _scene_payload(scenes_with_emphasis))
 
     elapsed = time.time() - t0
     _done("by_scene 구조 저장", elapsed)
     return {
         "by_scene_path": str(by_scene_path),
-        "by_slide_path": str(by_slide_path),
         "elapsed": elapsed,
     }
 
@@ -811,7 +753,6 @@ def stage5_fusion(
     stem = Path(args.input).stem
     fused_path = output_dir / f"{stem}_fused.json"
     by_scene_path = output_dir / f"{stem}_by_scene.json"
-    by_slide_path = output_dir / f"{stem}_by_slide.json"
 
     if _is_done(fused_path, "Stage 5 퓨전", args.force):
         return {"fused_path": str(fused_path), "elapsed": 0.0}
@@ -823,13 +764,13 @@ def stage5_fusion(
         stem=stem,
         output_dir=output_dir,
         slides_dir=Path(args.slides),
-        audio_path=by_scene_path if by_scene_path.exists() else by_slide_path,
+        audio_path=by_scene_path,
         classified_path=output_dir / f"{stem}_slide_classified.json",
         annotation_path=Path(annotation_path),
         output_path=fused_path,
     )
     fused_output = run_fusion(cfg)
-    fused_scenes = fused_output.get("scenes") or fused_output.get("slides", [])
+    fused_scenes = fused_output.get("scenes", [])
     logical_slide_count = len({
         scene.get("slide_number")
         for scene in fused_scenes
@@ -846,7 +787,6 @@ def stage5_fusion(
             "slide_count": logical_slide_count,
             "fusion_metadata": fused_output.get("metadata", {}),
             "scenes": fused_scenes,
-            "slides": fused_scenes,
         },
     )
     elapsed = time.time() - t0
@@ -889,7 +829,7 @@ def stage9_build_analyzer_merged_clean(
     for entry in metadata:
         if entry.get("capture_type") != "base" and int(entry.get("annot_index", 0) or 0) != 0:
             continue
-        scene_idx = entry.get("scene_index", entry.get("slide_index"))
+        scene_idx = entry.get("scene_index")
         if not isinstance(scene_idx, int) or scene_idx in scene_meta_by_index:
             continue
         scene_meta_by_index[scene_idx] = {
@@ -903,7 +843,7 @@ def stage9_build_analyzer_merged_clean(
         }
 
     slide_meta_by_no = {}
-    for slide in textualized.get("slides", []):
+    for slide in textualized.get("scenes", []):
         scene_no = slide.get("scene_number", slide.get("slide_number"))
         scene_info = scene_meta_by_index.get(scene_no if isinstance(scene_no, int) else -1, {})
         slide_no = scene_info.get(
@@ -924,24 +864,24 @@ def stage9_build_analyzer_merged_clean(
             if current_meta is None or len(candidate_meta["slide_text"]) > len(current_meta.get("slide_text", "")):
                 slide_meta_by_no[slide_no] = candidate_meta
 
-    segs_by_slide: dict[int, list[dict]] = {}
+    segs_by_logical_slide: dict[int, list[dict]] = {}
     for seg in segments:
-        slide_no = seg.get("slide_number", seg.get("slide_index"))
+        slide_no = seg.get("slide_number")
         if isinstance(slide_no, int):
             seg_copy = {
                 "start": float(seg.get("start", 0.0) or 0.0),
                 "end": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
                 "text": str(seg.get("text", "") or "").strip(),
             }
-            segs_by_slide.setdefault(slide_no, []).append(seg_copy)
+            segs_by_logical_slide.setdefault(slide_no, []).append(seg_copy)
 
     slide_titles = [slide_meta_by_no.get(slide_no, {}).get("title", "") for slide_no in sorted(slide_meta_by_no)]
     transcript_sample = " ".join(str(seg.get("text", "") or "") for seg in segments[:30])
     domain_info = classify_lecture_domain(slide_titles, transcript_sample)
 
-    occurrences_by_slide: dict[int, list[dict]] = {}
+    occurrences_by_logical_slide: dict[int, list[dict]] = {}
     for slide_range in slide_ranges:
-        scene_idx = int(slide_range["slide_index"])
+        scene_idx = int(slide_range["scene_index"])
         scene_info = scene_meta_by_index.get(scene_idx, {})
         slide_no = scene_info.get("slide_number", scene_idx)
         if not isinstance(slide_no, int):
@@ -949,7 +889,7 @@ def stage9_build_analyzer_merged_clean(
         start_sec = float(slide_range["start_sec"])
         end_sec = float(slide_range["end_sec"])
         slide_duration = round(end_sec - start_sec, 1)
-        occurrences_by_slide.setdefault(slide_no, []).append({
+        occurrences_by_logical_slide.setdefault(slide_no, []).append({
             "scene_index": scene_idx,
             "start_sec": start_sec,
             "end_sec": end_sec,
@@ -958,13 +898,13 @@ def stage9_build_analyzer_merged_clean(
             "visit_order": int(scene_info.get("slide_visit_order", 1) or 1),
         })
 
-    all_slide_numbers = sorted(set(slide_meta_by_no) | set(segs_by_slide) | set(occurrences_by_slide))
+    all_slide_numbers = sorted(set(slide_meta_by_no) | set(segs_by_logical_slide) | set(occurrences_by_logical_slide))
     slides = []
     for slide_no in all_slide_numbers:
         slide_meta = slide_meta_by_no.get(slide_no, {})
-        transcript_segments = sorted(segs_by_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
+        transcript_segments = sorted(segs_by_logical_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
         occurrences = sorted(
-            occurrences_by_slide.get(slide_no, []),
+            occurrences_by_logical_slide.get(slide_no, []),
             key=lambda item: (item["start_sec"], item["scene_index"]),
         )
         if occurrences:
@@ -1586,7 +1526,7 @@ def run_pipeline(args, progress_callback=None):
         _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
         t_parallel = time.time()
         classified_result: dict = {}
-        by_slide_result: dict = {}
+        by_scene_result: dict = {}
 
         silences_path = audio_result.get("silences_path", str(paths["silences"]))
         annotation_path = annotation_result.get("annotation_path", str(paths["annotation"]))
@@ -1595,14 +1535,14 @@ def run_pipeline(args, progress_callback=None):
             future_c = executor.submit(
                 stage4a_classify, args, textualized_path, meta_path, silences_path, output_dir
             )
-            future_d = executor.submit(stage4b_save_by_slide, args, audio_result, output_dir)
+            future_d = executor.submit(stage4b_save_by_scene, args, audio_result, output_dir)
             for future in as_completed([future_c, future_d]):
                 if future is future_c:
                     classified_result = future.result()
                     timings["Stage 4A 분류"] = classified_result.get("elapsed", 0.0)
                 else:
-                    by_slide_result = future.result()
-                    timings["Stage 4B by_scene 저장"] = by_slide_result.get("elapsed", 0.0)
+                    by_scene_result = future.result()
+                    timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
 
         timings["Stage 4 병렬 총"] = time.time() - t_parallel
         print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
@@ -1687,8 +1627,7 @@ def run_pipeline(args, progress_callback=None):
             annotation_path,
             textualized_path,
             classified_result.get("classified_path", ""),
-            by_slide_result.get("by_scene_path", ""),
-            by_slide_result.get("by_slide_path", ""),
+            by_scene_result.get("by_scene_path", ""),
             r5.get("fused_path", ""),
             r6.get("triples_parquet", ""),
             r6.get("nodes_parquet", ""),

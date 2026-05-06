@@ -700,7 +700,7 @@ class GraphPipeline:
         print('\n[Step 1] 데이터 로드')
         with open(cfg.fused_path, encoding='utf-8') as f:
             fused = json.load(f)
-        slides = fused.get('scenes') or fused['slides']
+        slides = fused['scenes']
         logical_slide_count = len({
             slide.get('slide_number')
             for slide in slides

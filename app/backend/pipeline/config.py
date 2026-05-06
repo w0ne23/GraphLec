@@ -8,7 +8,7 @@ API 클라이언트 초기화 및 경로 상수 정의
         lecture.mp4
     output_slides/
         metadata.json
-        slide_0001.jpg
+        scene_0001_base.jpg
         ...
     output/
         {stem}_slide_textualized.json
@@ -19,7 +19,6 @@ API 클라이언트 초기화 및 경로 상수 정의
         {stem}_audio_quality.json
         {stem}_emphasis.json
         {stem}_by_scene.json
-        {stem}_by_slide.json
         {stem}_slide_classified.json
         {stem}_fused.json
 """
@@ -124,7 +123,6 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
         "audio_quality":       output_dir / f"{stem}_audio_quality.json",
         "emphasis":            output_dir / f"{stem}_emphasis.json",
         "by_scene":            output_dir / f"{stem}_by_scene.json",
-        "by_slide":            output_dir / f"{stem}_by_slide.json",
         "classified":          output_dir / f"{stem}_slide_classified.json",
         "fused":               output_dir / f"{stem}_fused.json",
     }

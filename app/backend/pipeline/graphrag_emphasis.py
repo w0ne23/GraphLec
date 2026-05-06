@@ -80,7 +80,7 @@ def _parse_json_list(value: Any) -> list[str]:
 def _build_slide_keyword_map(fused: dict[str, Any]) -> dict[str, list[tuple[str, float]]]:
     """slide_id -> [(keyword_norm, slide_text_score)]"""
     result: dict[str, list[tuple[str, float]]] = {}
-    for slide in fused.get("slides") or []:
+    for slide in fused.get("scenes") or []:
         sid = str(slide.get("slide_id") or "").strip()
         if not sid:
             continue
@@ -166,7 +166,7 @@ def compute_keyword_match(
 def _build_slide_visual_kw_map(fused: dict[str, Any]) -> dict[str, list[tuple[str, float]]]:
     """slide_id -> [(keyword_norm, visual_score)]  — visual_score > 0 인 항목만"""
     result: dict[str, list[tuple[str, float]]] = {}
-    for slide in fused.get("slides") or []:
+    for slide in fused.get("scenes") or []:
         sid = str(slide.get("slide_id") or "").strip()
         if not sid:
             continue

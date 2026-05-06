@@ -99,7 +99,7 @@ def load_fused(stem: str, output_dir: Path) -> dict:
 
 
 def fused_scene_entries(fused: dict) -> list[dict]:
-    return fused.get("scenes") or fused.get("slides", [])
+    return fused.get("scenes", [])
 
 
 def get_duration(fused: dict) -> float:
