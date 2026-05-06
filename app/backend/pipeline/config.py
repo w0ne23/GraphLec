@@ -31,19 +31,15 @@ from dotenv import load_dotenv
 from groq import Groq
 from google import genai
 
-OPENAI_SDK_IMPORT_ERROR = None
 try:
     from openai import OpenAI
-except ImportError as e:
+except ImportError:
     OpenAI = None
-    OPENAI_SDK_IMPORT_ERROR = e
 
-ANTHROPIC_SDK_IMPORT_ERROR = None
 try:
     from anthropic import Anthropic
-except ImportError as e:
+except ImportError:
     Anthropic = None
-    ANTHROPIC_SDK_IMPORT_ERROR = e
 
 load_dotenv()
 
@@ -170,12 +166,12 @@ def get_gemini_client_sequence():
 
 def resolve_anthropic_model(model_name: str) -> str:
     aliases = {
-        "haiku-4.5": "claude-3-5-haiku-latest",
-        "claude-haiku-4.5": "claude-3-5-haiku-latest",
-        "claude-haiku-4-5": "claude-3-5-haiku-latest",
-        "sonnet-4.5": "claude-3-5-sonnet-latest",
-        "claude-sonnet-4.5": "claude-3-5-sonnet-latest",
-        "claude-sonnet-4-5": "claude-3-5-sonnet-latest",
+        "haiku-4.5": "claude-haiku-4-5-20251001",
+        "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        "sonnet-4.5": "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
         "opus-4.5": "claude-3-opus-latest",
         "claude-opus-4.5": "claude-3-opus-latest",
         "claude-opus-4-5": "claude-3-opus-latest",

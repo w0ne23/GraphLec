@@ -712,31 +712,51 @@ def _slide_number_key(value: Any) -> Optional[int]:
         return None
 
 
-def _load_slide_image_url_map(output_dir: Path) -> dict[int, str]:
+def _safe_count(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_slide_image_url_map(output_dir: Path) -> dict[str, dict[Any, str]]:
     classified_paths = list(output_dir.glob("*_slide_classified.json"))
     if not classified_paths:
-        return {}
+        return {"by_number": {}, "by_title": {}}
 
-    try:
-        with open(classified_paths[0], "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return {}
-
-    image_urls: dict[int, str] = {}
-    for slide in data.get("slides", []) or []:
-        if not isinstance(slide, dict):
+    image_urls: dict[str, dict[Any, str]] = {"by_number": {}, "by_title": {}}
+    for classified_path in classified_paths:
+        try:
+            with open(classified_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            logger.warning("Failed to read slide image metadata: %s", classified_path, exc_info=True)
             continue
 
-        slide_number = _slide_number_key(slide.get("slide_number"))
-        image_url = make_file_url(slide.get("image_path"))
-        if slide_number is not None and image_url:
-            image_urls[slide_number] = image_url
+        for slide in data.get("slides", []) or []:
+            if not isinstance(slide, dict):
+                continue
+
+            image_url = make_file_url(slide.get("image_path"))
+            if not image_url:
+                continue
+
+            slide_number = _slide_number_key(slide.get("slide_number"))
+            if slide_number is not None:
+                image_urls["by_number"][slide_number] = image_url
+
+            title = str(slide.get("title") or "").strip()
+            if title:
+                image_urls["by_title"][title] = image_url
 
     return image_urls
 
 
-def _attach_slide_image_urls(items: list[dict], image_urls: dict[int, str]) -> list[dict]:
+def _attach_slide_image_urls(items: list[dict], image_urls: dict[str, dict[Any, str]]) -> list[dict]:
+    by_number = image_urls.get("by_number", {}) or {}
+    by_title = image_urls.get("by_title", {}) or {}
     enriched = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -744,10 +764,15 @@ def _attach_slide_image_urls(items: list[dict], image_urls: dict[int, str]) -> l
 
         copied = dict(item)
         slide_number = _slide_number_key(copied.get("slide_number"))
-        if slide_number is not None and not copied.get("slide_image_url"):
-            image_url = image_urls.get(slide_number)
-            if image_url:
-                copied["slide_image_url"] = image_url
+        slide_title = str(copied.get("slide_title") or "").strip()
+        image_url = copied.get("slide_image_url") or copied.get("image_url")
+        if not image_url:
+            image_url = by_title.get(slide_title)
+            if not image_url and slide_number is not None:
+                image_url = by_number.get(slide_number)
+        if image_url:
+            copied.setdefault("slide_image_url", image_url)
+            copied.setdefault("image_url", image_url)
         enriched.append(copied)
 
     return enriched
@@ -778,6 +803,20 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
     flow = data.get("claim_decision_flow", {}) or {}
     summary = data.get("claim_decision_flow_summary", {}) or {}
+    content_summary = data.get("summary", {}) or summary
+    feedback_items = data.get("feedback_items", []) or []
+    confirmed_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") == "confirmed"
+    ]
+    professor_check_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") in {"professor_check", "review_needed"}
+    ]
+    rejected_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") == "rejected"
+    ]
     final_claims = flow.get("final_confirmed_claims", []) or []
     needs_review_claims = flow.get("needs_review_claims", []) or []
     crosscheck_rejected_claims = flow.get("crosscheck_rejected_claims", []) or []
@@ -799,26 +838,48 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "lecture_id": str(detail["id"]),
         "stem": stem,
         "verification_path": str(verifier_path),
+        "schema_version": data.get("schema_version"),
         "mode": data.get("mode", ""),
         "verification_date": data.get("verification_date", ""),
-        "models": data.get("models", []) or [],
+        "models": data.get("models", {}) or [],
+        "pipeline_models": data.get("pipeline_models", {}) or {},
         "primary_model": data.get("primary_model", ""),
-        "summary": summary,
+        "summary": content_summary,
         "overview": data.get("claim_decision_overview", []) or [],
         "counts": {
-            "final_confirmed": int(summary.get("final_confirmed_claim_count", len(final_claims)) or 0),
-            "needs_review": int(summary.get("needs_review_claim_count", len(needs_review_claims)) or 0),
+            "final_confirmed": _safe_count(
+                content_summary.get(
+                    "confirmed_feedback_count",
+                    summary.get("final_confirmed_claim_count", len(confirmed_feedback_items) or len(final_claims)),
+                )
+            ),
+            "needs_review": _safe_count(
+                content_summary.get(
+                    "review_needed_feedback_count",
+                    summary.get("needs_review_claim_count", len(professor_check_feedback_items) or len(needs_review_claims)),
+                )
+            ),
+            "rejected": _safe_count(
+                content_summary.get("rejected_feedback_count", len(rejected_feedback_items))
+            ),
             "slide_typos": len(slide_typos),
             "slide_typo_needs_review": len(slide_typo_needs_review),
-            "crosscheck_rejected": int(summary.get("crosscheck_rejected_claim_count", len(crosscheck_rejected_claims)) or 0),
-            "crosscheck_inconclusive": int(summary.get("crosscheck_inconclusive_claim_count", len(crosscheck_inconclusive_claims)) or 0),
-            "slide_rejected": int(summary.get("slide_rejected_claim_count", len(slide_rejected_claims)) or 0),
-            "grounding_rejected": int(summary.get("grounding_rejected_claim_count", len(grounding_rejected_claims)) or 0),
-            "first_stage_rejected": int(summary.get("first_stage_rejected_claim_count", len(first_stage_rejected_claims)) or 0),
+            "crosscheck_rejected": _safe_count(summary.get("crosscheck_rejected_claim_count", len(crosscheck_rejected_claims))),
+            "crosscheck_inconclusive": _safe_count(summary.get("crosscheck_inconclusive_claim_count", len(crosscheck_inconclusive_claims))),
+            "slide_rejected": _safe_count(summary.get("slide_rejected_claim_count", len(slide_rejected_claims))),
+            "grounding_rejected": _safe_count(summary.get("grounding_rejected_claim_count", len(grounding_rejected_claims))),
+            "first_stage_rejected": _safe_count(summary.get("first_stage_rejected_claim_count", len(first_stage_rejected_claims))),
         },
-        "final_confirmed_claim_count": int(
-            summary.get("final_confirmed_claim_count", len(final_claims))
+        "final_confirmed_claim_count": _safe_count(
+            content_summary.get(
+                "confirmed_feedback_count",
+                summary.get("final_confirmed_claim_count", len(confirmed_feedback_items) or len(final_claims)),
+            )
         ),
+        "claims": data.get("claims", []) or [],
+        "feedback_groups": data.get("feedback_groups", []) or [],
+        "feedback_items": feedback_items,
+        "views": data.get("views", {}) or {},
         "final_confirmed_claims": final_claims,
         "needs_review_claims": needs_review_claims,
         "crosscheck_rejected_claims": crosscheck_rejected_claims,

@@ -60,14 +60,10 @@ Google Search 결과를 근거로, 이 지적을 뒷받침하거나 반박하는
 3. 검색 결과에서 그 문맥화된 지적 내용을 뒷받침하는 근거를 찾으세요.
 4. 검색 결과가 오히려 발화 원문이 맞다고 지지하면, 이 지적은 기각합니다.
 5. 검색 결과가 불충분하거나 모호하면, 이 지적 자체를 기각하지 말고 외부 근거가 부족하다고 표시합니다.
-6. 슬라이드가 같은 교육적 단순화를 명시하고 발화가 이를 설명하는 경우, 강의 범위 밖의 고급 예외만으로 오류 처리하지 마세요.
-7. 입문 운영체제 강의의 계층 구조 설명을 펌웨어, DMA, 하이퍼바이저, 장치 내부 컨트롤러 같은 예외만으로 반박하지 마세요.
+6. 슬라이드가 같은 교육적 단순화를 명시하고 발화가 이를 설명하는 경우, 강의 수준 밖의 세부 예외만으로 오류 처리하지 마세요.
 
 ★ 중요: 검색 쿼리는 반드시 강의 도메인({domain_label})의 맥락으로 검색하세요.
-예: 특정 프로그래밍 언어 강의라면 해당 언어명을 포함해서 검색해야 하며,
-    다른 언어의 문법/문서를 근거로 사용하면 안 됩니다.
-예: 물리학 강의라면 물리학 맥락으로 검색해야 하며,
-    화학이나 다른 분야의 용어 정의를 근거로 사용하면 안 됩니다.
+다른 도메인의 용어 정의나 관례를 근거로 사용하지 마세요.
 
 응답 (JSON만):
 ```json
@@ -124,20 +120,6 @@ def _normalize_grounding_status(payload: dict, is_valid: bool) -> str:
     return "verified_error" if is_valid else "rejected_by_evidence"
 
 
-def _classify_grounding_result(issue: dict) -> str:
-    """grounding은 최종 판정이 아니라 외부 근거 첨부/반박 확인 단계로 사용한다."""
-    status = str(issue.get("grounding_status") or "").strip().lower()
-    if status in {"verified_error", "insufficient_evidence", "grounding_unavailable"}:
-        return "verified"
-    if status == "rejected_by_evidence":
-        return "rejected"
-
-    verified = issue.get("grounding_verified")
-    if verified is False:
-        return "rejected"
-    return "verified"
-
-
 def _ground_verify_issue(
     issue: dict,
     hint: dict,
@@ -161,6 +143,10 @@ def _ground_verify_issue(
         payload = cv._parse_grounding_payload(text)
         is_valid = _coerce_bool(payload.get("is_valid", True), default=True)
         status = _normalize_grounding_status(payload, is_valid)
+        if status == "rejected_by_evidence":
+            is_valid = False
+        elif status in {"verified_error", "insufficient_evidence", "grounding_unavailable"}:
+            is_valid = True
         reason = str(payload.get("reason", "") or "")
         sources = payload.get("evidence_sources", [])
         if not isinstance(sources, list):
@@ -190,53 +176,54 @@ def ground_verify_all_issues(
     slide_ctx: dict | None = None,
     slides: list[dict] | None = None,
     max_workers: int = 4,
-) -> tuple[list[dict], list[dict], list[dict], int, int, dict]:
-    """모든 이슈를 grounding 검증하고, 확정/기각/리뷰 필요로 분류."""
+) -> tuple[list[dict], list[dict], int, int, dict]:
+    """모든 이슈를 grounding 검증하고, 통과/기각으로 분류."""
     from . import claim_common as cv
 
     if not issues:
-        return [], [], [], 0, 0, cv._empty_token_usage()
+        return [], [], 0, 0, cv._empty_token_usage()
 
     print(f"\n  ── 4단계: grounding 검증 ({len(issues)}건) ──")
     verified = []
     rejected = []
-    needs_review = []
     api_calls = 0
     failed_calls = 0
     token_usage = cv._empty_token_usage()
 
     def process(i, issue):
+        issue = issue.copy()
+        cv.normalize_issue_metadata(issue)
         claim_preview = str(issue.get("claim_text", issue.get("problematic_content", "")))[:50]
+        if not cv.is_fact_grounded_issue(issue):
+            print(f"    grounding [{i+1}/{len(issues)}] {claim_preview}... 문맥 피드백 유지")
+            kept = issue
+            kept["grounding_verified"] = True
+            kept["grounding_skipped"] = True
+            kept["grounding_reason"] = "혼동 가능 설명은 외부 검색 대신 crosscheck 문맥 검증 결과를 유지합니다."
+            kept["grounding_api_failed"] = False
+            return kept, cv._empty_token_usage()
         print(f"    grounding [{i+1}/{len(issues)}] {claim_preview}...")
-        return _ground_verify_issue(issue.copy(), hint, slide_ctx, slides)
+        return _ground_verify_issue(issue, hint, slide_ctx, slides)
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(process, i, iss): i for i, iss in enumerate(issues)}
         for f in as_completed(futures):
-            api_calls += 1
             try:
                 result, call_usage = f.result()
+                if not result.get("grounding_skipped"):
+                    api_calls += 1
                 token_usage = cv._merge_token_usage(token_usage, call_usage)
                 if result.get("grounding_api_failed"):
                     failed_calls += 1
-                classification = _classify_grounding_result(result)
-                if classification == "rejected":
+                if result.get("grounding_verified") is False:
                     rejected.append(result)
-                    print(f"      ❌ 근거로 기각: {result.get('grounding_reason', '')[:80]}")
-                elif classification == "needs_review":
-                    verified.append(result)
-                    print(f"      ✅ 근거 미확정: {result.get('grounding_reason', '')[:80]}")
+                    print(f"      ❌ 기각: {result.get('grounding_reason', '')[:80]}")
                 else:
                     verified.append(result)
-                    status = str(result.get("grounding_status") or "")
-                    if status in {"insufficient_evidence", "grounding_unavailable"}:
-                        print(f"      ✅ 확정 유지(외부 근거 미확정): {result.get('grounding_reason', '')[:80]}")
-                    else:
-                        print(f"      ✅ 확인")
+                    print(f"      ✅ 확인")
             except Exception as e:
                 idx = futures[f]
                 issue_copy = issues[idx].copy()
-                issue_copy["grounding_status"] = "grounding_unavailable"
                 issue_copy["grounding_verified"] = None
                 issue_copy["grounding_reason"] = f"grounding 실패: {e}"
                 issue_copy["grounding_api_failed"] = True
@@ -245,9 +232,5 @@ def ground_verify_all_issues(
 
     verified.sort(key=lambda x: float(x.get("start_time", 0) or 0))
     rejected.sort(key=lambda x: float(x.get("start_time", 0) or 0))
-    needs_review.sort(key=lambda x: float(x.get("start_time", 0) or 0))
-    print(
-        f"  grounding 결과: {len(verified)}건 확인, "
-        f"{len(rejected)}건 근거 기각, {len(needs_review)}건 리뷰 필요"
-    )
-    return verified, rejected, needs_review, api_calls, failed_calls, token_usage
+    print(f"  grounding 결과: {len(verified)}건 확인, {len(rejected)}건 기각")
+    return verified, rejected, api_calls, failed_calls, token_usage
