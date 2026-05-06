@@ -28,6 +28,7 @@ export async function uploadLecture({ file, title, category, description }) {
     category,
     description,
     status: 'pending',
+    created_at: data.created_at,  // ← 이것만 추가
   };
 }
 
