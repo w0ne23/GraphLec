@@ -28,6 +28,7 @@ export async function uploadLecture({ file, title, category, description }) {
     category,
     description,
     status: 'pending',
+    created_at: data.created_at,  // ← 이것만 추가
   };
 }
 
@@ -52,29 +53,21 @@ export async function getLectureStatus(jobId) {
 
 export async function listLectures() {
   try {
-    const res = await fetch(`${API_BASE}/jobs`);
+    const res = await fetch(`${API_BASE}/results`);
     if (!res.ok) throw new Error('Failed to fetch lectures');
-    
+
     const data = await res.json();
-    return data.map(job => {
-      // 프론트엔드가 기대하는 백엔드 응답은 format_job_dict에서 생성된 구조입니다.
-      // job.job_id가 존재합니다. content.id가 존재하면 가져옵니다.
-      const content = job.content && job.content.length > 0 ? job.content[0] : {};
-      
-      const jobId = job.job_id || job.id; // Fallback
-      
-      return {
-        id: content.id || jobId, // 라우팅 등 범용 식별자 (우선순위: lecture_id > job_id)
-        job_id: jobId,           // 명확한 job 제어용 (상태조회, 삭제, 재시도)
-        lecture_id: content.id,  // 명확한 결과 조회용 (그래프, 질의)
-        title: content.title || (job.input_path ? job.input_path.split(/[\\/]/).pop() : 'Untitled'),
-        category: content.category || '기타',
-        status: job.status,
-        created_at: job.created_at,
-        error_message: job.error_message,
-        pipeline_stages: job.pipeline_stages || []
-      };
-    });
+    return data.map(lecture => ({
+      id: lecture.id,          // lecture_id — 라우팅 등 범용 식별자
+      job_id: lecture.job_id,  // job 제어용 (상태조회, 삭제, 재시도)
+      lecture_id: lecture.id,  // 결과 조회용 (그래프, 질의)
+      title: lecture.title || 'Untitled',
+      category: lecture.category || '기타',
+      status: lecture.status,
+      created_at: lecture.created_at,
+      error_message: lecture.error_message,
+      pipeline_stages: lecture.pipeline_stages || [],
+    }));
   } catch (error) {
     console.error("listLectures error:", error);
     return [];
