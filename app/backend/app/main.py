@@ -25,8 +25,26 @@ PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else PROJECT_ROOT_DIR
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 
+# Global worker task registry for monitoring
+worker_tasks = []
+
+async def monitor_workers():
+    """Periodically logs the number of active workers."""
+    while True:
+        try:
+            await asyncio.sleep(5)
+            if worker_tasks:
+                active = len([t for t in worker_tasks if not t.done()])
+                total = len(worker_tasks)
+                print(f"--- [Backend Heartbeat] Active Workers: {active}/{total} ---", flush=True)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"--- [Monitor Error]: {e} ---", flush=True)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global worker_tasks
     print("--- [FastAPI] Starting lifespan events... ---", flush=True)
     
     # Ensure local storage directory exists
@@ -48,15 +66,17 @@ async def lifespan(app: FastAPI):
         )
     
     print("--- [FastAPI] Starting worker loops... ---", flush=True)
-    tasks = [asyncio.create_task(worker_loop()) for _ in range(3)]
-    print(f"--- [FastAPI] {len(tasks)} worker tasks created. ---", flush=True)
+    worker_tasks = [asyncio.create_task(worker_loop()) for _ in range(3)]
+    monitor_task = asyncio.create_task(monitor_workers())
+    print(f"--- [FastAPI] {len(worker_tasks)} worker tasks and monitor created. ---", flush=True)
     
     yield
     
     print("--- [FastAPI] Shutting down... Cancelling workers. ---", flush=True)
-    for task in tasks:
+    monitor_task.cancel()
+    for task in worker_tasks:
         task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    await asyncio.gather(monitor_task, *worker_tasks, return_exceptions=True)
     print("--- [FastAPI] Shutdown complete. ---", flush=True)
 
 app = FastAPI(lifespan=lifespan)
