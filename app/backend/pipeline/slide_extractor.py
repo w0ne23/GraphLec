@@ -2159,7 +2159,7 @@ def _build_slide_number_lookup(metadata: list[dict]) -> dict[int, int]:
         items = by_scene[scene_idx]
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
         slide_idx = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
-        ts = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
+        ts = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
         ordered_pairs.append((ts, slide_idx))
 
     lookup: dict[int, int] = {}
@@ -2223,10 +2223,12 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
         base = next((x for x in items if x.get("capture_type") == "base"), items[0])
         slide_idx = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
         slide_number = int(base.get("slide_number", slide_number_lookup.get(slide_idx, slide_idx)) or slide_idx)
-        scene_start = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
-        scene_end = float(base.get("scene_end_sec", scene_start) or scene_start)
+        scene_start = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
+        scene_end = float(base.get("scene_end_sec", base.get("slide_end_sec", scene_start)) or scene_start)
+        scene_type = base.get("scene_type", "slide")
         mappings.append({
             "scene_index": scene_idx,
+            "scene_type": scene_type,
             "slide_number": slide_number,
             "slide_canonical_index": slide_idx,
             "slide_group": list(base.get("slide_group", base.get("same_slide_group", [slide_idx]))),
@@ -2247,17 +2249,22 @@ def build_scene_slide_map(metadata: list[dict]) -> dict:
             "clean_final_filename": base.get("clean_final_filename", base.get("filename")),
             "clean_final_capture_type": base.get("clean_final_capture_type", "base"),
         })
+        if scene_type == "video":
+            mappings[-1]["video_start_sec"] = float(base.get("video_start_sec", scene_start) or scene_start)
+            mappings[-1]["video_end_sec"] = float(base.get("video_end_sec", scene_end) or scene_end)
 
     unique_slides = sorted({row["slide_canonical_index"] for row in mappings})
     return {
         "summary": {
             "total_scenes": len(mappings),
             "total_slides": len(unique_slides),
+            "total_video_scenes": sum(1 for row in mappings if row.get("scene_type") == "video"),
         },
         "timeline": [
             {
                 "order": i + 1,
                 "scene_index": row["scene_index"],
+                "scene_type": row.get("scene_type", "slide"),
                 "slide_number": row["slide_number"],
                 "slide_canonical_index": row["slide_canonical_index"],
             }
@@ -2298,6 +2305,7 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
         for items in scene_groups:
             base = next((x for x in items if x.get("capture_type") == "base"), items[0])
             scene_idx = int(base.get("scene_index", 0) or 0)
+            scene_type = base.get("scene_type", "slide")
             annots = sorted(
                 [x for x in items if x.get("capture_type") == "annotation"],
                 key=lambda x: (
@@ -2307,13 +2315,14 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
             )
             visit_entry = {
                 "scene_index": scene_idx,
+                "scene_type": scene_type,
                 "slide_number": slide_number,
                 "visit_order": int(base.get("slide_visit_order", base.get("same_slide_visit_order", 1)) or 1),
                 "is_revisit": bool(base.get("slide_is_revisit", base.get("same_slide_is_revisit", False))),
-                "scene_start_sec": float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0),
-                "scene_end_sec": float(base.get("scene_end_sec", base.get("timestamp_sec", 0.0)) or 0.0),
-                "scene_start_formatted": _fmt_hms(base.get("scene_start_sec", base.get("timestamp_sec", 0.0))),
-                "scene_end_formatted": _fmt_hms(base.get("scene_end_sec", base.get("timestamp_sec", 0.0))),
+                "scene_start_sec": float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0),
+                "scene_end_sec": float(base.get("scene_end_sec", base.get("slide_end_sec", base.get("timestamp_sec", 0.0))) or 0.0),
+                "scene_start_formatted": _fmt_hms(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0)))),
+                "scene_end_formatted": _fmt_hms(base.get("scene_end_sec", base.get("slide_end_sec", base.get("timestamp_sec", 0.0)))),
                 "base_filename": base.get("filename"),
                 "clean_final_filename": base.get("clean_final_filename", base.get("filename")),
                 "clean_final_capture_type": base.get("clean_final_capture_type", "base"),
@@ -2322,6 +2331,9 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
                 "scene_annotation_end_index": int(base.get("scene_annotation_end_index", 0) or 0),
                 "annotations": [],
             }
+            if scene_type == "video":
+                visit_entry["video_start_sec"] = float(base.get("video_start_sec", visit_entry["scene_start_sec"]) or visit_entry["scene_start_sec"])
+                visit_entry["video_end_sec"] = float(base.get("video_end_sec", visit_entry["scene_end_sec"]) or visit_entry["scene_end_sec"])
 
             for annot in annots:
                 annot_entry = {
@@ -2344,6 +2356,8 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
         slides_payload.append({
             "slide_number": slide_number,
             "slide_canonical_index": slide_idx,
+            "scene_types": sorted({visit.get("scene_type", "slide") for visit in visits}),
+            "contains_video": any(visit.get("scene_type") == "video" for visit in visits),
             "scene_indices": [visit["scene_index"] for visit in visits],
             "visit_count": len(visits),
             "total_annotation_count": len(all_annotations),
@@ -2355,6 +2369,12 @@ def build_canonical_slide_annotations(metadata: list[dict]) -> dict:
         "summary": {
             "total_slides": len(slides_payload),
             "total_annotations": total_annotations,
+            "total_video_scenes": sum(
+                1
+                for slide in slides_payload
+                for visit in slide["visits"]
+                if visit.get("scene_type") == "video"
+            ),
         },
         "slides": slides_payload,
     }

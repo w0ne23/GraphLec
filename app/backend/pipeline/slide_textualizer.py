@@ -348,6 +348,7 @@ class SlideLoader:
         for scene_num in sorted(base_entries.keys()):
             base = base_entries[scene_num]
             annots = annot_entries.get(scene_num, [])
+            scene_type = base.get("scene_type", "slide")
 
             if annots:
                 last_annot = max(
@@ -381,6 +382,7 @@ class SlideLoader:
                 "slide_visit_order": base.get("slide_visit_order", base.get("same_slide_visit_order", 1)),
                 "slide_is_revisit": bool(base.get("slide_is_revisit", base.get("same_slide_is_revisit", False))),
                 "timestamp": base.get("timestamp_sec", 0.0),
+                "scene_type": scene_type,
                 "base_entry": base,
                 "target_entry": target,
                 "has_annot": bool(annots),
@@ -392,6 +394,8 @@ class SlideLoader:
         # 같은 slide family는 가장 정보가 많은 representative scene 하나만 LLM 입력으로 사용
         canonical_representatives: Dict[int, dict] = {}
         for record in scene_records:
+            if record.get("scene_type") == "video":
+                continue
             canonical = record["slide_canonical_number"]
             current = canonical_representatives.get(canonical)
             score = (
@@ -412,6 +416,36 @@ class SlideLoader:
 
         slides = []
         for record in scene_records:
+            if record.get("scene_type") == "video":
+                image_path = self.slides_dir / record["base_entry"]["filename"]
+                if not image_path.exists():
+                    logger.warning(f"video thumbnail 없음: {image_path}, 스킵")
+                    continue
+                slides.append({
+                    "scene_number":  record["scene_number"],
+                    "scene_index":   record["scene_index"],
+                    "scene_type":    "video",
+                    "slide_number":  record["slide_number"],
+                    "slide_canonical_number": record["slide_canonical_number"],
+                    "slide_visit_order": record["slide_visit_order"],
+                    "slide_is_revisit": record["slide_is_revisit"],
+                    "representative_scene_number": record["scene_number"],
+                    "timestamp":      record["timestamp"],
+                    "image_path":     str(image_path),
+                    "image":          None,
+                    "base_image":     None,
+                    "has_annot":      False,
+                    "has_teacher_annotation": False,
+                    "text_image_has_annot": False,
+                    "text_source":    "video",
+                    "title":          "영상 구간",
+                    "t1":             "",
+                    "t1_structure":   "",
+                    "slide_type":     "video",
+                    "slide_emphasis": [],
+                })
+                continue
+
             canonical = record["slide_canonical_number"]
             rep = canonical_representatives[canonical]
 
@@ -429,6 +463,7 @@ class SlideLoader:
             slides.append({
                 "scene_number":  record["scene_number"],
                 "scene_index":   record["scene_index"],
+                "scene_type":    record.get("scene_type", "slide"),
                 "slide_number":  record["slide_number"],
                 "slide_canonical_number": canonical,
                 "slide_visit_order": record["slide_visit_order"],
@@ -469,7 +504,7 @@ class SlideLoader:
             items = by_scene[scene_idx]
             base = next((x for x in items if x.get("capture_type") == "base"), items[0])
             canonical = int(base.get("slide_canonical_index") or base.get("same_slide_canonical") or scene_idx)
-            ts = float(base.get("scene_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
+            ts = float(base.get("scene_start_sec", base.get("slide_start_sec", base.get("timestamp_sec", 0.0))) or 0.0)
             ordered_pairs.append((ts, canonical))
 
         lookup: dict[int, int] = {}
@@ -517,6 +552,7 @@ class SlideLoader:
             slides.append({
                 "scene_number": slide_num,
                 "scene_index": slide_num,
+                "scene_type": "slide",
                 "slide_number": slide_num,
                 "slide_canonical_number": slide_num,
                 "slide_visit_order": 1,
@@ -835,6 +871,13 @@ class T1Extractor:
         slide.setdefault("t1_structure", "")
         slide.setdefault("visual_assets", [])
         slide.setdefault("slide_emphasis", [])
+        if slide.get("scene_type") == "video":
+            slide["title"] = slide.get("title") or "영상 구간"
+            slide["slide_type"] = "video"
+            slide["has_teacher_annotation"] = False
+            slide["text_image_has_annot"] = False
+            slide["text_source"] = "video"
+            return slide
 
         # 텍스트 추출 대상이 annot 이미지일 때만 base + annot 2장 전달.
         text_image_has_annot = slide.get("text_image_has_annot", slide.get("has_annot", False))
@@ -894,6 +937,14 @@ class T1Extractor:
 
         cache: Dict[int, Dict] = {}
         for i, slide in enumerate(slides):
+            if slide.get("scene_type") == "video":
+                self.extract(slide)
+                logger.info(
+                    f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
+                    "(video, textualization skipped)"
+                )
+                continue
+
             cache_key = int(slide.get("slide_canonical_number", slide["slide_number"]))
             if cache_key in cache:
                 cached = cache[cache_key]
@@ -1026,6 +1077,7 @@ class TextualizationPipeline:
                 {
                     "slide_id":            s["slide_id"],
                     "scene_id":            s.get("scene_id"),
+                    "scene_type":          s.get("scene_type", "slide"),
                     "scene_number":        s.get("scene_number", s["slide_number"]),
                     "scene_index":         s.get("scene_index", s.get("scene_number", s["slide_number"])),
                     "slide_number":        s["slide_number"],
