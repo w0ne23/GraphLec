@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 from neo4j import GraphDatabase
 
-from app.models import Job, LectureContent, GraphSession
+from app.models import Lecture, ProcessingJob, GraphSession
 from pipeline.graphrag_neo4j_ingest import (
     delete_graphrag_layer_tx,
     find_graphrag_output_dir,
@@ -48,16 +48,16 @@ _RUNTIME_GRAPH_LABELS = {
 }
 
 # ── 경로 설정 ────────────────────────────────────────────────────────────────
-PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
+PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 
 
 # ── Neo4j ────────────────────────────────────────────────────────────────────
 def get_neo4j_driver():
-    uri  = os.getenv("NEO4J_URI")
+    uri = os.getenv("NEO4J_URI")
     user = os.getenv("NEO4J_USER")
-    pw   = os.getenv("NEO4J_PASSWORD")
+    pw = os.getenv("NEO4J_PASSWORD")
     if not all([uri, user, pw]):
         return None
     return GraphDatabase.driver(uri, auth=(user, pw))
@@ -185,6 +185,8 @@ def clear_runtime_lecture_graphs() -> Dict[str, int]:
     except Exception as e:
         logger.warning("Failed to clear Neo4j runtime lecture graphs: %s", e)
         return {"before": 0, "after": 0}
+    
+    
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -196,10 +198,10 @@ def _session_expired(cutoff: datetime):
     )
 
 
-async def _cleanup_stale_sessions(db: AsyncSession, stem: str) -> int:
+async def _cleanup_stale_sessions(db: AsyncSession, lecture_id) -> int:
     cutoff = _utcnow() - timedelta(seconds=GRAPH_SESSION_TTL_SEC)
     q = select(GraphSession).where(
-        GraphSession.stem == stem,
+        GraphSession.stem == str(lecture_id),
         _session_expired(cutoff),
     )
     res = await db.execute(q)
@@ -211,10 +213,10 @@ async def _cleanup_stale_sessions(db: AsyncSession, stem: str) -> int:
     return len(rows)
 
 
-async def _active_session_count(db: AsyncSession, stem: str) -> int:
-    await _cleanup_stale_sessions(db, stem)
+async def _active_session_count(db: AsyncSession, lecture_id) -> int:
+    await _cleanup_stale_sessions(db, lecture_id)
     q = select(GraphSession).where(
-        GraphSession.stem == stem,
+        GraphSession.stem == str(lecture_id),
         GraphSession.ended_at.is_(None),
     )
     res = await db.execute(q)
@@ -225,7 +227,6 @@ async def _touch_or_create_graph_session(
     db: AsyncSession,
     *,
     lecture_id,
-    stem: str,
     session_id: str,
     now: datetime,
 ) -> None:
@@ -248,7 +249,7 @@ async def _touch_or_create_graph_session(
         db.add(
             GraphSession(
                 lecture_id=lecture_id,
-                stem=stem,
+                stem=str(lecture_id),
                 session_id=session_id,
                 last_heartbeat_at=now,
                 ended_at=None,
@@ -267,7 +268,6 @@ async def _commit_graph_session_touch(
     db: AsyncSession,
     *,
     lecture_id,
-    stem: str,
     session_id: str,
     now: datetime,
 ) -> None:
@@ -275,7 +275,6 @@ async def _commit_graph_session_touch(
         await _touch_or_create_graph_session(
             db,
             lecture_id=lecture_id,
-            stem=stem,
             session_id=session_id,
             now=now,
         )
@@ -285,7 +284,6 @@ async def _commit_graph_session_touch(
         await _touch_or_create_graph_session(
             db,
             lecture_id=lecture_id,
-            stem=stem,
             session_id=session_id,
             now=now,
         )
@@ -391,8 +389,8 @@ def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
-def format_job_dict(job: Job, content: Optional[LectureContent]) -> Dict[str, Any]:
-    """Job과 LectureContent를 하나의 딕셔너리로 직렬화"""
+def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str, Any]:
+    """ProcessingJob과 Lecture를 하나의 딕셔너리로 직렬화"""
     stages = job.pipeline_stages
     if isinstance(stages, str):
         try:
@@ -403,23 +401,23 @@ def format_job_dict(job: Job, content: Optional[LectureContent]) -> Dict[str, An
         stages = []
 
     res = {
-        "job_id":          str(job.id),
-        "status":          job.status,
-        "input_path":      job.input_path,
-        "current_stage":   job.current_stage,
-        "error_message":   job.error_message,
+        "job_id": str(job.id),
+        "status": job.status,
+        "current_stage": job.current_stage,
+        "error_message": job.error_message,
         "pipeline_stages": stages,
-        "created_at":      job.created_at.isoformat() if job.created_at else None,
-        "content":         [],
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "content": [],
     }
-    if content:
+    if lecture:
+        res["video_path"] = lecture.video_path
         res["content"].append({
-            "id":          str(content.id),
-            "title":       content.title,
-            "category":    content.category,
-            "description": content.description,
-            "stem":        content.stem,
-            "output_dir":  content.output_dir,
+            "id": str(lecture.id),
+            "title": lecture.title,
+            "category": lecture.category,
+            "description": lecture.description,
+            "stem": str(lecture.id),
+            "output_dir": lecture.output_dir,
         })
     return res
 
@@ -453,17 +451,19 @@ def _str_cell(x: Any) -> str:
     return str(x)
 
 
-# ── Job CRUD (분석 프로세스 관리) ─────────────────────────────────────────────
-async def get_job(db: AsyncSession, job_id: str) -> Optional[Job]:
-    result = await db.execute(select(Job).where(Job.id == job_id))
+# ── ProcessingJob CRUD ───────────────────────────────────────────────────────
+async def get_job(db: AsyncSession, job_id: str) -> Optional[ProcessingJob]:
+    result = await db.execute(
+        select(ProcessingJob).where(ProcessingJob.id == job_id)
+    )
     return result.scalar_one_or_none()
 
 
 async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, Any]]:
     query = (
-        select(Job, LectureContent)
-        .outerjoin(LectureContent, Job.id == LectureContent.job_id)
-        .where(Job.id == job_id)
+        select(ProcessingJob, Lecture)
+        .join(Lecture, ProcessingJob.lecture_id == Lecture.id)
+        .where(ProcessingJob.id == job_id)
     )
     result = await db.execute(query)
     row = result.unique().one_or_none()
@@ -474,9 +474,9 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
 
 async def list_jobs(db: AsyncSession) -> List[Dict[str, Any]]:
     query = (
-        select(Job, LectureContent)
-        .outerjoin(LectureContent, Job.id == LectureContent.job_id)
-        .order_by(Job.created_at.desc())
+        select(ProcessingJob, Lecture)
+        .join(Lecture, ProcessingJob.lecture_id == Lecture.id)
+        .order_by(ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
     rows = result.unique().all()
@@ -487,158 +487,190 @@ async def retry_job(db: AsyncSession, job_id: str) -> bool:
     job = await get_job(db, job_id)
     if not job:
         return False
-    job.status          = "pending"
-    job.error_message   = None
-    job.current_stage   = "Resuming pipeline..."
+    job.status = "pending"
+    job.error_message = None
+    job.current_stage = "Resuming pipeline..."
     job.pipeline_stages = []
     await db.commit()
     return True
 
 
-async def delete_job_and_content(db: AsyncSession, job_id: str) -> bool:
-    """모든 연관 데이터(DB, 로컬 파일, Neo4j) 정리"""
+async def delete_lecture_by_job(db: AsyncSession, job_id: str) -> bool:
+    """job_id로 강의(Lecture) 전체 삭제 — DB, 로컬 파일, Neo4j 모두 정리"""
     job = await get_job(db, job_id)
     if not job:
         return False
 
-    stem = Path(job.input_path).stem if job.input_path else None
-    result  = await db.execute(select(LectureContent).where(LectureContent.job_id == job_id))
-    content = result.scalar_one_or_none()
+    lecture_result = await db.execute(
+        select(Lecture).where(Lecture.id == job.lecture_id)
+    )
+    lecture = lecture_result.scalar_one_or_none()
+    if not lecture:
+        return False
 
-    if job.input_path:
-        shutil.rmtree(Path(job.input_path).parent, ignore_errors=True)
-    if content and content.output_dir:
-        shutil.rmtree(Path(content.output_dir), ignore_errors=True)
+    stem = str(lecture.id) # stem = lecture_id
 
-    if stem:
-        driver = get_neo4j_driver()
-        if driver:
-            try:
-                with driver.session() as session:
-                    session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
-            finally:
-                driver.close()
+    # 파일 정리 — inputs/{lecture_id}/ 와 results/{lecture_id}/
+    if lecture.video_path:
+        shutil.rmtree(Path(lecture.video_path).parent, ignore_errors=True)
+    if lecture.output_dir:
+        shutil.rmtree(Path(lecture.output_dir), ignore_errors=True)
 
-    await db.execute(delete(Job).where(Job.id == job_id))
+    # Neo4j 정리
+    driver = get_neo4j_driver()
+    if driver:
+        try:
+            with driver.session() as session:
+                session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
+        finally:
+            driver.close()
+
+    # Lecture CASCADE로 ProcessingJob, GraphSession 함께 삭제
+    await db.execute(delete(Lecture).where(Lecture.id == lecture.id))
     await db.commit()
     return True
 
 
 # ── 결과 조회 (Lecture ID 기준) ───────────────────────────────────────────────
 async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
-    """완료된 강의 목록 — Lecture ID 및 Job 상태 포함"""
+    """강의 목록 — 각 강의의 최신 job 상태 포함"""
+    # 최신 job을 서브쿼리로 가져오기 위해 모든 job을 로드 후 Python에서 필터
+    # (추후 window function으로 최적화 가능)
     query = (
-        select(Job, LectureContent)
-        .join(LectureContent, Job.id == LectureContent.job_id)
-        .order_by(Job.created_at.desc())
+        select(Lecture, ProcessingJob)
+        .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
     rows = result.unique().all()
-    return [
-        {
-            "id":          str(row[1].id),      # Lecture ID
-            "job_id":      str(row[0].id),      # Job ID
-            "status":      row[0].status,
-            "title":       row[1].title or row[1].stem,
-            "category":    row[1].category or "기타",
-            "description": row[1].description,
-            "stem":        row[1].stem,
-            "video_url":   make_file_url(row[1].video_path),
-            "created_at":  row[0].created_at.isoformat() if row[0].created_at else None,
-        }
-        for row in rows
-    ]
+
+    # lecture별로 최신 job만 남기기
+    seen: set = set()
+    out = []
+    for lecture, job in rows:
+        if lecture.id in seen:
+            continue
+        seen.add(lecture.id)
+        stem = str(lecture.id)
+        out.append({
+            "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "status": job.status if job else "unknown",
+            "title": lecture.title or stem,
+            "category": lecture.category or "기타",
+            "description": lecture.description,
+            "stem": stem,
+            "video_url": make_file_url(lecture.video_path),
+            "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+        })
+    return out
 
 
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict[str, Any]]:
     """강의 상세 정보 조회.
 
-    프론트가 업로드 직후 job_id를 들고 있는 경우가 있어 LectureContent.id,
-    Job.id, LectureContent.job_id, stem을 모두 허용한다.
+    프론트가 업로드 직후 job_id를 들고 있는 경우가 있어 Lecture.id,
+    Job.id, Lecture.job_id, stem을 모두 허용한다.
     """
     row = await _get_lecture_row(db, lecture_id)
     if not row:
         return None
-    job, content = row[0], row[1]
+    lecture, job = row
+    stem = str(lecture.id)
     return {
-        "id":          str(content.id),
-        "job_id":      str(job.id),
-        "status":      job.status,
-        "title":       content.title or content.stem,
-        "category":    content.category or "기타",
-        "description": content.description,
-        "stem":        content.stem,
-        "video_url":   make_file_url(content.video_path),
-        "output_dir":  content.output_dir,
-        "graphrag_workspace": content.graphrag_workspace,
-        "created_at":  job.created_at.isoformat() if job.created_at else None,
+        "id": str(lecture.id),
+        "job_id": str(job.id) if job else None,
+        "status": job.status if job else "unknown",
+        "title": lecture.title or stem,
+        "category": lecture.category or "기타",
+        "description": lecture.description,
+        "stem": stem,
+        "video_url": make_file_url(lecture.video_path),
+        "output_dir": lecture.output_dir,
+        "graphrag_workspace": str(Path(lecture.output_dir) / "graphrag") if lecture.output_dir else None,
+        "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
     }
 
 
-def _content_identifier_conditions(identifier: str):
-    raw = str(identifier)
-    conditions = [LectureContent.stem == raw]
-    try:
-        ident_uuid = uuid.UUID(raw)
-    except (ValueError, TypeError):
-        return conditions
-    conditions.extend([
-        LectureContent.id == ident_uuid,
-        LectureContent.job_id == ident_uuid,
-    ])
-    return conditions
 
-
-def _row_identifier_conditions(identifier: str):
-    conditions = _content_identifier_conditions(identifier)
+async def _get_lecture_row(db: AsyncSession, identifier: str):
+    """
+    identifier가 lecture_id이거나 job_id인 경우 모두 처리.
+    프론트가 업로드 직후 job_id를 들고 있는 경우를 위해 job_id로도 조회.
+    """
     try:
         ident_uuid = uuid.UUID(str(identifier))
     except (ValueError, TypeError):
-        return conditions
-    conditions.append(Job.id == ident_uuid)
-    return conditions
+        return None
 
-
-async def _get_lecture_row(db: AsyncSession, lecture_id: str):
+    # 먼저 lecture_id로 시도
     query = (
-        select(Job, LectureContent)
-        .join(LectureContent, Job.id == LectureContent.job_id)
-        .where(or_(*_row_identifier_conditions(lecture_id)))
+        select(Lecture, ProcessingJob)
+        .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .where(Lecture.id == ident_uuid)
+        .order_by(ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
-    return result.unique().one_or_none()
+    row = result.unique().first()
+    if row:
+        return row
 
-
-async def _get_lecture_content(db: AsyncSession, lecture_id: str) -> Optional[LectureContent]:
-    result = await db.execute(
-        select(LectureContent).where(or_(*_content_identifier_conditions(lecture_id)))
+    # lecture_id로 못 찾으면 job_id로 재시도
+    query2 = (
+        select(Lecture, ProcessingJob)
+        .join(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .where(ProcessingJob.id == ident_uuid)
+        .order_by(ProcessingJob.created_at.desc())
     )
-    return result.scalar_one_or_none()
+    result2 = await db.execute(query2)
+    return result2.unique().first()
 
 
+async def _get_lecture(db: AsyncSession, identifier: str) -> Optional[Lecture]:
+    """lecture_id 또는 job_id로 Lecture 객체를 반환"""
+    try:
+        ident_uuid = uuid.UUID(str(identifier))
+    except (ValueError, TypeError):
+        return None
+
+    result = await db.execute(select(Lecture).where(Lecture.id == ident_uuid))
+    lecture = result.scalar_one_or_none()
+    if lecture:
+        return lecture
+
+    # job_id로 재시도
+    job_result = await db.execute(
+        select(ProcessingJob).where(ProcessingJob.id == ident_uuid)
+    )
+    job = job_result.scalar_one_or_none()
+    if not job:
+        return None
+    result2 = await db.execute(select(Lecture).where(Lecture.id == job.lecture_id))
+    return result2.scalar_one_or_none()
+
+
+# ── GraphSession 관련 ────────────────────────────────────────────────────────
 async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
-    content = await _get_lecture_content(db, lecture_id)
-    if not content:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    content_id = content.id
-    stem = str(content.stem)
-    output_dir = str(content.output_dir)
+    stem = str(lecture.id)
+    output_dir = str(lecture.output_dir)
     now = _utcnow()
 
-    await _cleanup_stale_sessions(db, stem)
+    await _cleanup_stale_sessions(db, lecture.id)
     await _commit_graph_session_touch(
         db,
-        lecture_id=content_id,
-        stem=stem,
+        lecture_id=lecture.id,
         session_id=session_id,
         now=now,
     )
 
     load_info = _ensure_stem_loaded(stem, output_dir)
-    active_count = await _active_session_count(db, stem)
+    active_count = await _active_session_count(db, lecture.id)
     return {
-        "lecture_id": str(content_id),
+        "lecture_id": str(lecture.id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -648,38 +680,33 @@ async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
 
 
 async def graph_heartbeat(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
-    content = await _get_lecture_content(db, lecture_id)
-    if not content:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    content_id = content.id
-    stem = str(content.stem)
-    now = _utcnow()
 
+    now = _utcnow()
     await _commit_graph_session_touch(
         db,
-        lecture_id=content_id,
-        stem=stem,
+        lecture_id=lecture.id,
         session_id=session_id,
         now=now,
     )
-
     return {
-        "lecture_id": str(content_id),
-        "stem": stem,
+        "lecture_id": str(lecture.id),
+        "stem": str(lecture.id),
         "session_id": session_id,
-        "active_sessions": await _active_session_count(db, stem),
+        "active_sessions": await _active_session_count(db, lecture.id),
     }
 
 
 async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
-    content = await _get_lecture_content(db, lecture_id)
-    if not content:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    content_id = content.id
-    stem = str(content.stem)
 
+    stem = str(lecture.id)
     q = select(GraphSession).where(
-        GraphSession.lecture_id == content_id,
+        GraphSession.lecture_id == lecture.id,
         GraphSession.session_id == session_id,
         GraphSession.ended_at.is_(None),
     )
@@ -691,14 +718,14 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
             row.ended_at = now
         await db.commit()
 
-    active_count = await _active_session_count(db, stem)
+    active_count = await _active_session_count(db, lecture.id)
     unloaded_now = False
     if active_count == 0 and _is_stem_loaded(stem):
         _unload_stem_from_neo4j(stem)
         unloaded_now = True
 
     return {
-        "lecture_id": str(content_id),
+        "lecture_id": str(lecture.id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -708,28 +735,27 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
 
 
 async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
-    content = await _get_lecture_content(db, lecture_id)
-    if not content:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    stem = str(content.stem)
+    stem = str(lecture.id)
     return {
-        "lecture_id": str(content.id),
+        "lecture_id": str(lecture.id),
         "stem": stem,
         "loaded": _is_stem_loaded(stem),
-        "active_sessions": await _active_session_count(db, stem),
+        "active_sessions": await _active_session_count(db, lecture.id),
         "session_ttl_sec": GRAPH_SESSION_TTL_SEC,
     }
 
 
 async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict[str, Any]:
-    """질의응답 (Lecture ID 기준)"""
-    content = await _get_lecture_content(db, lecture_id)
-    if not content:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    stem      = content.stem
+    stem = str(lecture.id)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
-    _ensure_stem_loaded(stem, content.output_dir)
+    _ensure_stem_loaded(stem, lecture.output_dir)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -741,9 +767,9 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")
             qr = resp.json()
             return {
-                "answer":           qr.get("answer"),
-                "timestamps":       qr.get("timestamps", []),
-                "graph":            qr.get("graph", {"nodes": [], "edges": []}),
+                "answer": qr.get("answer"),
+                "timestamps": qr.get("timestamps", []),
+                "graph": qr.get("graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
             }
     except httpx.HTTPError:
@@ -772,10 +798,10 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
             if ts.startswith("00:"): ts = ts[3:]
 
             scenes.append({
-                "timestamp":    ts,
-                "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
-                "text":         s.get("title") or f"Slide {s.get('slide_number')}",
-                "image_url":    img_url,
+                "timestamp": ts,
+                "type": "emphasis" if s.get("role") == "elaborated" else "slide",
+                "text": s.get("title") or f"Slide {s.get('slide_number')}",
+                "image_url": img_url,
                 "slide_number": s.get("slide_number"),
             })
         return scenes
@@ -789,7 +815,7 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
     if not detail or not detail.get("output_dir"):
         raise HTTPException(status_code=404, detail="Lecture result not found")
 
-    output_dir  = Path(detail["output_dir"])
+    output_dir = Path(detail["output_dir"])
     nodes_paths = list(output_dir.glob("*_nodes.parquet"))
     edges_paths = list(output_dir.glob("*_edges.parquet"))
 
@@ -798,12 +824,17 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
 
     try:
         ndf = pd.read_parquet(nodes_paths[0])
-        edf = pd.read_parquet(edges_paths[0]) if edges_paths else pd.DataFrame(columns=["src_id", "rel_type", "tgt_id", "properties_json"])
+        edf = (
+            pd.read_parquet(edges_paths[0])
+            if edges_paths
+            else pd.DataFrame(columns=["src_id", "rel_type", "tgt_id", "properties_json"])
+        )
 
         nodes_out = []
         for _, row in ndf.iterrows():
             nid = _str_cell(row.get("node_id"))
-            if not nid: continue
+            if not nid:
+                continue
             label = _str_cell(row.get("label")) or nid
             props = _str_cell(row.get("properties_json")) or "{}"
             try:
@@ -819,7 +850,8 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         edges_out = []
         for _, row in edf.iterrows():
             src, tgt = _str_cell(row.get("src_id")), _str_cell(row.get("tgt_id"))
-            if not src or not tgt: continue
+            if not src or not tgt:
+                continue
             edges_out.append({"from": src, "to": tgt, "label": _str_cell(row.get("rel_type")) or "related"})
             for x in (src, tgt):
                 if x not in seen_ids:
@@ -1050,16 +1082,21 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 # ── 기타 유틸 ───────────────────────────────────────────────────────────────
 async def get_graph_info(db: AsyncSession, job_id: str) -> Dict[str, Any]:
     job = await get_job(db, job_id)
-    if not job: return {"error": "Not Found"}
-    stem = Path(job.input_path).stem
+    if not job:
+        return {"error": "Not Found"}
+    stem = str(job.lecture_id)
     node_count = 0
     driver = get_neo4j_driver()
     if driver:
         try:
             with driver.session() as session:
-                record = session.run("MATCH (n {stem: $stem}) RETURN count(n) AS count", stem=stem).single()
-                if record: node_count = record["count"]
-        finally: driver.close()
+                record = session.run(
+                    "MATCH (n {stem: $stem}) RETURN count(n) AS count", stem=stem
+                ).single()
+                if record:
+                    node_count = record["count"]
+        finally:
+            driver.close()
     return {"job_id": job_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
 
 
