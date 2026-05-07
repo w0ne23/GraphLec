@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import logging
@@ -667,7 +668,8 @@ async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         now=now,
     )
 
-    load_info = _ensure_stem_loaded(stem, output_dir)
+    loop = asyncio.get_event_loop()
+    load_info = await loop.run_in_executor(None, _ensure_stem_loaded, stem, output_dir)
     active_count = await _active_session_count(db, lecture.id)
     return {
         "lecture_id": str(lecture.id),
@@ -719,18 +721,20 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         await db.commit()
 
     active_count = await _active_session_count(db, lecture.id)
+    loop = asyncio.get_event_loop()
     unloaded_now = False
-    if active_count == 0 and _is_stem_loaded(stem):
-        _unload_stem_from_neo4j(stem)
+    if active_count == 0 and await loop.run_in_executor(None, _is_stem_loaded, stem):
+        await loop.run_in_executor(None, _unload_stem_from_neo4j, stem)
         unloaded_now = True
 
+    loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
     return {
         "lecture_id": str(lecture.id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
         "unloaded_now": unloaded_now,
-        "loaded": _is_stem_loaded(stem),
+        "loaded": loaded,
     }
 
 
@@ -739,11 +743,14 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
     stem = str(lecture.id)
+    loop = asyncio.get_event_loop()
+    loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
+    active_count = await _active_session_count(db, lecture.id)
     return {
         "lecture_id": str(lecture.id),
         "stem": stem,
-        "loaded": _is_stem_loaded(stem),
-        "active_sessions": await _active_session_count(db, lecture.id),
+        "loaded": loaded,
+        "active_sessions": active_count,
         "session_ttl_sec": GRAPH_SESSION_TTL_SEC,
     }
 
@@ -755,7 +762,8 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
 
     stem = str(lecture.id)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
-    _ensure_stem_loaded(stem, lecture.output_dir)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
