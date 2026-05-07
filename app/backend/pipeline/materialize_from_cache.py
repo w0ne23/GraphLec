@@ -235,8 +235,15 @@ def build_metadata(
 
     for item in metadata:
         scene_index = int(item["scene_index"])
-        item["slide_start_sec"] = round(unit_starts.get(scene_index, float(item["timestamp_sec"])), 3)
-        item["slide_end_sec"] = round(unit_ends.get(scene_index, item["slide_start_sec"]), 3)
+        start_sec = round(unit_starts.get(scene_index, float(item["timestamp_sec"])), 3)
+        end_sec = round(unit_ends.get(scene_index, start_sec), 3)
+        # Step 4 materializes timeline scenes only. True slide identity is assigned
+        # later by duplicate/canonical slide grouping. Keep slide_* as a temporary
+        # compatibility alias for downstream code that has not migrated to scene_*.
+        item["slide_start_sec"] = start_sec
+        item["slide_end_sec"] = end_sec
+        item["scene_start_sec"] = start_sec
+        item["scene_end_sec"] = end_sec
     return metadata
 
 

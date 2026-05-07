@@ -190,6 +190,9 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
         )
 
         for entry in ordered_metadata:
+            if entry.get("scene_type") == "video":
+                continue
+
             scene_idx = entry.get("scene_index")
             logical_slide_no = entry.get(
                 "slide_number",
