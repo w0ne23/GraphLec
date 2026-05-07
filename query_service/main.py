@@ -57,7 +57,7 @@ GRAPH_SCHEMA = """
 - Video          : id, stem, title
 - Slide          : id, stem, slide_number, title, slide_text
 - Domain         : id, stem, name, subdomain
-- Scene          : id, stem, source_slide_id, slide_number, start_sec, end_sec, role, emphasis_total
+- Scene          : id, stem, source_slide_id, scene_number, slide_number, start_sec, end_sec, role, emphasis_total
 - Context        : id, stem, slide_id, scene_id, context_index, start, end, stressed, text
 - Segment        : id, stem, start, end, text, stressed
 - AnnotationEmphasis : id, stem, type, target_content, score, confidence, timestamp_sec

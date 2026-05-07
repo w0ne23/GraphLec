@@ -78,16 +78,16 @@ class ExtractedSlideLoader:
     def load(self) -> Dict:
         with open(self.path, encoding="utf-8") as f:
             data = json.load(f)
-        logger.info(f"✓ slide_textualized.json 로드: {len(data['slides'])}개 슬라이드")
+        logger.info(f"✓ slide_textualized.json 로드: {len(data['scenes'])}개 scene")
         return data
 
 
 class AnnotationLoader:
     """
-    annotation_analysis.json 로드 후 slide_index 기준으로 그룹화.
+    annotation_analysis.json 로드 후 slide_number 기준으로 그룹화.
     한 슬라이드에 annot이 여러 개일 수 있으므로 리스트로 묶음.
 
-    반환: { slide_index: [annotation_result, ...] }
+    반환: { slide_number: [annotation_result, ...] }
     """
 
     def __init__(self, path: Path):
@@ -99,7 +99,7 @@ class AnnotationLoader:
 
         grouped: Dict[int, List[Dict]] = {}
         for entry in raw:
-            idx = entry.get("slide_index")
+            idx = entry.get("slide_number")
             if idx is None:
                 continue
             grouped.setdefault(idx, []).append(entry)
@@ -151,7 +151,14 @@ class SlideIntegrator:
 
         return {
             "slide_id":            slide["slide_id"],
+            "scene_id":            slide.get("scene_id"),
+            "scene_number":        slide.get("scene_number"),
+            "scene_index":         slide.get("scene_index", slide.get("scene_number")),
             "slide_number":        slide["slide_number"],
+            "slide_canonical_number": slide.get("slide_canonical_number", slide["slide_number"]),
+            "slide_visit_order":   slide.get("slide_visit_order", 1),
+            "slide_is_revisit":    slide.get("slide_is_revisit", False),
+            "representative_scene_number": slide.get("representative_scene_number"),
             "timestamp":           slide["timestamp"],
             "timestamp_formatted": slide.get("timestamp_formatted", ""),
             "image_path":          slide.get("image_path", ""),
@@ -437,18 +444,19 @@ class IntegrationPipeline:
         print("-"*70)
 
         integrator = SlideIntegrator()
-        integrated_slides = []
+        integrated_scenes = []
 
-        for slide in extracted_data["slides"]:
+        for slide in extracted_data["scenes"]:
             slide_num = slide["slide_number"]
+            scene_num = slide.get("scene_number", slide.get("scene_index", slide_num))
             annot_entries = annot_grouped.get(slide_num)
 
             integrated = integrator.integrate(slide, annot_entries)
-            integrated_slides.append(integrated)
+            integrated_scenes.append(integrated)
 
             status = f"{len(integrated['emphasized'])}개 강조" if integrated["has_annotation"] else "강조 없음"
             logger.info(
-                f"  [{slide_num:03d}] {integrated['title'][:30]:<30} | {status}"
+                f"  [scene {scene_num:03d} / slide {slide_num:03d}] {integrated['title'][:30]:<30} | {status}"
             )
 
         # Stage 3: cross-slide discount 적용
@@ -456,7 +464,7 @@ class IntegrationPipeline:
         print("Stage 3: cross-slide 배경 키워드 discount 적용")
         print("-"*70)
 
-        self._apply_cross_slide_discount(integrated_slides)
+        self._apply_cross_slide_discount(integrated_scenes)
 
         # Stage 4: 저장
         print("\n" + "-"*70)
@@ -464,14 +472,14 @@ class IntegrationPipeline:
         print("-"*70)
 
         total_time = time.time() - start_time
-        annotated_count  = sum(1 for s in integrated_slides if s["has_annotation"])
-        total_emphasized = sum(len(s["emphasized"]) for s in integrated_slides)
+        annotated_count  = sum(1 for s in integrated_scenes if s["has_annotation"])
+        total_emphasized = sum(len(s["emphasized"]) for s in integrated_scenes)
         scene_count      = sum(
-            1 for s in integrated_slides
+            1 for s in integrated_scenes
             for e in s["emphasized"] if e.get("source") in ("scene", "scene+slide")
         )
         slide_count      = sum(
-            1 for s in integrated_slides
+            1 for s in integrated_scenes
             for e in s["emphasized"] if e.get("source") in ("slide", "scene+slide")
         )
 
@@ -480,13 +488,13 @@ class IntegrationPipeline:
                 "textualized_path":    str(self.extracted_path),
                 "annotated_path":      str(self.annotated_path),
                 "processing_time":     total_time,
-                "total_slides":        len(integrated_slides),
+                "total_scenes":        len(integrated_scenes),
                 "annotated_slides":    annotated_count,
                 "total_emphasized":    total_emphasized,
                 "scene_emphasized":    scene_count,
                 "slide_emphasized":    slide_count,
             },
-            "slides": integrated_slides,
+            "scenes": integrated_scenes,
         }
 
         with open(self.output_path, "w", encoding="utf-8") as f:
@@ -497,7 +505,7 @@ class IntegrationPipeline:
         print("✅ 통합 완료!")
         print("="*70)
         print(f"\n📊 결과:")
-        print(f"  • 전체 슬라이드:      {len(integrated_slides)}개")
+        print(f"  • 전체 scene:        {len(integrated_scenes)}개")
         print(f"  • 강조 있는 슬라이드: {annotated_count}개")
         print(f"  • 총 강조 텍스트:     {total_emphasized}개")
         print(f"    - scene 강조:       {scene_count}개 (교수 필기)")
