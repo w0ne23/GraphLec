@@ -11,7 +11,7 @@ import json
 
 from app.db import AsyncSessionLocal, get_db
 from app.models import Lecture, ProcessingJob
-from app.services import job_service
+from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
@@ -25,7 +25,7 @@ async def stream_job_status(job_id: str, request: Request):
                 break
             try:
                 async with AsyncSessionLocal() as db:
-                    job = await job_service.get_job(db, job_id)
+                    job = await lecture_service.get_job(db, job_id)
                 if not job:
                     yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
                     break
@@ -50,20 +50,20 @@ async def stream_job_status(job_id: str, request: Request):
 
 @router.get("")
 async def list_jobs(db: AsyncSession = Depends(get_db)):
-    return await job_service.list_jobs(db)
+    return await lecture_service.list_jobs(db)
 
 
 @router.get("/{job_id}/graph_status")
 async def check_graph_status(job_id: str, db: AsyncSession = Depends(get_db)):
-    return await job_service.get_graph_info(db, job_id)
+    return await lecture_service.get_graph_info(db, job_id)
 
 
 @router.get("/{job_id}")
 async def get_job_detail(job_id: str, db: AsyncSession = Depends(get_db)):
-    job_detail = await job_service.get_job_detail(db, job_id)
+    job_detail = await lecture_service.get_job_detail(db, job_id)
     if not job_detail:
         raise HTTPException(status_code=404, detail="Job not found")
-    job_detail["video_url"] = job_service.make_file_url(job_detail.get("video_path"))
+    job_detail["video_url"] = lecture_service.make_file_url(job_detail.get("video_path"))
     return job_detail
 
 
@@ -76,7 +76,7 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     lecture_id = uuid.uuid4()
-    base_dir = Path(job_service.LOCAL_STORAGE_DIR)
+    base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
     input_dir = base_dir / "inputs" / str(lecture_id)
     output_dir = base_dir / "results" / str(lecture_id)
@@ -134,7 +134,7 @@ async def create_job(
 
 @router.delete("/{job_id}")
 async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.delete_lecture_by_job(db, job_id)
+    success = await lecture_service.delete_lecture_by_job(db, job_id)
     if not success:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "success"}
@@ -142,7 +142,7 @@ async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{job_id}/retry")
 async def retry_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.retry_job(db, job_id)
+    success = await lecture_service.retry_job(db, job_id)
     if not success:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "success"}
@@ -150,7 +150,7 @@ async def retry_job(job_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{job_id}/retry_graph")
 async def retry_graph_ingestion(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.retry_graph_only(db, job_id)
+    success = await lecture_service.retry_graph_only(db, job_id)
     if not success:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"status": "success"}
