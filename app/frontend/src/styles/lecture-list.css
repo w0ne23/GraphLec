@@ -29,15 +29,25 @@
 /* ── 검색바 스타일 ── */
 .ll-search-form {
   display: flex;
-  gap: 8px;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
   margin-bottom: 24px;
+}
+
+.ll-search-main {
+  flex: 1;
+  display: flex;
+  gap: 0;
 }
 
 .ll-search-input {
   flex: 1;
-  padding: 10px 16px;
+  height: 40px;
+  padding: 0 16px;
   border: 1.5px solid var(--b1);
-  border-radius: var(--rl);
+  border-right: none;
+  border-radius: var(--rl) 0 0 var(--rl);
   background: var(--panel);
   font-size: 14px;
   color: var(--t1);
@@ -48,25 +58,156 @@
 .ll-search-input:focus {
   border-color: var(--blue);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+  z-index: 1;
 }
 
 .ll-search-btn {
-  padding: 0 24px;
+  padding: 0 20px;
+  height: 40px;
   background: var(--blue);
-  color: #fff;
-  border: none;
-  border-radius: var(--rl);
+  border: 1.5px solid var(--blue);
+  border-radius: 0 var(--rl) var(--rl) 0;
   font-size: 14px;
   font-weight: 700;
+  color: #fff;
   cursor: pointer;
   transition: opacity 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .ll-search-btn:hover {
   opacity: 0.9;
 }
 
-/* ── 툴바 (필터 + 뷰 토글) ── */
+/* ── 상세검색 섹션 ── */
+.ll-detail-toggle-btn {
+  background: var(--panel);
+  border: 1.5px solid var(--b1);
+  border-radius: var(--rl);
+  padding: 0 16px;
+  height: 40px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t2);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ll-detail-toggle-btn:hover {
+  border-color: var(--b2);
+  color: var(--t1);
+}
+
+.ll-detail-toggle-btn.active {
+  background: var(--blue-bg);
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.ll-filter-panel {
+  margin-top: -12px;
+  margin-bottom: 24px;
+  padding: 20px;
+  background: var(--panel);
+  border: 1.5px solid var(--b1);
+  border-radius: var(--rl);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+}
+
+.ll-filter-section {
+  margin-bottom: 20px;
+}
+
+.ll-filter-label {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--t1);
+  margin-bottom: 16px;
+}
+
+.ll-filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.ll-filter-subgroup {
+  margin-top: 12px;
+}
+
+.ll-chip-divider {
+  width: 100%;
+  height: 1px;
+  background: var(--b1);
+  margin: 12px 0 16px 0;
+}
+
+.ll-filter-sublabel {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--t3);
+  margin-bottom: 8px;
+  user-select: none;
+}
+
+.ll-chip {
+  padding: 6px 14px;
+  background: var(--bg);
+  border: 1px solid var(--b1);
+  border-radius: 20px;
+  font-size: 13px;
+  color: var(--t2);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ll-chip:hover {
+  border-color: var(--b2);
+}
+
+.ll-chip.active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.ll-filter-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--b1);
+}
+
+.ll-filter-reset {
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  font-size: 13px;
+  color: var(--t3);
+  cursor: pointer;
+}
+
+.ll-filter-apply {
+  padding: 8px 24px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: var(--rl);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* ── 툴바 및 활성 필터 ── */
 .ll-toolbar {
   display: flex;
   justify-content: space-between;
@@ -75,49 +216,92 @@
   gap: 16px;
 }
 
-.ll-filter-bar {
+.ll-toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.ll-total-count {
+  font-size: 14px;
+  color: var(--t2);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  position: relative;
+  padding-left: 12px;
+}
+
+.ll-total-count::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 3px;
+  height: 1.5em;
+  background: var(--blue);
+  border-radius: 2px;
+}
+
+.ll-total-count strong {
+  color: var(--blue);
+  font-weight: 700;
+  margin: 0 2px;
+}
+
+.ll-active-filters {
   display: flex;
   gap: 8px;
-  flex-wrap: wrap;
 }
 
-.ll-filter-btn {
-  background: var(--panel);
-  border: 1px solid var(--b1);
-  padding: 8px 16px;
-  border-radius: 20px;
-  font-size: 13px;
-  color: var(--t2);
-  transition: all 0.15s;
+.ll-active-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--blue-bg);
+  border: 1px solid var(--blue-br);
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--blue);
+}
+
+.ll-active-remove {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--blue);
   cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
 }
 
-.ll-filter-btn:hover {
-  border-color: var(--b2);
-  color: var(--t1);
-}
-
-.ll-filter-btn--active {
-  background: var(--blue);
-  border-color: var(--blue);
-  color: #fff;
+.ll-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 0;
 }
 
 .ll-view-toggles {
   display: flex;
-  gap: 4px;
+  height: 38px;
   background: var(--panel);
-  border: 1px solid var(--b1);
-  padding: 4px;
-  border-radius: 8px;
+  border: 1.5px solid var(--b1);
+  padding: 0;
+  border-radius: var(--rl);
+  gap: 0;
+  overflow: hidden;
 }
 
 .ll-icon-btn {
   background: none;
   border: none;
-  border-radius: 4px;
-  width: 32px;
-  height: 32px;
+  border-radius: 0;
+  width: 38px;
+  height: 100%;
   font-size: 16px;
   color: var(--t3);
   display: flex;

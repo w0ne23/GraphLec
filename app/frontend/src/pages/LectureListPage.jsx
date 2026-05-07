@@ -19,9 +19,14 @@ export default function LectureListPage() {
   const [searchInput, setSearchInput] = useState('') // 타이핑 중인 값
   const [activeSearch, setActiveSearch] = useState('') // 실제 API에 요청할 검색어
   
-  // ── 2. 페이지네이션 상태 ──
+  // ── 2. 상세검색 패널 상태 ──
+  const [showFilterPanel, setShowFilterPanel] = useState(false)
+  const [pendingCategory, setPendingCategory] = useState('전체')
+
+  // ── 3. 페이지네이션 상태 ──
   const [currentPage, setCurrentPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
+  const [totalCount, setTotalCount] = useState(0)
 
   // 조건이나 페이지가 바뀔 때마다 API 단일 호출
   useEffect(() => {
@@ -29,29 +34,35 @@ export default function LectureListPage() {
     listLectures({
       page: currentPage,
       limit: ITEMS_PER_PAGE,
-      category: activeCategory,
-      search: activeSearch // 타이핑 중인 값이 아닌, 확정된 검색어 사용
+      category: activeCategory === '전체' ? null : activeCategory,
+      search: activeSearch 
     })
       .then(res => {
         setLectures(res.items)
         setTotalPages(res.totalPages)
+        setTotalCount(res.totalItems || res.items.length)
       })
       .finally(() => setLoading(false))
   }, [currentPage, activeCategory, activeSearch])
 
-  // 카테고리 변경 핸들러
-  const handleCategoryChange = (cat) => {
-    if (activeCategory === cat) return
-    setActiveCategory(cat)
-    setCurrentPage(1) // 조건 변경 시 1페이지로 리셋
-  }
-
   // 검색 실행 핸들러 (엔터 키 또는 버튼 클릭)
   const handleSearchSubmit = (e) => {
-    e?.preventDefault() // form 제출 새로고침 방지
+    e?.preventDefault() 
     if (activeSearch === searchInput.trim()) return
     setActiveSearch(searchInput.trim())
-    setCurrentPage(1) // 조건 변경 시 1페이지로 리셋
+    setCurrentPage(1) 
+  }
+
+  // 필터 적용 핸들러
+  const applyFilters = () => {
+    setActiveCategory(pendingCategory)
+    setCurrentPage(1)
+    setShowFilterPanel(false)
+  }
+
+  // 필터 초기화 핸들러
+  const resetFilters = () => {
+    setPendingCategory('전체')
   }
 
   return (
@@ -61,46 +72,98 @@ export default function LectureListPage() {
         <header className="ll-header">
           <h1 className="ll-title">모든 강의 둘러보기</h1>
           
-          {/* ── 검색바 추가 ── */}
           <form className="ll-search-form" onSubmit={handleSearchSubmit}>
-            <input 
-              type="text" 
-              className="ll-search-input"
-              placeholder="강의 제목을 검색하세요" 
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-            />
-            <button type="submit" className="ll-search-btn">검색</button>
+            <div className="ll-search-main">
+              <input 
+                type="text" 
+                className="ll-search-input"
+                placeholder="강의 제목을 검색하세요" 
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+              />
+              <button type="submit" className="ll-search-btn">검색</button>
+            </div>
+            <button 
+              type="button"
+              className={`ll-detail-toggle-btn ${showFilterPanel ? 'active' : ''}`}
+              onClick={() => setShowFilterPanel(!showFilterPanel)}
+            >
+              상세검색 {showFilterPanel ? '▴' : '▾'}
+            </button>
           </form>
+
+          {/* ── 상세검색 패널 ── */}
+          {showFilterPanel && (
+            <div className="ll-filter-panel">
+              <div className="ll-filter-section">
+                <h4 className="ll-filter-label">카테고리</h4>
+                {/* 전체 선택 칩 영역 */}
+                <div className="ll-filter-chips">
+                  <button
+                    className={`ll-chip ${pendingCategory === '전체' ? 'active' : ''}`}
+                    onClick={() => setPendingCategory('전체')}
+                  >
+                    전체
+                  </button>
+                </div>
+
+                <div className="ll-chip-divider" />
+
+                {/* 서브그룹: Engineering */}
+                <div className="ll-filter-subgroup">
+                  <h5 className="ll-filter-sublabel">Engineering</h5>
+                  <div className="ll-filter-chips">
+                    {CATEGORIES.filter(cat => cat !== '전체').map(cat => (
+                      <button
+                        key={cat}
+                        className={`ll-chip ${pendingCategory === cat ? 'active' : ''}`}
+                        onClick={() => setPendingCategory(cat)}
+                      >
+                        {cat}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>              <div className="ll-filter-actions">
+                <button className="ll-filter-reset" onClick={resetFilters}>초기화</button>
+                <button className="ll-filter-apply" onClick={applyFilters}>적용</button>
+              </div>
+            </div>
+          )}
           
           <div className="ll-toolbar">
-            <div className="ll-filter-bar">
-              {CATEGORIES.map(cat => (
-                <button
-                  key={cat}
-                  className={`ll-filter-btn ${activeCategory === cat ? 'll-filter-btn--active' : ''}`}
-                  onClick={() => handleCategoryChange(cat)}
-                >
-                  {cat}
-                </button>
-              ))}
+            <div className="ll-toolbar-left">
+              <span className="ll-total-count">전체 <strong>{totalCount}</strong>개</span>
+              {activeCategory !== '전체' && (
+                <div className="ll-active-filters">
+                  <span className="ll-active-chip">
+                    {activeCategory}
+                    <button className="ll-active-remove" onClick={() => {
+                      setActiveCategory('전체')
+                      setPendingCategory('전체')
+                    }}>✕</button>
+                  </span>
+                </div>
+              )}
             </div>
 
-            <div className="ll-view-toggles">
-              <button 
-                className={`ll-icon-btn ${viewMode === 'grid' ? 'll-icon-btn--active' : ''}`}
-                onClick={() => setViewMode('grid')}
-                title="그리드 뷰"
-              >
-                ⊞
-              </button>
-              <button 
-                className={`ll-icon-btn ${viewMode === 'list' ? 'll-icon-btn--active' : ''}`}
-                onClick={() => setViewMode('list')}
-                title="리스트 뷰"
-              >
-                ☰
-              </button>
+            <div className="ll-toolbar-right">
+              <div className="ll-view-toggles">
+                <button 
+                  className={`ll-icon-btn ${viewMode === 'grid' ? 'll-icon-btn--active' : ''}`}
+                  onClick={() => setViewMode('grid')}
+                  title="그리드 뷰"
+                >
+                  ⊞
+                </button>
+                <button 
+                  className={`ll-icon-btn ${viewMode === 'list' ? 'll-icon-btn--active' : ''}`}
+                  onClick={() => setViewMode('list')}
+                  title="리스트 뷰"
+                >
+                  ☰
+                </button>
+              </div>
             </div>
           </div>
         </header>
