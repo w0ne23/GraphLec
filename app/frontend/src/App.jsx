@@ -1,32 +1,63 @@
 import { useCallback } from 'react'
-import { BrowserRouter, Routes, Route, useNavigate, useLocation } from 'react-router-dom'
-import LecturesPage  from './pages/LecturesPage'
+import { BrowserRouter, Routes, Route, useNavigate, useLocation, NavLink } from 'react-router-dom'
+import LandingPage   from './pages/LandingPage'
+import UploadPage    from './pages/UploadPage'
 import RecommendPage from './pages/RecommendPage'
-import ReportPage    from './pages/ReportPage'
+import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
-import TabBar        from './components/common/TabBar'
 
-const PAGES = ['lectures', 'recommend', 'report']
+const HIDE_HEADER_PATHS = ['/']
+const HIDE_HEADER_PATTERNS = [/^\/lectures\/[^/]+(\/verifier)?$/]
 
-function pathToIdx(pathname) {
-  if (pathname === '/' || pathname.startsWith('/lectures')) {
-    // /lectures/:id 도 index 0으로 처리 (TabBar 표시 여부는 별도 판단)
-    return 0
-  }
-  if (pathname.startsWith('/recommend')) return 1
-  if (pathname.startsWith('/report'))    return 2
-  return 0
+function AppHeader() {
+  const location = useLocation()
+  const hide =
+    HIDE_HEADER_PATHS.includes(location.pathname) ||
+    HIDE_HEADER_PATTERNS.some(p => p.test(location.pathname))
+  if (hide) return null
+
+  return (
+    <header className="app-header">
+      <NavLink to="/" className="app-header-logo">
+        Graph<span>Lec</span>
+      </NavLink>
+      <nav className="app-header-nav">
+        <NavLink to="/upload"    className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Upload</NavLink>
+        <NavLink to="/recommend" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Recommend</NavLink>
+        <NavLink to="/lectures"  className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Browse</NavLink>
+      </nav>
+    </header>
+  )
 }
 
-/** /lectures/:id 여부 — 탭 바를 숨겨야 하는 독립 페이지 */
-function isLectureDetailPage(pathname) {
-  return /^\/lectures\/[^/]+(\/verifier)?$/.test(pathname)
+function AppTabBar() {
+  const location = useLocation()
+  const hide =
+    HIDE_HEADER_PATHS.includes(location.pathname) ||
+    HIDE_HEADER_PATTERNS.some(p => p.test(location.pathname))
+  if (hide) return null
+
+  return (
+    <nav className="app-tabbar">
+      <NavLink to="/upload"    className={({ isActive }) => 'app-tabbar-tab' + (isActive ? ' app-tabbar-tab--active' : '')}>
+        <i className="ti ti-upload" aria-hidden="true" />
+        <span>Upload</span>
+      </NavLink>
+      <NavLink to="/recommend" className={({ isActive }) => 'app-tabbar-tab' + (isActive ? ' app-tabbar-tab--active' : '')}>
+        <i className="ti ti-bulb" aria-hidden="true" />
+        <span>Recommend</span>
+      </NavLink>
+      <NavLink to="/lectures"  className={({ isActive }) => 'app-tabbar-tab' + (isActive ? ' app-tabbar-tab--active' : '')}>
+        <i className="ti ti-books" aria-hidden="true" />
+        <span>Browse</span>
+      </NavLink>
+    </nav>
+  )
 }
 
 function MainLayout() {
   const navigate = useNavigate()
-  const location = useLocation()
 
   const handleNavigate = useCallback(({ page, lectureId = null }) => {
     if (page === 'lecture' && lectureId != null) {
@@ -40,30 +71,21 @@ function MainLayout() {
     navigate(`/${page}`)
   }, [navigate])
 
-  const activeIdx = pathToIdx(location.pathname)
-  const hideTabBar = isLectureDetailPage(location.pathname)
-
   return (
-    <div className="app-shell" style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <div className="main-content" style={{ flex: 1, overflowY: 'auto' }}>
+    <div className="app-shell">
+      <AppHeader />
+      <div className="app-main">
         <Routes>
-          <Route path="/"            element={<LecturesPage onNavigate={handleNavigate} />} />
-          <Route path="/lectures"    element={<LecturesPage onNavigate={handleNavigate} />} />
-          <Route path="/lectures/:id" element={<LecturePage onNavigate={handleNavigate} />} />
+          <Route path="/"                      element={<LandingPage />} />
+          <Route path="/lectures"              element={<LectureListPage onNavigate={handleNavigate} />} />
+          <Route path="/upload"                element={<UploadPage onNavigate={handleNavigate} />} />
+          <Route path="/lectures/:id"          element={<LecturePage onNavigate={handleNavigate} />} />
           <Route path="/lectures/:id/verifier" element={<VerifierPage />} />
-          <Route path="/recommend"   element={<RecommendPage onNavigate={handleNavigate} />} />
-          <Route path="/report"      element={<ReportPage />} />
-          {/* 404 fallback */}
-          <Route path="*"            element={<LecturesPage onNavigate={handleNavigate} />} />
+          <Route path="/recommend"             element={<RecommendPage onNavigate={handleNavigate} />} />
+          <Route path="*"                      element={<LandingPage />} />
         </Routes>
       </div>
-
-      {!hideTabBar && (
-        <TabBar 
-          activeIdx={activeIdx} 
-          onTabClick={(idx) => navigate(`/${PAGES[idx]}`)} 
-        />
-      )}
+      <AppTabBar />
     </div>
   )
 }

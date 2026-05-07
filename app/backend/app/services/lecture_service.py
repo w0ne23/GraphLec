@@ -473,15 +473,37 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-async def list_jobs(db: AsyncSession) -> List[Dict[str, Any]]:
+ACTIVE_STATUSES = {'pending', 'running'}
+
+async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
-        select(ProcessingJob, Lecture)
-        .join(Lecture, ProcessingJob.lecture_id == Lecture.id)
-        .order_by(ProcessingJob.created_at.desc())
+        select(Lecture, ProcessingJob)
+        .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
     rows = result.unique().all()
-    return [format_job_dict(row[0], row[1]) for row in rows]
+
+    seen = set()
+    out = []
+    for lecture, job in rows:
+        if lecture.id in seen:
+            continue
+        seen.add(lecture.id)
+        job_status = job.status if job else 'unknown'
+        if status_filter == 'active' and job_status not in ACTIVE_STATUSES:
+            continue
+        out.append({
+            "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "status": job_status,
+            "title": lecture.title or str(lecture.id),
+            "category": lecture.category or "기타",
+            "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "error_message": job.error_message if job else None,
+            "pipeline_stages": job.pipeline_stages or [] if job else [],
+        })
+    return out
 
 
 async def retry_job(db: AsyncSession, job_id: str) -> bool:
@@ -533,10 +555,14 @@ async def delete_lecture_by_job(db: AsyncSession, job_id: str) -> bool:
 
 
 # ── 결과 조회 (Lecture ID 기준) ───────────────────────────────────────────────
-async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
-    """강의 목록 — 각 강의의 최신 job 상태 포함"""
-    # 최신 job을 서브쿼리로 가져오기 위해 모든 job을 로드 후 Python에서 필터
-    # (추후 window function으로 최적화 가능)
+async def list_all_results(
+    db: AsyncSession,
+    page: int = 1,
+    limit: int = 12,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    scope: str = 'browse',
+) -> Dict[str, Any]:
     query = (
         select(Lecture, ProcessingJob)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
@@ -545,26 +571,39 @@ async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
     result = await db.execute(query)
     rows = result.unique().all()
 
-    # lecture별로 최신 job만 남기기
-    seen: set = set()
+    seen = set()
     out = []
     for lecture, job in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
-        stem = str(lecture.id)
+        job_status = job.status if job else 'unknown'
+
+        if scope == 'browse' and job_status != 'done':
+            continue
+        if scope == 'upload' and job_status in ACTIVE_STATUSES:
+            continue
+
+        if category and lecture.category != category:
+            continue
+        if search and search.lower() not in (lecture.title or '').lower():
+            continue
+
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
-            "status": job.status if job else "unknown",
-            "title": lecture.title or stem,
+            "status": job_status,
+            "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
-            "description": lecture.description,
-            "stem": stem,
-            "video_url": make_file_url(lecture.video_path),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "error_message": job.error_message if job else None,
+            "pipeline_stages": job.pipeline_stages or [] if job else [],
         })
-    return out
+
+    total_items = len(out)
+    start = (page - 1) * limit
+    paginated = out[start: start + limit]
+    return {"items": paginated, "total_items": total_items}
 
 
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict[str, Any]]:
