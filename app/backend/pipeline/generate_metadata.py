@@ -21,6 +21,8 @@ import re
 import json
 import math
 import argparse
+import random
+import time
 from pathlib import Path
 from collections import Counter
 
@@ -42,6 +44,9 @@ print(f"[디버그] NEO4J URI={NEO4J_URI}  USER={NEO4J_USER}  PW={'*'*len(NEO4J_
 
 _client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_1"))
 MODEL   = GEMINI_GENERATIVE_MODEL
+GEMINI_METADATA_MAX_ATTEMPTS = int(os.getenv("GRAPHLEC_STAGE8_GEMINI_MAX_ATTEMPTS", "5"))
+GEMINI_METADATA_BACKOFF_BASE_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKOFF_BASE_SEC", "10"))
+GEMINI_METADATA_BACKOFF_MAX_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKOFF_MAX_SEC", "90"))
 
 
 def _sample_uniform(texts: list[str], n: int) -> list[str]:
@@ -93,9 +98,13 @@ def load_fused(stem: str, output_dir: Path) -> dict:
         return json.load(f)
 
 
+def fused_scene_entries(fused: dict) -> list[dict]:
+    return fused.get("scenes", [])
+
+
 def get_duration(fused: dict) -> float:
     """마지막 슬라이드 end_sec 기준 총 길이(초)"""
-    slides = fused.get("slides", [])
+    slides = fused_scene_entries(fused)
     if not slides:
         return 0.0
     last = slides[-1]
@@ -118,7 +127,7 @@ def collect_texts(fused: dict) -> tuple[list[str], list[str], list[str], list[st
     core_slide_texts = []
     core_trans_texts = []
 
-    for slide in fused.get("slides", []):
+    for slide in fused_scene_entries(fused):
         # objectives 슬라이드 스킵
         if slide.get("role") == "objectives":
             continue
@@ -154,7 +163,7 @@ def collect_texts(fused: dict) -> tuple[list[str], list[str], list[str], list[st
 def collect_emphasized(fused: dict) -> dict[str, float]:
     """키워드 → 강조 점수 합산 (emphasized_keywords 기반)"""
     scores: dict[str, float] = {}
-    for slide in fused.get("slides", []):
+    for slide in fused_scene_entries(fused):
         for kw in slide.get("emphasized_keywords", []):
             name = kw.get("keyword", "")
             if not name:
@@ -187,7 +196,7 @@ def collect_pedagogy(fused: dict) -> dict:
       그 외              → 태그 없음
     """
     slides = [
-        s for s in fused.get("slides", [])
+        s for s in fused_scene_entries(fused)
         if s.get("role") != "objectives"  # 학습목표 슬라이드 제외
     ]
     total = len(slides)
@@ -232,7 +241,7 @@ def collect_slide_role_freq(
     result = {n: {"core": 0, "elaborated": 0, "supplementary": 0, "other": 0}
               for n in all_names}
 
-    for slide in fused.get("slides", []):
+    for slide in fused_scene_entries(fused):
         role = slide.get("role", "other")
         role_key = role if role in TRACKED_ROLES else "other"
 
@@ -687,7 +696,7 @@ _TOC_LINE_RE = re.compile(r"^\d+\s*[.)]?\s+\S+")
 
 def collect_learning_objectives(fused: dict) -> list[str]:
     objectives = []
-    for slide in fused.get("slides", []):      # slides 리스트 순회
+    for slide in fused_scene_entries(fused):
         if slide.get("role") != "objectives":
             continue
         slide_text = slide.get("slide_text", "")
@@ -746,12 +755,59 @@ def estimate_difficulty(
 
 # ── LLM 호출 ──────────────────────────────────────────────────────────────────
 
-def _gemini(prompt: str) -> str:
-    resp = _client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config={"temperature": 0.0},
+def _is_retryable_gemini_error(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code in {429, 500, 502, 503, 504}:
+        return True
+
+    text = str(exc).lower()
+    retryable_markers = (
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "unavailable",
+        "high demand",
+        "rate limit",
+        "resource exhausted",
+        "deadline exceeded",
+        "temporarily",
     )
+    return any(marker in text for marker in retryable_markers)
+
+
+def _gemini(prompt: str) -> str:
+    max_attempts = max(1, GEMINI_METADATA_MAX_ATTEMPTS)
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = _client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config={"temperature": 0.0},
+            )
+            break
+        except Exception as exc:
+            last_error = exc
+            if attempt >= max_attempts or not _is_retryable_gemini_error(exc):
+                raise
+
+            delay = min(
+                GEMINI_METADATA_BACKOFF_MAX_SEC,
+                GEMINI_METADATA_BACKOFF_BASE_SEC * (2 ** (attempt - 1)),
+            )
+            jitter = random.uniform(0.0, min(3.0, delay * 0.15))
+            wait_sec = delay + jitter
+            print(
+                f"[경고] Gemini metadata 호출 실패({type(exc).__name__}: {exc}). "
+                f"{wait_sec:.1f}초 후 재시도 {attempt + 1}/{max_attempts}"
+            )
+            time.sleep(wait_sec)
+    else:
+        raise RuntimeError("Gemini metadata 호출 재시도에 실패했습니다.") from last_error
+
     try:
         from .cost_report import record_model_call
 

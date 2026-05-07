@@ -310,6 +310,7 @@ class Preprocessor:
 
     인덱스:
       - slide_map:    slide_id → slide dict
+      - unique_slides: logical slide_id별 대표 slide dict
       - segment_data: segment_id → segment dict (slide_id 포함)
       - annot_data:   annot_id  → annotation_summary dict (slide_id 포함)
     """
@@ -317,26 +318,36 @@ class Preprocessor:
     def __init__(self, slides: List[Dict]):
         self.slides = slides
         self.slide_map:    Dict[str, Dict] = {}
+        self.unique_slides: Dict[str, Dict] = {}
         self.segment_data: Dict[str, Dict] = {}  # segment/NNNN → dict
         self.annot_data:   Dict[str, Dict] = {}  # annotation/NNNN → dict
         self.scene_data:   Dict[str, Dict] = {}  # scene/0000 → dict
-        self.context_data: Dict[str, Dict] = {}  # slide_id/context/NN → dict
+        self.context_data: Dict[str, Dict] = {}  # scene_id/context/NN → dict
         self._build()
 
+    @staticmethod
+    def _content_score(slide: Dict) -> int:
+        return len(str(slide.get('slide_text') or '')) + len(str(slide.get('title') or ''))
+
     def _build(self):
-        scene_idx = 0
         seg_idx = 0
         ann_idx = 0
 
         for slide in self.slides:
             sid = slide['slide_id']
             self.slide_map[sid] = slide
+            current = self.unique_slides.get(sid)
+            if current is None or self._content_score(slide) > self._content_score(current):
+                self.unique_slides[sid] = slide
 
-            # Scene ID는 slide_id에 종속되지 않는 occurrence 기반 — 추후 1:N 확장 안전
-            scene_id = f"scene/{scene_idx:04d}"
-            scene_idx += 1
+            scene_number = slide.get('scene_number', slide.get('scene_index'))
+            if isinstance(scene_number, int):
+                scene_id = slide.get('scene_id') or f"scene/{scene_number:04d}"
+            else:
+                scene_id = slide.get('scene_id') or f"scene/{len(self.scene_data):04d}"
             self.scene_data[scene_id] = {
                 'slide_id':       sid,
+                'scene_number':   scene_number,
                 'start':          slide.get('start_sec'),
                 'end':            slide.get('end_sec'),
                 'slide_number':   slide.get('slide_number'),
@@ -345,7 +356,7 @@ class Preprocessor:
             }
 
             for ctx in slide.get('contexts', []):
-                context_id = f"{sid}/context/{ctx['context_index']:02d}"
+                context_id = f"{scene_id}/context/{ctx['context_index']:02d}"
                 for seg in ctx.get('segments', []):
                     seg_id = seg.get('segment_id') or f'segment/{seg_idx:04d}'
                     self.segment_data[seg_id] = {
@@ -358,7 +369,7 @@ class Preprocessor:
                     seg_idx += 1
 
             for ctx in slide.get('contexts', []):
-                context_id = f"{sid}/context/{ctx['context_index']:02d}"
+                context_id = f"{scene_id}/context/{ctx['context_index']:02d}"
                 self.context_data[context_id] = {
                     'slide_id':      sid,
                     'scene_id':      scene_id,
@@ -427,7 +438,7 @@ class StructureLayerBuilder:
         self.c.add(self.vid, 'type', 'Video', {'title': self.cfg.lecture_title, 'stem': self.cfg.stem})
 
     def _build_slides(self):
-        for slide in self.pre.slides:
+        for slide in self.pre.unique_slides.values():
             sid = slide['slide_id']
             self.c.add(self.vid, 'HAS_SLIDE', sid)
             self.c.add(sid, 'type', 'Slide', {
@@ -437,13 +448,14 @@ class StructureLayerBuilder:
             })
 
     def _build_scenes(self):
-        """Scene 노드 생성 (슬라이드 등장 구간, 1 per Slide; 추후 1:N 확장 예정)"""
+        """Scene 노드 생성 (슬라이드 등장 구간, 1 per scene occurrence)."""
         for scene_id, data in self.pre.scene_data.items():
             sid = data['slide_id']
             self.c.add(self.vid, 'HAS_SCENE', scene_id)
             self.c.add(scene_id, 'USES_SLIDE', sid)
             self.c.add(scene_id, 'type', 'Scene', {
                 'source_slide_id': sid,
+                'scene_number':    data.get('scene_number'),
                 'slide_number':    data.get('slide_number'),
                 'start_sec':       data['start'],
                 'end_sec':         data['end'],
@@ -688,8 +700,13 @@ class GraphPipeline:
         print('\n[Step 1] 데이터 로드')
         with open(cfg.fused_path, encoding='utf-8') as f:
             fused = json.load(f)
-        slides = fused['slides']
-        logger.info(f"✓ slide {len(slides)}개")
+        slides = fused['scenes']
+        logical_slide_count = len({
+            slide.get('slide_number')
+            for slide in slides
+            if slide.get('slide_number') is not None
+        })
+        logger.info(f"✓ scene {len(slides)}개 / slide {logical_slide_count}개")
 
         # ── 전처리 ───────────────────────────────────────────────────────────
         print('\n[Step 2] 전처리')

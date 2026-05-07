@@ -80,7 +80,7 @@ def _parse_json_safe(raw: str) -> dict:
 
 
 _LEGACY_EVENT_KEYS = (
-    "slide_index",
+    "slide_number",
     "annot_index",
     "timestamp_sec",
     "base_path",
@@ -162,7 +162,7 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
     반환 형식:
         [
           {
-            "slide_index": 1,
+            "slide_number": 1,
             "base_path": "...",
             "annot_paths": ["...", "..."]
           },
@@ -190,18 +190,18 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
         )
 
         for entry in ordered_metadata:
-            scene_idx = entry.get("scene_index", entry.get("slide_index"))
-            logical_slide_idx = entry.get(
+            scene_idx = entry.get("scene_index")
+            logical_slide_no = entry.get(
                 "slide_number",
-                entry.get("slide_canonical_index", entry.get("slide_index")),
+                entry.get("slide_canonical_index"),
             )
-            if not isinstance(scene_idx, int) or not isinstance(logical_slide_idx, int):
+            if not isinstance(scene_idx, int) or not isinstance(logical_slide_no, int):
                 continue
 
             pair = pairs.setdefault(
-                logical_slide_idx,
+                logical_slide_no,
                 {
-                    "slide_index": logical_slide_idx,
+                    "slide_number": logical_slide_no,
                     "scene_indices": [],
                     "base_path": None,
                     "annot_paths": [],
@@ -251,7 +251,7 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
             last_path_by_scene[scene_idx] = full_path
 
         result = [v for v in pairs.values() if v["base_path"] is not None]
-        result.sort(key=lambda x: x["slide_index"])
+        result.sort(key=lambda x: x["slide_number"])
     else:
         # metadata 없을 경우 파일명 패턴으로 폴백
         log.warning("metadata.json 없음 - 파일명 패턴으로 쌍 구성")
@@ -267,15 +267,15 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
 
 
 def _load_pairs_by_filename(slides_path: Path) -> list[dict]:
-    bases = sorted(slides_path.glob("slide_*_base.jpg"))
+    bases = sorted(slides_path.glob("scene_*_base.jpg"))
     pairs = []
     for base in bases:
         idx = int(base.name.split("_")[1])
-        builds = sorted(slides_path.glob(f"slide_{idx:03d}_build_*.jpg"))
-        annots = sorted(slides_path.glob(f"slide_{idx:03d}_annot_*.jpg"))
+        builds = sorted(slides_path.glob(f"scene_{idx:03d}_build_*.jpg"))
+        annots = sorted(slides_path.glob(f"scene_{idx:03d}_annot_*.jpg"))
         clean_base = builds[-1] if builds else base
         pairs.append({
-            "slide_index": idx,
+            "slide_number": idx,
             "base_path": str(clean_base),
             "original_base_path": str(base),
             "annot_paths": [str(a) for a in annots],
@@ -847,7 +847,7 @@ def analyze_annotation_pair(
     annot_path: str,
     diff_mask: np.ndarray,
     region_bboxes: list[dict],
-    slide_index: int,
+    slide_number: int,
     annot_index: int,
     timestamp_sec: float = 0.0,
 ) -> dict:
@@ -858,7 +858,7 @@ def analyze_annotation_pair(
     region_bboxes: build_diff_mask()가 반환한 정규화 bbox 리스트.
                    VLM이 annotation_bbox 할당에 사용.
     """
-    log.info(f"  분석 중: slide_{slide_index:03d}_annot_{annot_index:02d} "
+    log.info(f"  분석 중: slide_{slide_number:03d}_annot_{annot_index:02d} "
              f"(필기 영역 {len(region_bboxes)}개)")
 
     # bbox 목록 문자열 생성 (프롬프트 주입용)
@@ -894,7 +894,7 @@ def analyze_annotation_pair(
         )
         raw = _sanitize_raw(raw)
         result = _parse_json_safe(raw)
-        result["slide_index"]    = slide_index
+        result["slide_number"]   = slide_number
         result["annot_index"]    = annot_index
         result["timestamp_sec"]  = timestamp_sec
         result["base_path"]      = base_path
@@ -903,9 +903,9 @@ def analyze_annotation_pair(
         return result
 
     except json.JSONDecodeError as e:
-        log.warning(f"  JSON 파싱 실패 (slide {slide_index}, annot {annot_index}): {e}")
+        log.warning(f"  JSON 파싱 실패 (slide {slide_number}, annot {annot_index}): {e}")
         return {
-            "slide_index":   slide_index,
+            "slide_number":  slide_number,
             "annot_index":   annot_index,
             "timestamp_sec": timestamp_sec,
             "base_path":     base_path,
@@ -917,9 +917,9 @@ def analyze_annotation_pair(
             "slide_summary": "",
         }
     except Exception as e:
-        log.error(f"  VLM API 오류 (slide {slide_index}, annot {annot_index}): {e}")
+        log.error(f"  VLM API 오류 (slide {slide_number}, annot {annot_index}): {e}")
         return {
-            "slide_index":   slide_index,
+            "slide_number":  slide_number,
             "annot_index":   annot_index,
             "timestamp_sec": timestamp_sec,
             "region_bboxes": region_bboxes,
@@ -938,7 +938,7 @@ def analyze_slide_change_tracks(
     annot_timestamps: list[float],
     annot_prev_paths: Optional[list[str]],
     annot_indices: Optional[list[int]],
-    slide_index: int,
+    slide_number: int,
     cfg: Config,
     save_masks: bool = False,
     mask_dir: Optional[Path] = None,
@@ -954,7 +954,7 @@ def analyze_slide_change_tracks(
     반환: 기존 analyze_all()과 동일한 형식의 list[dict]
     """
     log.info(
-        f"  [change-track 분석] slide_{slide_index:03d}: "
+        f"  [change-track 분석] slide_{slide_number:03d}: "
         f"{len(annot_paths)}개 annot → 1회 요청 ({VLM_MODEL}, base/final + change tracks)"
     )
 
@@ -966,22 +966,22 @@ def analyze_slide_change_tracks(
     # 마스크 저장 (디버그용)
     if save_masks and mask_dir:
         cv2.imwrite(
-            str(mask_dir / f"slide_{slide_index:03d}_composite_mask.jpg"),
+            str(mask_dir / f"slide_{slide_number:03d}_composite_mask.jpg"),
             composite_mask
         )
         for step in per_step_data:
-            mask_fname = f"slide_{slide_index:03d}_annot_{step['annot_index']:02d}_mask.jpg"
+            mask_fname = f"slide_{slide_number:03d}_annot_{step['annot_index']:02d}_mask.jpg"
             cv2.imwrite(str(mask_dir / mask_fname), step["diff_mask"])
 
     if not change_tracks:
         log.warning(
-            f"  [change-track 분석] slide_{slide_index:03d}: "
+            f"  [change-track 분석] slide_{slide_number:03d}: "
             "local change track 0개 → local 결과만 저장"
         )
         return _build_local_track_results(
             per_step_data=per_step_data,
             change_tracks=[],
-            slide_index=slide_index,
+            slide_number=slide_number,
             error="No local change tracks detected",
         )
 
@@ -1006,32 +1006,32 @@ def analyze_slide_change_tracks(
         return _build_results_from_track_analysis(
             track_analysis_result=track_analysis_result,
             per_step_data=per_step_data,
-            slide_index=slide_index,
+            slide_number=slide_number,
             base_path=base_path,
             change_tracks=change_tracks,
         )
 
     except json.JSONDecodeError as e:
         log.warning(
-            f"  [change-track 분석 파싱 실패] slide {slide_index}: {e} "
+            f"  [change-track 분석 파싱 실패] slide {slide_number}: {e} "
             "→ local change track 결과만 저장"
         )
         return _build_local_track_results(
             per_step_data=per_step_data,
             change_tracks=change_tracks,
-            slide_index=slide_index,
+            slide_number=slide_number,
             error=f"Track analysis JSON parse error: {e}",
         )
     except Exception as e:
         err_msg = str(e)
         log.error(
-            f"  [change-track 분석 API 오류] slide {slide_index}: {e} "
+            f"  [change-track 분석 API 오류] slide {slide_number}: {e} "
             "→ local change track 결과만 저장"
         )
         return _build_local_track_results(
             per_step_data=per_step_data,
             change_tracks=change_tracks,
-            slide_index=slide_index,
+            slide_number=slide_number,
             error=err_msg,
         )
 
@@ -1182,7 +1182,7 @@ def _build_annotation_track_metadata(track_ids: list[str], change_tracks_by_id: 
 def _build_results_from_track_analysis(
     track_analysis_result: dict,
     per_step_data: list[dict],
-    slide_index: int,
+    slide_number: int,
     base_path: str,
     change_tracks: list[dict],
 ) -> list[dict]:
@@ -1235,7 +1235,7 @@ def _build_results_from_track_analysis(
             if track["first_seen_annot_index"] == annot_idx
         ]
         results.append({
-            "slide_index":   slide_index,
+            "slide_number":  slide_number,
             "annot_index":   annot_idx,
             "timestamp_sec": step["timestamp_sec"],
             "base_path":     step["prev_path"],
@@ -1252,7 +1252,7 @@ def _build_results_from_track_analysis(
 def _build_local_track_results(
     per_step_data: list[dict],
     change_tracks: list[dict],
-    slide_index: int,
+    slide_number: int,
     error: Optional[str] = None,
 ) -> list[dict]:
     results = []
@@ -1272,7 +1272,7 @@ def _build_local_track_results(
             if track["first_seen_annot_index"] == annot_idx
         ]
         payload = {
-            "slide_index": slide_index,
+            "slide_number": slide_number,
             "annot_index": annot_idx,
             "timestamp_sec": step["timestamp_sec"],
             "base_path": step["prev_path"],
@@ -1333,14 +1333,14 @@ def _enrich_results_with_change_tracks(results: list[dict], change_tracks: list[
 def _run_per_annot_mode(
     base_path: str,
     per_step_data: list[dict],
-    slide_index: int,
+    slide_number: int,
     cfg: Config,
     save_masks: bool,
     mask_dir: Optional[Path],
     change_tracks: Optional[list[dict]] = None,
 ) -> list[dict]:
     """annot별 개별 호출 방식 실행"""
-    log.info(f"  [per-annot 모드] slide_{slide_index:03d}: annot별 개별 호출 실행")
+    log.info(f"  [per-annot 모드] slide_{slide_number:03d}: annot별 개별 호출 실행")
     results = []
     for step in per_step_data:
         result = analyze_annotation_pair(
@@ -1348,7 +1348,7 @@ def _run_per_annot_mode(
             step["annot_path"],
             step["diff_mask"],
             step["region_bboxes"],
-            slide_index,
+            slide_number,
             step["annot_index"],
             timestamp_sec=step["timestamp_sec"],
         )
@@ -1386,7 +1386,7 @@ def analyze_all(
         mask_dir.mkdir(exist_ok=True)
 
     for pair in pairs:
-        slide_idx = pair["slide_index"]
+        slide_no = pair["slide_number"]
         base_path = pair["base_path"]
         scene_indices = pair.get("scene_indices", [])
         scene_label = ",".join(str(scene_idx) for scene_idx in scene_indices[:4])
@@ -1395,16 +1395,16 @@ def analyze_all(
 
         if not pair["annot_paths"]:
             if scene_label:
-                log.info(f"[slide {slide_idx} | scenes {scene_label}] 필기 없음 - 스킵")
+                log.info(f"[slide {slide_no} | scenes {scene_label}] 필기 없음 - 스킵")
             else:
-                log.info(f"[슬라이드 {slide_idx}] 필기 없음 - 스킵")
+                log.info(f"[슬라이드 {slide_no}] 필기 없음 - 스킵")
             continue
 
         annot_timestamps = pair.get("annot_timestamps", [0.0] * len(pair["annot_paths"]))
         if scene_label:
-            log.info(f"[slide {slide_idx} | scenes {scene_label}] {len(pair['annot_paths'])}개 annot 분석 시작")
+            log.info(f"[slide {slide_no} | scenes {scene_label}] {len(pair['annot_paths'])}개 annot 분석 시작")
         else:
-            log.info(f"[슬라이드 {slide_idx}] {len(pair['annot_paths'])}개 annot 분석 시작")
+            log.info(f"[슬라이드 {slide_no}] {len(pair['annot_paths'])}개 annot 분석 시작")
 
         if per_annot_mode:
             # ── 기존 방식: annot당 1회 호출 ──
@@ -1422,12 +1422,12 @@ def analyze_all(
                 diff_mask, region_bboxes = build_diff_mask(prev_path, annot_path, cfg)
 
                 if save_masks:
-                    mask_fname = f"slide_{slide_idx:03d}_annot_{annot_idx:02d}_mask.jpg"
+                    mask_fname = f"slide_{slide_no:03d}_annot_{annot_idx:02d}_mask.jpg"
                     cv2.imwrite(str(mask_dir / mask_fname), diff_mask)
 
                 result = analyze_annotation_pair(
                     prev_path, annot_path, diff_mask, region_bboxes,
-                    slide_idx, annot_idx, timestamp_sec=ts
+                    slide_no, annot_idx, timestamp_sec=ts
                 )
                 results.append(result)
         else:
@@ -1438,7 +1438,7 @@ def analyze_all(
                 annot_timestamps,
                 pair.get("annot_prev_paths"),
                 pair.get("annot_indices"),
-                slide_idx, cfg, save_masks, mask_dir,
+                slide_no, cfg, save_masks, mask_dir,
             )
             results.extend(track_analysis_results)
 

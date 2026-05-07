@@ -2,16 +2,16 @@
 fusion.py — 멀티모달 강의 데이터 통합
 
 입력:
-  - by_slide_v2.json    : 오디오 전사 + 강조 감지 (슬라이드 단위)
+  - by_scene.json       : 오디오 전사 + 강조 감지 (scene occurrence 단위)
   - slide_classified.json : 슬라이드 텍스트 + 시각 강조 + role 분류
   - annotation.json       : 강사 필기 annotation 이벤트
 
 출력:
-  - fused.json : 슬라이드 단위 통합 텍스트 + 강조 점수
+  - fused.json : scene 단위 통합 텍스트 + 강조 점수
 
 사용법:
   python fusion.py
-  python fusion.py --audio by_slide_v2.json --classified slide_classified.json
+  python fusion.py --audio by_scene.json --classified slide_classified.json
                    --annotation annotation.json --output fused.json
 """
 
@@ -45,13 +45,15 @@ class Config:
         try:
             from .config import output_paths
             paths = output_paths(self.stem, self.output_dir, self.slides_dir)
-            if self.audio_path      is None: self.audio_path      = paths["by_slide"]
+            if self.audio_path is None:
+                self.audio_path = paths["by_scene"]
             if self.classified_path is None: self.classified_path = paths["classified"]
             if self.annotation_path is None: self.annotation_path = paths["annotation"]
             if self.output_path     is None: self.output_path     = paths["fused"]
         except ImportError:
             d, s = self.output_dir, self.stem
-            if self.audio_path      is None: self.audio_path      = d / f"{s}_by_slide.json"
+            if self.audio_path is None:
+                self.audio_path = d / f"{s}_by_scene.json"
             if self.classified_path is None: self.classified_path = d / f"{s}_slide_classified.json"
             if self.annotation_path is None: self.annotation_path = d / f"{s}_annotation.json"
             if self.output_path     is None: self.output_path     = d / f"{s}_fused.json"
@@ -165,7 +167,7 @@ def score_annotation_emphasis(annotations: list[dict]) -> float:
 
 
 def score_audio_emphasis(contexts: list[dict]) -> float:
-    """by_slide_v2 contexts 배열 → 오디오 강조 점수 (0~1 정규화)."""
+    """by_scene contexts 배열 → 오디오 강조 점수 (0~1 정규화)."""
     max_audio = 60.0  # 오디오 score 최대값 기준
     scores = []
     for ctx in contexts:
@@ -204,7 +206,7 @@ def extract_keywords_from_text(text: str, stopwords: frozenset, min_len: int) ->
 
 
 def build_emphasized_keywords(
-    audio_keywords: list[str],        # by_slide_v2 emphasis.keywords.all_keywords
+    audio_keywords: list[str],        # by_scene emphasis.keywords.all_keywords
     visual_keywords: list[str],        # slide_classified slide_emphasis[].text
     annotation_keywords: list[str],    # annotation target_content 토큰
     slide_text_keywords: list[str],    # slide_text 본문 라인 스캔 (4번째 소스)
@@ -261,17 +263,60 @@ def build_emphasized_keywords(
 
 def build_annotation_index(annotation_data: list[dict]) -> dict[int, list[dict]]:
     """
-    slide_index → annotation 이벤트 리스트 인덱스.
+    logical slide_number → annotation 이벤트 리스트 인덱스.
     annotation.json은 annotation 이벤트(annot_index별) 배열이므로
-    같은 slide_index에 여러 이벤트가 있을 수 있음.
+    같은 논리 슬라이드에 여러 scene 이벤트가 있을 수 있음.
     """
     index: dict[int, list[dict]] = {}
     for event in annotation_data:
-        sid = event["slide_index"]
+        sid = event.get("slide_number")
+        if sid is None:
+            continue
         if sid not in index:
             index[sid] = []
         index[sid].append(event)
     return index
+
+
+def _annotation_timestamp(event: dict, ann: dict | None = None) -> float | None:
+    if ann:
+        for key in ("first_seen_timestamp_sec", "timestamp_sec"):
+            if ann.get(key) is not None:
+                return float(ann[key])
+    if event.get("timestamp_sec") is not None:
+        return float(event["timestamp_sec"])
+    return None
+
+
+def filter_annotation_events_for_scene(
+    events: list[dict],
+    start_sec: float | None,
+    end_sec: float | None,
+) -> list[dict]:
+    """논리 슬라이드에 묶인 annotation 중 현재 scene 시간대의 이벤트만 남긴다."""
+    if start_sec is None or end_sec is None:
+        return copy_annotation_events(events)
+
+    start = float(start_sec)
+    end = float(end_sec)
+    filtered: list[dict] = []
+    for event in events:
+        event_ts = _annotation_timestamp(event)
+        anns = event.get("annotations")
+        if isinstance(anns, list):
+            kept_annotations = []
+            for ann in anns:
+                ann_ts = _annotation_timestamp(event, ann)
+                if ann_ts is None or start <= ann_ts <= end:
+                    kept_annotations.append(ann)
+            if kept_annotations:
+                event_copy = json.loads(json.dumps(event))
+                event_copy["annotations"] = kept_annotations
+                filtered.append(event_copy)
+                continue
+        if event_ts is None or start <= event_ts <= end:
+            filtered.append(json.loads(json.dumps(event)))
+    return filtered
 
 
 def flatten_annotations_for_slide(events: list[dict]) -> list[dict]:
@@ -419,20 +464,6 @@ def calc_both_bonus(
 
 
 # ============================================================================
-#  슬라이드 ID 변환
-# ============================================================================
-
-def slide_index_to_id(idx: int) -> str:
-    """2 → 'slide_002'"""
-    return f"slide_{idx:03d}"
-
-
-def slide_id_to_index(sid: str) -> int:
-    """'slide_002' → 2"""
-    return int(sid.split("_")[-1])
-
-
-# ============================================================================
 #  메인 퓨전 로직
 # ============================================================================
 
@@ -445,12 +476,16 @@ def run_fusion(cfg: Config) -> dict:
     with open(cfg.annotation_path, encoding="utf-8") as f:
         annotation_data = json.load(f)
 
-    audio_slides      = audio_data["slides"]
-    classified_slides = classified_data["slides"]
+    audio_slides      = audio_data["scenes"]
+    classified_slides = classified_data["scenes"]
     annot_index       = build_annotation_index(annotation_data)
 
-    # audio를 slide_index 기준으로 인덱싱
-    audio_index: dict[int, dict] = {s["slide_index"]: s for s in audio_slides}
+    # audio를 scene_index 기준으로 인덱싱
+    audio_index: dict[int, dict] = {
+        s.get("scene_index"): s
+        for s in audio_slides
+        if s.get("scene_index") is not None
+    }
 
     # classified를 slide_id 기준으로 인덱싱
     classified_index: dict[str, dict] = {s["slide_id"]: s for s in classified_slides}
@@ -465,12 +500,19 @@ def run_fusion(cfg: Config) -> dict:
     for cl_slide in classified_slides:
         slide_id  = cl_slide["slide_id"]
         slide_num = cl_slide["slide_number"]
+        scene_num = cl_slide.get("scene_number", cl_slide.get("scene_index", slide_num))
+        scene_label = int(scene_num) if isinstance(scene_num, int) else int(slide_num)
 
-        # audio 슬라이드 매핑 (slide_number로 매칭)
-        au_slide = audio_index.get(slide_num)
+        # audio scene 매핑
+        au_slide = audio_index.get(scene_num)
 
-        # annotation 이벤트 (이 슬라이드에 해당하는 것)
-        annot_events   = annot_index.get(slide_num, [])
+        # annotation 이벤트 (논리 슬라이드로 찾고, 현재 scene 시간대로 좁힘)
+        annot_events_all = annot_index.get(slide_num, [])
+        annot_events = filter_annotation_events_for_scene(
+            annot_events_all,
+            au_slide.get("start_sec") if au_slide else None,
+            au_slide.get("end_sec") if au_slide else None,
+        )
         annotation_events = copy_annotation_events(annot_events)
         flat_annots    = flatten_annotations_for_slide(annot_events)
         annot_ts_list  = [a["timestamp_sec"] for a in flat_annots if a.get("timestamp_sec")]
@@ -603,9 +645,10 @@ def run_fusion(cfg: Config) -> dict:
         # ── 슬라이드 통합 ────────────────────────────────────────────────────
         fused_slide = {
             "slide_id":     slide_id,
+            "scene_id":     cl_slide.get("scene_id", f"scene/{scene_label:04d}"),
             "slide_number": slide_num,
-            "scene_number": cl_slide.get("scene_number", slide_num),
-            "scene_index": cl_slide.get("scene_number", slide_num),
+            "scene_number": scene_num,
+            "scene_index": cl_slide.get("scene_index", scene_num),
             "slide_canonical_number": cl_slide.get("slide_canonical_number", slide_num),
             "slide_visit_order": cl_slide.get("slide_visit_order", 1),
             "slide_is_revisit": cl_slide.get("slide_is_revisit", False),
@@ -637,14 +680,21 @@ def run_fusion(cfg: Config) -> dict:
         }
 
         fused_slides.append(fused_slide)
-        print(f"  {slide_id} | role={cl_slide.get('role'):12s} | "
+        print(f"  scene_{scene_label:03d} / {slide_id} | role={cl_slide.get('role'):12s} | "
               f"total={total_score:.2f} "
               f"(vis={visual_score:.1f} ann={annot_score:.1f} aud={audio_score:.2f} bonus={both_bonus:.1f})")
 
     # ── 출력 ─────────────────────────────────────────────────────────────────
+    logical_slide_count = len({
+        slide.get("slide_number")
+        for slide in fused_slides
+        if slide.get("slide_number") is not None
+    })
+
     output = {
         "metadata": {
-            "total_slides": len(fused_slides),
+            "total_scenes": len(fused_slides),
+            "total_slides": logical_slide_count,
             "source_files": {
                 "audio":      str(cfg.audio_path),
                 "classified": str(cfg.classified_path),
@@ -660,7 +710,7 @@ def run_fusion(cfg: Config) -> dict:
                 "DEICTIC_WINDOW_AFTER_SEC":   cfg.DEICTIC_WINDOW_AFTER_SEC,
             },
         },
-        "slides": fused_slides,
+        "scenes": fused_slides,
     }
 
     return output
@@ -708,10 +758,10 @@ def main():
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     elapsed = time.time() - start
-    total_kw = sum(len(s["emphasized_keywords"]) for s in output["slides"])
+    total_kw = sum(len(s["emphasized_keywords"]) for s in output["scenes"])
     total_deictic = sum(
         1
-        for s in output["slides"]
+        for s in output["scenes"]
         for ctx in s["contexts"]
         for seg in ctx["segments"]
         if seg.get("deictic_target")
@@ -720,7 +770,8 @@ def main():
     print("\n" + "="*60)
     print("✅ 완료")
     print("="*60)
-    print(f"  슬라이드       : {output['metadata']['total_slides']}개")
+    print(f"  scene          : {output['metadata']['total_scenes']}개")
+    print(f"  slide          : {output['metadata']['total_slides']}개")
     print(f"  강조 키워드    : {total_kw}개")
     print(f"  지시어 매칭    : {total_deictic}개")
     print(f"  처리 시간      : {elapsed:.2f}초")

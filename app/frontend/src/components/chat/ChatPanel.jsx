@@ -98,16 +98,12 @@ export default function ChatPanel({
     const scenes = lecture?.scenes || []
     if (!scenes.length) return -1
 
-    if (ref.slideNumber != null) {
-      const bySlide = scenes.findIndex(s => Number(s.slide_number) === Number(ref.slideNumber))
-      if (bySlide >= 0) return bySlide
-    }
-
     if (ref.startSec != null) {
       const targetSec = Number(ref.startSec)
       let bestIdx = -1
       let bestSec = -1
       scenes.forEach((scene, idx) => {
+        if (ref.slideNumber != null && Number(scene.slide_number) !== Number(ref.slideNumber)) return
         const sec = parseTimestamp(scene.timestamp)
         if (sec == null) return
         if (sec <= targetSec && sec > bestSec) {
@@ -116,6 +112,11 @@ export default function ChatPanel({
         }
       })
       if (bestIdx >= 0) return bestIdx
+    }
+
+    if (ref.slideNumber != null) {
+      const bySlide = scenes.findIndex(s => Number(s.slide_number) === Number(ref.slideNumber))
+      if (bySlide >= 0) return bySlide
     }
 
     return scenes.findIndex(s => s.timestamp === ref.timestamp)

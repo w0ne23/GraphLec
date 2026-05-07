@@ -792,16 +792,17 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
             data = json.load(f)
 
         scenes = []
-        for s in data.get("slides", []):
+        for s in data.get("scenes", []):
             img_url = make_file_url(s.get("image_path"))
             ts = s.get("timestamp_formatted", "00:00").split(".")[0]
             if ts.startswith("00:"): ts = ts[3:]
 
             scenes.append({
-                "timestamp": ts,
-                "type": "emphasis" if s.get("role") == "elaborated" else "slide",
-                "text": s.get("title") or f"Slide {s.get('slide_number')}",
-                "image_url": img_url,
+                "timestamp":    ts,
+                "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
+                "text":         s.get("title") or f"Slide {s.get('slide_number')}",
+                "image_url":    img_url,
+                "scene_number": s.get("scene_number", s.get("scene_index")),
                 "slide_number": s.get("slide_number"),
             })
         return scenes

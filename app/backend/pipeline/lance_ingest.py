@@ -33,12 +33,13 @@ def default_lance_root() -> Path:
 
 def build_chunks_from_fused(fused: Dict[str, Any], stem: str) -> List[Dict[str, Any]]:
     """슬라이드 본문 + 세그먼트 전사를 검색용 청크로 만든다."""
-    slides = fused.get("slides") or []
+    slides = fused.get("scenes") or []
     chunks: List[Dict[str, Any]] = []
     seg_idx = 0
 
     for slide in slides:
         sid = slide.get("slide_id", "")
+        scene_id = slide.get("scene_id") or f"scene/{int(slide.get('scene_number', 0) or 0):04d}"
         sn = slide.get("slide_number")
         title = (slide.get("title") or "").strip()
         stext = (slide.get("slide_text") or "").strip()
@@ -46,11 +47,12 @@ def build_chunks_from_fused(fused: Dict[str, Any], stem: str) -> List[Dict[str, 
         if body:
             chunks.append(
                 {
-                    "chunk_id": f"{sid}_slide_body",
+                    "chunk_id": f"{scene_id}_slide_body",
                     "stem": stem,
                     "chunk_type": "slide",
                     "text": body[:12000],
                     "slide_id": sid,
+                    "scene_id": scene_id,
                     "slide_number": sn,
                     "start_sec": slide.get("start_sec"),
                     "end_sec": slide.get("end_sec"),
@@ -72,6 +74,7 @@ def build_chunks_from_fused(fused: Dict[str, Any], stem: str) -> List[Dict[str, 
                         "chunk_type": "segment",
                         "text": f"[{seg_id}] [{sid}] {t}"[:12000],
                         "slide_id": sid,
+                        "scene_id": scene_id,
                         "slide_number": sn,
                         "start_sec": seg.get("start"),
                         "end_sec": seg.get("end"),
