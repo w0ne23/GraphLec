@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.db import init_db
 from app.worker import worker_loop
 from app.routers import jobs, results
-from app.services.job_service import clear_runtime_lecture_graphs
+from app.services.lecture_service import clear_runtime_lecture_graphs
 
 # Cross-platform path handling for local_storage
 # main.py is in app/backend/app/ -> 4 levels deep from root (including filename)
