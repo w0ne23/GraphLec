@@ -11,6 +11,12 @@
   display: flex; flex-direction: column;
 }
 
+.app-main {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
 .swipe-viewport {
   flex: 1;
   display: flex;
@@ -30,7 +36,6 @@
   display: flex; flex-direction: column;
 }
 
-/* 모바일: dvh로 전환 (주소창 대응) */
 @media (max-width: 768px) {
   .app-shell { height: 100dvh; }
 }

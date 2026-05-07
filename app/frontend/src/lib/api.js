@@ -51,26 +51,58 @@ export async function getLectureStatus(jobId) {
   };
 }
 
-export async function listLectures() {
-  try {
-    const res = await fetch(`${API_BASE}/results`);
-    if (!res.ok) throw new Error('Failed to fetch lectures');
+// 1. SSE 영역 - pending/running
+export async function listActiveJobs() {
+  const res = await fetch(`${API_BASE}/jobs?status=active`)
+  if (!res.ok) throw new Error('Failed to fetch active jobs')
+  return res.json() // []
+}
 
-    const data = await res.json();
-    return data.map(lecture => ({
-      id: lecture.id,          // lecture_id — 라우팅 등 범용 식별자
-      job_id: lecture.job_id,  // job 제어용 (상태조회, 삭제, 재시도)
-      lecture_id: lecture.id,  // 결과 조회용 (그래프, 질의)
-      title: lecture.title || 'Untitled',
-      category: lecture.category || '기타',
-      status: lecture.status,
-      created_at: lecture.created_at,
-      error_message: lecture.error_message,
-      pipeline_stages: lecture.pipeline_stages || [],
-    }));
+// 2. UploadPage 완료 목록 - error/done/기타
+export async function listUploadedLectures(params = {}) {
+  return _fetchResults({ ...params, scope: 'upload' })
+}
+
+// 3. LectureListPage - done만
+export async function listLectures(params = {}) {
+  return _fetchResults({ ...params, scope: 'browse' })
+}
+
+async function _fetchResults(params) {
+  try {
+    const query = new URLSearchParams()
+    const limit = params.limit || 12
+    query.append('limit', limit)
+    query.append('scope', params.scope)
+    if (params.page) query.append('page', params.page)
+    if (params.category && params.category !== '전체') query.append('category', params.category)
+    if (params.search) query.append('search', params.search)
+
+    const res = await fetch(`${API_BASE}/results?${query.toString()}`)
+    if (!res.ok) throw new Error('Failed to fetch lectures')
+    const data = await res.json()
+
+    const items = Array.isArray(data) ? data : (data.items || [])
+    const totalItems = data.total_items || items.length
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit))
+
+    return {
+      items: items.map(lec => ({
+        id: lec.id,
+        job_id: lec.job_id,
+        title: lec.title || 'Untitled',
+        category: lec.category || '기타',
+        status: lec.status,
+        created_at: lec.created_at,
+        error_message: lec.error_message,
+        pipeline_stages: lec.pipeline_stages || [],
+        tags: lec.tags || [],
+      })),
+      totalPages,
+    }
   } catch (error) {
-    console.error("listLectures error:", error);
-    return [];
+    console.error('_fetchResults error:', error)
+    return { items: [], totalPages: 1 }
   }
 }
 

@@ -1,0 +1,272 @@
+/* ============================================================
+   lecture-list.css — LectureListPage 스타일
+   접두사: ll- (Lecture List)
+   ============================================================ */
+
+.ll-page {
+  flex: 1;
+  background: var(--bg);
+  overflow-y: auto;
+  padding: 40px 24px;
+}
+
+.ll-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.ll-header {
+  margin-bottom: 32px;
+}
+
+.ll-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--t1);
+  margin-bottom: 20px;
+}
+
+/* ── 검색바 스타일 ── */
+.ll-search-form {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 24px;
+}
+
+.ll-search-input {
+  flex: 1;
+  padding: 10px 16px;
+  border: 1.5px solid var(--b1);
+  border-radius: var(--rl);
+  background: var(--panel);
+  font-size: 14px;
+  color: var(--t1);
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.ll-search-input:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.ll-search-btn {
+  padding: 0 24px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: var(--rl);
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.ll-search-btn:hover {
+  opacity: 0.9;
+}
+
+/* ── 툴바 (필터 + 뷰 토글) ── */
+.ll-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.ll-filter-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ll-filter-btn {
+  background: var(--panel);
+  border: 1px solid var(--b1);
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  color: var(--t2);
+  transition: all 0.15s;
+  cursor: pointer;
+}
+
+.ll-filter-btn:hover {
+  border-color: var(--b2);
+  color: var(--t1);
+}
+
+.ll-filter-btn--active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff;
+}
+
+.ll-view-toggles {
+  display: flex;
+  gap: 4px;
+  background: var(--panel);
+  border: 1px solid var(--b1);
+  padding: 4px;
+  border-radius: 8px;
+}
+
+.ll-icon-btn {
+  background: none;
+  border: none;
+  border-radius: 4px;
+  width: 32px;
+  height: 32px;
+  font-size: 16px;
+  color: var(--t3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ll-icon-btn:hover {
+  color: var(--t1);
+  background: var(--hover);
+}
+
+.ll-icon-btn--active {
+  color: var(--blue);
+  background: var(--blue-bg);
+}
+
+/* ── 레이아웃 모드 ── */
+
+/* 그리드 뷰: 기본 3열 고정 */
+.ll-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+/* 리스트 뷰: 세로 스택 */
+.ll-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── 카드 리스트 모드 커스텀 (common.css 오버라이딩) ── */
+.lecture-card--list {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  min-height: 112px;
+}
+
+.lecture-card--list .lecture-card-thumb {
+  width: 200px;
+  aspect-ratio: auto;
+  flex-shrink: 0;
+  border-radius: var(--rl) 0 0 var(--rl);
+}
+
+.lecture-card--list .lecture-card-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 12px 20px;
+}
+
+.lecture-card--list .lecture-card-title {
+  font-size: 14px;
+  margin-bottom: 6px;
+  -webkit-line-clamp: 1;
+}
+
+.lecture-card--list .lecture-card-meta {
+  margin-bottom: 6px;
+}
+
+/* ── 상태 메시지 ── */
+.ll-loading, .ll-empty {
+  text-align: center;
+  padding: 80px 0;
+  font-size: 14px;
+  color: var(--t3);
+}
+
+/* ── 페이지네이션 ── */
+.ll-pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  margin-top: 48px;
+}
+
+.ll-page-btn {
+  background: var(--panel);
+  border: 1px solid var(--b1);
+  color: var(--t2);
+  min-width: 34px;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.ll-page-btn:not(:disabled):hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.ll-page-btn--active {
+  background: var(--blue);
+  border-color: var(--blue);
+  color: #fff !important;
+}
+
+.ll-page-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  background: var(--bg);
+}
+
+/* ── 반응형 처리 (모바일 최적화) ── */
+@media (max-width: 768px) {
+  .ll-page {
+    padding: 24px 16px;
+  }
+  
+  /* 모바일 그리드: 줄당 1개 (기존과 동일) */
+  .ll-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* 💡 모바일 리스트: 가로 배치 유지, 썸네일 크기 대폭 축소 */
+  .lecture-card--list {
+    flex-direction: row; 
+    min-height: auto;
+  }
+  
+  .lecture-card--list .lecture-card-thumb {
+    width: 140px; /* 모바일용 미니 썸네일 */
+    aspect-ratio: 16/9;
+    border-radius: var(--rl) 0 0 var(--rl);
+  }
+
+  .lecture-card--list .lecture-card-info {
+    padding: 10px 12px;
+  }
+
+  .lecture-card--list .lecture-card-title {
+    font-size: 13px; /* 폰트 약간 축소 */
+    margin-bottom: 4px;
+    -webkit-line-clamp: 2; /* 공간이 좁으므로 두 줄까지 허용 */
+  }
+}

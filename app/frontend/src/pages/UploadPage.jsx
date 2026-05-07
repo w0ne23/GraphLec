@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { getLectureStatus, listLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
+import { listActiveJobs, listUploadedLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
 import '../styles/upload.css'
 
@@ -22,7 +22,7 @@ const THUMB_ICON = {
   '소프트웨어 공학': '⚙️', '수학': '📐',
 }
 
-export default function LecturesPage({ onNavigate }) {
+export default function UploadPage({ onNavigate }) {
   const [lectures,    setLectures]    = useState([])
   const [title,       setTitle]       = useState('')
   const [category,    setCategory]    = useState('컴퓨터 과학')
@@ -31,6 +31,9 @@ export default function LecturesPage({ onNavigate }) {
   const [dragOver,    setDragOver]    = useState(false)
   const [uploading,   setUploading]   = useState(null)
   const [error,       setError]       = useState('')
+
+  const [totalPages, setTotalPages] = useState(1)
+  const [currentPage, setCurrentPage] = useState(1)
 
   const fileRef    = useRef()
   const scrollRef  = useRef()   // 페이지 스크롤 컨테이너
@@ -82,13 +85,13 @@ export default function LecturesPage({ onNavigate }) {
   }
 
   // 주기적으로(또는 처음 로드 시) 진행 중인 작업에 대해 SSE 연결을 맺는 함수
-  const setupSSEForJob = (job_id) => {
+  const setupSSEForJob = (job_id, lecture_id) => {
     if (eventSources.current[job_id]) return // 이미 연결되어 있음
 
-    console.log(`--- [SSE] Connecting to stream for job ${job_id} ---`)
+    console.log(`--- [SSE] Connecting to stream for job ${job_id} (Lecture: ${lecture_id}) ---`)
     const eventSource = new EventSource(`/api/jobs/${job_id}/stream`)
     eventSources.current[job_id] = eventSource
-    startHealthCheck() // SSE 연결 시작 시 헬스체크 함께 시작
+    startHealthCheck()
 
     let closed = false
     const closeSSE = () => {
@@ -103,26 +106,25 @@ export default function LecturesPage({ onNavigate }) {
       try {
         const data = JSON.parse(event.data)
         if (data.error) {
-          console.error("SSE Error from server:", data.error)
+          console.error("SSE Error:", data.error)
           setLectures(prev => prev.map(lec => 
-             (lec.id === job_id || lec.job_id === job_id) 
-               ? { ...lec, status: 'error', error_message: data.error === 'Job not found' ? '작업을 찾을 수 없습니다. (실패했거나 삭제됨)' : data.error } 
+             lec.id === lecture_id
+               ? { ...lec, status: 'error', error_message: data.error } 
                : lec
            ))
           closeSSE()
           return
         }
 
-        // 특정 강의 상태 및 상세 단계 업데이트 (job_id 기준)
         setLectures(prev => prev.map(lec => {
-          if (lec.job_id === data.job_id) {
+          if (lec.id === lecture_id) {
             let stages = data.pipeline_stages
             if (!stages || stages.length === 0) {
                stages = STAGE_KEYS.map((key) => ({ stage: key, status: 'wait' }))
             }
-
             return { 
               ...lec, 
+              job_id: data.job_id, // 혹시 바뀌었을 경우를 대비
               status: data.lecture_status,
               current_stage: data.current_stage,
               error_message: data.error_message || lec.error_message,
@@ -132,43 +134,36 @@ export default function LecturesPage({ onNavigate }) {
           return lec
         }))
 
-        // 완료 또는 에러 상태면 연결 종료
         if (data.lecture_status === 'done' || data.lecture_status === 'error') {
-           console.log(`--- [SSE] Closing stream for job ${job_id} (Terminal state) ---`)
            closeSSE()
         }
-
-      } catch (err) {
-        console.error("--- [SSE] Parse error:", err)
-      }
+      } catch (err) { console.error("SSE Parse error:", err) }
     }
 
     eventSource.onerror = (err) => {
       if (closed) return
-      console.error(`--- [SSE] Connection error for job ${job_id}:`, err)
-      // SSE 에러 발생 시 즉시 끊고 서버 다운 체크 유도
       closeSSE()
-      // 단일 작업에 대해 에러 표시
       setLectures(prev => prev.map(lec => 
-        lec.job_id === job_id ? { ...lec, status: 'error', error_message: '서버와의 연결이 끊어졌습니다.' } : lec
+        lec.id === lecture_id ? { ...lec, status: 'error', error_message: '연결이 끊어졌습니다.' } : lec
       ))
     }
   }
 
-  // 처음 로드 시 목록을 가져오고, 진행 중인 작업들에 대해 SSE 연결 시작
+  // 처음 로드 시
   useEffect(() => {
-    listLectures().then(data => {
-      setLectures(data)
-      data.forEach(lec => {
-        if (lec.status === 'running' || lec.status === 'pending') {
-          setupSSEForJob(lec.job_id)
-        }
+    Promise.all([
+      listActiveJobs(),
+      listUploadedLectures({ page: 1, limit: 12 }),
+    ]).then(([activeJobs, result]) => {
+      setLectures([...activeJobs, ...result.items])
+      setTotalPages(result.totalPages)
+      activeJobs.forEach(lec => {
+        if (lec.job_id) setupSSEForJob(lec.job_id, lec.id)
       })
     }).catch(e => setError(String(e.message || e)))
 
-    // 언마운트 시 모든 SSE 연결 정리
     return () => {
-      Object.values(eventSources.current).forEach(source => source.close())
+      Object.values(eventSources.current).forEach(s => s.close())
       eventSources.current = {}
       if (healthTimer.current) clearInterval(healthTimer.current)
     }
@@ -183,14 +178,13 @@ export default function LecturesPage({ onNavigate }) {
   async function handleSubmit() {
     if (uploading || !file) return
     setError('')
-
-    // 업로드 시작 → 목록 섹션으로 스크롤
     listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 
     try {
-      const created   = await uploadLecture({ title: title || file.name, category, description, file })
-      setLectures(prev => [{ ...created, status: 'pending', pipeline_stages: [] }, ...prev])
-      setupSSEForJob(created.job_id)
+      const created = await uploadLecture({ title: title || file.name, category, description, file })
+      // created에는 id(lecture_id)와 job_id가 모두 있음
+      setLectures(prev => [created, ...prev])
+      setupSSEForJob(created.job_id, created.id)
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -198,40 +192,48 @@ export default function LecturesPage({ onNavigate }) {
     }
   }
 
-  async function handleDelete(jobId, e) {
+  async function handleDelete(jobId, e, lectureId) {
     e.stopPropagation()
     if (!confirm('이 강의를 삭제하시겠습니까?')) return
     try {
       await deleteLecture(jobId)
-      setLectures(prev => prev.filter(l => l.job_id !== jobId))
+      setLectures(prev => prev.filter(l => l.id !== lectureId))
+      if (eventSources.current[jobId]) {
+        eventSources.current[jobId].close()
+        delete eventSources.current[jobId]
+      }
     } catch (err) { alert(`삭제 실패: ${err.message}`) }
   }
 
-  async function handleRetry(jobId, e) {
+  async function handleRetry(lectureId, oldJobId, e) {
     e.stopPropagation()
     if (!confirm('분석을 다시 시도하시겠습니까?')) return
     try {
-      await retryLecture(jobId)
-      // 재시도 요청 후 SSE 새로 연결
-      setLectures(prev => prev.map(l => l.job_id === jobId ? { ...l, status: 'pending', pipeline_stages: [] } : l))
-      setupSSEForJob(jobId)
+      const { job_id: newJobId } = await retryLecture(oldJobId)
+      // 이전 SSE 정리
+      if (eventSources.current[oldJobId]) {
+        eventSources.current[oldJobId].close()
+        delete eventSources.current[oldJobId]
+      }
+      
+      setLectures(prev => prev.map(l => 
+        l.id === lectureId 
+          ? { ...l, job_id: newJobId, status: 'pending', pipeline_stages: [], current_stage: 'Resuming pipeline...' } 
+          : l
+      ))
+      setupSSEForJob(newJobId, lectureId)
     } catch (err) { alert(`재시도 실패: ${err.message}`) }
   }
 
   return (
     <div className="up-page" ref={scrollRef}>
 
-      {/* ── 섹션 1: 업로드 폼 (뷰포트 전체 높이) ── */}
+      {/* ── 섹션 1: 업로드 폼 ── */}
       <section className="up-form-section">
         <div className="up-form-inner">
-          <div className="up-form-logo">
-            Graph<span>Lec</span>
-          </div>
+          <div className="up-form-logo">Graph<span>Lec</span></div>
           <p className="up-form-sub">강의 영상을 업로드하면 자동으로 분석합니다.</p>
-
           {error && <p className="up-error">{error}</p>}
-
-          {/* 드롭존 */}
           <div
             className={`up-dropzone${dragOver ? ' up-dropzone--drag' : ''}${file ? ' up-dropzone--file' : ''}`}
             onClick={() => fileRef.current.click()}
@@ -244,11 +246,8 @@ export default function LecturesPage({ onNavigate }) {
               ? <><p className="up-dz-text"><strong>{file.name}</strong></p><p className="up-dz-sub">{(file.size/1024/1024).toFixed(1)} MB</p></>
               : <><p className="up-dz-text"><strong>드래그하거나 클릭</strong></p><p className="up-dz-sub">MP4, MOV, AVI · 최대 2GB</p></>
             }
-            <input ref={fileRef} type="file" accept="video/*" style={{ display: 'none' }}
-              onChange={e => setFileWithAutoTitle(e.target.files[0])} />
+            <input ref={fileRef} type="file" accept="video/*" style={{ display: 'none' }} onChange={e => setFileWithAutoTitle(e.target.files[0])} />
           </div>
-
-          {/* 폼 필드 */}
           <div className="up-field-group">
             <div className="up-field">
               <label className="up-label">강의 제목</label>
@@ -257,10 +256,7 @@ export default function LecturesPage({ onNavigate }) {
             <div className="up-field">
               <label className="up-label">카테고리</label>
               <select className="up-select" value={category} onChange={e => setCategory(e.target.value)}>
-                <option>컴퓨터 과학</option>
-                <option>수학</option>
-                <option>데이터 사이언스</option>
-                <option>소프트웨어 공학</option>
+                <option>컴퓨터 과학</option><option>수학</option><option>데이터 사이언스</option><option>소프트웨어 공학</option>
               </select>
             </div>
             <div className="up-field">
@@ -268,15 +264,8 @@ export default function LecturesPage({ onNavigate }) {
               <textarea className="up-textarea" value={description} onChange={e => setDescription(e.target.value)} placeholder="강의 내용을 간략히 설명하세요..." />
             </div>
           </div>
-
-          <button className="up-submit-btn" onClick={handleSubmit} disabled={!!uploading || !file}>
-            {uploading ? '업로드 중...' : '업로드 시작'}
-          </button>
-
-          {/* 목록으로 내려가는 힌트 */}
-          <button className="up-scroll-hint" onClick={() => listRef.current?.scrollIntoView({ behavior: 'smooth' })}>
-            강의 목록 보기 ↓
-          </button>
+          <button className="up-submit-btn" onClick={handleSubmit} disabled={!!uploading || !file}>업로드 시작</button>
+          <button className="up-scroll-hint" onClick={() => listRef.current?.scrollIntoView({ behavior: 'smooth' })}>강의 목록 보기 ↓</button>
         </div>
       </section>
 
@@ -286,90 +275,42 @@ export default function LecturesPage({ onNavigate }) {
           <div className="up-list-title">강의 목록</div>
           <span className="up-list-count">{lectures.length}개</span>
         </div>
-
         <div className="up-list content-max">
           {lectures.length === 0 && <div className="up-empty">업로드된 강의가 없습니다</div>}
           {lectures.map(lec => {
-            const st        = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
-            const thumbBg   = THUMB_COLOR[lec.category] ?? '#1e2333'
+            const st = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
+            const thumbBg = THUMB_COLOR[lec.category] ?? '#1e2333'
             const thumbIcon = THUMB_ICON[lec.category] ?? '🎬'
 
             return (
-              <div key={lec.job_id}>
-                <div
-                  className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`}
-                  onClick={() => lec.status === 'done' && onNavigate?.({ page: 'lecture', lectureId: lec.id })}
-                >
-                  <div className="upload-row-thumb" style={{ background: thumbBg }}>
-                    <span className="upload-row-thumb-icon">{thumbIcon}</span>
-                  </div>
+              <div key={lec.id}>
+                <div className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`} onClick={() => lec.status === 'done' && onNavigate?.({ page: 'lecture', lectureId: lec.id })}>
+                  <div className="upload-row-thumb" style={{ background: thumbBg }}><span className="upload-row-thumb-icon">{thumbIcon}</span></div>
                   <div className="upload-row-main">
                     <div className="upload-row-title">{lec.title}</div>
-                    <div className="upload-row-meta">
-                      <span className="upload-row-cat">{lec.category}</span>
-                      {lec.tags?.slice(0, 3).map(tag => (
-                        <span key={tag} className="upload-row-tag">{tag}</span>
-                      ))}
-                    </div>
+                    <div className="upload-row-meta"><span className="upload-row-cat">{lec.category}</span></div>
                   </div>
-                  <div className="upload-row-date">
-                    {new Date(lec.created_at).toLocaleDateString('ko-KR')}
-                  </div>
-                  <div className="upload-row-status">
-                    <span className={`upload-status-badge ${st.cls}`}>{st.label}</span>
-                  </div>
+                  <div className="upload-row-date">{new Date(lec.created_at).toLocaleDateString('ko-KR')}</div>
+                  <div className="upload-row-status"><span className={`upload-status-badge ${st.cls}`}>{st.label}</span></div>
                   <div className="upload-row-actions">
-                    {lec.status === 'done' && (
-                      <button
-                        className="upload-btn-verifier"
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          onNavigate?.({ page: 'verifier', lectureId: lec.id })
-                        }}
-                      >
-                        Verifier
-                      </button>
-                    )}
-                    {lec.status === 'error' && (
-                      <button className="upload-btn-retry" onClick={e => handleRetry(lec.job_id, e)}>재시도</button>
-                    )}
-                    {lec.status !== 'done' && (
-                      <button className="upload-btn-delete" onClick={e => handleDelete(lec.job_id, e)}>삭제</button>
-                    )}
+                    {lec.status === 'done' && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); onNavigate?.({ page: 'verifier', lectureId: lec.id }) }}>Verifier</button>}
+                    {lec.status === 'error' && <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, lec.job_id, e)}>재시도</button>}
+                    {lec.status !== 'done' && <button className="upload-btn-delete" onClick={e => handleDelete(lec.job_id, e, lec.id)}>삭제</button>}
                     {lec.status === 'done' && <span className="upload-row-arrow">→</span>}
                   </div>
                 </div>
-
-                {/* 인라인 파이프라인 진행 */}
                 {(lec.status === 'running' || lec.status === 'pending' || lec.status === 'error') && lec.pipeline_stages && (
                   <div className="upload-pipe" style={{ margin: '-4px 0 4px', borderTopLeftRadius: 0, borderTopRightRadius: 0 }}>
                     <div className="upload-pipe-track">
-                      {/* 파이프라인 진행 상태에 따른 진행률 바 계산 */}
-                      <div className="upload-pipe-fill" style={{ 
-                        width: lec.status === 'done' ? '100%' : 
-                               lec.status === 'error' ? '0%' : 
-                               `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * (100 / STAGE_KEYS.length) + 
-                                  (lec.pipeline_stages.some(s => s.status === 'run') ? (100 / STAGE_KEYS.length) / 2 : 0))}%` 
-                      }} />
+                      <div className="upload-pipe-fill" style={{ width: lec.status === 'done' ? '100%' : lec.status === 'error' ? '0%' : `${Math.max(0, lec.pipeline_stages.filter(s => s.status === 'done').length * (100 / STAGE_KEYS.length) + (lec.pipeline_stages.some(s => s.status === 'run') ? (100 / STAGE_KEYS.length) / 2 : 0))}%` }} />
                     </div>
                     <div className="upload-pipe-stages">
                       {STAGE_LABELS.map((lbl, i) => {
                         const stageStatus = lec.pipeline_stages.find(s => s.stage === STAGE_KEYS[i])?.status ?? 'wait'
-                        return (
-                          <span key={i} className={`upload-chip${
-                            stageStatus === 'done' ? ' upload-chip--done' :
-                            stageStatus === 'run'  ? ' upload-chip--run'  : ''
-                          }`}>
-                            {stageStatus === 'done' ? '✓ ' : stageStatus === 'run' ? '↻ ' : ''}{lbl}
-                          </span>
-                        )
+                        return <span key={i} className={`upload-chip${stageStatus === 'done' ? ' upload-chip--done' : stageStatus === 'run' ? ' upload-chip--run' : ''}`}>{stageStatus === 'done' ? '✓ ' : stageStatus === 'run' ? '↻ ' : ''}{lbl}</span>
                       })}
                     </div>
-                    {lec.status === 'error' && (
-                      <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--red)' }}>
-                        오류 내용: {lec.error_message}
-                      </div>
-                    )}
+                    {lec.status === 'error' && <div style={{ marginTop: '8px', fontSize: '11px', color: 'var(--red)' }}>오류: {lec.error_message}</div>}
                   </div>
                 )}
               </div>

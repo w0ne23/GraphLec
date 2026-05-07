@@ -2,8 +2,9 @@ import uuid
 import shutil
 import logging
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
@@ -49,8 +50,11 @@ async def stream_job_status(job_id: str, request: Request):
 
 
 @router.get("")
-async def list_jobs(db: AsyncSession = Depends(get_db)):
-    return await lecture_service.list_jobs(db)
+async def list_jobs(
+    db: AsyncSession = Depends(get_db),
+    status: Optional[str] = Query(None),
+):
+    return await lecture_service.list_jobs(db, status_filter=status)
 
 
 @router.get("/{job_id}/graph_status")

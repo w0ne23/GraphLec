@@ -1,5 +1,6 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, Request
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
@@ -10,9 +11,18 @@ router = APIRouter(prefix="/results")
 
 
 @router.get("")
-async def list_results(db: AsyncSession = Depends(get_db)):
-    """강의 목록 조회 (Lecture ID 기준)"""
-    return await lecture_service.list_all_results(db)
+async def list_results(
+    db: AsyncSession = Depends(get_db),
+    page: int = Query(1, ge=1),
+    limit: int = Query(12, ge=1, le=100),
+    category: Optional[str] = Query(None),
+    search: Optional[str] = Query(None),
+    scope: str = Query('browse'),
+):
+    return await lecture_service.list_all_results(
+        db, page=page, limit=limit,
+        category=category, search=search, scope=scope
+    )
 
 
 @router.get("/{lecture_id}/timeline")

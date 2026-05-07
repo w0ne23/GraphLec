@@ -1,0 +1,80 @@
+/* ============================================================
+   landing.css — 진입 페이지(LandingPage) 스타일
+   접두사: ld- (Landing)
+   ============================================================ */
+
+.ld-page {
+  display: flex; align-items: center; justify-content: center;
+  height: 100vh; /* 꽉 찬 한 화면 */
+  width: 100%;
+  background: var(--bg);
+  padding: 24px;
+  overflow-y: auto; /* 내용이 너무 많을 경우를 대비한 최소한의 스크롤 */
+}
+
+/* 중앙 콘텐츠 레이아웃 */
+.ld-content {
+  display: flex; flex-direction: column; align-items: center;
+  gap: 4rem; /* 설명 영역과 카드 영역 사이 간격 */
+  width: 100%;
+}
+
+/* ── 헤더(로고, 설명) ── */
+.ld-header {
+  text-align: center;
+  display: flex; flex-direction: column; align-items: center;
+}
+
+.ld-logo {
+  font-size: 38px; font-weight: 800; color: var(--t1);
+  letter-spacing: -1px; margin-bottom: 20px;
+}
+.ld-logo span { color: var(--blue); }
+
+.ld-desc {
+  font-size: 14px; line-height: 1.7; color: var(--t2);
+  max-width: 640px; margin-bottom: 0; word-break: keep-all;
+}
+
+/* ── 카드 영역 ── */
+.ld-cards {
+  display: grid; 
+  /* 데스크탑에서는 3컬럼 고정 */
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px; 
+  width: 100%;
+  max-width: 1000px;
+}
+
+.ld-card {
+  height: 20rem;
+  background: var(--panel); border: 1px solid var(--b1);
+  border-radius: var(--rl); padding: 32px 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  transition: all .18s ease-in-out;
+}
+
+.ld-card:hover {
+  border-color: var(--blue); background: var(--blue-bg);
+  transform: translateY(-3px); box-shadow: 0 4px 20px rgba(0,0,0,.08);
+}
+
+.ld-card-icon { font-size: 32px; margin-bottom: 16px; opacity: .9; }
+.ld-card-title { font-size: 15px; font-weight: 700; color: var(--t1); margin-bottom: 10px; }
+.ld-card-desc { font-size: 13px; color: var(--t2); line-height: 1.5; word-break: keep-all; }
+
+/* ── 모바일/태블릿 반응형 ── */
+@media (max-width: 900px) {
+  .ld-cards { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+}
+
+@media (max-width: 768px) {
+  .ld-page { padding: 40px 20px; height: auto; min-height: 100vh; }
+  .ld-content { gap: 40px; }
+  .ld-logo { font-size: 32px; }
+  .ld-cards { grid-template-columns: 1fr; } /* 모바일은 세로로 스택 */
+}
