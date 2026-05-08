@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from pathlib import Path
 
 from . import claim_common as cv
@@ -56,6 +57,75 @@ SEVERITY_SORT_ORDER = {
     "major": 1,
     "minor": 2,
 }
+_DOCKER_LOG_TEE_ENABLED = False
+
+
+class _DockerLogTee:
+    def __init__(self, primary, docker_stream):
+        self.primary = primary
+        self.docker_stream = docker_stream
+        self.encoding = getattr(primary, "encoding", None) or "utf-8"
+        self.errors = getattr(primary, "errors", None) or "replace"
+
+    def write(self, data):
+        written = self.primary.write(data)
+        self.primary.flush()
+        self.docker_stream.write(data)
+        self.docker_stream.flush()
+        return written
+
+    def flush(self):
+        self.primary.flush()
+        self.docker_stream.flush()
+
+    def fileno(self):
+        return self.primary.fileno()
+
+    def isatty(self):
+        return self.primary.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self.primary, name)
+
+
+def _same_stream_target(stream, target_path: str) -> bool:
+    try:
+        return os.fstat(stream.fileno()) == os.stat(target_path)
+    except Exception:
+        return False
+
+
+def _enable_docker_log_tee() -> None:
+    """
+    Docker 백그라운드 verifier는 stdout이 파일로 리다이렉트된다.
+    파일 로그는 유지하면서 Docker Desktop/backend logs에도 같은 내용을 흘려보낸다.
+    """
+    global _DOCKER_LOG_TEE_ENABLED
+    if _DOCKER_LOG_TEE_ENABLED:
+        return
+
+    flag = os.getenv("VERIFIER_DOCKER_LOGS", "1").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return
+
+    target_path = os.getenv("VERIFIER_DOCKER_LOG_TARGET", "/proc/1/fd/1")
+    if not Path(target_path).exists():
+        return
+    if not (Path("/.dockerenv").exists() or Path("/pipeline").exists()):
+        return
+    if _same_stream_target(sys.stdout, target_path) and _same_stream_target(sys.stderr, target_path):
+        return
+
+    try:
+        docker_stream = open(target_path, "a", encoding="utf-8", errors="replace", buffering=1)
+    except OSError:
+        return
+
+    if not _same_stream_target(sys.stdout, target_path):
+        sys.stdout = _DockerLogTee(sys.stdout, docker_stream)
+    if not _same_stream_target(sys.stderr, target_path):
+        sys.stderr = _DockerLogTee(sys.stderr, docker_stream)
+    _DOCKER_LOG_TEE_ENABLED = True
 
 
 def _include_debug_fields() -> bool:
@@ -66,12 +136,13 @@ def _feedback_sort_key(item: dict, status: str | None = None) -> tuple:
     item_status = status or str(item.get("status", "") or "")
     issue_type = str(item.get("issue_type") or item.get("feedback_type") or item.get("type") or "")
     issue_basis = str(item.get("issue_basis", "") or "")
+    score = item.get("crosscheck_score", item.get("score", item.get("confidence", 0)))
     return (
         STATUS_SORT_ORDER.get(item_status, 9),
         ISSUE_SORT_ORDER.get(issue_type, 9),
         ISSUE_BASIS_SORT_ORDER.get(issue_basis, 8),
         SEVERITY_SORT_ORDER.get(str(item.get("severity", "") or ""), 9),
-        -float(item.get("confidence", 0) or 0),
+        -float(score or 0),
         float(item.get("start_time", item.get("location", {}).get("start_time", 0)) or 0),
     )
 
@@ -98,13 +169,51 @@ def _default_cross_models() -> list[str]:
     return ["gpt-5.4", "claude-sonnet-4.5"]
 
 
+def _default_crosscheck_models() -> list[str]:
+    return _split_model_specs(os.getenv("CROSS_CHECK_MODELS"))
+
+
 def _is_openai_model(model: str) -> bool:
     return str(model or "").lower().startswith(("gpt", "o1", "o3"))
+
+
+def _is_xai_model(model: str) -> bool:
+    return cv._is_xai_model(model)
+
+
+def _is_deepseek_model(model: str) -> bool:
+    return cv._is_deepseek_model(model)
 
 
 def _is_anthropic_model(model: str) -> bool:
     lowered = str(model or "").lower()
     return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
+
+
+def _missing_provider_key(model: str) -> str | None:
+    if _is_openai_model(model) and not os.getenv("OPENAI_API_KEY"):
+        return "OPENAI_API_KEY"
+    if _is_xai_model(model) and not os.getenv("XAI_API_KEY"):
+        return "XAI_API_KEY"
+    if _is_deepseek_model(model) and not os.getenv("DEEPSEEK_API_KEY"):
+        return "DEEPSEEK_API_KEY"
+    if _is_anthropic_model(model) and not os.getenv("ANTHROPIC_API_KEY"):
+        return "ANTHROPIC_API_KEY"
+    return None
+
+
+def _filter_available_crosscheck_models(models: list[str]) -> list[str]:
+    available = []
+    skipped = []
+    for model in models:
+        missing = _missing_provider_key(model)
+        if missing:
+            skipped.append(f"{model}({missing} 없음)")
+            continue
+        available.append(model)
+    if skipped:
+        print(f"  crosscheck 모델 제외: {', '.join(skipped)}")
+    return available
 
 
 def _load_verifier():
@@ -521,6 +630,11 @@ def _claim_record_from_issue(
             "evidence_in_context": issue.get("evidence_in_context", ""),
             "crosscheck_context_text": issue.get("crosscheck_context_text", ""),
             "evidence_sources": issue.get("evidence_sources", []),
+            "crosscheck_score": issue.get("crosscheck_score"),
+            "crosscheck_score_percent": issue.get("crosscheck_score_percent"),
+            "crosscheck_score_verdict": issue.get("crosscheck_score_verdict", ""),
+            "crosscheck_weighted_status": issue.get("crosscheck_weighted_status", ""),
+            "crosscheck_scoring": issue.get("crosscheck_scoring", {}),
             "canonical_issue_id": issue.get("canonical_issue_id", ""),
             "canonical_issue_count": issue.get("canonical_issue_count", 1),
             "canonical_member_utterance_ids": issue.get("canonical_member_utterance_ids", []),
@@ -535,7 +649,6 @@ def _claim_record_from_issue(
             "grounding_skipped": issue.get("grounding_skipped", False),
             "grounding_reason": issue.get("grounding_reason", ""),
             "grounding_api_failed": issue.get("grounding_api_failed", False),
-            "slide_recheck_reason": issue.get("slide_recheck_reason", ""),
             "severity": issue.get("severity", ""),
             "confidence": issue.get("confidence", 0),
             **_classify_pedagogical_issue(issue),
@@ -550,7 +663,7 @@ def _claim_record_from_issue(
             )
     rejection_reason = issue.get("rejection_reason") or ""
     if stage != "final_confirmed":
-        rejection_reason = rejection_reason or issue.get("grounding_reason") or issue.get("slide_recheck_reason") or ""
+        rejection_reason = rejection_reason or issue.get("grounding_reason") or ""
     if rejection_reason:
         record["rejection_reason"] = rejection_reason
     return record
@@ -646,9 +759,7 @@ status_bucket: {status}
 
     try:
         model = cv._resolve_stage_model("cross_recheck")
-        response_format = {"type": "json_object"} if (
-            model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
-        ) else None
+        response_format = {"type": "json_object"} if cv._supports_json_object_response_format(model) else None
         text, call_usage = cv._call_llm(
             prompt,
             max_tokens=1024,
@@ -1001,11 +1112,15 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
     payload = {
         "claim_id": _claim_key(claim),
         "utterance_id": uid,
+        "utterance_ids": claim.get("utterance_ids") or [uid],
         "claim_type": claim_type,
         "claim_type_label": _claim_type_label(claim_type),
         "claim_text": claim.get("claim_text", ""),
         "resolved_claim": claim.get("resolved_claim", ""),
         "is_approximate": bool(claim.get("is_approximate")),
+        "needs_context": bool(claim.get("needs_context")),
+        "resolution_status": claim.get("resolution_status", ""),
+        "context_note": claim.get("context_note", ""),
         "location": {
             "start_time": utt.get("start_time"),
             "end_time": utt.get("end_time"),
@@ -1018,6 +1133,12 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
 
 
 def _crosscheck_verdict(details: list[dict], status: str) -> str:
+    scoring = {}
+    if isinstance(details, dict):
+        scoring = details.get("scoring") or {}
+        details = details.get("model_results") or []
+    if isinstance(scoring, dict) and scoring.get("score_verdict"):
+        return str(scoring.get("score_verdict") or "")
     verdicts = [str(row.get("verdict", "") or "") for row in details if isinstance(row, dict)]
     if not verdicts:
         if status == STATUS_CONFIRMED:
@@ -1090,6 +1211,12 @@ def _compact_crosscheck_details(details: list[dict]) -> list[dict]:
             "verdict": row.get("verdict", ""),
             "reason": row.get("reason", ""),
         }
+        for numeric_field in ("vote_score", "model_weight", "weighted_score", "confidence"):
+            if row.get(numeric_field) is not None:
+                item[numeric_field] = row.get(numeric_field)
+        for scoring_field in ("criteria_scores", "criteria_evidence", "score_breakdown"):
+            if isinstance(row.get(scoring_field), dict):
+                item[scoring_field] = row.get(scoring_field)
         for field in visible_fields:
             value = str(row.get(field, "") or "").strip()
             if value:
@@ -1188,6 +1315,10 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
     )
     source_claim_id = record.get("source_claim_key") if record.get("matched_to_extracted_claim", True) else None
     crosscheck_details = record.get("crosscheck_details") or []
+    crosscheck_scoring = record.get("crosscheck_scoring") or {}
+    crosscheck_score = record.get("crosscheck_score")
+    if crosscheck_score is None and isinstance(crosscheck_scoring, dict):
+        crosscheck_score = crosscheck_scoring.get("score")
     confirmation_reason = _confirmation_reason(record, crosscheck_details)
     related_utterance_ids = _record_related_utterance_ids(record, crosscheck_details)
     feedback_id = f"fb_{index + 1:04d}"
@@ -1204,6 +1335,11 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
         "feedback_label": feedback_label,
         "severity": record.get("severity", ""),
         "status": status,
+        "score": crosscheck_score,
+        "crosscheck_score": crosscheck_score,
+        "crosscheck_score_percent": record.get("crosscheck_score_percent"),
+        "crosscheck_score_verdict": record.get("crosscheck_score_verdict"),
+        "crosscheck_weighted_status": record.get("crosscheck_weighted_status"),
         "location": {
             "start_time": record.get("start_time"),
             "end_time": record.get("end_time"),
@@ -1256,7 +1392,11 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
     if crosscheck_details:
         payload["checks"] = {
             "crosscheck": {
-                "verdict": _crosscheck_verdict(crosscheck_details, status),
+                "verdict": record.get("crosscheck_score_verdict") or _crosscheck_verdict(crosscheck_details, status),
+                "score": crosscheck_score,
+                "score_percent": record.get("crosscheck_score_percent"),
+                "status_by_score": record.get("crosscheck_weighted_status"),
+                "scoring": crosscheck_scoring,
                 "model_results": _compact_crosscheck_details(crosscheck_details),
             },
             "grounding": _grounding_payload(record),
@@ -1279,7 +1419,11 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
         }
         payload["checks"] = {
             "crosscheck": {
-                "verdict": _crosscheck_verdict(crosscheck_details, status),
+                "verdict": record.get("crosscheck_score_verdict") or _crosscheck_verdict(crosscheck_details, status),
+                "score": crosscheck_score,
+                "score_percent": record.get("crosscheck_score_percent"),
+                "status_by_score": record.get("crosscheck_weighted_status"),
+                "scoring": crosscheck_scoring,
                 "model_results": crosscheck_details,
             },
             "grounding": _grounding_payload(record),
@@ -1313,6 +1457,7 @@ def _build_v2_output(
         raw_models = raw_models.get("judge") or raw_models.get("crosscheck") or []
     legacy_models = list(raw_models)
     crosscheck_models = list(result.get("crosscheck_models") or legacy_models)
+    crosscheck_source_models = list(result.get("crosscheck_source_models") or crosscheck_models)
     feedback_items: list[dict] = []
     for status, records in (
         (STATUS_CONFIRMED, confirmed),
@@ -1371,7 +1516,10 @@ def _build_v2_output(
         },
         "pipeline_models": legacy_models,
         "crosscheck_models": crosscheck_models,
+        "crosscheck_source_models": crosscheck_source_models,
         "crosscheck_model_map": result.get("crosscheck_model_map", {}),
+        "crosscheck_model_weights": result.get("crosscheck_model_weights", {}),
+        "crosscheck_score_report": result.get("crosscheck_score_report", {}),
         "summary": {
             "extracted_claim_count": len(claims),
             "issue_union_raw_count": result.get("issue_union_raw_count", result.get("issue_union_count", 0)),
@@ -1390,6 +1538,11 @@ def _build_v2_output(
             "breakdown_by_verification_basis": breakdown_by_verification_basis,
             "breakdown_by_evidence_need": breakdown_by_evidence_need,
             "breakdown_by_claim_type": _count_by(claims, "claim_type"),
+            "crosscheck_score": {
+                "algorithm": (result.get("crosscheck_score_report", {}) or {}).get("algorithm", ""),
+                "thresholds": (result.get("crosscheck_score_report", {}) or {}).get("thresholds", {}),
+                "status_counts": (result.get("crosscheck_score_report", {}) or {}).get("status_counts", {}),
+            },
         },
         "claims": [_claim_payload_v2(claim, utterance_lookup) for claim in claims],
         "feedback_groups": feedback_groups,
@@ -1422,7 +1575,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "issues",
         "crosscheck_rejected_issues",
         "crosscheck_inconclusive_issues",
-        "slide_rejected_issues",
         "grounding_rejected_issues",
         "rejected_issues",
     ):
@@ -1449,10 +1601,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "crosscheck_inconclusive")
         for issue in result.get("crosscheck_inconclusive_issues", [])
     ])
-    raw_slide_rejected = _dedupe_records([
-        _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "slide_recheck_rejected")
-        for issue in result.get("slide_rejected_issues", [])
-    ])
     raw_grounding_rejected = _dedupe_records([
         _claim_record_from_issue(issue, claim_lookup, claim_candidates, utterance_lookup, "grounding_rejected")
         for issue in result.get("grounding_rejected_issues", [])
@@ -1463,7 +1611,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             raw_final_confirmed
             + raw_crosscheck_rejected
             + raw_crosscheck_inconclusive
-            + raw_slide_rejected
             + raw_grounding_rejected
         )
         if not record.get("matched_to_extracted_claim", True)
@@ -1471,7 +1618,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     final_confirmed = [record for record in raw_final_confirmed if record.get("matched_to_extracted_claim", True)]
     crosscheck_rejected = [record for record in raw_crosscheck_rejected if record.get("matched_to_extracted_claim", True)]
     crosscheck_inconclusive = [record for record in raw_crosscheck_inconclusive if record.get("matched_to_extracted_claim", True)]
-    slide_rejected = [record for record in raw_slide_rejected if record.get("matched_to_extracted_claim", True)]
     grounding_rejected = [record for record in raw_grounding_rejected if record.get("matched_to_extracted_claim", True)]
     final_confirmed, professor_check = _split_confirmed_and_professor_check(final_confirmed)
     for record in crosscheck_inconclusive:
@@ -1488,8 +1634,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     source_claim_dedupe_token_usage = cv._merge_token_usage(source_claim_dedupe_token_usage, usage)
     crosscheck_rejected, usage = _dedupe_records_by_source_claim_with_llm(crosscheck_rejected, STATUS_REJECTED)
     source_claim_dedupe_token_usage = cv._merge_token_usage(source_claim_dedupe_token_usage, usage)
-    slide_rejected, usage = _dedupe_records_by_source_claim_with_llm(slide_rejected, STATUS_REJECTED)
-    source_claim_dedupe_token_usage = cv._merge_token_usage(source_claim_dedupe_token_usage, usage)
     grounding_rejected, usage = _dedupe_records_by_source_claim_with_llm(grounding_rejected, STATUS_REJECTED)
     source_claim_dedupe_token_usage = cv._merge_token_usage(source_claim_dedupe_token_usage, usage)
     if source_claim_dedupe_token_usage.get("total", {}).get("total_tokens", 0):
@@ -1504,7 +1648,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             final_confirmed,
             professor_check,
             crosscheck_rejected,
-            slide_rejected,
             grounding_rejected,
         )
         for record in records
@@ -1517,7 +1660,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
 
     final_rejected_lists = (
         crosscheck_rejected,
-        slide_rejected,
         grounding_rejected,
         first_stage_rejected,
     )
@@ -1555,7 +1697,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "professor_check_claim_count": len(professor_check),
         "crosscheck_rejected_claim_count": len(crosscheck_rejected),
         "crosscheck_inconclusive_claim_count": len(crosscheck_inconclusive),
-        "slide_rejected_claim_count": len(slide_rejected),
         "grounding_rejected_claim_count": len(grounding_rejected),
         "first_stage_rejected_claim_count": len(first_stage_rejected),
         "final_rejected_claim_count": len(final_rejected_keys),
@@ -1605,14 +1746,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
                 "count": len(crosscheck_inconclusive),
             }
         )
-    if slide_rejected:
-        result["claim_decision_overview"].append(
-            {
-                "label": "슬라이드 재검증 기각 claim",
-                "key": "slide_rejected_claims",
-                "count": len(slide_rejected),
-            }
-        )
     if grounding_rejected:
         result["claim_decision_overview"].append(
             {
@@ -1635,7 +1768,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
         "crosscheck_rejected_claims": crosscheck_rejected,
         "first_stage_rejected_claims": first_stage_rejected,
         "crosscheck_inconclusive_claims": crosscheck_inconclusive,
-        "slide_rejected_claims": slide_rejected,
         "grounding_rejected_claims": grounding_rejected,
         "unmatched_issue_records": unmatched_issue_records,
     }
@@ -1651,7 +1783,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     unmatched_professor_check.extend(routed_unmatched_professor_check)
     unmatched_rejected = [
         record for record in unmatched_issue_records
-        if record.get("stage") in {"crosscheck_rejected", "slide_recheck_rejected", "grounding_rejected"}
+        if record.get("stage") in {"crosscheck_rejected", "grounding_rejected"}
     ]
     result.update(
         _build_v2_output(
@@ -1660,7 +1792,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             utterance_lookup,
             final_confirmed + unmatched_confirmed,
             professor_check + unmatched_professor_check,
-            crosscheck_rejected + slide_rejected + grounding_rejected + unmatched_rejected,
+            crosscheck_rejected + grounding_rejected + unmatched_rejected,
         )
     )
     return result
@@ -1675,7 +1807,10 @@ def _reorder_result_for_output(result: dict) -> dict:
         "crosscheck_focus_window",
         "models",
         "crosscheck_models",
+        "crosscheck_source_models",
         "crosscheck_model_map",
+        "crosscheck_model_weights",
+        "crosscheck_score_report",
         "claims_source_path",
         "summary",
         "claims",
@@ -1703,7 +1838,6 @@ def _reorder_result_for_output(result: dict) -> dict:
         "issues",
         "crosscheck_rejected_issues",
         "crosscheck_inconclusive_issues",
-        "slide_rejected_issues",
         "grounding_rejected_issues",
         "rejected_issues",
         "slide_typos",
@@ -1718,9 +1852,7 @@ def _reorder_result_for_output(result: dict) -> dict:
         "token_usage",
         "crosscheck_filtered",
         "crosscheck_inconclusive_filtered",
-        "slide_recheck_filtered",
         "grounding_filtered",
-        "slide_recheck_failures",
         "grounding_failures",
         "slide_typo_failures",
     ]
@@ -1746,7 +1878,10 @@ def _compact_result_for_output(result: dict) -> dict:
         "crosscheck_focus_window",
         "models",
         "crosscheck_models",
+        "crosscheck_source_models",
         "crosscheck_model_map",
+        "crosscheck_model_weights",
+        "crosscheck_score_report",
         "claims_source_path",
         "summary",
         "claims",
@@ -1769,6 +1904,7 @@ def run_all_analyzers(
     claim_batch_size: int = CLAIM_BATCH_SIZE,
     claim_max_workers: int = 4,
     cross_models: list[str] | None = None,
+    crosscheck_models: list[str] | None = None,
     cross_runs: int = 1,
     cross_min_rate: float = 0.5,
     cross_batch_size: int = 20,
@@ -1796,14 +1932,23 @@ def run_all_analyzers(
     from .cross_pipeline import cross_verify
 
     models = cross_models or _default_cross_models()
+    effective_crosscheck_models = crosscheck_models or _default_crosscheck_models()
     if len(models) < 2:
         raise RuntimeError("cross verifier는 최소 2개 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --cross-models를 확인하세요.")
-    if any(_is_openai_model(model) for model in models) and not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("cross verifier는 OPENAI_API_KEY가 필요합니다.")
-    if any(_is_anthropic_model(model) for model in models) and not os.getenv("ANTHROPIC_API_KEY"):
-        raise RuntimeError("cross verifier는 ANTHROPIC_API_KEY가 필요합니다.")
+    missing_judge_keys = [
+        f"{model}({missing} 없음)"
+        for model in models
+        for missing in [_missing_provider_key(model)]
+        if missing
+    ]
+    if missing_judge_keys:
+        raise RuntimeError(f"cross verifier judge 모델 키가 필요합니다: {', '.join(missing_judge_keys)}")
+    if effective_crosscheck_models:
+        effective_crosscheck_models = _filter_available_crosscheck_models(effective_crosscheck_models)
     print(f"  claim 추출 모델: {os.getenv('VERIFIER_CLAIM_EXTRACT_MODEL') or os.getenv('VERIFIER_MODEL') or 'gemini-2.5-flash'}")
-    print(f"  verifier/crosscheck 모델: {', '.join(models)}")
+    print(f"  verifier judge 모델: {', '.join(models)}")
+    if effective_crosscheck_models:
+        print(f"  crosscheck 전용 모델: {', '.join(effective_crosscheck_models)}")
 
     verification_result = cross_verify(
         merged_path=str(merged_file),
@@ -1813,6 +1958,9 @@ def run_all_analyzers(
         batch_size=claim_batch_size,
         judge_batch_size=cross_batch_size,
         claims_jsonl=effective_claims_jsonl,
+        crosscheck_models=effective_crosscheck_models or None,
+        claim_runs=claim_runs,
+        claim_min_rate=claim_min_rate,
         env_vars=_collect_env_vars(),
     )
 
@@ -1858,6 +2006,8 @@ def run_all_analyzers(
 
 
 def main():
+    _enable_docker_log_tee()
+
     parser = argparse.ArgumentParser(description="merged_clean 입력 기준 verifier 실행")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--output-dir", default=None, help="결과 저장 디렉토리 (기본: merged 파일 폴더)")
@@ -1878,12 +2028,18 @@ def main():
         help="cross verifier 모델 목록 (기본: CROSS_VERIFY_MODELS, 없으면 CROSS_VERIFY_MODEL)",
     )
     parser.add_argument(
+        "--crosscheck-models",
+        nargs="+",
+        default=None,
+        help="3단계 crosscheck 전용 모델 목록. 지정하지 않으면 CROSS_CHECK_MODELS 또는 --cross-models를 사용",
+    )
+    parser.add_argument(
         "--cross-runs",
         "--judge-runs",
         dest="cross_runs",
         type=int,
         default=1,
-        help="1차 judge 반복 횟수 (기본 1). crosscheck의 2는 두 모델 검증을 의미함",
+        help="1차 judge 반복 횟수 (기본 1). crosscheck 모델 수는 --crosscheck-models 또는 CROSS_CHECK_MODELS로 지정",
     )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
@@ -1900,6 +2056,7 @@ def main():
         claim_batch_size=args.claim_batch_size,
         claim_max_workers=args.claim_max_workers,
         cross_models=args.cross_models,
+        crosscheck_models=args.crosscheck_models,
         cross_runs=args.cross_runs,
         cross_min_rate=args.cross_min_rate,
         cross_batch_size=args.cross_batch_size,

@@ -29,15 +29,33 @@ _ENV_KEYS = [
     "GOOGLE_API_KEY_2",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "XAI_BASE_URL",
+    "DEEPSEEK_API_KEY",
+    "DEEPSEEK_BASE_URL",
+    "DEEPSEEK_THINKING",
+    "DEEPSEEK_REASONING_EFFORT",
+    "DEEPSEEK_TIMEOUT_SEC",
+    "VERIFIER_DEEPSEEK_THINKING",
+    "VERIFIER_DEEPSEEK_REASONING_EFFORT",
+    "VERIFIER_DEEPSEEK_TIMEOUT_SEC",
+    "VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS",
+    "VERIFIER_DEEPSEEK_API_MAX_RETRIES",
+    "VERIFIER_DEEPSEEK_API_INITIAL_WAIT",
     "GROQ_API_KEY",
     "CROSS_VERIFY_MODELS",
     "CROSS_VERIFY_MODEL",
+    "CROSS_CHECK_MODELS",
+    "CROSS_VERIFY_MODEL_WEIGHTS",
+    "CROSS_VERIFY_SCORE_CONFIRM_THRESHOLD",
+    "CROSS_VERIFY_SCORE_PROFESSOR_CHECK_THRESHOLD",
     "VERIFIER_MODEL",
     "VERIFIER_CLAIM_EXTRACT_MODEL",
+    "VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE",
     "VERIFIER_CLAIM_JUDGE_MODEL",
     "VERIFIER_CROSS_RECHECK_MODEL",
     "VERIFIER_CROSSCHECK_GEMINI_MODEL",
-    "VERIFIER_SLIDE_RECHECK_MODEL",
+    "VERIFIER_SLIDE_TYPO_MODEL",
     "VERIFIER_GROUNDING_MODEL",
     "VERIFIER_BATCH_SIZE",
     "VERIFIER_TEMPERATURE",
@@ -132,12 +150,13 @@ def _setup_worker(root: str, env_vars: dict, model: str):
         if v is not None:
             os.environ[k] = v
 
-    explicit_slide_recheck = str(os.environ.get("VERIFIER_SLIDE_RECHECK_MODEL", "") or "").strip()
+    base_model = str(os.environ.get("VERIFIER_MODEL", "") or "").strip()
+    explicit_slide_typo = str(os.environ.get("VERIFIER_SLIDE_TYPO_MODEL", "") or "").strip()
 
     os.environ["VERIFIER_MODEL"] = model
     os.environ["VERIFIER_CLAIM_EXTRACT_MODEL"] = model
     os.environ["VERIFIER_CLAIM_JUDGE_MODEL"] = model
     os.environ["VERIFIER_CROSS_RECHECK_MODEL"] = model
-    os.environ["VERIFIER_SLIDE_RECHECK_MODEL"] = explicit_slide_recheck or model
+    os.environ["VERIFIER_SLIDE_TYPO_MODEL"] = explicit_slide_typo or base_model or "gemini-2.5-flash"
     os.environ["VERIFIER_GROUNDING_MODEL"] = model
     os.environ.setdefault("VERIFIER_TEMPERATURE", "0.0")

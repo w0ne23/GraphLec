@@ -31,6 +31,7 @@ export default function UploadPage({ onNavigate }) {
   const [dragOver,    setDragOver]    = useState(false)
   const [uploading,   setUploading]   = useState(null)
   const [error,       setError]       = useState('')
+  const [loadingLectures, setLoadingLectures] = useState(true)
 
   const [totalPages, setTotalPages] = useState(1)
   const [currentPage, setCurrentPage] = useState(1)
@@ -163,7 +164,8 @@ export default function UploadPage({ onNavigate }) {
       activeJobs.forEach(lec => {
         setupSSEForJob(lec.id, lec.job_id)
       })
-    }).catch(e => setError(String(e.message || e)))
+      .catch(e => setError(String(e.message || e)))
+      .finally(() => setLoadingLectures(false))
 
     return () => {
       Object.values(eventSources.current).forEach(s => s.close())
@@ -279,7 +281,8 @@ export default function UploadPage({ onNavigate }) {
           <span className="up-list-count">{lectures.length}개</span>
         </div>
         <div className="up-list content-max">
-          {lectures.length === 0 && <div className="up-empty">업로드된 강의가 없습니다</div>}
+          {loadingLectures && lectures.length === 0 && <div className="up-empty">강의 목록을 불러오는 중입니다</div>}
+          {!loadingLectures && lectures.length === 0 && <div className="up-empty">업로드된 강의가 없습니다</div>}
           {lectures.map(lec => {
             const st = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
             const thumbBg = THUMB_COLOR[lec.category] ?? '#1e2333'

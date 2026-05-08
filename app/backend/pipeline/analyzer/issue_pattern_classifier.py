@@ -17,11 +17,8 @@ CACHE_VERSION = 1
 
 ISSUE_LIST_KEYS = (
     "issues",
-    "needs_review_issues",
     "grounding_rejected_issues",
-    "slide_rejected_issues",
     "crosscheck_rejected_issues",
-    "crosscheck_needs_review_issues",
     "crosscheck_inconclusive_issues",
 )
 
@@ -64,7 +61,6 @@ def _fingerprint(refs: list[dict]) -> str:
             "issue": ref["issue"].get("issue", ""),
             "correct_info": ref["issue"].get("correct_info", ""),
             "grounding_status": ref["issue"].get("grounding_status", ""),
-            "slide_recheck_status": ref["issue"].get("slide_recheck_status", ""),
         }
         for ref in refs
     ]
@@ -160,7 +156,6 @@ def _build_prompt(items: list[dict]) -> str:
                 "issue": issue.get("issue", ""),
                 "correct_info": issue.get("correct_info", ""),
                 "grounding_status": issue.get("grounding_status", ""),
-                "slide_recheck_status": issue.get("slide_recheck_status", ""),
                 "supporting_slide_status": issue.get("supporting_slide_status", ""),
                 "error_origin": issue.get("error_origin", ""),
             }
@@ -286,7 +281,7 @@ def classify_issue_patterns(
         }
 
     model = cc._resolve_stage_model("issue_pattern")
-    response_format = {"type": "json_object"} if model.startswith(("gpt", "o1", "o3")) else None
+    response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
     batches = _chunks(refs, batch_size)
 
     print(f"\n  ── issue_pattern LLM 분류 ({len(refs)}건, {len(batches)}배치) ──")

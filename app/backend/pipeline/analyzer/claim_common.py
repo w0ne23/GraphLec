@@ -17,8 +17,10 @@ from google.genai import types
 
 from config import (
     get_anthropic_client,
+    get_deepseek_client,
     get_gemini_client_sequence,
     get_openai_client,
+    get_xai_client,
     resolve_anthropic_model,
 )
 from utils import api_call_with_retry, is_retryable_api_error
@@ -39,7 +41,7 @@ def _resolve_stage_model(stage: str) -> str:
     extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
     judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
     cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
-    slide_recheck_model = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", VERIFIER_SLIDE_RECHECK_MODEL).strip()
+    slide_typo_model = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", VERIFIER_SLIDE_TYPO_MODEL).strip()
     grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
 
@@ -49,8 +51,8 @@ def _resolve_stage_model(stage: str) -> str:
         return strong
     if stage == "cross_recheck":
         return cross_recheck_model or strong
-    if stage == "recheck":
-        return slide_recheck_model or strong
+    if stage == "slide_typo":
+        return slide_typo_model or strong
     if stage == "grounding":
         return grounding_model or strong
     return base
@@ -94,7 +96,49 @@ def _is_anthropic_model(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = ("extract", "judge", "recheck", "grounding", "cross_recheck")
+def _is_xai_model(model: str) -> bool:
+    spec = str(model or "").strip().lower()
+    return spec.startswith("grok") or spec.startswith("xai:")
+
+
+def _is_deepseek_model(model: str) -> bool:
+    spec = str(model or "").strip().lower()
+    return spec.startswith("deepseek") or spec.startswith("deepseek:")
+
+
+def _resolve_xai_model(model: str) -> str:
+    spec = str(model or "").strip()
+    lowered = spec.lower()
+    if lowered.startswith("xai:"):
+        return spec.split(":", 1)[1].strip()
+    if lowered.startswith("xai/"):
+        return spec.split("/", 1)[1].strip()
+    return spec
+
+
+def _resolve_deepseek_model(model: str) -> str:
+    spec = str(model or "").strip()
+    lowered = spec.lower()
+    if lowered in {"deepseek", "deepseek-default"}:
+        return "deepseek-v4-flash"
+    if lowered.startswith("deepseek:"):
+        return spec.split(":", 1)[1].strip()
+    if lowered.startswith("deepseek/"):
+        return spec.split("/", 1)[1].strip()
+    return spec
+
+
+def _supports_json_object_response_format(model: str) -> bool:
+    lowered = str(model or "").strip().lower()
+    return (
+        lowered.startswith(("gpt", "o1", "o3"))
+        or lowered.startswith("grok")
+        or lowered.startswith(("xai:", "xai/"))
+        or lowered.startswith("deepseek")
+    )
+
+
+TOKEN_USAGE_STAGES = ("extract", "judge", "slide_typo", "grounding", "cross_recheck")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -185,6 +229,67 @@ def _anthropic_prompt_cache_control() -> dict | None:
     return control
 
 
+def _deepseek_thinking_extra_body() -> dict | None:
+    raw = (
+        os.getenv("VERIFIER_DEEPSEEK_THINKING", "")
+        or os.getenv("DEEPSEEK_THINKING", "")
+        or "disabled"
+    ).strip().lower()
+    aliases = {
+        "0": "disabled",
+        "false": "disabled",
+        "off": "disabled",
+        "none": "disabled",
+        "no": "disabled",
+        "disable": "disabled",
+        "disabled": "disabled",
+        "1": "enabled",
+        "true": "enabled",
+        "on": "enabled",
+        "yes": "enabled",
+        "enable": "enabled",
+        "enabled": "enabled",
+    }
+    thinking_type = aliases.get(raw, raw)
+    if thinking_type not in {"enabled", "disabled"}:
+        thinking_type = "disabled"
+    return {"thinking": {"type": thinking_type}}
+
+
+def _deepseek_reasoning_effort() -> str | None:
+    raw = (
+        os.getenv("VERIFIER_DEEPSEEK_REASONING_EFFORT", "")
+        or os.getenv("DEEPSEEK_REASONING_EFFORT", "")
+    ).strip().lower()
+    if raw in {"high", "max"}:
+        return raw
+    return None
+
+
+def _deepseek_request_timeout() -> float:
+    raw = (
+        os.getenv("VERIFIER_DEEPSEEK_TIMEOUT_SEC", "")
+        or os.getenv("DEEPSEEK_TIMEOUT_SEC", "")
+        or "180"
+    )
+    try:
+        return max(30.0, float(raw))
+    except (TypeError, ValueError):
+        return 180.0
+
+
+def _deepseek_api_retry_config() -> tuple[int, float]:
+    try:
+        max_retries = int(os.getenv("VERIFIER_DEEPSEEK_API_MAX_RETRIES", "1") or "1")
+    except ValueError:
+        max_retries = 1
+    try:
+        initial_wait = float(os.getenv("VERIFIER_DEEPSEEK_API_INITIAL_WAIT", "5") or "5")
+    except ValueError:
+        initial_wait = 5.0
+    return max(1, max_retries), max(0.0, initial_wait)
+
+
 def _join_system_and_prompt(system_prompt: str | None, prompt: str) -> str:
     if not system_prompt:
         return prompt
@@ -247,6 +352,48 @@ def _extract_openai_usage(resp, model: str, stage: str) -> dict:
         "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
         "cache_creation_input_tokens": 0,
         "total_tokens": _usage_value(usage, "total_tokens"),
+    }
+
+
+def _extract_xai_usage(resp, model: str, stage: str) -> dict:
+    usage = getattr(resp, "usage", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    return {
+        "provider": "xai",
+        "model": model,
+        "stage": stage,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
+        "tool_input_tokens": 0,
+        "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
+    }
+
+
+def _extract_deepseek_usage(resp, model: str, stage: str) -> dict:
+    usage = getattr(resp, "usage", None)
+    completion_details = getattr(usage, "completion_tokens_details", None)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
+    input_tokens = _usage_value(usage, "prompt_tokens", "input_tokens")
+    output_tokens = _usage_value(usage, "completion_tokens", "output_tokens")
+    total_tokens = _usage_value(usage, "total_tokens")
+    return {
+        "provider": "deepseek",
+        "model": model,
+        "stage": stage,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": _usage_value(completion_details, "reasoning_tokens"),
+        "tool_input_tokens": 0,
+        "cached_input_tokens": _usage_value(prompt_details, "cached_tokens"),
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens,
     }
 
 
@@ -374,6 +521,98 @@ def _call_llm(
         resp = api_call_with_retry(call_api)
         return resp.choices[0].message.content or "", _extract_openai_usage(resp, model, stage)
 
+    # ── xAI Grok ────────────────────────────────────────────
+    if _is_xai_model(model):
+        import base64
+
+        resolved_model = _resolve_xai_model(model)
+        client = get_xai_client()
+        if client is None:
+            raise RuntimeError("XAI_API_KEY가 설정되지 않았습니다.")
+
+        image_payloads = []
+        if image_bytes_list:
+            image_payloads.extend([b for b in image_bytes_list if b])
+        elif image_bytes:
+            image_payloads.append(image_bytes)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if image_payloads:
+            content = []
+            for img in image_payloads:
+                b64 = base64.b64encode(img).decode()
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            content.append({"type": "text", "text": prompt})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        def call_api():
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temp,
+            )
+            if response_format is not None:
+                kwargs["response_format"] = response_format
+            return client.chat.completions.create(**kwargs, timeout=_deepseek_request_timeout())
+
+        resp = api_call_with_retry(call_api)
+        return resp.choices[0].message.content or "", _extract_xai_usage(resp, resolved_model, stage)
+
+    # ── DeepSeek ───────────────────────────────────────────
+    if _is_deepseek_model(model):
+        import base64
+
+        resolved_model = _resolve_deepseek_model(model)
+        client = get_deepseek_client()
+        if client is None:
+            raise RuntimeError("DEEPSEEK_API_KEY가 설정되지 않았습니다.")
+
+        image_payloads = []
+        if image_bytes_list:
+            image_payloads.extend([b for b in image_bytes_list if b])
+        elif image_bytes:
+            image_payloads.append(image_bytes)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if image_payloads:
+            content = []
+            for img in image_payloads:
+                b64 = base64.b64encode(img).decode()
+                content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+            content.append({"type": "text", "text": prompt})
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        def call_api():
+            thinking_extra_body = _deepseek_thinking_extra_body()
+            kwargs = dict(
+                model=resolved_model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temp,
+                extra_body=thinking_extra_body,
+            )
+            reasoning_effort = _deepseek_reasoning_effort()
+            if reasoning_effort and (thinking_extra_body or {}).get("thinking", {}).get("type") == "enabled":
+                kwargs["reasoning_effort"] = reasoning_effort
+            if response_format is not None:
+                kwargs["response_format"] = response_format
+            return client.chat.completions.create(**kwargs, timeout=_deepseek_request_timeout())
+
+        max_retries, initial_wait = _deepseek_api_retry_config()
+        resp = api_call_with_retry(call_api, max_retries=max_retries, initial_wait=initial_wait)
+        return resp.choices[0].message.content or "", _extract_deepseek_usage(resp, resolved_model, stage)
+
     # ── Anthropic ───────────────────────────────────────────
     if _is_anthropic_model(model):
         import base64
@@ -496,7 +735,7 @@ VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
 VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
 VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
 VERIFIER_CROSS_RECHECK_MODEL = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", "")
-VERIFIER_SLIDE_RECHECK_MODEL = os.getenv("VERIFIER_SLIDE_RECHECK_MODEL", "")
+VERIFIER_SLIDE_TYPO_MODEL = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", "")
 VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {

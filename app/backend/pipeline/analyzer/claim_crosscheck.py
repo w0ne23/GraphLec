@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import Counter
 
 _CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
 _CROSSCHECK_PARSE_RETRIES = 1
@@ -23,12 +24,359 @@ _CROSSCHECK_EXTRA_FIELDS = (
     "recommendation",
 )
 
+_API_FAILURE_MARKERS = (
+    "timeout",
+    "timed out",
+    "apitimeout",
+    "readtimeout",
+    "connection error",
+    "apiconnectionerror",
+    "connecttimeout",
+    "connect timeout",
+    "handshake",
+    "429",
+    "500",
+    "503",
+    "resource_exhausted",
+    "unavailable",
+    "overloaded",
+)
+
+_CRITERIA_WEIGHTS = {
+    "misinformation_risk": 0.15,
+    "nearby_context_unresolved": 0.25,
+    "slide_context_unresolved": 0.25,
+    "concrete_basis": 0.20,
+    "student_impact": 0.15,
+}
+
+_TERM_RE = re.compile(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9_+-]{1,}")
+_KOREAN_SUFFIXES = (
+    "에게서는",
+    "에게는",
+    "에서는",
+    "으로는",
+    "이라는",
+    "라는",
+    "이고",
+    "이며",
+    "에서",
+    "으로",
+    "에게",
+    "부터",
+    "까지",
+    "처럼",
+    "보다",
+    "라고",
+    "이나",
+    "거나",
+    "하고",
+    "은",
+    "는",
+    "이",
+    "가",
+    "을",
+    "를",
+    "의",
+    "도",
+    "만",
+    "로",
+    "과",
+    "와",
+)
+_SEMANTIC_PREFIXES = ("비", "무", "반", "탈")
+
+
+def _strip_korean_suffix(term: str) -> str:
+    text = str(term or "").strip()
+    if len(text) <= 2:
+        return text
+    for suffix in _KOREAN_SUFFIXES:
+        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
+            return text[: -len(suffix)]
+    return text
+
+
+def _normalize_term(term: str) -> str:
+    text = _strip_korean_suffix(term)
+    if re.fullmatch(r"[A-Za-z0-9_+-]+", text or ""):
+        return text.lower()
+    return text
+
+
+def _extract_terms(text: str) -> list[str]:
+    terms = []
+    for raw in _TERM_RE.findall(str(text or "")):
+        term = _normalize_term(raw)
+        if len(term) >= 3:
+            terms.append(term)
+    return terms
+
+
+def _levenshtein_distance(a: str, b: str, *, max_distance: int = 2) -> int:
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > max_distance:
+        return max_distance + 1
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            value = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            current.append(value)
+            row_min = min(row_min, value)
+        if row_min > max_distance:
+            return max_distance + 1
+        previous = current
+    return previous[-1]
+
+
+def _looks_like_semantic_prefix_pair(a: str, b: str) -> bool:
+    for prefix in _SEMANTIC_PREFIXES:
+        if a == f"{prefix}{b}" or b == f"{prefix}{a}":
+            return True
+    return False
+
+
+def _terms_are_asr_neighbors(a: str, b: str) -> bool:
+    if not a or not b or a == b:
+        return False
+    if _looks_like_semantic_prefix_pair(a, b):
+        return False
+    max_len = max(len(a), len(b))
+    if max_len < 3:
+        return False
+    distance = _levenshtein_distance(a, b, max_distance=2)
+    if distance <= 1:
+        return True
+    return max_len >= 6 and distance <= 2 and (distance / max_len) <= 0.25
+
+
+def _compact_reason(text: str, limit: int = 90) -> str:
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1].rstrip() + "..."
+
+
+def _format_utterance_line(u: dict, *, marker: str = "  ") -> str:
+    uid = str(u.get("utterance_id", "") or "").strip()
+    text = str(u.get("text", "") or "").strip()
+    start = float(u.get("start_time", 0) or 0)
+    slide_number = u.get("slide_number", "")
+    status = str(u.get("correction_status", "") or "").strip()
+    risk = str(u.get("correction_risk", "") or "").strip()
+    reason = str(u.get("correction_reason", "") or "").strip()
+    suffix = ""
+    if status == "candidate_only":
+        detail = f", risk={risk}" if risk else ""
+        if reason:
+            detail += f", reason={_compact_reason(reason, 60)}"
+        suffix = f" [전사 교정 후보 미적용{detail}]"
+    return f"{marker}{uid} [{start:.1f}s, slide {slide_number}] {text}{suffix}"
+
+
+def _issue_text_for_artifact_check(issue: dict) -> str:
+    parts = [
+        issue.get("claim_text", ""),
+        issue.get("issue", ""),
+        issue.get("why_wrong", ""),
+        issue.get("student_error", ""),
+        issue.get("correct_info", ""),
+    ]
+    for source in issue.get("source_issues") or []:
+        if isinstance(source, dict):
+            parts.extend([
+                source.get("claim_text", ""),
+                source.get("problematic_content", ""),
+                source.get("issue", ""),
+            ])
+    return "\n".join(str(part or "") for part in parts if part)
+
+
+def _find_transcript_artifact_hint(
+    issue: dict,
+    utterances: list[dict],
+    slides: list[dict],
+    target_indices: list[int],
+    slide_number: int,
+    radius: int = 5,
+) -> dict | None:
+    target_indices = [idx for idx in target_indices if 0 <= idx < len(utterances)]
+    if not target_indices:
+        return None
+
+    target_index_set = set(target_indices)
+    window_indices: set[int] = set()
+    for idx in target_indices:
+        window_indices.update(range(max(0, idx - radius), min(len(utterances), idx + radius + 1)))
+
+    target_text = "\n".join(str(utterances[idx].get("text", "") or "") for idx in target_indices)
+    issue_text = _issue_text_for_artifact_check(issue)
+    target_terms = Counter(_extract_terms(f"{target_text}\n{issue.get('claim_text', '')}"))
+    if not target_terms:
+        return None
+
+    context_parts = []
+    for idx in sorted(window_indices - target_index_set):
+        context_parts.append(str(utterances[idx].get("text", "") or ""))
+    for slide in slides:
+        if int(slide.get("slide_number", 0) or 0) == int(slide_number or 0):
+            context_parts.append(str(slide.get("slide_text", "") or ""))
+            break
+    context_terms = Counter(_extract_terms("\n".join(context_parts)))
+    if not context_terms:
+        return None
+
+    best: tuple[str, str, int, int] | None = None
+    for target_term, target_count in target_terms.items():
+        if target_count <= 0 or context_terms.get(target_term, 0) > 0:
+            continue
+        if target_term not in issue_text and target_term not in target_text:
+            continue
+        for context_term, context_count in context_terms.items():
+            if context_count < 3:
+                continue
+            if not _terms_are_asr_neighbors(target_term, context_term):
+                continue
+            candidate = (target_term, context_term, target_count, context_count)
+            if best is None or candidate[3] > best[3]:
+                best = candidate
+
+    if best is None:
+        return None
+
+    bad_term, context_term, bad_count, context_count = best
+    note = (
+        f"전사 오류 가능성: 대상 발화/claim의 '{bad_term}'는 주변 문맥에서는 거의 보이지 않고, "
+        f"슬라이드와 주변 발화에서는 형태가 매우 가까운 '{context_term}'가 {context_count}회 반복됩니다. "
+        f"이 이슈가 '{bad_term}' 한 단어에만 의존하면 강의 내용 오류로 확정하지 마세요."
+    )
+    return {
+        "likely": True,
+        "suspect_term": bad_term,
+        "context_term": context_term,
+        "suspect_count": bad_count,
+        "context_count": context_count,
+        "reason": note,
+    }
+
+
+def _coerce_confidence(value, default: float | None = None) -> float | None:
+    if value is None or value == "":
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number > 1.0 and number <= 100.0:
+        number = number / 100.0
+    return max(0.0, min(1.0, number))
+
+
+def _normalized_score_map(value, allowed_keys: dict[str, float]) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    scores: dict[str, float] = {}
+    for key in allowed_keys:
+        raw = value.get(key)
+        if isinstance(raw, bool):
+            scores[key] = 1.0 if raw else 0.0
+            continue
+        scores[key] = _coerce_confidence(raw, 0.0) or 0.0
+    return scores
+
+
+def _confidence_from_criteria(payload: dict) -> tuple[float | None, dict]:
+    criteria = _normalized_score_map(
+        payload.get("criteria_scores") or payload.get("criteria") or {},
+        _CRITERIA_WEIGHTS,
+    )
+    if not criteria:
+        return None, {}
+
+    score = sum(criteria.get(key, 0.0) * weight for key, weight in _CRITERIA_WEIGHTS.items())
+    score = max(0.0, min(1.0, score))
+
+    gates = []
+    if criteria.get("misinformation_risk", 0.0) < 0.5:
+        score = min(score, 0.44)
+        gates.append("misinformation_risk_not_verified")
+    if criteria.get("nearby_context_unresolved", 0.0) < 0.5 and criteria.get("slide_context_unresolved", 0.0) < 0.5:
+        score = min(score, 0.44)
+        gates.append("resolved_by_nearby_context_and_slide")
+    if criteria.get("concrete_basis", 0.0) < 0.5 and criteria.get("student_impact", 0.0) < 0.5:
+        score = min(score, 0.79)
+        gates.append("weak_concrete_basis_and_student_impact")
+
+    breakdown = {
+        "criteria_weights": _CRITERIA_WEIGHTS,
+        "raw_score": round(sum(criteria.get(key, 0.0) * weight for key, weight in _CRITERIA_WEIGHTS.items()), 4),
+        "applied_gates": gates,
+        "computed_confidence": round(score, 4),
+    }
+    evidence = payload.get("criteria_evidence") if isinstance(payload.get("criteria_evidence"), dict) else {}
+    return round(score, 4), {
+        "criteria_scores": criteria,
+        "criteria_evidence": evidence,
+        "score_breakdown": breakdown,
+    }
+
+
+def _confidence_from_verdict(verdict: str) -> float:
+    verdict = str(verdict or "").lower().strip()
+    if verdict == "agree":
+        return 1.0
+    if verdict == "disagree":
+        return 0.0
+    return 0.5
+
+
+def _verdict_from_confidence(confidence: float | None) -> str:
+    if confidence is None:
+        return "inconclusive"
+    if confidence >= 0.75:
+        return "agree"
+    if confidence < 0.45:
+        return "disagree"
+    return "inconclusive"
+
+
+def _is_crosscheck_api_failure(error: Exception | None) -> bool:
+    if error is None:
+        return False
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(marker in text for marker in _API_FAILURE_MARKERS)
+
+
+def _crosscheck_retry_message(error: Exception) -> str:
+    if _is_crosscheck_api_failure(error):
+        return "교차 재검증 API 호출 재시도"
+    return "교차 재검증 batch JSON 파싱 재시도"
+
 
 def _pack_crosscheck_payload(payload: dict) -> dict:
+    raw_verdict = str(payload.get("verdict", "") or "").lower().strip()
+    criteria_confidence, criteria_payload = _confidence_from_criteria(payload)
+    confidence = _coerce_confidence(
+        payload.get("confidence", payload.get("score", payload.get("issue_score"))),
+        None,
+    )
+    if criteria_confidence is not None:
+        confidence = criteria_confidence
+    if confidence is None and raw_verdict in _CROSSCHECK_VERDICTS:
+        confidence = _confidence_from_verdict(raw_verdict)
+    if confidence is None:
+        confidence = 0.5
+    verdict = raw_verdict if raw_verdict in _CROSSCHECK_VERDICTS else _verdict_from_confidence(confidence)
     result = {
-        "verdict": str(payload.get("verdict", "") or "").lower().strip(),
+        "verdict": verdict,
+        "confidence": confidence,
         "reason": str(payload.get("reason", "") or "").strip(),
     }
+    result.update(criteria_payload)
     for field in _CROSSCHECK_EXTRA_FIELDS:
         value = str(payload.get(field, "") or "").strip()
         if value:
@@ -36,88 +384,95 @@ def _pack_crosscheck_payload(payload: dict) -> dict:
     return result
 
 
-def _parse_crosscheck_payload(text: str) -> dict:
-    from . import claim_common as cv
+def _apply_transcript_artifact_cap(payload: dict, hint: dict | None) -> None:
+    if not isinstance(payload, dict) or not isinstance(hint, dict) or not hint.get("likely"):
+        return
+    try:
+        cap = float(os.getenv("VERIFIER_TRANSCRIPT_ARTIFACT_SCORE_CAP", "0.44") or "0.44")
+    except ValueError:
+        cap = 0.44
+    cap = max(0.0, min(1.0, cap))
+    original_confidence = _coerce_confidence(payload.get("confidence"), 0.5)
+    payload["transcript_artifact_likely"] = True
+    payload["transcript_artifact_reason"] = str(hint.get("reason", "") or "").strip()
+    payload["transcript_artifact_terms"] = {
+        "suspect": hint.get("suspect_term", ""),
+        "context": hint.get("context_term", ""),
+        "context_count": hint.get("context_count", 0),
+    }
+    if original_confidence is None or original_confidence <= cap:
+        return
 
-    cleaned = cv._strip_json_fence((text or "").strip())
-    candidates = [cleaned]
-    obj = cv._extract_first_json_object(cleaned)
-    if obj and obj not in candidates:
-        candidates.append(obj)
+    payload["confidence_before_transcript_artifact_cap"] = round(original_confidence, 4)
+    payload["confidence"] = round(cap, 4)
+    payload["verdict"] = _verdict_from_confidence(cap)
+    reason = str(payload.get("reason", "") or "").strip()
+    artifact_reason = str(hint.get("reason", "") or "").strip()
+    cap_reason = "강한 전사 오류 가능성이 있어 content issue 점수를 상한 처리했습니다."
+    payload["reason"] = " / ".join(part for part in [artifact_reason, cap_reason, reason] if part)
 
-    for candidate in candidates:
-        if not candidate:
+    breakdown = payload.get("score_breakdown")
+    if isinstance(breakdown, dict):
+        gates = breakdown.setdefault("applied_gates", [])
+        if isinstance(gates, list) and "transcript_artifact_likely" not in gates:
+            gates.append("transcript_artifact_likely")
+        breakdown["computed_confidence_before_transcript_artifact_cap"] = round(original_confidence, 4)
+        breakdown["computed_confidence"] = round(cap, 4)
+
+
+def _canonical_issue_id(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    lowered = text.lower().strip()
+    m = re.fullmatch(r"(?:issue[_\s-]*)?i?0*(\d+)", lowered)
+    if m:
+        return f"i{int(m.group(1)):04d}"
+    return text
+
+
+def _issue_id_sort_key(issue_id: str) -> tuple[int, str]:
+    canonical = _canonical_issue_id(issue_id)
+    m = re.fullmatch(r"i(\d+)", canonical)
+    if m:
+        return int(m.group(1)), canonical
+    return 999999, canonical
+
+
+def _candidate_crosscheck_rows(payload, issue_ids: set[str]) -> list[dict]:
+    if isinstance(payload, list):
+        return [row for row in payload if isinstance(row, dict)]
+    if not isinstance(payload, dict):
+        return []
+
+    rows = (
+        payload.get("results")
+        or payload.get("verdicts")
+        or payload.get("items")
+        or payload.get("issues")
+        or payload.get("judgments")
+        or payload.get("scores")
+    )
+    if isinstance(rows, list):
+        return [row for row in rows if isinstance(row, dict)]
+
+    if len(issue_ids) == 1 and (
+        "criteria_scores" in payload
+        or "criteria" in payload
+        or "verdict" in payload
+        or "reason" in payload
+    ):
+        only_issue_id = next(iter(issue_ids))
+        return [{**payload, "issue_id": payload.get("issue_id") or only_issue_id}]
+
+    keyed_rows = []
+    for key, value in payload.items():
+        if not isinstance(value, dict):
             continue
-        fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
-        compact = re.sub(r"\s+", " ", fixed).strip()
-        for payload_text in (candidate, fixed, compact):
-            try:
-                payload = json.loads(payload_text)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                result = _pack_crosscheck_payload(payload)
-                if result["verdict"] in _CROSSCHECK_VERDICTS:
-                    return result
-
-        # 흔한 비표준 응답 형태 복구:
-        # {verdict: agree, reason: "..."} / {'verdict':'agree', ...}
-        relaxed = fixed
-        relaxed = re.sub(r"([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)(\s*:)", r'\1"\2"\3', relaxed)
-        relaxed = re.sub(
-            r'("verdict"\s*:\s*)(agree|disagree|inconclusive)(\s*[,}])',
-            lambda m: f'{m.group(1)}"{m.group(2)}"{m.group(3)}',
-            relaxed,
-            flags=re.IGNORECASE,
-        )
-        relaxed = relaxed.replace("'", '"')
-        try:
-            payload = json.loads(relaxed)
-        except json.JSONDecodeError:
-            payload = None
-        if isinstance(payload, dict):
-            result = _pack_crosscheck_payload(payload)
-            if result["verdict"] in _CROSSCHECK_VERDICTS:
-                return result
-
-    verdict = cv._extract_json_like_string_field(cleaned, "verdict").lower().strip()
-    if verdict not in _CROSSCHECK_VERDICTS:
-        m = re.search(
-            r"['\"]?verdict['\"]?\s*:\s*['\"]?(agree|disagree|inconclusive)['\"]?",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if m:
-            verdict = m.group(1).lower()
-    if verdict not in _CROSSCHECK_VERDICTS:
-        m = re.search(
-            r"['\"]?verdict['\"]?\s*:\s*['\"]?(agr|dis|incon)",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        if m:
-            prefix = m.group(1).lower()
-            if prefix.startswith("agr"):
-                verdict = "agree"
-            elif prefix.startswith("dis"):
-                verdict = "disagree"
-            elif prefix.startswith("incon"):
-                verdict = "inconclusive"
-
-    reason = cv._extract_json_like_string_field(cleaned, "reason")
-    if not reason:
-        m = re.search(
-            r"['\"]?reason['\"]?\s*:\s*['\"]?(.+?)(?:['\"]?\s*[,}]|\n|$)",
-            cleaned,
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if m:
-            reason = re.sub(r"\s+", " ", m.group(1)).strip()
-
-    if verdict in _CROSSCHECK_VERDICTS:
-        return {"verdict": verdict, "reason": reason}
-
-    raise ValueError("crosscheck_response_parse_failed")
+        canonical = _canonical_issue_id(key)
+        if key in issue_ids or canonical in {_canonical_issue_id(issue_id) for issue_id in issue_ids}:
+            keyed_rows.append({**value, "issue_id": value.get("issue_id") or key})
+    return keyed_rows
 
 
 def _parse_crosscheck_batch_payload(text: str, issue_ids: set[str]) -> dict[str, dict]:
@@ -139,15 +494,21 @@ def _parse_crosscheck_batch_payload(text: str, issue_ids: set[str]) -> dict[str,
             except json.JSONDecodeError:
                 continue
 
-            rows = payload.get("verdicts") if isinstance(payload, dict) else payload
-            if not isinstance(rows, list):
+            rows = _candidate_crosscheck_rows(payload, issue_ids)
+            if not rows:
                 continue
 
             parsed: dict[str, dict] = {}
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
+            ordered_issue_ids = sorted(issue_ids, key=_issue_id_sort_key)
+            canonical_map = {_canonical_issue_id(issue_id): issue_id for issue_id in issue_ids}
+            for row_index, row in enumerate(rows):
                 issue_id = str(row.get("issue_id", "") or row.get("id", "") or "").strip()
+                if issue_id not in issue_ids:
+                    issue_id = canonical_map.get(_canonical_issue_id(issue_id), "")
+                if not issue_id and len(rows) == len(ordered_issue_ids):
+                    issue_id = ordered_issue_ids[row_index]
+                if not issue_id and len(ordered_issue_ids) == 1:
+                    issue_id = ordered_issue_ids[0]
                 if issue_id not in issue_ids:
                     continue
                 packed = _pack_crosscheck_payload(row)
@@ -177,11 +538,9 @@ def _build_slide_transcript_block(
         for u in utterances:
             if int(u.get("slide_number", 0) or 0) != slide_number:
                 continue
-            start = float(u.get("start_time", 0) or 0)
-            uid = str(u.get("utterance_id", "") or "").strip()
             text = str(u.get("text", "") or "").strip()
             if text:
-                transcript_lines.append(f"  {uid} [{start:.1f}s] {text}")
+                transcript_lines.append(_format_utterance_line(u, marker="  "))
     else:
         for slide in slides:
             if int(slide.get("slide_number", 0) or 0) != slide_number:
@@ -221,6 +580,40 @@ def _build_multi_slide_transcript_block(
         block = _build_slide_transcript_block(slides, slide_number, utterances)
         blocks.append(f"[슬라이드 {slide_number}]\n{block}")
     return "\n\n".join(blocks) if blocks else "(없음)"
+
+
+def _build_utterance_window_block(
+    utterances: list[dict],
+    target_indices: list[int],
+    radius: int = 5,
+    target_labels: dict[int, list[str]] | None = None,
+) -> str:
+    """대상 발화별 ±radius 문맥을 중복 없이 병합해 보여준다."""
+    if not utterances or not target_indices:
+        return "(없음)"
+
+    labels = target_labels or {}
+    index_set: set[int] = set()
+    for idx in target_indices:
+        if idx < 0 or idx >= len(utterances):
+            continue
+        start = max(0, idx - radius)
+        end = min(len(utterances), idx + radius + 1)
+        index_set.update(range(start, end))
+
+    if not index_set:
+        return "(없음)"
+
+    lines = []
+    target_set = set(target_indices)
+    for idx in sorted(index_set):
+        u = utterances[idx]
+        text = str(u.get("text", "") or "").strip()
+        label = ",".join(labels.get(idx, []))
+        marker = f">> {label} " if idx in target_set and label else (">> " if idx in target_set else "   ")
+        if text:
+            lines.append(_format_utterance_line(u, marker=marker))
+    return "\n".join(lines)
 
 
 def _crosscheck_slide_context(ctx: dict, slide_num: int) -> tuple[str, str, str]:
@@ -271,6 +664,10 @@ def _issue_line_for_batch(issue_id: str, issue: dict) -> str:
         source_block = "\n- 묶인 발화/claim:\n" + "\n".join(lines)
     elif related:
         source_block = "\n- 관련 utterance_ids: " + ", ".join(str(uid) for uid in related)
+    artifact = issue.get("_transcript_artifact_hint")
+    artifact_block = ""
+    if isinstance(artifact, dict) and artifact.get("likely"):
+        artifact_block = f"\n- 전사 오류 가능성 힌트: {artifact.get('reason', '')}"
     return (
         f"### {issue_id}\n"
         f"- utterance_id: {issue.get('utterance_id', '')}\n"
@@ -279,214 +676,64 @@ def _issue_line_for_batch(issue_id: str, issue: dict) -> str:
         f"- claim: {issue.get('claim_text', '')}\n"
         f"- 문제: {issue.get('issue', '')}"
         f"{source_block}"
+        f"{artifact_block}"
     )
 
 
-def judge_single_claim(issue: dict, ctx: dict) -> tuple[dict, dict]:
-    """단일 이슈를 재검증하여 agree/disagree/inconclusive 반환."""
-    from . import claim_common as cv
-
-    uid = issue.get("utterance_id", "")
-    claim_text = issue.get("claim_text", "")
-    issue_desc = issue.get("issue", "")
-    issue_type = cv.normalize_issue_type(issue.get("type", ""))
-    issue_label = issue.get("issue_type_label") or cv.issue_type_label(issue_type)
-
-    utterances = ctx["utterances"]
-    slides = ctx["slides"]
-    slide_ctx = ctx["slide_ctx"]
-    hint = ctx["hint"]
-    current_date = ctx["current_date"]
-
-    utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(utterances)}
-    if uid not in utt_map:
-        return {"verdict": "inconclusive", "reason": "utterance_id를 찾을 수 없음"}, cv._empty_token_usage()
-
-    idx, target_utt = utt_map[uid]
-
-    slide_num = target_utt.get("slide_number", 0)
-    prev_slide_num = max(0, int(slide_num or 0) - 1)
-    slide_info = slide_ctx.get(slide_num, {})
-    title = slide_info.get("title", f"슬라이드 {slide_num}")
-    time_range = slide_info.get("time_range", "")
-    prev_slide_info = slide_ctx.get(prev_slide_num, {}) if prev_slide_num > 0 else {}
-    prev_title = prev_slide_info.get("title", f"슬라이드 {prev_slide_num}") if prev_slide_num > 0 else ""
-    prev_time_range = prev_slide_info.get("time_range", "") if prev_slide_num > 0 else ""
-    slide_numbers = [n for n in [prev_slide_num, int(slide_num or 0)] if n > 0]
-    transcript_block = _build_multi_slide_transcript_block(slides, slide_numbers, utterances)
-    context_text = _crosscheck_context_text(
-        f"{title} ({time_range})",
-        (prev_title + f" ({prev_time_range})") if prev_slide_num > 0 else "없음",
-        transcript_block,
-    )
-
-    prompt = f"""다른 검증 모델이 아래 발화에서 문제를 발견했습니다.
-당신은 이 지적이 타당한지 독립적으로 판단해야 합니다.
-
-## 도메인
-{hint.get('label', '')}
-
-## 대상 슬라이드
-{title} ({time_range})
-
-## 이전 슬라이드
-{(prev_title + f" ({prev_time_range})") if prev_slide_num > 0 else "없음"}
-
-## 이전+현재 슬라이드 내용 (슬라이드 텍스트 + 강의자 발화)
-{transcript_block}
-
-## 지적 내용
-- 유형: {issue_label} ({issue_type})
-- claim: {claim_text}
-- 문제: {issue_desc}
-
-## 판정 절차
-이전 judge의 문제 제기를 그대로 믿지 말고, 아래 순서로 다시 판단하세요.
-
-중요: 실재 대상의 구체 수치/비율/연도/규모를 다루는 이슈에서는 "핵심 설명용 예시라서 학생이 암기하지 않을 것"만으로
-disagree하지 마세요. 강의의 핵심이 다른 개념이어도, 현실 대상에 붙은 수치가 틀리거나 오래되었으면 교수에게 확인 대상으로
-올릴 수 있습니다. 이 경우 문맥이 해결했다는 판단은 "해당 숫자가 임의값/가상값/변수값이라고 명시됨" 또는
-"같은 문맥에서 정확한 값이나 최신 값으로 바로 정정됨"일 때만 가능합니다.
-
-1. **문제 제기가 전제하는 잘못된 명제 재구성**
-   이 지적이 맞으려면 학생이 어떤 잘못된 명제를 외워야 하는지 한 문장으로 재구성하세요.
-   그 명제가 구체적으로 재구성되지 않으면 disagree입니다.
-
-2. **그 잘못된 명제가 원문+문맥에 실제로 남아 있는지 확인**
-   원문 발화, 슬라이드 텍스트, 앞뒤 발화가 함께 학생에게 남기는 의미를 판단하세요.
-   주변 문맥이나 슬라이드가 설명을 보충해서 대상, 관계, 순서, 주체, 조건, 범위가 충분히 이해되고,
-   그 결과 학생이 잘못된 명제로 외울 가능성이 낮아지면 disagree입니다.
-   완전한 정정 문장이 없더라도, 앞뒤 발화나 슬라이드 구조가 생략된 주어/대상/관계/범위를 자연스럽게 지지하면
-   그 문맥상 지지되는 해석을 우선하세요. 문제가 되는 해석이 더 약하거나 과도한 추측이면 disagree입니다.
-   단, 실재하는 대상, 집단, 기관, 지역, 제품, 시장, 인구, 통계값 등에 구체적인 수치/비율/연도/규모가 붙은 경우에는
-   예시 문맥이라는 이유만으로 disagree하지 마세요. 그 수치가 실제와 다르거나 오래되었고 학생이 예시 수치로 받아들일 수 있으면
-   agree 또는 inconclusive로 유지하세요. 명시적으로 가상의 대상/임의의 숫자/변수 예시라고 밝힌 경우에만 이 이유로 기각할 수 있습니다.
-   단, 앞에서 올바른 설명이 한 번 나왔거나 슬라이드에 관련 키워드가 있다는 이유만으로 자동 해소하지 마세요.
-   뒤따르는 발화 흐름이 다시 다른 오해를 만들면 그 흐름 기준으로 판단하세요.
-   특정 단어만 떼어내야 문제가 생기면 disagree이고, 발화 흐름 전체가 같은 오해를 남기면 agree 또는 inconclusive입니다.
-
-3. **문맥 보충 판단**
-   슬라이드와 전사문은 서로 보완 근거입니다. 둘을 함께 봤을 때 학생이 자연스럽게 이해할 최종 의미를 판단하세요.
-   문맥이 문제 발화를 보충해 오해 가능성을 실질적으로 낮추면 disagree입니다.
-   문맥과 슬라이드가 오히려 같은 혼동을 반복하거나, 서로 다른 설명이 충돌해 학생이 잘못된 관계/순서/주체를 외울 수 있으면 agree 또는 inconclusive입니다.
-   보충 또는 충돌의 근거는 reason이나 evidence_in_context에 실제 발화나 슬라이드 표현으로 설명하세요.
-   생략된 주어/지시어가 있는 경우에는 먼저 "문맥상 가장 자연스러운 대상"과 그 근거를 찾으세요.
-   그 자연스러운 해석에서는 발화가 맞고, 문제 제기 쪽 해석이 특정 단어나 직전 용어를 과도하게 잡아당겨야만 성립하면 disagree입니다.
-
-4. **판단 기준의 수준 맞추기**
-   반박 근거는 학생이 이 강의 구간에서 배우는 개념 수준과 맞아야 합니다.
-   강의가 설명하지 않는 세부 구현, 특수 상황, 예외적 전제만으로는 issue를 유지하지 마세요.
-   반대로 문제 제기가 같은 수준의 기본 개념, 관계, 순서, 주체, 조건, 범위 혼동을 지적한다면 issue를 유지하세요.
-   단순한 세부 생략이나 표현 취향이 아니라, 학생이 실제로 잘못 외울 명제가 남는지가 기준입니다.
-
-5. **유형별 확인**
-   - factual_error/temporal_error: 발화가 실제로 틀린 사실/현재성 주장을 남겼을 때만 agree입니다.
-     현실 대상에 붙은 예시 수치가 실제와 다르거나 오래된 경우도 factual_error/temporal_error 후보입니다.
-     예시라는 점은 severity나 professor_check 여부를 낮출 수는 있지만, 그 자체로 기각 사유는 아닙니다.
-     "학생이 암기하지 않을 것"이라는 추정만으로는 disagree하지 말고, 정확한 값 확인이 필요하면 inconclusive로 유지하세요.
-   - confusing_explanation: 학생이 서로 다른 개념, 주체, 과정, 조건을 같은 것으로 외우게 되는 구체 명제가 남을 때만 agree입니다.
-     단, "얘/이거/그거/이 값/해당 항목" 같은 지시어를 특정 선행사 하나로 강제 해석해야만 문제가 생기고,
-     원문 발화와 슬라이드를 함께 보면 맞는 설명이면 disagree입니다.
-   - scope_overclaim: 발화와 문맥이 학생에게 닫힌 범위의 명제로 남을 때만 agree입니다.
-   - 더 자세히 말할 수 있다는 정도, 더 엄밀한 표현 가능성, 표현 취향만으로는 agree하지 마세요.
-
-## verdict 기준
-- agree: 원문+슬라이드+주변 발화를 함께 봐도 학생이 잘못 외울 명제가 실제로 남습니다.
-- disagree: 문맥과 슬라이드가 설명을 충분히 보충해 오해 가능성이 낮거나, 문제 제기가 특정 단어/지시어를 과확장한 것입니다.
-- inconclusive: 오해 가능성은 있지만 문맥만으로 확정하기 어려워 교수 확인 대상으로 둘 필요가 있습니다.
-
-agree 또는 inconclusive로 판단하는 경우에는 교수에게 보여줄 수 있는 설명 필드도 작성하세요.
-disagree로 판단하는 경우에는 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
-inconclusive는 확정 표현을 피하고, "교수 확인 후보" 관점으로 작성하세요.
-
-응답 규칙:
-- 반드시 JSON object 하나만 출력
-- markdown/code fence 금지
-- verdict 값은 agree / disagree / inconclusive 중 하나만 사용
-
-응답 예시:
-{{
-  "verdict": "agree",
-  "reason": "원문과 문맥 기준의 판단 이유",
-  "issue": "문제점 또는 교수 확인 후보 요약",
-  "correct_info": "올바른 정보 또는 필요한 조건/범위",
-  "why_wrong": "왜 틀렸거나 오해를 부를 수 있는지",
-  "counterexample": "반례 또는 예외 조건. 없으면 빈 문자열",
-  "issue_basis": "명확한 반례 있음 | 조건/범위 누락 | 핵심 개념 동일시 | 주체/과정 혼동 | 교수 확인 필요",
-  "student_error": "학생이 잘못 외울 수 있는 구체적 명제",
-  "counterexample_or_condition": "반례 또는 조건",
-  "context_resolution": "문맥에서 해소됨 | 일부 해소됨 | 해소 안 됨 | 모델 간 판단 불일치",
-  "evidence_in_context": "제공된 문맥에서 판단을 뒷받침하는 근거",
-  "student_misunderstanding": "학생 오해 가능성",
-  "why_it_matters": "왜 중요한지",
-  "suggested_rephrase": "대체 표현",
-  "teaching_note": "교수에게 전달할 짧은 메모",
-  "recommendation": "수정 또는 보충 방향"
-}}"""
-
-    model = str(cv._resolve_stage_model("cross_recheck") or "").strip()
-    response_format = {"type": "json_object"} if (
-        model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
-    ) else None
-
-    token_usage = cv._empty_token_usage()
-    last_error = None
-    for attempt in range(_CROSSCHECK_PARSE_RETRIES + 1):
-        try:
-            text, call_usage = cv._call_llm(
-                prompt,
-                max_tokens=2048,
-                thinking_budget=1024,
-                response_format=response_format,
-                stage="cross_recheck",
-            )
-            cv._add_call_usage(token_usage, call_usage)
-            payload = _parse_crosscheck_payload(text)
-            verdict = str(payload.get("verdict", "") or "").lower().strip()
-            if verdict not in _CROSSCHECK_VERDICTS:
-                return {"verdict": "inconclusive", "reason": f"알 수 없는 verdict: {verdict}"}, token_usage
-            payload["crosscheck_context_text"] = context_text
-            return payload, token_usage
-        except Exception as e:
-            last_error = e
-            if attempt < _CROSSCHECK_PARSE_RETRIES:
-                print(f"    ↺ 교차 재검증 JSON 파싱 재시도 ({attempt+1}/{_CROSSCHECK_PARSE_RETRIES})")
-
-    return {
-        "verdict": "inconclusive",
-        "reason": f"교차 재검증 실패: {last_error}",
-        "crosscheck_context_text": context_text,
-    }, token_usage
+def _split_crosscheck_prompt(prompt: str) -> tuple[str, str | None]:
+    dynamic_marker = "## 도메인"
+    instruction_marker = "## 판정 절차"
+    dynamic_start = prompt.find(dynamic_marker)
+    instruction_start = prompt.find(instruction_marker)
+    if 0 <= dynamic_start < instruction_start:
+        system_prompt = prompt[:dynamic_start].rstrip() + "\n\n" + prompt[instruction_start:].lstrip()
+        return prompt[dynamic_start:instruction_start].strip(), system_prompt
+    return prompt, None
 
 
-def judge_claim_batch(issues: list[dict], ctx: dict) -> tuple[dict[str, dict], dict]:
-    """같은 슬라이드 문맥의 여러 이슈를 한 번에 crosscheck한다."""
-    from . import claim_common as cv
-
-    if not issues:
-        return {}, cv._empty_token_usage()
-
+def _build_crosscheck_batch_prompt(
+    valid: list[tuple[str, dict]],
+    ctx: dict,
+) -> tuple[str, str | None, str, set[str], dict[str, dict]]:
     utterances = ctx["utterances"]
     hint = ctx["hint"]
     utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(utterances)}
-
-    valid: list[tuple[str, dict]] = []
-    payloads: dict[str, dict] = {}
-    for idx, issue in enumerate(issues, 1):
-        issue_id = f"i{idx:04d}"
-        if issue.get("utterance_id", "") not in utt_map:
-            payloads[issue_id] = {"verdict": "inconclusive", "reason": "utterance_id를 찾을 수 없음"}
-            continue
-        valid.append((issue_id, issue))
-
-    if not valid:
-        return payloads, cv._empty_token_usage()
 
     _, first_utt = utt_map[valid[0][1].get("utterance_id", "")]
     slide_num = int(first_utt.get("slide_number", 0) or 0)
     target_label, prev_label, transcript_block = _crosscheck_slide_context(ctx, slide_num)
     context_text = _crosscheck_context_text(target_label, prev_label, transcript_block)
+
+    target_indices = []
+    target_labels: dict[int, list[str]] = {}
+    artifact_hints: dict[str, dict] = {}
+    for issue_id, issue in valid:
+        issue_indices = []
+        related_ids = [issue.get("utterance_id", "")]
+        related_ids.extend(issue.get("utterance_ids") or [])
+        related_ids.extend(issue.get("canonical_member_utterance_ids") or [])
+        for uid in dict.fromkeys(str(item or "") for item in related_ids):
+            if uid not in utt_map:
+                continue
+            idx, _ = utt_map[uid]
+            issue_indices.append(idx)
+            target_indices.append(idx)
+            target_labels.setdefault(idx, []).append(issue_id)
+        artifact_hint = _find_transcript_artifact_hint(issue, utterances, ctx["slides"], issue_indices, slide_num)
+        if artifact_hint:
+            issue["_transcript_artifact_hint"] = artifact_hint
+            artifact_hints[issue_id] = artifact_hint
+    nearby_block = _build_utterance_window_block(utterances, target_indices, target_labels=target_labels)
+    context_text = f"{context_text}\n\n대상 발화 전후 ±5개 병합 문맥\n{nearby_block}"
+    artifact_block = "\n".join(
+        f"- {issue_id}: {hint.get('reason', '')}"
+        for issue_id, hint in artifact_hints.items()
+        if hint.get("reason")
+    )
+    if artifact_block:
+        context_text = f"{context_text}\n\n전사 오류 가능성 힌트\n{artifact_block}"
     issue_block = "\n\n".join(_issue_line_for_batch(issue_id, issue) for issue_id, issue in valid)
+    issue_ids = {issue_id for issue_id, _ in valid}
 
     prompt = f"""다른 검증 모델이 아래 발화들에서 문제를 발견했습니다.
 당신은 각 지적이 타당한지 원문과 강의 문맥만 기준으로 독립 판단해야 합니다.
@@ -503,6 +750,12 @@ def judge_claim_batch(issues: list[dict], ctx: dict) -> tuple[dict[str, dict], d
 ## 이전+현재 슬라이드 내용 (슬라이드 텍스트 + 강의자 발화)
 {transcript_block}
 
+## 대상 발화 전후 ±5개 병합 문맥
+{nearby_block}
+
+## 전사 오류 가능성 힌트
+{artifact_block or "(없음)"}
+
 ## 지적 목록
 {issue_block}
 
@@ -510,81 +763,115 @@ def judge_claim_batch(issues: list[dict], ctx: dict) -> tuple[dict[str, dict], d
 각 issue_id는 하나의 claim이 아니라 같은 오해를 만들 수 있는 문맥 단위 issue일 수 있습니다.
 issue 안에 묶인 발화/claim이 여러 개 있으면, 개별 문장 하나가 아니라 그 발화 흐름 전체가 학생에게 남기는
 잘못된 명제 또는 오해를 판단하세요.
-서로 다른 issue_id끼리는 독립적으로 판단하세요. 새로운 이슈를 만들지 말고, 제공된 issue_id 각각에 대해서만 verdict를 작성하세요.
+서로 다른 issue_id끼리는 독립적으로 판단하세요. 새로운 이슈를 만들지 말고, 제공된 issue_id 각각에 대해서만 criteria_scores와 criteria_evidence를 작성하세요.
 
 중요: 실재 대상의 구체 수치/비율/연도/규모를 다루는 이슈에서는 "핵심 설명용 예시라서 학생이 암기하지 않을 것"만으로
-disagree하지 마세요. 강의의 핵심이 다른 개념이어도, 현실 대상에 붙은 수치가 틀리거나 오래되었으면 교수에게 확인 대상으로
+가산 기준을 자동으로 낮추거나 감점하지 마세요. 강의의 핵심이 다른 개념이어도, 현실 대상에 붙은 수치가 틀리거나 오래되었으면 교수에게 확인 대상으로
 올릴 수 있습니다. 이 경우 문맥이 해결했다는 판단은 "해당 숫자가 임의값/가상값/변수값이라고 명시됨" 또는
 "같은 문맥에서 정확한 값이나 최신 값으로 바로 정정됨"일 때만 가능합니다.
 
-1. **문제 제기가 전제하는 잘못된 명제 재구성**
-   이 지적이 맞으려면 학생이 어떤 잘못된 명제를 외워야 하는지 한 문장으로 재구성하세요.
-   그 명제가 구체적으로 재구성되지 않으면 disagree입니다.
+## 채점 기준
+아래 5개 항목만 채우세요. 5개 항목의 가중치 합은 1.0입니다.
+각 항목은 0.0 / 0.5 / 1.0 중 하나를 기본으로 쓰되, 꼭 필요하면 0.25나 0.75를 사용할 수 있습니다.
 
-2. **그 잘못된 명제가 원문+문맥에 실제로 남아 있는지 확인**
-   원문 발화, 묶인 발화 흐름, 슬라이드 텍스트, 앞뒤 발화가 함께 학생에게 남기는 의미를 판단하세요.
-   주변 문맥이나 슬라이드가 설명을 보충해서 대상, 관계, 순서, 주체, 조건, 범위가 충분히 이해되고,
-   그 결과 학생이 잘못된 명제로 외울 가능성이 낮아지면 disagree입니다.
-   완전한 정정 문장이 없더라도, 앞뒤 발화나 슬라이드 구조가 생략된 주어/대상/관계/범위를 자연스럽게 지지하면
-   그 문맥상 지지되는 해석을 우선하세요. 문제가 되는 해석이 더 약하거나 과도한 추측이면 disagree입니다.
-   단, 실재하는 대상, 집단, 기관, 지역, 제품, 시장, 인구, 통계값 등에 구체적인 수치/비율/연도/규모가 붙은 경우에는
-   예시 문맥이라는 이유만으로 disagree하지 마세요. 그 수치가 실제와 다르거나 오래되었고 학생이 예시 수치로 받아들일 수 있으면
-   agree 또는 inconclusive로 유지하세요. 명시적으로 가상의 대상/임의의 숫자/변수 예시라고 밝힌 경우에만 이 이유로 기각할 수 있습니다.
-   단, 앞에서 올바른 설명이 한 번 나왔거나 슬라이드에 관련 키워드가 있다는 이유만으로 자동 해소하지 마세요.
-   뒤따르는 발화 흐름이 다시 다른 오해를 만들면 그 흐름 기준으로 판단하세요.
-   특정 단어만 떼어내야 문제가 생기면 disagree이고, 발화 흐름 전체가 같은 오해를 남기면 agree 또는 inconclusive입니다.
-   슬라이드 텍스트가 판단에 영향을 주면 reason/evidence_in_context에서 실제 표현을 들어 반영하세요.
+1. **misinformation_risk (0.15)**
+   이 claim 또는 issue가 학생에게 잘못된 정보를 주게 되는 이유를 작성하고 검증하세요.
+   잘못 외울 명제가 구체적이고, 원문에 의해 실제로 유도될 수 있으면 높게 줍니다.
+   잘못된 명제를 재구성할 수 없거나 특정 단어/지시어만 과해석해야 성립하면 낮게 줍니다.
 
-3. **문맥 보충 판단**
-   슬라이드와 전사문은 서로 보완 근거입니다. 둘을 함께 봤을 때 학생이 자연스럽게 이해할 최종 의미를 판단하세요.
-   문맥이 문제 발화를 보충해 오해 가능성을 실질적으로 낮추면 disagree입니다.
-   문맥과 슬라이드가 오히려 같은 혼동을 반복하거나, 서로 다른 설명이 충돌해 학생이 잘못된 관계/순서/주체를 외울 수 있으면 agree 또는 inconclusive입니다.
-   보충 또는 충돌의 근거는 reason이나 evidence_in_context에 실제 발화나 슬라이드 표현으로 설명하세요.
-   생략된 주어/지시어가 있는 경우에는 먼저 "문맥상 가장 자연스러운 대상"과 그 근거를 찾으세요.
-   그 자연스러운 해석에서는 발화가 맞고, 문제 제기 쪽 해석이 특정 단어나 직전 용어를 과도하게 잡아당겨야만 성립하면 disagree입니다.
+2. **nearby_context_unresolved (0.25)**
+   대상 발화 전후 ±5개 발화 안에서 해당 claim을 해소하는 발화가 있는지 확인하고 검증하세요.
+   주변 발화가 대상, 관계, 순서, 주체, 조건, 범위를 충분히 보완하면 낮게 줍니다.
+   주변 발화가 해소하지 못하거나 같은 오해를 반복/강화하면 높게 줍니다.
 
-4. **판단 기준의 수준 맞추기**
-   반박 근거는 학생이 이 강의 구간에서 배우는 개념 수준과 맞아야 합니다.
-   강의가 설명하지 않는 세부 구현, 특수 상황, 예외적 전제만으로는 issue를 유지하지 마세요.
-   반대로 문제 제기가 같은 수준의 기본 개념, 관계, 순서, 주체, 조건, 범위 혼동을 지적한다면 issue를 유지하세요.
-   단순한 세부 생략이나 표현 취향이 아니라, 학생이 실제로 잘못 외울 명제가 남는지가 기준입니다.
+3. **slide_context_unresolved (0.25)**
+   해당 슬라이드의 텍스트, 그림 설명, 구조가 해당 claim을 해소하는지 확인하고 검증하세요.
+   슬라이드가 문제를 명확히 보완하면 낮게 줍니다.
+   슬라이드가 보완하지 못하거나 발화와 충돌하거나 같은 혼동을 강화하면 높게 줍니다.
 
-5. **유형별 확인**
-   - factual_error/temporal_error: 발화가 실제로 틀린 사실/현재성 주장을 남겼을 때만 agree입니다.
-     현실 대상에 붙은 예시 수치가 실제와 다르거나 오래된 경우도 factual_error/temporal_error 후보입니다.
-     예시라는 점은 severity나 professor_check 여부를 낮출 수는 있지만, 그 자체로 기각 사유는 아닙니다.
-     "학생이 암기하지 않을 것"이라는 추정만으로는 disagree하지 말고, 정확한 값 확인이 필요하면 inconclusive로 유지하세요.
-   - confusing_explanation: 학생이 서로 다른 개념, 주체, 과정, 조건을 같은 것으로 외우게 되는 구체 명제가 남을 때만 agree입니다.
-     단, "얘/이거/그거/이 값/해당 항목" 같은 지시어를 특정 선행사 하나로 강제 해석해야만 문제가 생기고,
-     원문 발화와 슬라이드를 함께 보면 맞는 설명이면 disagree입니다.
-   - scope_overclaim: 발화와 문맥이 학생에게 닫힌 범위의 명제로 남을 때만 agree입니다.
-   - 더 자세히 말할 수 있다는 정도, 더 엄밀한 표현 가능성, 표현 취향만으로는 agree하지 마세요.
+4. **concrete_basis (0.20)**
+   반례, 정답 충돌, 현재성 오류, 범위 과잉, 주체/과정 혼동처럼 구체적인 판단 근거가 있는지 검증하세요.
+   현실 대상의 구체 수치/비율/연도/규모가 틀리거나 오래된 경우도 근거가 될 수 있습니다.
+   범위 과잉은 단순히 더 많은 예외나 더 넓은 설명이 가능하다는 뜻이 아닙니다.
+   강의 문맥 안에서 학생이 실제로 다른 가능성/주체/조건을 배제하는 명제를 외우게 될 때만 높게 줍니다.
+   단순히 더 엄밀히 말할 수 있다는 정도, 표현 취향, 세부 생략뿐이면 낮게 줍니다.
 
-## verdict 기준
-- agree: 원문+슬라이드+주변 발화를 함께 봐도 학생이 잘못 외울 명제가 실제로 남습니다.
-- disagree: 문맥과 슬라이드가 설명을 충분히 보충해 오해 가능성이 낮거나, 문제 제기가 특정 단어/지시어를 과확장한 것입니다.
-- inconclusive: 오해 가능성은 있지만 문맥만으로 확정하기 어려워 교수 확인 대상으로 둘 필요가 있습니다.
+5. **student_impact (0.15)**
+   학생이 실제로 잘못 외우거나 후속 개념을 혼동할 위험이 구체적인지 검증하세요.
+   어떤 오개념으로 이어지는지 설명 가능하면 높게 줍니다.
+   오해 가능성이 추상적이거나 교수 표현 취향 수준이면 낮게 줍니다.
 
-agree 또는 inconclusive로 판단하는 경우에는 교수에게 보여줄 수 있는 설명 필드도 작성하세요.
-disagree로 판단하는 경우에는 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
+추가 판단 원칙:
+- 슬라이드와 전사문은 서로 보완 근거입니다. 둘을 함께 봤을 때 학생이 자연스럽게 이해할 최종 의미를 판단하세요.
+- 전사 오류 가능성 힌트가 있는 경우, 해당 이슈가 고립된 단어 하나에만 의존하는지 먼저 확인하세요.
+- 주변 발화와 슬라이드가 일관되게 유사한 대체어를 지지하고, 문제 제기가 그 고립된 단어 없이는 성립하지 않으면 강의 내용 오류로 확정하지 마세요.
+- 단, 같은 오류 표현이 여러 발화에서 반복되거나 슬라이드도 같은 오류를 쓰거나, 고립된 단어 외에도 독립적인 개념 충돌이 있으면 이슈를 유지할 수 있습니다.
+- 완전한 정정 문장이 없더라도, 앞뒤 발화나 슬라이드 구조가 생략된 주어/대상/관계/범위를 자연스럽게 지지하면 그 해석을 우선하세요.
+- 앞에서 올바른 설명이 한 번 나왔거나 슬라이드에 관련 키워드가 있다는 이유만으로 자동 해소하지 마세요. 뒤따르는 발화 흐름이 다시 다른 오해를 만들면 그 흐름 기준으로 판단하세요.
+- 실재 대상의 구체 수치/비율/연도/규모가 틀리거나 오래되었고 학생이 예시 수치로 받아들일 수 있으면 issue를 유지할 수 있습니다. 명시적으로 가상의 대상/임의값/변수값이라고 밝힌 경우에만 이 이유로 낮게 채점할 수 있습니다.
+- 반박 근거는 학생이 이 강의 구간에서 배우는 개념 수준과 맞아야 합니다. 강의가 설명하지 않는 세부 구현, 특수 상황, 예외적 전제만으로는 issue를 유지하지 마세요.
+- "모든", "오직", "~만", "독점" 같은 닫힌 표현이 있어도, 문맥상 역할/책임/관리 주체/대표 경로를 강조한 표준적 설명이면 그 단어만으로 범위 과잉 점수를 올리지 마세요.
+- 범위 과잉 issue를 유지하려면, 원문과 문맥을 함께 본 뒤에도 "다른 가능성은 불가능하다", "다른 주체는 관여하지 않는다", "이 조건에서만 성립한다"처럼 학생이 잘못 외울 닫힌 명제가 구체적으로 남아야 합니다.
+- 반례가 강의 범위 밖의 더 상위/하위 계층, 예외적 구현, 고급 세부사항에만 의존하면 concrete_basis와 student_impact를 낮게 주세요.
+- 더 자세히 말할 수 있다는 정도, 더 엄밀한 표현 가능성, 표현 취향만이면 모든 항목을 낮게 채점하세요.
+
+최종 점수 기준:
+- 0.00~0.44: 기각
+- 0.45~0.79: 교수 확인
+- 0.80~1.00: 확정
+
+교수 확인 또는 확정 구간이 될 만한 채점이면 교수에게 보여줄 수 있는 설명 필드도 작성하세요.
+기각 구간이 될 만한 채점이면 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
 
 응답 규칙:
 - 반드시 JSON object 하나만 출력
 - markdown/code fence 금지
-- verdict 값은 agree / disagree / inconclusive 중 하나만 사용
-- 입력된 모든 issue_id에 대해 정확히 하나의 verdict를 출력
+- verdict는 출력하지 마세요
+- confidence는 출력하지 마세요
+- criteria_scores와 criteria_evidence는 반드시 출력
+- 입력된 모든 issue_id에 대해 정확히 하나의 criteria_scores와 criteria_evidence를 출력
+- 단일 issue를 받더라도 반드시 results 배열로 출력
+- criteria_evidence의 각 값은 1문장 이내로 짧게 출력
+- reason은 2문장 이내로 출력
+- 추가 설명 필드는 교수에게 보여줄 필요가 있는 경우만 쓰고, 각 필드는 1문장 이내로 출력
 
 응답 예시:
 {{
-  "verdicts": [
+  "results": [
     {{
       "issue_id": "i0001",
-      "verdict": "disagree",
+      "criteria_scores": {{
+        "misinformation_risk": 0.0,
+        "nearby_context_unresolved": 0.0,
+        "slide_context_unresolved": 0.0,
+        "concrete_basis": 0.0,
+        "student_impact": 0.0
+      }},
+      "criteria_evidence": {{
+        "misinformation_risk": "잘못된 명제가 구체적으로 남지 않음",
+        "nearby_context_unresolved": "±5개 발화가 의미를 보완함",
+        "slide_context_unresolved": "슬라이드가 의미를 보완함",
+        "concrete_basis": "반례/충돌/조건 근거가 부족함",
+        "student_impact": "학생 오개념 위험이 낮음"
+      }},
       "reason": "원문과 문맥 기준의 판단 이유"
     }},
     {{
       "issue_id": "i0002",
-      "verdict": "agree",
+      "criteria_scores": {{
+        "misinformation_risk": 1.0,
+        "nearby_context_unresolved": 1.0,
+        "slide_context_unresolved": 0.5,
+        "concrete_basis": 0.75,
+        "student_impact": 0.75
+      }},
+      "criteria_evidence": {{
+        "misinformation_risk": "잘못된 명제와 그 이유",
+        "nearby_context_unresolved": "±5개 발화 확인 결과",
+        "slide_context_unresolved": "슬라이드 확인 결과",
+        "concrete_basis": "반례/충돌/조건 근거",
+        "student_impact": "학생 오개념 가능성"
+      }},
       "reason": "원문과 문맥 기준의 판단 이유",
       "issue": "문제점 또는 교수 확인 후보 요약",
       "correct_info": "올바른 정보 또는 필요한 조건/범위",
@@ -603,268 +890,147 @@ disagree로 판단하는 경우에는 reason에 기각 이유를 쓰고 나머�
     }}
   ]
 }}"""
-    dynamic_marker = "## 도메인"
-    instruction_marker = "## 판정 절차"
-    dynamic_start = prompt.find(dynamic_marker)
-    instruction_start = prompt.find(instruction_marker)
-    system_prompt = None
-    if 0 <= dynamic_start < instruction_start:
-        system_prompt = prompt[:dynamic_start].rstrip() + "\n\n" + prompt[instruction_start:].lstrip()
-        prompt = prompt[dynamic_start:instruction_start].strip()
+    prompt, system_prompt = _split_crosscheck_prompt(prompt)
+    return prompt, system_prompt, context_text, issue_ids, artifact_hints
+
+
+def _run_crosscheck_batch_prompt(
+    valid: list[tuple[str, dict]],
+    ctx: dict,
+) -> tuple[dict[str, dict], dict, str, Exception | None]:
+    from . import claim_common as cv
+
+    if not valid:
+        return {}, cv._empty_token_usage(), "", None
+
+    prompt, system_prompt, context_text, issue_ids, artifact_hints = _build_crosscheck_batch_prompt(valid, ctx)
 
     model = str(cv._resolve_stage_model("cross_recheck") or "").strip()
-    response_format = {"type": "json_object"} if (
-        model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
-    ) else None
+    response_format = {"type": "json_object"} if cv._supports_json_object_response_format(model) else None
+    max_tokens = min(8192, max(4096, 1600 * len(valid)))
+    if cv._is_deepseek_model(model):
+        try:
+            deepseek_max_tokens = int(os.getenv("VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS", "2048"))
+        except ValueError:
+            deepseek_max_tokens = 2048
+        max_tokens = max(1024, min(max_tokens, deepseek_max_tokens))
+    debug_raw = str(os.getenv("VERIFIER_DEBUG_CROSSCHECK_RAW", "") or "").strip().lower() in {"1", "true", "yes"}
 
     token_usage = cv._empty_token_usage()
-    issue_ids = {issue_id for issue_id, _ in valid}
-    parsed: dict[str, dict] = {}
     last_error = None
     for attempt in range(_CROSSCHECK_PARSE_RETRIES + 1):
+        text = ""
         try:
             text, call_usage = cv._call_llm(
                 prompt,
                 system_prompt=system_prompt,
-                max_tokens=min(8192, max(2048, 900 * len(valid))),
+                max_tokens=max_tokens,
                 thinking_budget=1024,
                 response_format=response_format,
                 stage="cross_recheck",
             )
             cv._add_call_usage(token_usage, call_usage)
             parsed = _parse_crosscheck_batch_payload(text, issue_ids)
-            for payload in parsed.values():
+            for issue_id, payload in parsed.items():
                 payload.setdefault("crosscheck_context_text", context_text)
-            break
+                _apply_transcript_artifact_cap(payload, artifact_hints.get(issue_id))
+            return parsed, token_usage, context_text, None
         except Exception as e:
             last_error = e
+            if cv._is_deepseek_model(model) and _is_crosscheck_api_failure(e):
+                break
             if attempt < _CROSSCHECK_PARSE_RETRIES:
-                print(f"    ↺ 교차 재검증 batch JSON 파싱 재시도 ({attempt+1}/{_CROSSCHECK_PARSE_RETRIES})")
+                print(
+                    f"    ↺ {_crosscheck_retry_message(e)} "
+                    f"({attempt+1}/{_CROSSCHECK_PARSE_RETRIES}) [{model}] {type(e).__name__}: {str(e)[:160]}",
+                    flush=True,
+                )
+                if debug_raw and text:
+                    preview = re.sub(r"\s+", " ", text).strip()[:800]
+                    print(f"      raw preview: {preview}", flush=True)
 
-    missing = [pair for pair in valid if pair[0] not in parsed]
-    for issue_id, issue in missing:
-        try:
-            payload, call_usage = judge_single_claim(issue, ctx)
-        except Exception as e:
-            payload, call_usage = {"verdict": "inconclusive", "reason": f"교차 재검증 실패: {e}"}, cv._empty_token_usage()
-        cv._add_call_usage(token_usage, call_usage)
-        payload.setdefault("crosscheck_context_text", context_text)
-        parsed[issue_id] = payload
-
-    if last_error and not parsed:
-        for issue_id, _ in valid:
-            parsed[issue_id] = {
-                "verdict": "inconclusive",
-                "reason": f"교차 재검증 batch 실패: {last_error}",
-                "crosscheck_context_text": context_text,
-            }
-
-    payloads.update(parsed)
-    return payloads, token_usage
+    return {}, token_usage, context_text, last_error
 
 
-def _build_slide_recheck_prompt(
-    issue: dict,
-    slide_ctx: dict,
-    slides: list[dict],
-    hint: dict,
-) -> str:
-    sn = int(issue.get("slide_number", 0) or 0)
-    prev_sn = max(0, sn - 1)
-    ctx = slide_ctx.get(sn, {})
-    title = ctx.get("title", f"슬라이드 {sn}")
-    time_range = ctx.get("time_range", "")
-    prev_ctx = slide_ctx.get(prev_sn, {}) if prev_sn > 0 else {}
-    prev_title = prev_ctx.get("title", f"슬라이드 {prev_sn}") if prev_sn > 0 else ""
-    prev_time_range = prev_ctx.get("time_range", "") if prev_sn > 0 else ""
-    transcript_block = _build_multi_slide_transcript_block(slides, [prev_sn, sn] if prev_sn > 0 else [sn])
-
-    claim = issue.get("claim_text", issue.get("problematic_content", ""))
-    issue_desc = issue.get("issue", "")
-    correct_info = issue.get("correct_info", "")
-    explanation = issue.get("explanation", "")
-
-    return f"""당신은 강의 내용 검증의 재검증 단계입니다.
-강의 도메인: {hint.get('label', '일반')}
-
-이전 단계에서 아래 이슈가 발견되었습니다.
-이제 해당 슬라이드의 **전체 맥락**(이전+현재 슬라이드 텍스트 + 강의자 발화)을 보고,
-이 이슈가 정말 타당한지 재확인해주세요.
-
-━━━ {title} ({time_range}) ━━━
-
-[이전 슬라이드]
-{(prev_title + f" ({prev_time_range})") if prev_sn > 0 else "없음"}
-
-[이전+현재 슬라이드 내용 (슬라이드 텍스트 + 강의자 발화)]
-{transcript_block}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-이전 단계에서 발견된 이슈
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-발화 원문: {claim}
-지적 내용: {issue_desc}
-제안된 정보: {correct_info}
-이전 설명: {explanation}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-재검증 기준
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-슬라이드 전체 맥락을 보고 아래를 확인하세요:
-
-1. **슬라이드의 정확한 조건 확인**
-   슬라이드에 있는 구체적 조건, 표기, 구조, 자료 범위를 정확히 확인하세요.
-   발화가 슬라이드의 특정 상황을 설명하는 것이면, 그 상황에서 발화가 맞는지 판단하세요.
-   claim 또는 이전 단계의 지적이 발화 원문보다 넓게 일반화되었다면, 발화 원문과 주변 문맥의 범위로 다시 좁혀 판단하세요.
-   **슬라이드에 정량 자료나 비교 기준이 있으면 직접 확인하여 발화와 비교하세요.**
-
-2. **전사 전문의 전후 맥락 확인**
-   강의자가 이후 발화에서 정정하거나 보충 설명했는지 확인하세요.
-
-3. **슬라이드-발화 일치 여부**
-   슬라이드 텍스트와 발화가 같은 내용을 말하고 있으면 → 발화는 맞는 설명
-   슬라이드 텍스트와 발화가 직접 모순되면 → 이슈 유지
-   슬라이드 텍스트 기준으로 약어차이, 영어-한글 혼동되어 잡히는 문제점이라면 이슈에서 탈락.
-
-4. **배경 설명/상대 시점/애매한 지시어 재판단**
-   - 복잡한 현상을 설명하면서 여러 요인 중 하나를 대표 축으로 든 경우,
-     배타적 단정이 없다면 오류로 보지 마세요.
-   - "최근/요즘/현재/당시/주류/추세" 같은 상대 시점 표현은 강의 발화 시점 기준으로 해석하세요.
-     녹화 시점을 알 수 없으면 그것만으로 오류를 유지하지 마세요.
-   - "하나는/이것/그것/마찬가지고"처럼 선행사가 애매한 표현은
-     슬라이드 전체 맥락을 봐도 단일 해석이 확실할 때만 이슈를 유지하세요.
-   - 원문 발화와 슬라이드가 함께 보면 맞는 설명인데, 이전 단계의 claim 해소가 지시어를 특정 선행사로 과하게 확정해서
-     오류처럼 보이는 경우는 이슈를 유지하지 마세요.
-   - 완전한 정정 문장이 없더라도, 슬라이드 구조나 앞뒤 발화가 생략된 주어/대상/관계/범위를 자연스럽게 지지하면
-     그 문맥상 지지되는 해석을 우선하세요.
-
-5. **설명적 요약과 배타적 단정 구분**
-   - 강의자가 복잡한 현상, 이론, 제도, 관점을 설명하면서 하나의 설명 축이나 대표 요인을 말하는 경우,
-     그것이 더 완전한 설명이 아니라고 해서 곧바로 오류가 되지는 않습니다.
-   - 여러 요인 중 하나를 설명한 것과, 그 요인이 유일한 원인이라고 단정한 것은 다릅니다.
-     "오직", "전적으로", "유일한 원인", "~만으로", "반드시 이것 때문이다" 같은 배타적 단정이 없다면
-     기본적으로 설명적 요약으로 해석하세요.
-   - 단지 더 포괄적이고 더 정확한 보충 설명이 가능하다는 이유만으로 이슈를 유지하지 마세요.
-   - 슬라이드가 같은 교육적 단순화를 명시하고 발화가 그 슬라이드를 설명하는 경우, 강의 수준 밖의 세부 예외만으로 이슈를 유지하지 마세요.
-   - 강의 수준에 맞춘 큰 그림 설명, 비유, 세부 계층 생략은 핵심 결론이 맞으면 이슈를 유지하지 마세요.
-   - 다만 실재 대상에 붙은 구체 수치/비율/연도/규모가 실제와 다르거나 오래된 경우에는,
-     예시 문맥이라는 이유만으로 이슈를 기각하지 마세요. 명시적으로 가상의 대상/임의 숫자/변수 예시라고 밝힌 경우만 제외합니다.
-
-6. **이론/관점 소개 구간 처리**
-   - 슬라이드나 직전 발화가 특정 이론, 관점, 설명틀을 소개하고 있다면,
-     바로 뒤의 발화는 그 관점 안에서 해석하세요.
-   - 매 문장마다 "라고 본다", "라고 주장한다", "~의 관점에서는" 같은 한정 표현이 반복되지 않았더라도,
-     주변 맥락이 이미 그 관점을 세워주고 있으면 이를 사실 오류로 보지 마세요.
-   - 발화의 유일한 문제점이 "관점/주장임을 더 명시적으로 말하지 않았다"는 것뿐이라면,
-     학생이 전체 맥락상 올바르게 이해할 수 있는지 먼저 판단하고, 그렇다면 이슈를 기각하세요.
-
-7. **일반화된 표현과 구체적 표기의 관계**
-   - 슬라이드가 하위 분류, 구체 예시, 특정 표기를 제시하고, 발화는 그보다 상위 범주나 더 일반적인 명칭으로 설명할 수 있습니다.
-   - 이 경우 발화의 일반적 표현이 슬라이드의 구체 정보와 양립 가능하면 이슈를 유지하지 마세요.
-   - "더 구체적으로 말할 수 있었다", "세부 명칭을 다 말하지 않았다", "예시를 하나만 말하지 않았다"는 이유만으로는 factual_error가 아닙니다.
-   - 일반적 표현이 잘못된 상위 범주이거나, 슬라이드의 구체 대상을 배제하거나, 직접 모순될 때만 이슈를 유지하세요.
-
-결론:
-- 슬라이드 전체 맥락을 봐도 여전히 틀리면 → "valid": true
-- 슬라이드 맥락을 보면 실제로는 맞는 설명이었으면 → "valid": false
-
-응답 (JSON만):
-```json
-{{
-  "valid": true | false,
-  "reason": "슬라이드 맥락을 참고한 판단 이유"
-}}
-```
-
-JSON 외 텍스트를 출력하지 마세요.
-"""
-
-
-def _slide_recheck_issue(
-    issue: dict,
-    slide_ctx: dict,
-    slides: list[dict],
-    hint: dict,
-) -> tuple[dict, dict]:
+def judge_single_claim(issue: dict, ctx: dict) -> tuple[dict, dict]:
+    """단일 이슈도 batch crosscheck 프롬프트를 1건짜리로 재사용한다."""
     from . import claim_common as cv
 
-    prompt = _build_slide_recheck_prompt(issue, slide_ctx, slides, hint)
+    uid = issue.get("utterance_id", "")
+    utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(ctx["utterances"])}
+    if uid not in utt_map:
+        return {"verdict": "inconclusive", "confidence": 0.5, "reason": "utterance_id를 찾을 수 없음"}, cv._empty_token_usage()
 
-    try:
-        text, call_usage = cv._call_llm(
-            prompt,
-            max_tokens=2048,
-            temperature=0.0,
-            thinking_budget=1024,
-            stage="recheck",
-        )
-        payload = json.loads(cv._strip_json_fence(text.strip()))
-        valid = payload.get("valid", True)
-        reason = str(payload.get("reason", "") or "")
-        issue["slide_recheck_valid"] = bool(valid)
-        issue["slide_recheck_reason"] = reason
-        issue["slide_recheck_api_failed"] = False
-        token_usage = cv._empty_token_usage()
-        cv._add_call_usage(token_usage, call_usage)
-        return issue, token_usage
-    except Exception as e:
-        issue["slide_recheck_valid"] = True
-        issue["slide_recheck_reason"] = f"재검증 호출 실패: {e}"
-        issue["slide_recheck_api_failed"] = True
-        return issue, cv._empty_token_usage()
+    issue_id = "i0001"
+    parsed, token_usage, context_text, last_error = _run_crosscheck_batch_prompt([(issue_id, issue)], ctx)
+    payload = parsed.get(issue_id)
+    if payload:
+        return payload, token_usage
+
+    reason = f"교차 재검증 실패: {last_error}" if last_error else "교차 재검증 응답에 issue_id가 없음"
+    return {
+        "verdict": "inconclusive",
+        "confidence": 0.5,
+        "reason": reason,
+        "crosscheck_context_text": context_text,
+        "model_failed": bool(_is_crosscheck_api_failure(last_error)),
+        "excluded_from_score": bool(_is_crosscheck_api_failure(last_error)),
+    }, token_usage
 
 
-def slide_recheck_all_issues(
-    issues: list[dict],
-    slide_ctx: dict,
-    slides: list[dict],
-    hint: dict,
-    max_workers: int = 4,
-) -> tuple[list[dict], list[dict], int, int, dict]:
-    """모든 이슈를 슬라이드 맥락으로 재검증, 통과/기각 분류."""
+def judge_claim_batch(issues: list[dict], ctx: dict) -> tuple[dict[str, dict], dict]:
+    """같은 슬라이드 문맥의 여러 이슈를 한 번에 crosscheck한다."""
     from . import claim_common as cv
 
     if not issues:
-        return [], [], 0, 0, cv._empty_token_usage()
+        return {}, cv._empty_token_usage()
 
-    print(f"\n  ── 3단계: 슬라이드 맥락 재검증 ({len(issues)}건) ──")
-    verified, rejected = [], []
-    api_calls = 0
-    failed_calls = 0
-    token_usage = cv._empty_token_usage()
+    utterances = ctx["utterances"]
+    utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(utterances)}
 
-    def process(i, issue):
-        claim_preview = str(issue.get("claim_text", issue.get("problematic_content", "")))[:50]
-        print(f"    재검증 [{i+1}/{len(issues)}] 슬라이드 {issue.get('slide_number', '?')} | {claim_preview}...")
-        return _slide_recheck_issue(issue.copy(), slide_ctx, slides, hint)
+    valid: list[tuple[str, dict]] = []
+    payloads: dict[str, dict] = {}
+    for idx, issue in enumerate(issues, 1):
+        issue_id = f"i{idx:04d}"
+        if issue.get("utterance_id", "") not in utt_map:
+            payloads[issue_id] = {"verdict": "inconclusive", "confidence": 0.5, "reason": "utterance_id를 찾을 수 없음"}
+            continue
+        valid.append((issue_id, issue))
 
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(process, i, iss): i for i, iss in enumerate(issues)}
-        for f in as_completed(futures):
-            api_calls += 1
-            try:
-                result, call_usage = f.result()
-                token_usage = cv._merge_token_usage(token_usage, call_usage)
-                if result.get("slide_recheck_api_failed"):
-                    failed_calls += 1
-                if result.get("slide_recheck_valid") is False:
-                    rejected.append(result)
-                    print(f"      ❌ 기각: {result.get('slide_recheck_reason', '')[:80]}")
-                else:
-                    verified.append(result)
-                    print(f"      ✅ 유지")
-            except Exception as e:
-                idx = futures[f]
-                issue_copy = issues[idx].copy()
-                issue_copy["slide_recheck_valid"] = True
-                issue_copy["slide_recheck_reason"] = f"재검증 실패: {e}"
-                issue_copy["slide_recheck_api_failed"] = True
-                verified.append(issue_copy)
-                failed_calls += 1
+    if not valid:
+        return payloads, cv._empty_token_usage()
 
-    verified.sort(key=lambda x: float(x.get("start_time", 0) or 0))
-    rejected.sort(key=lambda x: float(x.get("start_time", 0) or 0))
-    print(f"  슬라이드 재검증 결과: {len(verified)}건 유지, {len(rejected)}건 기각")
-    return verified, rejected, api_calls, failed_calls, token_usage
+    parsed, token_usage, context_text, last_error = _run_crosscheck_batch_prompt(valid, ctx)
+    missing = [pair for pair in valid if pair[0] not in parsed]
+    if missing and _is_crosscheck_api_failure(last_error):
+        for issue_id, _issue in missing:
+            parsed[issue_id] = {
+                "verdict": "inconclusive",
+                "confidence": 0.5,
+                "reason": f"교차 재검증 batch 실패: {last_error}",
+                "crosscheck_context_text": context_text,
+                "model_failed": True,
+                "excluded_from_score": True,
+            }
+        payloads.update(parsed)
+        return payloads, token_usage
+
+    for issue_id, issue in missing:
+        single_parsed, call_usage, single_context, single_error = _run_crosscheck_batch_prompt([(issue_id, issue)], ctx)
+        cv._add_call_usage(token_usage, call_usage)
+        payload = single_parsed.get(issue_id)
+        if payload:
+            parsed[issue_id] = payload
+            continue
+        reason_error = single_error or last_error
+        parsed[issue_id] = {
+            "verdict": "inconclusive",
+            "confidence": 0.5,
+            "reason": f"교차 재검증 batch 실패: {reason_error}" if reason_error else "교차 재검증 응답에 issue_id가 없음",
+            "crosscheck_context_text": single_context or context_text,
+            "model_failed": bool(_is_crosscheck_api_failure(reason_error)),
+            "excluded_from_score": bool(_is_crosscheck_api_failure(reason_error)),
+        }
+
+    payloads.update(parsed)
+    return payloads, token_usage
