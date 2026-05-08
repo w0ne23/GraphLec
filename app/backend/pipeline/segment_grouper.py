@@ -110,6 +110,98 @@ def decide_semantic_merges(groups: list[dict]) -> set[int]:
         return set()
 
 
+def decide_context_breaks(groups: list[dict]) -> set[int]:
+    """
+    같은 scene 안의 연속 segment들을 의미/맥락 단위 context로 나누기 위해
+    context가 끝나는 지점(i, i+1 사이 break)을 LLM으로 판단한다.
+
+    기본 전제는 "인접 segment는 이어지는 강의 흐름"이며, LLM은 끊을 지점만 고른다.
+    """
+    if len(groups) <= 1:
+        return set()
+
+    group_list = _build_group_list_for_prompt(groups)
+
+    prompt = f"""당신은 대학 강의 전사를 의미/맥락 단위 context로 나누는 도우미입니다.
+아래는 같은 scene/slide 안에서 시간 순서대로 이어지는 발화 segment 목록입니다.
+
+목표: segment들을 강의 설명의 의미 흐름이 유지되는 context 단위로 나누세요.
+
+중요 원칙:
+- 기본적으로 인접 segment는 같은 설명 흐름으로 보고 이어 붙입니다.
+- scene 밖으로 넘어가는 병합은 이미 금지되어 있으므로, 아래 목록 내부에서만 판단하세요.
+- 새 개념, 새 소주제, 새 설명 단계로 명확히 넘어가는 지점에서만 끊으세요.
+- 수업 운영 멘트, 감사 인사, 녹음/마이크 안내, 쉬는 시간 안내, 다음 장/다음 주제로 넘어간다는 전환 멘트는
+  본 설명 context와 섞지 말고 별도 context가 되도록 앞뒤를 끊으세요.
+
+끊지 마세요:
+- 같은 개념을 계속 설명하는 경우
+- 앞 segment의 보충, 재진술, 원인/결과, 예시, 비교 설명인 경우
+- "그러니까", "즉", "예를 들어", "이러한", "그런데", "그리고"처럼 이어지는 설명인 경우
+
+segment 목록:
+{group_list}
+
+출력은 다음 JSON 형식으로만 작성하세요:
+
+```json
+{{ "break_after": [3, 8, 14] }}
+```
+
+break_after의 각 숫자 i는 "segment i까지 현재 context로 묶고, segment i+1부터 새 context를 시작하라"는 의미입니다.
+끊을 지점이 없으면 빈 배열을 반환하세요. 설명은 쓰지 말고 JSON만 출력하세요.
+"""
+
+    def call_api():
+        return gemini_client_2.models.generate_content(
+            model=GEMINI_GENERATIVE_MODEL,
+            contents=[types.Part.from_text(text=prompt)],
+            config=types.GenerateContentConfig(
+                temperature=0.1,
+                max_output_tokens=2048,
+            ),
+        )
+
+    try:
+        response = api_call_with_retry(call_api)
+        text = response.text.strip()
+
+        if "```json" in text:
+            text = text.split("```json")[1].split("```")[0].strip()
+        elif "```" in text:
+            text = text.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(text)
+        break_after = data.get("break_after", [])
+        return {int(i) for i in break_after if 0 <= int(i) < len(groups) - 1}
+    except Exception:
+        # 실패 시 scene 내부 발화 흐름을 최대한 보존한다.
+        return set()
+
+
+_OPERATIONAL_CONTEXT_RE = re.compile(
+    r"("
+    r"감사합니다|수고하셨|고생하셨|"
+    r"출석|쉬는\s*시간|잠깐\s*쉬|휴식|"
+    r"녹음|마이크|소리\s*들리|"
+    r"다음\s*영상|구독|좋아요|"
+    r"질문\s*있|마치겠습니다|끝내겠습니다|"
+    r"다음으로\s*(넘어|가|보)|이제\s*다음|넘어가겠습니다"
+    r")"
+)
+
+
+def _is_operational_or_transition_segment(text: str) -> bool:
+    """
+    수업 운영/감사/짧은 전환 멘트를 본 설명 context와 섞지 않기 위한 보조 규칙.
+    긴 내용 설명 안에 우연히 포함된 표현은 과도하게 분리하지 않도록 짧은 segment에만 적용한다.
+    """
+    t = re.sub(r"\s+", " ", (text or "")).strip()
+    if not t:
+        return False
+    return len(t) <= 90 and bool(_OPERATIONAL_CONTEXT_RE.search(t))
+
+
 def decide_merge_pair(current_text: str, next_text: str, max_chars: int = 400) -> bool:
     """
     두 인접 구간(current_text, next_text)이 같은 맥락/설명의 연속인지 LLM으로 판단.
@@ -352,7 +444,7 @@ def expand_group_annotations_to_segments(
     - groups: group_segments_by_context() 반환값 (각 그룹에 segment_indices 있음)
 
     반환: segments와 같은 길이·순서의 리스트. 각 세그먼트에 해당 그룹의
-    emphasis, emphasis_score 등이 복사됨.
+    audio_emphasis, 점수 산출용 필드 등이 복사됨.
     """
     group_by_start = {g["start"]: g for g in groups}
     annotated_by_start = {s["start"]: s for s in annotated_groups}
@@ -373,9 +465,6 @@ def expand_group_annotations_to_segments(
         ann = index_to_annotated.get(i)
         if ann:
             for key in (
-                "emphasis",
-                "emphasis_detected",
-                "emphasis_score",
                 "emphasis_methods",
                 "emphasis_reasons",
                 "detection_count",
@@ -384,13 +473,12 @@ def expand_group_annotations_to_segments(
                 "emphasis_keywords",
                 "emphasis_keywords_by_method",
                 "emphasis_detail",
+                "audio_emphasis",
             ):
                 if key in ann:
                     seg_copy[key] = ann[key]
         else:
-            seg_copy["emphasis"] = None
-            seg_copy["emphasis_detected"] = False
-            seg_copy["emphasis_score"] = 0
+            seg_copy["detection_count"] = 0
         result.append(seg_copy)
 
     return result
@@ -454,7 +542,7 @@ def group_segments_by_scene_and_context(
     use_pause_sentence: bool = False,
 ) -> tuple[list[dict], list[dict]]:
     """
-    먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 LLM 의미 병합으로 컨텍스트 구성.
+    먼저 scene occurrence별로 세그먼트를 나누고, 각 scene 내부에서 의미 전환점 기준으로 컨텍스트 구성.
     use_pause_sentence: True면 침묵/문장끝 기준 분할 추가 (나중에 사용할 옵션).
 
     반환: (groups_flat, scenes_structure)
@@ -513,36 +601,41 @@ def group_segments_by_scene_and_context(
                 "segment_indices": [i],
             })
 
-        if use_pause_sentence:
-            pass
-
+        break_after: set[int] = set()
         if use_llm_merge and len(initial_groups) > 1:
-            merge_after = decide_semantic_merges(initial_groups)
-            merged = []
-            cur = {
-                "start": initial_groups[0]["start"],
-                "end": initial_groups[0]["end"],
-                "text": initial_groups[0]["text"],
-                "segment_indices": list(initial_groups[0]["segment_indices"]),
-            }
-            for j in range(len(initial_groups) - 1):
-                g_next = initial_groups[j + 1]
-                if j in merge_after:
-                    cur["end"] = g_next["end"]
-                    cur["text"] = f"{cur['text']} {g_next['text']}".strip()
-                    cur["segment_indices"].extend(g_next["segment_indices"])
-                else:
-                    merged.append(cur)
-                    cur = {
-                        "start": g_next["start"],
-                        "end": g_next["end"],
-                        "text": g_next["text"],
-                        "segment_indices": list(g_next["segment_indices"]),
-                    }
-            merged.append(cur)
-            context_groups = merged
-        else:
-            context_groups = initial_groups
+            break_after = decide_context_breaks(initial_groups)
+
+        # 수업 운영/감사/짧은 전환 멘트는 본 설명 context와 섞이지 않도록 앞뒤를 끊는다.
+        for j, g in enumerate(initial_groups):
+            if not _is_operational_or_transition_segment(g.get("text", "")):
+                continue
+            if j > 0:
+                break_after.add(j - 1)
+            if j < len(initial_groups) - 1:
+                break_after.add(j)
+
+        context_groups = []
+        cur = {
+            "start": initial_groups[0]["start"],
+            "end": initial_groups[0]["end"],
+            "text": initial_groups[0]["text"],
+            "segment_indices": list(initial_groups[0]["segment_indices"]),
+        }
+        for j in range(len(initial_groups) - 1):
+            g_next = initial_groups[j + 1]
+            if j in break_after:
+                context_groups.append(cur)
+                cur = {
+                    "start": g_next["start"],
+                    "end": g_next["end"],
+                    "text": g_next["text"],
+                    "segment_indices": list(g_next["segment_indices"]),
+                }
+            else:
+                cur["end"] = g_next["end"]
+                cur["text"] = f"{cur['text']} {g_next['text']}".strip()
+                cur["segment_indices"].extend(g_next["segment_indices"])
+        context_groups.append(cur)
 
         scene_text = " ".join((g["text"] for g in context_groups if g["text"])).strip()
         contexts_for_scene = []

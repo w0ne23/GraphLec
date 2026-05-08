@@ -32,39 +32,57 @@ from typing import Optional, Set
 # ---------------------------------------------------------------------------
 
 KEYWORDS_WEIGHTED = {
-    'strong':  (['중요', '핵심', '반드시', '꼭', '필수'], 30),
-    'summary': (['정리하면', '요약하면', '다시 말하면', '즉'], 25),
-    'exam':    (['시험', '문제', '출제', '나옵니다'], 40),
+    'exam':    (['시험', '문제', '출제', '나옵니다'], 5),
+    'strong':  (['중요', '핵심', '반드시', '꼭', '필수'], 3),
+    'summary': (['정리하면', '요약하면', '다시 말하면', '즉'], 1),
 }
 
 
 def detect_emphasis_by_keywords_weighted(segments: list[dict]) -> list[dict]:
-    """가중치 적용 키워드 감지"""
+    """중요 표현 키워드 점수 계산. 카테고리별로 한 번만 가산한다."""
     print("  [가중치 키워드] 분석 중...")
     emphasis_segments = []
 
     for seg in segments:
         text = seg['text']
-        matched_keywords = []
+        matched_keywords_by_category: dict[str, list[str]] = {}
+        category_scores = {}
+        matched_categories = []
         keyword_score = 0
 
         for category, (keywords, weight) in KEYWORDS_WEIGHTED.items():
+            matched = [keyword for keyword in keywords if keyword in text]
+            matched_keywords_by_category[category] = matched
+            if matched:
+                matched_categories.append(category)
+                category_scores[category] = weight
+                keyword_score += weight
+            else:
+                category_scores[category] = 0
+
+        flat_matched_keywords = []
+        for keywords in matched_keywords_by_category.values():
             for keyword in keywords:
-                if keyword in text:
-                    matched_keywords.append(keyword)
-                    keyword_score += weight
+                if keyword not in flat_matched_keywords:
+                    flat_matched_keywords.append(keyword)
 
-        if keyword_score >= 40:
-            emphasis_segments.append({
-                'start': seg['start'],
-                'end': seg['end'],
-                'text': text,
-                'emphasis_score': float(keyword_score),
-                'matched_keywords': matched_keywords,
-                'detection_method': 'keyword_weighted',
-            })
+        emphasis_segments.append({
+            'start': seg['start'],
+            'end': seg['end'],
+            'text': text,
+            'emphasis_score': float(keyword_score),
+            'importance_keyword_score': int(keyword_score),
+            'category_scores': category_scores,
+            'matched_categories': matched_categories,
+            'matched_keywords': flat_matched_keywords,
+            'matched_keywords_by_category': matched_keywords_by_category,
+            'detected': keyword_score > 0,
+            'detection_method': 'keyword_weighted',
+        })
 
-    print(f"    -> 가중치 키워드: {len(emphasis_segments)}개 (전체의 {len(emphasis_segments)/len(segments)*100:.1f}%)")
+    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
+    ratio = detected_count / len(segments) * 100 if segments else 0.0
+    print(f"    -> 가중치 키워드: {detected_count}개 detected (전체의 {ratio:.1f}%), 점수 {len(emphasis_segments)}개")
     return emphasis_segments
 
 
@@ -429,10 +447,22 @@ def get_topic_keyword_count_map(
     }
 
 
+def get_topic_keyword_score_map(topic_count_map: dict[str, int]) -> dict[str, int]:
+    """반복 키워드 count 내림차순으로 4개씩 5~1점을 부여한다."""
+    if not topic_count_map:
+        return {}
+    sorted_items = sorted(topic_count_map.items(), key=lambda item: (-int(item[1]), item[0]))
+    result = {}
+    for idx, (kw, _count) in enumerate(sorted_items[:20]):
+        result[kw] = max(1, 5 - idx // 4)
+    return result
+
+
 def topic_keyword_count_items(topic_count_map: dict[str, int]) -> list[dict]:
     """JSON 저장용 [{keyword,total_count}] 목록으로 변환."""
+    score_map = get_topic_keyword_score_map(topic_count_map)
     return [
-        {"keyword": kw, "total_count": int(total)}
+        {"keyword": kw, "total_count": int(total), "score": int(score_map.get(kw, 0))}
         for kw, total in sorted(topic_count_map.items(), key=lambda item: (-item[1], item[0]))
     ]
 
@@ -449,12 +479,16 @@ def summarize_topic_keyword_counts_for_text(
     같은 text 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
     """
     if not text or not topic_count_map:
-        return {"keywords": [], "total_count_sum": 0}
+        return {"keywords": [], "total_count_sum": 0, "keyword_scores": {}, "score_sum": 0}
     words = set(_extract_content_words(text, min_length=min_keyword_len))
     keywords = sorted(words & set(topic_count_map), key=lambda w: (-topic_count_map[w], w))
+    score_map = get_topic_keyword_score_map(topic_count_map)
+    keyword_scores = {kw: int(score_map.get(kw, 0)) for kw in keywords}
     return {
         "keywords": keywords,
         "total_count_sum": int(sum(topic_count_map[kw] for kw in keywords)),
+        "keyword_scores": keyword_scores,
+        "score_sum": int(sum(keyword_scores.values())),
     }
 
 
@@ -493,6 +527,7 @@ def detect_emphasis_by_topic_keyword_repetition(
     min_keyword_count: int = 1,
     _topic_keywords_override: Optional[Set[str]] = None,
     _topic_keyword_count_map: Optional[dict[str, int]] = None,
+    _topic_keyword_score_map: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """
     전사문 전체에서 반복되는 주제 키워드가 등장하는 구간을 강조로 표시.
@@ -522,30 +557,36 @@ def detect_emphasis_by_topic_keyword_repetition(
     if not topic_keywords:
         print(f"    -> 주제 키워드 없음 (반복 단어 부족)")
         return []
+    topic_keyword_score_map = _topic_keyword_score_map
+    if topic_keyword_score_map is None:
+        topic_keyword_score_map = get_topic_keyword_score_map(_topic_keyword_count_map or {})
 
     emphasis_segments = []
     for seg in segments:
         words = _extract_content_words(seg.get("text") or "", min_length=min_keyword_len)
         here = set(words) & topic_keywords
-        if len(here) < min_keyword_count:
-            continue
         repeated_words = sorted(here)
-        score = min(25 + len(repeated_words) * 5 + sum(len(w) for w in repeated_words[:5]), 55)
         topic_total_count_sum = 0
         if _topic_keyword_count_map:
             # 같은 context 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
             topic_total_count_sum = int(sum(_topic_keyword_count_map.get(w, 0) for w in repeated_words))
+        keyword_scores = {w: int(topic_keyword_score_map.get(w, 0)) for w in repeated_words}
+        topic_keyword_score = int(sum(keyword_scores.values()))
         emphasis_segments.append({
             "start": seg["start"],
             "end": seg["end"],
             "text": seg["text"],
-            "emphasis_score": float(score),
-            "repeated_topic_keywords": repeated_words[:10],
+            "emphasis_score": float(topic_keyword_score),
+            "repeated_topic_keywords": repeated_words,
+            "repeated_topic_keyword_scores": keyword_scores,
             "audio_topic_total_count_sum": topic_total_count_sum,
+            "audio_topic_keyword_score": topic_keyword_score,
+            "detected": len(here) >= min_keyword_count and topic_keyword_score > 0,
             "detection_method": "topic_keyword_repeat",
         })
 
-    print(f"    -> 주제 키워드 반복 ({label}): {len(emphasis_segments)}개 (전체의 {len(emphasis_segments)/len(segments)*100:.1f}%)")
+    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
+    print(f"    -> 주제 키워드 반복 ({label}): {detected_count}개 (전체의 {detected_count/len(segments)*100:.1f}%)")
     return emphasis_segments
 
 
