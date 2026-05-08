@@ -27,18 +27,31 @@ async def list_jobs(
 
 
 @router.get("/{lecture_id}/stream")
-async def stream_job_status(lecture_id: str, request: Request):
+async def stream_job_status(
+    lecture_id: str,
+    request: Request,
+    job_id: Optional[str] = Query(None),
+):
+    """
+    job_id 쿼리파라미터가 있으면 해당 job을 고정 추적.
+    없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
+    retry 후 새 job_id로 재연결하면 정확한 시도별 추적이 가능.
+    """
     async def event_generator():
         while True:
             if await request.is_disconnected():
                 break
             try:
                 async with AsyncSessionLocal() as db:
-                    job = await lecture_service.get_latest_job(db, lecture_id)
+                    if job_id:
+                        job = await lecture_service.get_job(db, job_id)
+                    else:
+                        job = await lecture_service.get_latest_job(db, lecture_id)
                 if not job:
                     yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
                     break
                 payload = {
+                    "job_id": str(job.id),
                     "lecture_status": job.status,
                     "current_stage": job.current_stage,
                     "error_message": job.error_message,
@@ -142,10 +155,10 @@ async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{lecture_id}/retry")
 async def retry_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    success = await lecture_service.retry_lecture(db, lecture_id)
-    if not success:
+    result = await lecture_service.retry_lecture(db, lecture_id)
+    if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    return {"status": "success"}
+    return result
 
 
 @router.post("/{lecture_id}/retry_graph")

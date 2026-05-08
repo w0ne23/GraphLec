@@ -528,17 +528,31 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     return out
 
 
-async def retry_lecture(db: AsyncSession, lecture_id: str) -> bool:
-    """lecture_id로 최신 job을 찾아 재시도 상태로 초기화"""
-    job = await get_latest_job(db, lecture_id)
-    if not job:
-        return False
-    job.status = "pending"
-    job.error_message = None
-    job.current_stage = "Resuming pipeline..."
-    job.pipeline_stages = []
+async def retry_lecture(db: AsyncSession, lecture_id: str):
+    """lecture_id로 새 ProcessingJob을 INSERT하여 재시도 이력을 누적.
+    성공 시 { status, job_id } dict 반환, 실패 시 None.
+    """
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, ident_uuid)
+    if not lecture:
+        return None
+
+    new_job = ProcessingJob(
+        id=uuid.uuid4(),
+        lecture_id=ident_uuid,
+        status="pending",
+        current_stage="Resuming pipeline...",
+        error_message=None,
+        pipeline_stages=[],
+    )
+    db.add(new_job)
     await db.commit()
-    return True
+    await db.refresh(new_job)
+    return {"status": "success", "job_id": str(new_job.id)}
 
 
 async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
