@@ -90,6 +90,18 @@ class Config:
     #   - 실제 동일 슬라이드 쌍의 dist → 이 값보다 크게
     #   - 실제 다른 슬라이드 쌍의 dist → 이 값보다 작게
     DUPLICATE_HASH_THRESHOLD     = 30    # 초기값, 로그 확인 후 조정 필요
+    DUPLICATE_DHASH_THRESHOLD    = int(os.getenv("GRAPHLEC_DUPLICATE_DHASH_THRESHOLD", "34"))
+    DUPLICATE_CONTENT_HASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HASH_THRESHOLD", "18"))
+    DUPLICATE_CONTENT_DHASH_THRESHOLD = int(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_DHASH_THRESHOLD", "24"))
+    DUPLICATE_CONTENT_CHANGED_RATIO_MAX = float(
+        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_CHANGED_RATIO_MAX", "0.10")
+    )
+    DUPLICATE_CONTENT_EDGE_OVERLAP_MIN = float(
+        os.getenv("GRAPHLEC_DUPLICATE_CONTENT_EDGE_OVERLAP_MIN", "0.90")
+    )
+    DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
+    DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
+    DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
 
     # ── 필기 감지 ────────────────────────────────────────────────────
     ANNOT_DIFF_THRESHOLD         = 15    # 픽셀 변화 판정 절댓값 임계
@@ -256,6 +268,78 @@ def is_same_scene_content(reference: np.ndarray, frame: np.ndarray, cfg: Config)
     if metrics["changed_ratio"] > cfg.SAME_SCENE_CHANGED_RATIO_MAX:
         return False
     return metrics["edge_preserve"] >= cfg.SAME_SCENE_EDGE_PRESERVE_THRESHOLD
+
+
+def duplicate_frame_features(frame: np.ndarray, cfg: Config) -> dict:
+    full = resize_frame(frame, cfg.RESIZE_WIDTH)
+    content = content_region(full, cfg)
+    return {
+        "frame": full,
+        "content": content,
+        "phash": compute_phash_hires(full),
+        "dhash": compute_dhash_hires(full),
+        "content_phash": compute_phash_hires(content),
+        "content_dhash": compute_dhash_hires(content),
+    }
+
+
+def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
+    full_a = rep_a["frame"]
+    full_b = rep_b["frame"]
+    content_a = rep_a["content"]
+    content_b = rep_b["content"]
+
+    metrics = {
+        "phash": int(rep_a["phash"] - rep_b["phash"]),
+        "dhash": int(rep_a["dhash"] - rep_b["dhash"]),
+        "changed": float(count_changed_pixels(full_a, full_b, cfg.ANNOT_DIFF_THRESHOLD)),
+        "edge": float(symmetric_edge_overlap(full_a, full_b)),
+        "mse": float(normalized_mse(full_a, full_b)),
+        "hist": float(grayscale_hist_correlation(full_a, full_b)),
+        "content_phash": int(rep_a["content_phash"] - rep_b["content_phash"]),
+        "content_dhash": int(rep_a["content_dhash"] - rep_b["content_dhash"]),
+        "content_changed": float(count_changed_pixels(content_a, content_b, cfg.ANNOT_DIFF_THRESHOLD)),
+        "content_edge": float(symmetric_edge_overlap(content_a, content_b)),
+        "content_mse": float(normalized_mse(content_a, content_b)),
+        "content_hist": float(grayscale_hist_correlation(content_a, content_b)),
+    }
+
+    strict_phash = max(8, min(int(cfg.DUPLICATE_HASH_THRESHOLD), 18))
+    strict_match = (
+        metrics["phash"] <= strict_phash
+        and metrics["dhash"] <= 24
+        and metrics["content_changed"] <= 0.14
+        and metrics["content_mse"] <= 0.030
+        and metrics["content_edge"] >= 0.72
+    )
+    near_identical = (
+        metrics["phash"] <= cfg.DUPLICATE_HASH_THRESHOLD
+        and metrics["dhash"] <= cfg.DUPLICATE_DHASH_THRESHOLD
+        and metrics["changed"] <= 0.055
+        and metrics["mse"] <= 0.018
+        and metrics["edge"] >= 0.86
+        and metrics["hist"] >= 0.985
+    )
+    content_match = (
+        metrics["content_phash"] <= cfg.DUPLICATE_CONTENT_HASH_THRESHOLD
+        and metrics["content_dhash"] <= cfg.DUPLICATE_CONTENT_DHASH_THRESHOLD
+        and metrics["content_changed"] <= cfg.DUPLICATE_CONTENT_CHANGED_RATIO_MAX
+        and metrics["content_mse"] <= cfg.DUPLICATE_CONTENT_MSE_MAX
+        and metrics["content_edge"] >= cfg.DUPLICATE_CONTENT_EDGE_OVERLAP_MIN
+        and metrics["content_hist"] >= cfg.DUPLICATE_CONTENT_HIST_MIN
+        and metrics["hist"] >= cfg.DUPLICATE_FULL_HIST_MIN
+    )
+
+    if strict_match:
+        metrics["reason"] = "strict"
+    elif near_identical:
+        metrics["reason"] = "near-identical"
+    elif content_match:
+        metrics["reason"] = "content"
+    else:
+        metrics["reason"] = ""
+
+    return bool(strict_match or near_identical or content_match), metrics
 
 
 
@@ -1619,6 +1703,15 @@ def _extract_slides_staged(
     with open(metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
+    cfg = Config()
+    metadata = mark_clean_final_frames(metadata)
+    metadata = mark_visual_duplicates(metadata, out_path, cfg)
+    metadata = finalize_scene_slide_metadata(metadata)
+    log_scene_slide_summary(metadata)
+
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
     scene_slide_map_path = out_path / "scene_slide_map.json"
     with open(scene_slide_map_path, "w", encoding="utf-8") as f:
         json.dump(build_scene_slide_map(metadata), f, ensure_ascii=False, indent=2)
@@ -1940,9 +2033,9 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
       - 레이블: "base{idx}" / "annot{idx}"
 
     비교:
-      - 풀 내 모든 쌍을 phash(256비트) 비교
+      - 풀 내 모든 쌍을 full-frame + content-region 복합 지표로 비교
       - 동일 scene_index 간 쌍은 건너뜀
-      - dist < DUPLICATE_HASH_THRESHOLD(현재 30) → 같은 슬라이드로 간주
+      - strict / near-identical / content match 중 하나를 만족하면 같은 슬라이드로 간주
 
     여기서 "같은 slide"는 재등장(revisit)을 포함한 같은 원본 장표 계열을 의미한다.
     """
@@ -1965,24 +2058,32 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         if annot_list:
             pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"])
 
-    # phash 계산 (256비트)
-    phashes: dict[str, imagehash.ImageHash] = {}
+    # full frame은 보조로, content region은 실제 장표 본문 identity 판정에 사용한다.
+    representatives: dict[str, dict] = {}
     for label, (_, fname) in pool.items():
         img = cv2.imread(str(out_path / fname))
         if img is not None:
-            phashes[label] = compute_phash_hires(resize_frame(img, cfg.RESIZE_WIDTH))
+            representatives[label] = duplicate_frame_features(img, cfg)
         else:
             log.warning(f"  [중복 감지] 이미지 로드 실패: {fname}")
 
     # 전체 쌍 비교 — scene_index별 같은 슬라이드 관계 수집
-    labels = sorted(phashes.keys())
+    labels = sorted(representatives.keys())
     # duplicate_map[idx] = 이 scene과 같은 슬라이드로 판정된 다른 scene_index 집합
     duplicate_map: dict[int, set[int]] = defaultdict(set)
 
-    log.info("\n──────── 슬라이드 간 phash 거리 전체 비교 (같은 슬라이드 판정용) ────────")
-    log.info(f"  DUPLICATE_HASH_THRESHOLD = {cfg.DUPLICATE_HASH_THRESHOLD}  (256비트 기준, 최대 256)")
-    log.info(f"  {'프레임 쌍':<30} {'dist':>5}  {'판정'}")
-    log.info(f"  {'-'*30}  {'-'*5}  {'-'*10}")
+    log.info("\n──────── 슬라이드 간 복합 비교 (같은 슬라이드 판정용) ────────")
+    log.info(
+        "  thresholds: phash<=%s, content_phash<=%s, content_edge>=%.2f",
+        cfg.DUPLICATE_HASH_THRESHOLD,
+        cfg.DUPLICATE_CONTENT_HASH_THRESHOLD,
+        cfg.DUPLICATE_CONTENT_EDGE_OVERLAP_MIN,
+    )
+    log.info(
+        f"  {'프레임 쌍':<30} {'ph':>4} {'dh':>4} {'cph':>4} "
+        f"{'chg':>5} {'cedge':>6} {'hist':>5}  {'판정'}"
+    )
+    log.info(f"  {'-'*30}  {'-'*4} {'-'*4} {'-'*4} {'-'*5} {'-'*6} {'-'*5}  {'-'*12}")
 
     for i in range(len(labels)):
         for j in range(i + 1, len(labels)):
@@ -1994,12 +2095,21 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             if idx_a == idx_b:
                 continue
 
-            dist = phashes[la] - phashes[lb]
-            flag = "★ 같은 슬라이드" if dist < cfg.DUPLICATE_HASH_THRESHOLD else ""
+            is_dup, metrics = duplicate_pair_decision(
+                representatives[la],
+                representatives[lb],
+                cfg,
+            )
+            flag = f"★ 같은 슬라이드({metrics['reason']})" if is_dup else ""
 
-            log.info(f"  {la:<14} ↔ {lb:<14}  {dist:>5}  {flag}")
+            log.info(
+                f"  {la:<14} ↔ {lb:<14}  "
+                f"{metrics['phash']:>4} {metrics['dhash']:>4} {metrics['content_phash']:>4} "
+                f"{metrics['content_changed']:>5.3f} {metrics['content_edge']:>6.3f} "
+                f"{metrics['hist']:>5.3f}  {flag}"
+            )
 
-            if dist < cfg.DUPLICATE_HASH_THRESHOLD:
+            if is_dup:
                 duplicate_map[idx_a].add(idx_b)
                 duplicate_map[idx_b].add(idx_a)
 

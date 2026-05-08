@@ -128,12 +128,133 @@ def _save_cache_scene(
     return record
 
 
+def _scene_time(record: dict) -> float:
+    return float(
+        record.get(
+            "scene_start_sec",
+            record.get("base_timestamp_sec", record.get("timestamp_sec", 0.0)),
+        )
+        or 0.0
+    )
+
+
+def _same_region(a: dict, b: dict) -> bool:
+    return a.get("region_segment_index") == b.get("region_segment_index")
+
+
+def _remove_pruned_scene_previews(out_dir: Path, pruned_records: list[dict]) -> None:
+    for record in pruned_records:
+        filename = record.get("filename")
+        if filename:
+            (out_dir / str(filename)).unlink(missing_ok=True)
+
+
+def prune_transition_middle_frames(
+    records: list[dict],
+    out_dir: Path,
+    max_gap_sec: float = 3.0,
+    min_cluster_scenes: int = 3,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """
+    Remove only the middle candidates from rapid transition clusters.
+
+    A real fast slide change often looks like:
+
+      clean slide A -> transition frames -> clean slide B
+
+    The first and last candidates are therefore kept. Only candidates between
+    them are pruned. This is deliberately conservative: a lone quick pair is
+    left intact, and the final candidate in a burst is never removed here.
+    """
+    if len(records) < min_cluster_scenes:
+        return records, [], []
+
+    kept: list[dict] = []
+    pruned: list[dict] = []
+    review_candidates: list[dict] = []
+    i = 0
+
+    while i < len(records):
+        cluster = [records[i]]
+        j = i + 1
+
+        while j < len(records):
+            current = records[j]
+            prev = cluster[-1]
+            if not _same_region(prev, current):
+                break
+            gap = _scene_time(current) - _scene_time(prev)
+            if gap < 0 or gap > max_gap_sec:
+                break
+            cluster.append(current)
+            j += 1
+
+        if len(cluster) >= min_cluster_scenes:
+            kept.append(cluster[0])
+            kept.append(cluster[-1])
+            middle = cluster[1:-1]
+            review_candidates.append({
+                "reason": "transition_cluster",
+                "cluster_scene_indices": [int(x["scene_index"]) for x in cluster],
+                "context_scene_indices": [
+                    int(cluster[0]["scene_index"]),
+                    int(cluster[-1]["scene_index"]),
+                ],
+                "middle_scene_indices": [int(x["scene_index"]) for x in middle],
+                "cluster_start_sec": _scene_time(cluster[0]),
+                "cluster_end_sec": _scene_time(cluster[-1]),
+                "max_adjacent_gap_sec": max_gap_sec,
+                "candidate_records": [
+                    {
+                        "scene_index": item.get("scene_index"),
+                        "filename": item.get("filename"),
+                        "scene_start_sec": item.get("scene_start_sec"),
+                        "base_timestamp_sec": item.get("base_timestamp_sec"),
+                        "frame_no": item.get("frame_no"),
+                        "base_frame_no": item.get("base_frame_no"),
+                        "reason": item.get("reason"),
+                    }
+                    for item in cluster
+                ],
+            })
+            for item in middle:
+                pruned.append({
+                    "scene_index": item.get("scene_index"),
+                    "filename": item.get("filename"),
+                    "scene_start_sec": item.get("scene_start_sec"),
+                    "base_timestamp_sec": item.get("base_timestamp_sec"),
+                    "reason": item.get("reason"),
+                    "prune_reason": "transition_middle_frame",
+                    "cluster_start_scene_index": cluster[0].get("scene_index"),
+                    "cluster_end_scene_index": cluster[-1].get("scene_index"),
+                    "cluster_gap_sec": max_gap_sec,
+                })
+            log.info(
+                "[prune] transition cluster %s-%s: removed %s middle candidates (%s)",
+                cluster[0].get("scene_index"),
+                cluster[-1].get("scene_index"),
+                len(middle),
+                ", ".join(str(x.get("scene_index")) for x in middle),
+            )
+            i = j
+        else:
+            kept.append(cluster[0])
+            i += 1
+
+    if pruned:
+        _remove_pruned_scene_previews(out_dir, pruned)
+    return kept, pruned, review_candidates
+
+
 def run_cache_probe(
     cache_dir: str,
     output_dir: str,
     cfg: ProbeConfig,
     regions_path: str | None = None,
     region_guard_sec: float = 1.0,
+    prune_bursts: bool = True,
+    transient_burst_gap_sec: float = 3.0,
+    transient_burst_min_extra_scenes: int = 2,
 ) -> list[dict]:
     manifest = load_sample_cache(cache_dir)
     sampled_fps = float(manifest["cache"]["sampled_fps"])
@@ -356,11 +477,30 @@ def run_cache_probe(
             records.append(record)
             last_saved_base_decision = pending["decision"].copy()
 
+    pruned_records: list[dict] = []
+    review_candidates: list[dict] = []
+    if prune_bursts:
+        records, pruned_records, review_candidates = prune_transition_middle_frames(
+            records,
+            out_dir,
+            max_gap_sec=max(0.0, transient_burst_gap_sec),
+            min_cluster_scenes=max(3, transient_burst_min_extra_scenes + 1),
+        )
+
     payload = {
         "cache_dir": str(cache_dir),
         "source_input": manifest.get("input_path"),
         "regions_path": str(regions_path) if regions_path else None,
         "region_guard_sec": region_guard_sec if regions_path else 0.0,
+        "postprocess": {
+            "prune_transition_middle_frames": prune_bursts,
+            "transient_burst_gap_sec": transient_burst_gap_sec,
+            "transition_min_cluster_scenes": max(3, transient_burst_min_extra_scenes + 1),
+            "pruned_count": len(pruned_records),
+            "pruned_records": pruned_records,
+            "review_candidate_count": len(review_candidates),
+            "review_candidates": review_candidates,
+        },
         "config": asdict(cfg),
         "cache": manifest.get("cache"),
         "source": manifest.get("source"),
@@ -383,6 +523,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Output scene probe directory")
     parser.add_argument("--regions", help="timeline_segments.json from Step 1; only type=slide regions are processed")
     parser.add_argument("--region-guard-sec", type=float, default=1.0, help="Shrink slide regions next to non-slide regions by this many seconds")
+    parser.add_argument("--no-prune-transient-bursts", action="store_true", help="Disable rapid transition-cluster middle-frame pruning")
+    parser.add_argument("--transient-burst-gap-sec", type=float, default=3.0, help="Max gap between adjacent scene candidates in one transition cluster")
+    parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="Legacy option: default 2 means prune only clusters with 3+ candidates")
     parser.add_argument("--resize-width", type=int, default=ProbeConfig.resize_width)
     parser.add_argument("--delay-sec", type=float, default=ProbeConfig.delay_sec)
     parser.add_argument("--max-pending-sec", type=float, default=ProbeConfig.max_pending_sec)
@@ -410,6 +553,9 @@ def main():
         cfg,
         regions_path=args.regions,
         region_guard_sec=max(0.0, args.region_guard_sec),
+        prune_bursts=not args.no_prune_transient_bursts,
+        transient_burst_gap_sec=max(0.0, args.transient_burst_gap_sec),
+        transient_burst_min_extra_scenes=max(1, args.transient_burst_min_extra_scenes),
     )
 
 
