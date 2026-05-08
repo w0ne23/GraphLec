@@ -768,7 +768,7 @@ class TextualizationPipeline:
         slide_topic_keyword_counts = get_topic_keyword_count_map(
             slide_keyword_units,
             min_freq=2,
-            max_keywords=30,
+            max_keywords=20,
             max_segment_ratio=1.0,
             min_keyword_len=2,
             candidate_pool_size=80,
@@ -782,6 +782,8 @@ class TextualizationPipeline:
             )
             slide["slide_topic_keywords"] = summary["keywords"]
             slide["slide_topic_total_count_sum"] = summary["total_count_sum"]
+            slide["slide_topic_keyword_scores"] = summary["keyword_scores"]
+            slide["slide_topic_keyword_score"] = summary["score_sum"]
 
         total_time = time.time() - start_time
 
@@ -818,6 +820,8 @@ class TextualizationPipeline:
                     "slide_emphasis":      s.get("slide_emphasis", []),
                     "slide_topic_keywords": s.get("slide_topic_keywords", []),
                     "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),
+                    "slide_topic_keyword_scores": s.get("slide_topic_keyword_scores", {}),
+                    "slide_topic_keyword_score": s.get("slide_topic_keyword_score", 0),
                     "text_source":         s.get("text_source", "base"),
                     "has_teacher_annotation": s.get("has_teacher_annotation", s.get("has_annot", False)),
                     "text_image_has_annot": s.get("text_image_has_annot", False),
