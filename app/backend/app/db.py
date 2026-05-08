@@ -1,5 +1,6 @@
 import os
 import logging
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from app.models import Base
 
@@ -14,6 +15,10 @@ async def init_db():
     """DB 초기화: 모든 모델 테이블 생성"""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(text("""
+            ALTER TABLE lectures_content
+            ADD COLUMN IF NOT EXISTS graphrag_workspace TEXT
+        """))
     logger.info("--- [DB] Database initialized via SQLAlchemy models. ---")
 
 async def get_db():

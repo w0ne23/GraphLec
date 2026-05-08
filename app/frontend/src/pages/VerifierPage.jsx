@@ -57,10 +57,7 @@ function labelForStage(stage) {
     rejected: '기각',
     final_confirmed: '확정',
     needs_review: '교수 확인',
-    crosscheck_rejected: '교차검증 기각',
-    crosscheck_inconclusive: '교차검증 불확실',
-    grounding_rejected: '근거 기각',
-    first_stage_rejected: '1차 제외',
+    verifier_rejected: '검증 기각',
     agree: '확정',
     inconclusive: '교수 확인',
     disagree: '기각',
@@ -74,9 +71,6 @@ function labelForIssueType(type) {
     temporal_error: '시대적 오류',
     scope_overclaim: '범위 과잉 단정',
     confusing_explanation: '혼동 가능 설명',
-    outdated: '현행성 오류',
-    simple_factual_error: '단순 사실 오류',
-    scope_error: '범위 오류',
   }
   return labels[type] || compactText(type)
 }
@@ -87,9 +81,6 @@ function labelForIssueSubtype(type) {
     temporal_error: '시대적 오류',
     scope_overclaim: '범위 과잉 단정',
     confusing_explanation: '혼동 가능 설명',
-    simple_factual_error: '단순 사실 오류',
-    scope_error: '범위 오류',
-    outdated: '현행성 오류',
   }
   return labels[type] || compactText(type)
 }
@@ -97,13 +88,9 @@ function labelForIssueSubtype(type) {
 function getIssueSubtype(item) {
   const direct = item.feedback_type || item.issue_type || item.type || item.issue_subtype
   if (direct === 'temporal_error') return 'temporal_error'
-  if (direct === 'outdated') return 'temporal_error'
   if (direct === 'scope_overclaim') return 'scope_overclaim'
-  if (direct === 'scope_error') return 'scope_overclaim'
   if (direct === 'confusing_explanation') return 'confusing_explanation'
   if (direct === 'factual_error') return 'factual_error'
-  if (direct === 'simple_factual_error') return 'factual_error'
-  if (item.issue_pattern === 'scope_overstatement') return 'scope_overclaim'
   return ''
 }
 
@@ -130,29 +117,29 @@ function labelForClaimIssue(claim) {
   return labelForIssueSubtype(key) || labelForIssueType(key)
 }
 
-function groupTyposBySlide(items) {
+function groupSlideErrorsBySlide(items) {
   const groups = new Map()
-  asArray(items).forEach((typo, idx) => {
-    const slideNumber = typo.slide_number ?? 'unknown'
+  asArray(items).forEach((error, idx) => {
+    const slideNumber = error.slide_number ?? 'unknown'
     const key = String(slideNumber)
     if (!groups.has(key)) {
       groups.set(key, {
         key,
         slideNumber,
-        title: typo.slide_title || '',
-        imageUrl: typo.slide_image_url || typo.image_url || '',
+        title: error.slide_title || '',
+        imageUrl: error.slide_image_url || error.image_url || '',
         items: [],
       })
     }
 
     const group = groups.get(key)
-    if (!group.imageUrl && (typo.slide_image_url || typo.image_url)) {
-      group.imageUrl = typo.slide_image_url || typo.image_url
+    if (!group.imageUrl && (error.slide_image_url || error.image_url)) {
+      group.imageUrl = error.slide_image_url || error.image_url
     }
-    if (!group.title && typo.slide_title) {
-      group.title = typo.slide_title
+    if (!group.title && error.slide_title) {
+      group.title = error.slide_title
     }
-    group.items.push({ ...typo, _typoIndex: idx })
+    group.items.push({ ...error, _slideErrorIndex: idx })
   })
 
   return Array.from(groups.values()).sort((a, b) => {
@@ -176,11 +163,10 @@ function getItemStartTime(item, sourceClaim = {}) {
 function getConfirmationReason(item) {
   const direct =
     item.confirmation_reason ||
-    item.evidence?.confirmation_reason ||
-    item.cross_recheck_reason
+    item.evidence?.confirmation_reason
   if (direct) return direct
 
-  const modelResults = item.checks?.crosscheck?.model_results
+  const modelResults = item.checks?.severity?.model_results
   if (!Array.isArray(modelResults)) return ''
   return modelResults
     .filter((row) => row?.verdict === 'agree' && row?.reason)
@@ -194,13 +180,13 @@ function getRejectionReason(item) {
     item.professor_check_reason ||
     item.review_reason ||
     item.evidence?.rejection_reason ||
-    item.checks?.crosscheck?.reason ||
+    item.checks?.severity?.reason ||
     ''
   )
 }
 
 function getModelVerdicts(item) {
-  const rows = asArray(item.checks?.crosscheck?.model_results)
+  const rows = asArray(item.checks?.severity?.model_results)
   return rows.reduce((acc, row) => {
     const model = row?.model || row?.resolved_model || row?.source_model
     if (model) acc[model] = row
@@ -208,7 +194,7 @@ function getModelVerdicts(item) {
   }, {})
 }
 
-function getCrosscheckScoreFromModels(modelResults) {
+function getSeverityScoreFromModels(modelResults) {
   const rows = asArray(modelResults)
   let weightedSum = 0
   let totalWeight = 0
@@ -225,18 +211,18 @@ function getCrosscheckScoreFromModels(modelResults) {
   return Math.max(0, Math.min(1, weightedSum / totalWeight))
 }
 
-function getCrosscheckScore(item, crosscheck = {}) {
+function getSeverityScore(item, severity = {}) {
   return (
-    toNumberOrUndefined(item.crosscheck_score) ??
+    toNumberOrUndefined(item.severity_score) ??
     toNumberOrUndefined(item.score) ??
-    toNumberOrUndefined(crosscheck.score) ??
-    toNumberOrUndefined(crosscheck.scoring?.score) ??
-    getCrosscheckScoreFromModels(crosscheck.model_results)
+    toNumberOrUndefined(severity.score) ??
+    toNumberOrUndefined(severity.scoring?.score) ??
+    getSeverityScoreFromModels(severity.model_results)
   )
 }
 
-function getCrosscheckScorePercent(item, crosscheck = {}, score) {
-  const direct = toNumberOrUndefined(item.crosscheck_score_percent ?? crosscheck.score_percent ?? crosscheck.scoring?.score_percent)
+function getSeverityScorePercent(item, severity = {}, score) {
+  const direct = toNumberOrUndefined(item.severity_score_percent ?? severity.score_percent ?? severity.scoring?.score_percent)
   if (direct !== undefined) return direct
   return score !== undefined ? score * 100 : undefined
 }
@@ -257,14 +243,14 @@ function feedbackItemToClaim(item, claimById) {
   const problem = item.problem || {}
   const feedback = item.professor_feedback || {}
   const evidence = item.evidence || {}
-  const crosscheck = item.checks?.crosscheck || {}
-  const crosscheckScore = getCrosscheckScore(item, crosscheck)
-  const crosscheckScorePercent = getCrosscheckScorePercent(item, crosscheck, crosscheckScore)
-  const crosscheckWeightedStatus =
-    item.crosscheck_weighted_status ||
-    crosscheck.status_by_score ||
-    crosscheck.scoring?.status ||
-    statusFromScore(crosscheckScore)
+  const severity = item.checks?.severity || {}
+  const severityScore = getSeverityScore(item, severity)
+  const severityScorePercent = getSeverityScorePercent(item, severity, severityScore)
+  const severityStatus =
+    item.severity_status ||
+    severity.status_by_score ||
+    severity.scoring?.status ||
+    statusFromScore(severityScore)
   const location = getItemLocation(item, sourceClaim)
   const status = item.status === 'review_needed' ? 'professor_check' : item.status
   const title =
@@ -302,10 +288,10 @@ function feedbackItemToClaim(item, claimById) {
     context_resolution: problem.context_resolution || evidence.context_resolution || feedback.context_resolution,
     recommendation: problem.recommendation || feedback.teaching_note,
     evidence_in_context: evidence.evidence_in_context || feedback.evidence_in_context,
-    crosscheck_score: crosscheckScore,
-    crosscheck_score_percent: crosscheckScorePercent,
-    crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
-    crosscheck_weighted_status: crosscheckWeightedStatus,
+    severity_score: severityScore,
+    severity_score_percent: severityScorePercent,
+    severity_verdict: item.severity_verdict ?? severity.verdict,
+    severity_status: severityStatus,
     model_verdicts: getModelVerdicts(item),
     confirmation_reason: status === 'confirmed' ? getConfirmationReason(item) : '',
     rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
@@ -435,8 +421,8 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   const sources = asArray(grounding.evidence_sources).length
     ? grounding.evidence_sources
     : asArray(claim.evidence_sources)
-  const hasCrosscheckScore = claim.crosscheck_score !== undefined && claim.crosscheck_score !== null
-  const crosscheckStatus = claim.crosscheck_weighted_status || claim.crosscheck_score_verdict
+  const hasSeverityScore = claim.severity_score !== undefined && claim.severity_score !== null
+  const severityStatus = claim.severity_status || claim.severity_verdict
 
   return (
     <article className={`vf-claim-card ${expanded ? 'vf-claim-card--expanded' : ''}`}>
@@ -446,9 +432,9 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
           <div className="vf-chip-row">
             <span className="vf-chip vf-chip--stage">{labelForStage(claim.stage || section)}</span>
             {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
-            {hasCrosscheckScore && (
-              <span className={`vf-chip vf-chip--score vf-chip--score-${crosscheckStatus || 'unknown'}`}>
-                점수 {scoreLabel(claim.crosscheck_score)}
+            {hasSeverityScore && (
+              <span className={`vf-chip vf-chip--score vf-chip--score-${severityStatus || 'unknown'}`}>
+                점수 {scoreLabel(claim.severity_score)}
               </span>
             )}
           </div>
@@ -467,8 +453,8 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow
               label="검증 점수"
               value={
-                hasCrosscheckScore
-                  ? `${formatPercent(claim.crosscheck_score)} (${labelForStage(crosscheckStatus) || '-'})`
+                hasSeverityScore
+                  ? `${formatPercent(claim.severity_score)} (${labelForStage(severityStatus) || '-'})`
                   : ''
               }
             />
@@ -501,35 +487,35 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   )
 }
 
-function SlideErrorItem({ typo }) {
-  const candidates = asArray(typo.correction_candidates)
-  const runCount = Number(typo.run_count || 0)
+function SlideErrorItem({ error }) {
+  const candidates = asArray(error.correction_candidates)
+  const runCount = Number(error.run_count || 0)
   return (
-    <div className="vf-typo-item">
-      <div className="vf-typo-main">
-        <div className="vf-typo-fields">
-          <div className="vf-typo-correction">
+    <div className="vf-error-item">
+      <div className="vf-error-main">
+        <div className="vf-error-fields">
+          <div className="vf-error-correction">
             <span>수정</span>
             <strong>
-              {compactText(typo.problematic_text)}
+              {compactText(error.problematic_text)}
               <em>→</em>
-              {compactText(typo.corrected_text)}
+              {compactText(error.corrected_text)}
             </strong>
           </div>
-          {typo.error_type_label && (
-            <div className="vf-typo-field">
+          {error.error_type_label && (
+            <div className="vf-error-field">
               <span>오류 유형</span>
-              <p>{compactText(typo.error_type_label, '')}</p>
+              <p>{compactText(error.error_type_label, '')}</p>
             </div>
           )}
-          <div className="vf-typo-field">
+          <div className="vf-error-field">
             <span>이유</span>
-            <p>{compactText(typo.reason, '')}</p>
+            <p>{compactText(error.reason, '')}</p>
           </div>
         </div>
-        <div className="vf-typo-meta">
-          {typo.confidence !== undefined && <span>신뢰도 {formatPercent(typo.confidence)}</span>}
-          {runCount > 1 && <span>지지 {typo.support_count || 0}/{runCount}</span>}
+        <div className="vf-error-meta">
+          {error.confidence !== undefined && <span>신뢰도 {formatPercent(error.confidence)}</span>}
+          {runCount > 1 && <span>지지 {error.support_count || 0}/{runCount}</span>}
         </div>
       </div>
       {candidates.length > 1 && (
@@ -548,23 +534,23 @@ function SlideErrorItem({ typo }) {
 
 function SlideErrorCard({ group, review = false }) {
   return (
-    <article className={`vf-typo-slide-card ${review ? 'vf-typo-slide-card--review' : ''}`}>
-      <div className={`vf-typo-slide-layout ${group.imageUrl ? '' : 'vf-typo-slide-layout--no-image'}`}>
+    <article className={`vf-error-slide-card ${review ? 'vf-error-slide-card--review' : ''}`}>
+      <div className={`vf-error-slide-layout ${group.imageUrl ? '' : 'vf-error-slide-layout--no-image'}`}>
         {group.imageUrl && (
-          <div className="vf-typo-slide-image">
+          <div className="vf-error-slide-image">
             <img src={group.imageUrl} alt={`Slide ${group.slideNumber}`} loading="lazy" />
           </div>
         )}
-        <div className="vf-typo-slide-panel">
-          <div className="vf-typo-slide-head">
+        <div className="vf-error-slide-panel">
+          <div className="vf-error-slide-head">
             <strong>slide {group.slideNumber}</strong>
             <span>{group.items.length}건</span>
           </div>
-          <div className="vf-typo-items">
-            {group.items.map((typo) => (
+          <div className="vf-error-items">
+            {group.items.map((error) => (
               <SlideErrorItem
-                key={`${group.key}-${typo.problematic_text}-${typo.corrected_text}-${typo._typoIndex}`}
-                typo={typo}
+                key={`${group.key}-${error.problematic_text}-${error.corrected_text}-${error._slideErrorIndex}`}
+                error={error}
               />
             ))}
           </div>
@@ -653,39 +639,22 @@ export default function VerifierPage() {
       return {
         finalClaims,
         needsReview,
-        slideTypos: asArray(verifier?.slide_errors).length > 0
-          ? asArray(verifier?.slide_errors)
-          : asArray(verifier?.slide_typos),
-        crossRejected: rejected,
-        inconclusive: [],
-        groundingRejected: [],
+        slideErrors: asArray(verifier?.slide_errors),
+        verifierRejected: rejected,
         filtered: rejected,
-        firstStageRejected: [],
         usesFeedbackItems: true,
       }
     }
 
     const finalClaims = asArray(verifier?.final_confirmed_claims)
     const needsReview = asArray(verifier?.needs_review_claims)
-    const crossRejected = asArray(verifier?.crosscheck_rejected_claims)
-    const inconclusive = asArray(verifier?.crosscheck_inconclusive_claims)
-    const groundingRejected = asArray(verifier?.grounding_rejected_claims)
-    const firstStageRejected = asArray(verifier?.first_stage_rejected_claims)
+    const verifierRejected = asArray(verifier?.verifier_rejected_claims)
     return {
       finalClaims,
       needsReview,
-      slideTypos: asArray(verifier?.slide_errors).length > 0
-        ? asArray(verifier?.slide_errors)
-        : asArray(verifier?.slide_typos),
-      crossRejected,
-      inconclusive,
-      groundingRejected,
-      filtered: [
-        ...crossRejected,
-        ...inconclusive,
-        ...groundingRejected,
-      ],
-      firstStageRejected,
+      slideErrors: asArray(verifier?.slide_errors),
+      verifierRejected,
+      filtered: verifierRejected,
       usesFeedbackItems: false,
     }
   }, [claimById, verifier])
@@ -693,8 +662,8 @@ export default function VerifierPage() {
   const counts = verifier?.counts || {}
   const finalCount = counts.final_confirmed ?? verifier?.final_confirmed_claim_count ?? sections.finalClaims.length
   const reviewCount = counts.needs_review ?? counts.professor_check ?? sections.needsReview.length
-  const typoCount = counts.slide_typos ?? sections.slideTypos.length
-  const filteredCount = counts.rejected ?? sections.filtered.length + sections.firstStageRejected.length
+  const slideErrorCount = counts.slide_errors ?? sections.slideErrors.length
+  const filteredCount = counts.rejected ?? counts.verifier_rejected ?? sections.filtered.length
 
   function selectTab(tab) {
     setActiveTab(tab)
@@ -735,22 +704,13 @@ export default function VerifierPage() {
     return items.filter((item) => matchesIssueFilter(item, activeIssueFilter))
   }
 
-  function renderTypoGroups(items, review = false) {
+  function renderSlideErrorGroups(items, review = false) {
     return (
-      <div className="vf-typo-list">
-        {groupTyposBySlide(items).map((group) => (
+      <div className="vf-error-list">
+        {groupSlideErrorsBySlide(items).map((group) => (
           <SlideErrorCard key={`${review ? 'review' : 'slide-error'}-${group.key}`} group={group} review={review} />
         ))}
       </div>
-    )
-  }
-
-  function renderFilteredSection({ title, items, section, empty, tone = '' }) {
-    if (!items.length) return null
-    return (
-      <Section key={section} title={title} count={items.length} tone={tone} empty={empty}>
-        {renderClaimList(items, section)}
-      </Section>
     )
   }
 
@@ -778,15 +738,15 @@ export default function VerifierPage() {
       )
     }
 
-    if (activeTab === 'typos') {
+    if (activeTab === 'slideErrors') {
       return (
         <Section
           title="슬라이드 오류"
-          count={sections.slideTypos.length}
-          tone="typo"
+          count={sections.slideErrors.length}
+          tone="error"
           empty="확정된 슬라이드 오류가 없습니다."
         >
-          {renderTypoGroups(sections.slideTypos)}
+          {renderSlideErrorGroups(sections.slideErrors)}
         </Section>
       )
     }
@@ -804,50 +764,14 @@ export default function VerifierPage() {
         )
       }
 
-      const filteredGroups = [
-        {
-          title: '교차검증 기각',
-          items: sections.crossRejected,
-          section: 'crosscheck_rejected',
-          empty: '두 모델 모두 검토 가치가 낮다고 본 후보가 없습니다.',
-        },
-        {
-          title: '교차검증 불확실',
-          items: sections.inconclusive,
-          section: 'crosscheck_inconclusive',
-          empty: '교차검증에서 불확실로 남은 후보가 없습니다.',
-          tone: 'review',
-        },
-        {
-          title: '근거 기각',
-          items: sections.groundingRejected,
-          section: 'grounding_rejected',
-          empty: '외부 근거로 기각된 후보가 없습니다.',
-        },
-      ]
-      const hasDetailedFiltered = filteredGroups.some((group) => group.items.length > 0)
       return (
-        <>
-          {hasDetailedFiltered
-            ? filteredGroups
-              .filter((group) => group.items.length > 0)
-              .map((group) => renderFilteredSection(group))
-            : (
-              <Section
-                title="필터링된 내용 후보"
-                count={0}
-                empty="문맥상 맞음, 교차검증 기각, 근거 기각 후보가 없습니다."
-              />
-            )}
-
-          <Section
-            title="1차 판정에서 제외된 claim"
-            count={sections.firstStageRejected.length}
-            empty="1차 판정에서 제외된 claim이 없습니다."
-          >
-            {renderClaimList(sections.firstStageRejected, 'first_stage_rejected')}
-          </Section>
-        </>
+        <Section
+          title="기각된 내용 후보"
+          count={sections.filtered.length}
+          empty="검증에서 기각된 내용 후보가 없습니다."
+        >
+          {renderClaimList(sections.filtered, 'verifier_rejected')}
+        </Section>
       )
     }
 
@@ -941,10 +865,10 @@ export default function VerifierPage() {
             />
             <SummaryMetric
               label="슬라이드 오류"
-              value={typoCount}
-              tone="typo"
-              active={activeTab === 'typos'}
-              onClick={() => selectTab('typos')}
+              value={slideErrorCount}
+              tone="error"
+              active={activeTab === 'slideErrors'}
+              onClick={() => selectTab('slideErrors')}
             />
             <SummaryMetric
               label="기각"

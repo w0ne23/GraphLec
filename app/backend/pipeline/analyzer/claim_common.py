@@ -40,21 +40,15 @@ def _resolve_stage_model(stage: str) -> str:
     base = os.getenv("VERIFIER_MODEL", VERIFIER_MODEL).strip() or VERIFIER_MODEL
     extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
     judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
-    cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
-    slide_typo_model = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", VERIFIER_SLIDE_TYPO_MODEL).strip()
-    grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
+    slide_error_model = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", VERIFIER_SLIDE_ERROR_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
         return extract_model or base
     if stage == "judge":
         return strong
-    if stage == "cross_recheck":
-        return cross_recheck_model or strong
-    if stage == "slide_typo":
-        return slide_typo_model or strong
-    if stage == "grounding":
-        return grounding_model or strong
+    if stage == "slide_error":
+        return slide_error_model or strong
     return base
 
 
@@ -138,7 +132,7 @@ def _supports_json_object_response_format(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = ("extract", "judge", "slide_typo", "grounding", "cross_recheck")
+TOKEN_USAGE_STAGES = ("extract", "judge", "slide_error")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -452,7 +446,6 @@ def _call_llm(
     temperature: float = None,
     image_bytes: bytes = None,
     image_bytes_list: list[bytes] = None,
-    use_grounding: bool = False,
     thinking_budget: int = 1024,
     thinking_level: str = None,
     response_format: dict = None,
@@ -683,14 +676,11 @@ def _call_llm(
     contents.append(types.Part.from_text(text=_join_system_and_prompt(system_prompt, prompt)))
 
     cfg_kwargs: dict = dict(temperature=temp, max_output_tokens=max_tokens)
-    if use_grounding:
-        cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    if thinking_level is not None:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
     else:
-        if thinking_level is not None:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
-        else:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-        cfg_kwargs["response_mime_type"] = "application/json"
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+    cfg_kwargs["response_mime_type"] = "application/json"
 
     client_sequence = get_gemini_client_sequence()
     if len(client_sequence) == 1:
@@ -734,9 +724,7 @@ BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "15"))
 VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
 VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
 VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
-VERIFIER_CROSS_RECHECK_MODEL = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", "")
-VERIFIER_SLIDE_TYPO_MODEL = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", "")
-VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
+VERIFIER_SLIDE_ERROR_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {
     "factual_error": "발언 자체 오류",
@@ -744,196 +732,29 @@ ISSUE_TYPE_LABELS = {
     "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "범위 과잉 단정",
 }
-FACT_GROUNDED_ISSUE_TYPES = {"factual_error", "temporal_error", "scope_overclaim"}
-PEDAGOGICAL_ISSUE_TYPES = {"confusing_explanation"}
-ALLOWED_ISSUE_TYPES = set(ISSUE_TYPE_LABELS)
-ISSUE_VERIFICATION_BASIS_VALUES = {
-    "external_factual",
-    "temporal_factual",
-    "lecture_context",
-    "pedagogical_risk",
-    "insufficient_context",
-}
-ISSUE_EVIDENCE_NEED_VALUES = {"external_grounding", "lecture_context_only", "professor_check"}
-ISSUE_CLAIM_SCOPE_VALUES = {"explicit", "contextualized", "overgeneralized_from_context"}
-ISSUE_REVIEW_PRIORITY_VALUES = {"high", "medium", "low"}
-ISSUE_METADATA_FIELDS = (
-    "verification_basis",
-    "evidence_need",
-    "claim_scope",
-    "review_priority",
-)
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
 VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES", "1"))
 VERIFIER_REQUIRE_COMPLETE = os.getenv("VERIFIER_REQUIRE_COMPLETE", "1") != "0"
 
 
 def normalize_issue_type(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    aliases = {
-        "outdated": "temporal_error",
-        "currentness_error": "temporal_error",
-        "temporal": "temporal_error",
-        "missing_condition": "scope_overclaim",
-        "clarification_needed": "scope_overclaim",
-        "needs_clarification": "scope_overclaim",
-        "overgeneralization": "scope_overclaim",
-        "overclaim": "scope_overclaim",
-        "ambiguous_expression": "confusing_explanation",
-        "misleading_explanation": "confusing_explanation",
-        "misconception_risk": "confusing_explanation",
-        "ambiguous": "confusing_explanation",
-        "ambiguity": "confusing_explanation",
-        "misleading": "confusing_explanation",
-        "misunderstanding_risk": "confusing_explanation",
-        "student_misunderstanding": "confusing_explanation",
-    }
-    return aliases.get(raw, raw)
+    return str(value or "").strip().lower()
 
 
 def issue_type_label(issue_type: str) -> str:
     return ISSUE_TYPE_LABELS.get(normalize_issue_type(issue_type), str(issue_type or "unknown"))
 
 
-def normalize_issue_metadata(issue: dict, issue_type: str | None = None) -> dict:
-    """Normalize stage-to-stage metadata so old/partial judge outputs do not break later phases."""
-    if not isinstance(issue, dict):
-        issue = {}
-    normalized_type = normalize_issue_type(issue_type if issue_type is not None else issue.get("type", ""))
-
-    basis_aliases = {
-        "fact": "external_factual",
-        "factual": "external_factual",
-        "external": "external_factual",
-        "temporal": "temporal_factual",
-        "currentness": "temporal_factual",
-        "context": "lecture_context",
-        "pedagogical": "pedagogical_risk",
-        "teaching": "pedagogical_risk",
-        "review": "insufficient_context",
-        "insufficient": "insufficient_context",
-        "uncertain": "insufficient_context",
-    }
-    evidence_aliases = {
-        "grounding": "external_grounding",
-        "external": "external_grounding",
-        "search": "external_grounding",
-        "context": "lecture_context_only",
-        "lecture": "lecture_context_only",
-        "review": "professor_check",
-        "human": "professor_check",
-        "manual": "professor_check",
-    }
-    scope_aliases = {
-        "explicit_claim": "explicit",
-        "context": "contextualized",
-        "contextual": "contextualized",
-        "overgeneralized": "overgeneralized_from_context",
-        "too_broad": "overgeneralized_from_context",
-    }
-
-    basis = str(issue.get("verification_basis", "") or "").strip().lower()
-    basis = basis_aliases.get(basis, basis)
-    evidence_need = str(issue.get("evidence_need", "") or "").strip().lower()
-    evidence_need = evidence_aliases.get(evidence_need, evidence_need)
-    claim_scope = str(issue.get("claim_scope", "") or "").strip().lower()
-    claim_scope = scope_aliases.get(claim_scope, claim_scope)
-    review_priority = str(issue.get("review_priority", "") or "").strip().lower()
-
-    if basis not in ISSUE_VERIFICATION_BASIS_VALUES:
-        if normalized_type == "temporal_error":
-            basis = "temporal_factual"
-        elif normalized_type in {"factual_error", "scope_overclaim"}:
-            basis = "external_factual"
-        elif normalized_type in PEDAGOGICAL_ISSUE_TYPES:
-            basis = "pedagogical_risk"
-        else:
-            basis = "lecture_context"
-
-    if evidence_need not in ISSUE_EVIDENCE_NEED_VALUES:
-        if basis in {"external_factual", "temporal_factual"}:
-            evidence_need = "external_grounding"
-        elif basis == "insufficient_context":
-            evidence_need = "professor_check"
-        else:
-            evidence_need = "lecture_context_only"
-
-    if claim_scope not in ISSUE_CLAIM_SCOPE_VALUES:
-        claim_scope = "explicit"
-
-    if review_priority not in ISSUE_REVIEW_PRIORITY_VALUES:
-        review_priority = "high"
-
-    issue["verification_basis"] = basis
-    issue["evidence_need"] = evidence_need
-    issue["claim_scope"] = claim_scope
-    issue["review_priority"] = review_priority
-    return issue
-
-
-def should_drop_issue_by_metadata(issue: dict) -> bool:
-    normalize_issue_metadata(issue)
-    return issue.get("review_priority") == "low"
-
-
-def should_route_issue_to_professor_check(issue: dict) -> bool:
-    normalize_issue_metadata(issue)
-    return (
-        issue.get("verification_basis") == "insufficient_context"
-        or issue.get("evidence_need") == "professor_check"
-        or issue.get("claim_scope") == "overgeneralized_from_context"
-    )
-
-
-def is_pedagogical_or_context_issue(issue: dict) -> bool:
-    normalize_issue_metadata(issue)
-    issue_type = normalize_issue_type(issue.get("type", ""))
-    return (
-        issue_type in PEDAGOGICAL_ISSUE_TYPES
-        or issue.get("verification_basis") in {"pedagogical_risk", "lecture_context"}
-        or issue.get("evidence_need") == "lecture_context_only"
-    )
-
-
-def should_review_single_model_pedagogical_issue(issue: dict, total_models: int) -> bool:
-    normalize_issue_metadata(issue)
-    detected_by = issue.get("detected_by_models")
-    if not isinstance(detected_by, list):
-        detected_by = []
-    if total_models <= 1 or len(set(detected_by)) != 1:
-        return False
-    return is_pedagogical_or_context_issue(issue)
-
-
-def is_fact_grounded_issue(issue: dict) -> bool:
-    normalize_issue_metadata(issue)
-    return normalize_issue_type(issue.get("type", "")) in FACT_GROUNDED_ISSUE_TYPES
-
-
-def copy_issue_metadata(dst: dict, src: dict) -> dict:
-    """Copy normalized issue metadata without overwriting already meaningful destination values."""
-    if not isinstance(dst, dict):
-        dst = {}
-    if not isinstance(src, dict):
-        return dst
-    normalize_issue_metadata(src)
-    for field in ISSUE_METADATA_FIELDS:
-        if not dst.get(field) and src.get(field):
-            dst[field] = src[field]
-    return normalize_issue_metadata(dst)
-
-
-def metadata_review_reason(issue: dict) -> str:
-    normalize_issue_metadata(issue)
-    reasons = []
-    if issue.get("verification_basis") == "insufficient_context":
-        reasons.append("문맥 부족")
-    if issue.get("evidence_need") == "professor_check":
-        reasons.append("교수 확인 필요")
-    if issue.get("claim_scope") == "overgeneralized_from_context":
-        reasons.append("원문보다 넓게 일반화된 claim")
-    return ", ".join(reasons) or "자동 확정보다 교수 확인이 필요한 후보"
-
+def _strip_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    if "```json" in text:
+        return text.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```" in text:
+        return text.split("```", 1)[1].split("```", 1)[0].strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return text.strip()
 
 
 def build_verification_question(claim: dict) -> str:
@@ -1028,9 +849,9 @@ def _normalize_severity(issue: dict) -> None:
     issue["severity"] = severity
 
 
-def _is_asr_artifact(issue: dict, utt_map: dict) -> bool:
-    uid = issue.get("utterance_id", "")
-    ref = utt_map.get(uid)
+def _is_asr_artifact(issue: dict, context_map: dict) -> bool:
+    cid = issue.get("context_id", "")
+    ref = context_map.get(cid)
     if not ref:
         return False
     orig = _compact_text(ref.get("text_original", ""))
@@ -1082,11 +903,11 @@ def merge_multiple_runs(
     issues_by_key = {}
     for result in run_results:
         for issue in result.get("issues", []):
-            # ② claim_id 기반 매칭: utterance_id + claim_text 우선, fallback으로 기존 fuzzy key
+            # ② claim_id 기반 매칭: context_id + claim_text 우선, fallback으로 기존 fuzzy key
             claim_text = _compact_text(str(issue.get("claim_text", "") or ""))
-            uid = issue.get("utterance_id", "")
-            if uid and claim_text:
-                key = (uid, claim_text[:80])
+            cid = issue.get("context_id", "")
+            if cid and claim_text:
+                key = (cid, claim_text[:80])
             else:
                 start = float(issue.get("start_time", 0) or 0)
                 bucket = round(start / time_window_sec) * time_window_sec
@@ -1140,149 +961,10 @@ def merge_multiple_runs(
     }
 
 
-def _strip_json_fence(text: str) -> str:
-    if "```json" in text:
-        return text.split("```json")[1].split("```")[0].strip()
-    if "```" in text:
-        return text.split("```")[1].split("```")[0].strip()
-    return text.strip()
+# ── context 수집 + 슬라이드 맥락 ────────────────────────────
 
-
-def _extract_first_json_object(text: str) -> str:
-    """응답 문자열에서 첫 JSON object 블록을 안전하게 추출."""
-    s = text or ""
-    start = s.find("{")
-    if start < 0:
-        return ""
-
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if escaped:
-            escaped = False
-            continue
-        if ch == "\\" and in_string:
-            escaped = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start:i + 1]
-    return ""
-
-
-def _extract_json_like_string_field(text: str, key: str) -> str:
-    """불완전 JSON에서도 key의 string 값을 최대한 복구."""
-    m = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
-    if not m:
-        return ""
-    i = m.end()
-    while i < len(text) and text[i].isspace():
-        i += 1
-    if i >= len(text):
-        return ""
-
-    if text[i] == '"':
-        i += 1
-        out = []
-        escaped = False
-        while i < len(text):
-            ch = text[i]
-            if escaped:
-                out.append(ch)
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                break
-            else:
-                out.append(ch)
-            i += 1
-        return "".join(out).strip()
-
-    j = i
-    while j < len(text) and text[j] not in ",}\n\r":
-        j += 1
-    return text[i:j].strip()
-
-
-def _extract_json_like_bool_field(text: str, keys: list[str]) -> Optional[bool]:
-    for key in keys:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*(true|false)', text, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).lower() == "true"
-    return None
-
-
-def _extract_urls(text: str) -> list[str]:
-    urls = re.findall(r'https?://[^\s"\'<>]+', text or "")
-    return list(dict.fromkeys(urls))
-
-
-def _parse_grounding_payload(text: str) -> dict:
-    """
-    grounding 응답을 최대한 복구해서 파싱.
-    1) strict JSON
-    2) object 블록 추출 + trailing comma 정리
-    3) 최소 필드(is_valid/reason/evidence_sources) regex 복구
-    """
-    cleaned = _strip_json_fence((text or "").strip())
-    candidates = [cleaned]
-
-    obj = _extract_first_json_object(cleaned)
-    if obj and obj not in candidates:
-        candidates.append(obj)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-            if isinstance(payload, dict):
-                return payload
-        except json.JSONDecodeError:
-            fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
-            try:
-                payload = json.loads(fixed)
-                if isinstance(payload, dict):
-                    return payload
-            except json.JSONDecodeError:
-                pass
-
-    recovered = {}
-    is_valid = _extract_json_like_bool_field(
-        cleaned,
-        ["is_valid", "issue_is_valid", "claim_is_true", "claim_is_valid"],
-    )
-    if is_valid is not None:
-        recovered["is_valid"] = is_valid
-
-    reason = _extract_json_like_string_field(cleaned, "reason")
-    if reason:
-        recovered["reason"] = reason
-
-    sources = _extract_urls(cleaned)
-    if sources:
-        recovered["evidence_sources"] = sources
-
-    if recovered:
-        return recovered
-    raise ValueError("grounding_response_parse_failed")
-
-
-# ── 발화 수집 + 슬라이드 맥락 ────────────────────────────
-
-def _collect_utterances(slides: list[dict]) -> list[dict]:
-    utterances = []
+def _collect_contexts(slides: list[dict]) -> list[dict]:
+    contexts = []
     has_contexts = any(slide.get("contexts") for slide in slides)
     if has_contexts:
         for slide in slides:
@@ -1293,10 +975,9 @@ def _collect_utterances(slides: list[dict]) -> list[dict]:
                     continue
                 context_id = str(ctx.get("context_id", "") or "").strip()
                 if not context_id:
-                    context_id = f"S{slide_no:03d}-C{len(utterances) + 1:04d}"
-                utterances.append({
+                    context_id = f"S{slide_no:03d}-C{len(contexts) + 1:04d}"
+                contexts.append({
                     "context_id": context_id,
-                    "utterance_id": context_id,
                     "slide_number": slide_no,
                     "scene_index": ctx.get("scene_index"),
                     "context_index": ctx.get("context_index"),
@@ -1311,8 +992,8 @@ def _collect_utterances(slides: list[dict]) -> list[dict]:
                     "correction_reason": "",
                     "source_segment_indices": ctx.get("source_segment_indices", []),
                 })
-        utterances.sort(key=lambda u: u["start_time"])
-        return utterances
+        contexts.sort(key=lambda u: u["start_time"])
+        return contexts
 
     for slide in slides:
         slide_no = int(slide.get("slide_number", 0) or 0)
@@ -1323,7 +1004,7 @@ def _collect_utterances(slides: list[dict]) -> list[dict]:
             text = corr or orig
             if not text:
                 continue
-            utterances.append({
+            contexts.append({
                 "slide_number": slide_no,
                 "start_time": float(seg.get("start", 0) or 0),
                 "text": text,
@@ -1334,10 +1015,11 @@ def _collect_utterances(slides: list[dict]) -> list[dict]:
                 "correction_risk": str(seg.get("correction_risk", "") or "").strip(),
                 "correction_reason": str(seg.get("correction_reason", "") or "").strip(),
             })
-    utterances.sort(key=lambda u: u["start_time"])
-    for i, u in enumerate(utterances, start=1):
-        u["utterance_id"] = f"U{i:04d}"
-    return utterances
+    contexts.sort(key=lambda u: u["start_time"])
+    for i, u in enumerate(contexts, start=1):
+        slide_no = int(u.get("slide_number", 0) or 0)
+        u["context_id"] = f"S{slide_no:03d}-SEG{i:04d}"
+    return contexts
 
 
 def _build_slide_context_map(slides: list[dict]) -> dict:
@@ -1355,16 +1037,16 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
     return ctx
 
 
-def _format_utterance_for_prompt(u: dict) -> str:
-    uid = u["utterance_id"]
+def _format_context_for_prompt(u: dict) -> str:
+    cid = u["context_id"]
     ts = f"{u['start_time']:.1f}s"
     corr = str(u.get("text_corrected", "") or "").strip()
     orig = str(u.get("text_original", "") or "").strip()
 
     if str(u.get("correction_status", "") or "").strip() == "candidate_only":
-        return f"{uid} | {ts} | {orig or u.get('text', '')}"
+        return f"{cid} | {ts} | {orig or u.get('text', '')}"
 
     if corr and orig and corr != orig:
-        return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"
+        return f"{cid} | {ts} | 교정: {corr} | 원문: {orig}"
 
-    return f"{uid} | {ts} | {u['text']}"
+    return f"{cid} | {ts} | {u['text']}"
