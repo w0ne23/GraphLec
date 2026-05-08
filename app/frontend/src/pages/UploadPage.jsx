@@ -47,9 +47,9 @@ export default function UploadPage({ onNavigate }) {
     const activeIds = Object.keys(eventSources.current)
     if (activeIds.length === 0) return
 
-    activeIds.forEach(job_id => {
-      eventSources.current[job_id]?.close()
-      delete eventSources.current[job_id]
+    activeIds.forEach(id => {
+      eventSources.current[id]?.close()
+      delete eventSources.current[id]
     })
 
     setLectures(prev => prev.map(lec =>
@@ -85,12 +85,12 @@ export default function UploadPage({ onNavigate }) {
   }
 
   // 주기적으로(또는 처음 로드 시) 진행 중인 작업에 대해 SSE 연결을 맺는 함수
-  const setupSSEForJob = (job_id, lecture_id) => {
-    if (eventSources.current[job_id]) return // 이미 연결되어 있음
+  const setupSSEForJob = (lecture_id) => {
+    if (eventSources.current[lecture_id]) return // 이미 연결되어 있음
 
-    console.log(`--- [SSE] Connecting to stream for job ${job_id} (Lecture: ${lecture_id}) ---`)
-    const eventSource = new EventSource(`/api/jobs/${job_id}/stream`)
-    eventSources.current[job_id] = eventSource
+    console.log(`--- [SSE] Connecting to stream for lecture ${lecture_id} ---`)
+    const eventSource = new EventSource(`/api/jobs/${lecture_id}/stream`)
+    eventSources.current[lecture_id] = eventSource
     startHealthCheck()
 
     let closed = false
@@ -98,7 +98,7 @@ export default function UploadPage({ onNavigate }) {
       if (closed) return
       closed = true
       eventSource.close()
-      delete eventSources.current[job_id]
+      delete eventSources.current[lecture_id]
     }
 
     eventSource.onmessage = (event) => {
@@ -158,7 +158,7 @@ export default function UploadPage({ onNavigate }) {
       setLectures([...activeJobs, ...result.items])
       setTotalPages(result.totalPages)
       activeJobs.forEach(lec => {
-        if (lec.job_id) setupSSEForJob(lec.job_id, lec.id)
+        setupSSEForJob(lec.id)
       })
     }).catch(e => setError(String(e.message || e)))
 
@@ -184,7 +184,7 @@ export default function UploadPage({ onNavigate }) {
       const created = await uploadLecture({ title: title || file.name, category, description, file })
       // created에는 id(lecture_id)와 job_id가 모두 있음
       setLectures(prev => [created, ...prev])
-      setupSSEForJob(created.job_id, created.id)
+      setupSSEForJob(created.id)
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -192,36 +192,36 @@ export default function UploadPage({ onNavigate }) {
     }
   }
 
-  async function handleDelete(jobId, e, lectureId) {
+  async function handleDelete(lectureId, e) {
     e.stopPropagation()
     if (!confirm('이 강의를 삭제하시겠습니까?')) return
     try {
-      await deleteLecture(jobId)
+      await deleteLecture(lectureId)
       setLectures(prev => prev.filter(l => l.id !== lectureId))
-      if (eventSources.current[jobId]) {
-        eventSources.current[jobId].close()
-        delete eventSources.current[jobId]
+      if (eventSources.current[lectureId]) {
+        eventSources.current[lectureId].close()
+        delete eventSources.current[lectureId]
       }
     } catch (err) { alert(`삭제 실패: ${err.message}`) }
   }
 
-  async function handleRetry(lectureId, oldJobId, e) {
+  async function handleRetry(lectureId, e) {
     e.stopPropagation()
     if (!confirm('분석을 다시 시도하시겠습니까?')) return
     try {
-      const { job_id: newJobId } = await retryLecture(oldJobId)
-      // 이전 SSE 정리
-      if (eventSources.current[oldJobId]) {
-        eventSources.current[oldJobId].close()
-        delete eventSources.current[oldJobId]
+      await retryLecture(lectureId)
+
+      // 이전 SSE 정리 후 재연결
+      if (eventSources.current[lectureId]) {
+        eventSources.current[lectureId].close()
+        delete eventSources.current[lectureId]
       }
-      
-      setLectures(prev => prev.map(l => 
-        l.id === lectureId 
-          ? { ...l, job_id: newJobId, status: 'pending', pipeline_stages: [], current_stage: 'Resuming pipeline...' } 
+      setLectures(prev => prev.map(l =>
+        l.id === lectureId
+          ? { ...l, status: 'pending', pipeline_stages: [], current_stage: 'Resuming pipeline...' }
           : l
       ))
-      setupSSEForJob(newJobId, lectureId)
+      setupSSEForJob(lectureId)
     } catch (err) { alert(`재시도 실패: ${err.message}`) }
   }
 
@@ -294,8 +294,8 @@ export default function UploadPage({ onNavigate }) {
                   <div className="upload-row-status"><span className={`upload-status-badge ${st.cls}`}>{st.label}</span></div>
                   <div className="upload-row-actions">
                     {lec.status === 'done' && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); onNavigate?.({ page: 'verifier', lectureId: lec.id }) }}>Verifier</button>}
-                    {lec.status === 'error' && <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, lec.job_id, e)}>재시도</button>}
-                    {lec.status !== 'done' && <button className="upload-btn-delete" onClick={e => handleDelete(lec.job_id, e, lec.id)}>삭제</button>}
+                    {lec.status === 'error' && <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, e)}>재시도</button>}
+                    {lec.status !== 'done' && <button className="upload-btn-delete" onClick={e => handleDelete(lec.id, e)}>삭제</button>}
                     {lec.status === 'done' && <span className="upload-row-arrow">→</span>}
                   </div>
                 </div>

@@ -19,16 +19,13 @@ export async function uploadLecture({ file, title, category, description }) {
   }
   
   const data = await res.json();
-  const lectureId = data.lecture_id || data.id || data.job_id;
   return {
-    id: lectureId,
-    job_id: data.job_id,
-    lecture_id: data.lecture_id || lectureId,
-    title,
-    category,
-    description,
-    status: 'pending',
-    created_at: data.created_at,  // ← 이것만 추가
+    id: data.id,
+    title: data.title || title,
+    category: data.category || category,
+    description: data.description || description,
+    status: data.status || 'pending',
+    created_at: data.created_at,
   };
 }
 
@@ -139,8 +136,8 @@ export async function unloadLectureGraphRag(lectureId) {
   }).catch(() => null);
 }
 
-export async function deleteLecture(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+export async function deleteLecture(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -150,8 +147,8 @@ export async function deleteLecture(jobId) {
   return res.json();
 }
 
-export async function retryLecture(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}/retry`, {
+export async function retryLecture(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry`, {
     method: 'POST',
   });
   if (!res.ok) {
