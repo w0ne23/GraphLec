@@ -171,7 +171,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 ```
 
 지침:
-1. 확신이 0.90 미만이면 출력하지 마세요.
+1. 확신이 0.80 미만이면 출력하지 마세요.
 2. "더 자연스럽다", "더 적절하다" 수준이면 출력하지 마세요.
 3. 오타가 없으면 {{"typos": []}}만 출력하세요.
 4. JSON 외 텍스트 금지.
@@ -243,10 +243,8 @@ def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict]
         img_bytes = img_path.read_bytes()
 
     prompt = _build_slide_typo_prompt(slide_no, title, slide_text)
-    model = str(cc._resolve_stage_model("recheck") or "").strip()
-    response_format = {"type": "json_object"} if (
-        model.startswith("gpt") or model.startswith("o1") or model.startswith("o3")
-    ) else None
+    model = str(cc._resolve_stage_model("slide_typo") or "").strip()
+    response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
 
     api_calls = 0
     token_usage = cc._empty_token_usage()
@@ -259,7 +257,7 @@ def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict]
             image_bytes=img_bytes,
             thinking_budget=0,
             response_format=response_format,
-            stage="recheck",
+            stage="slide_typo",
         )
         api_calls += 1
         cc._add_call_usage(token_usage, call_usage)
@@ -276,7 +274,7 @@ def _check_single_slide(slide: dict, img_dir: Optional[str]) -> tuple[list[dict]
                     conf = float(item.get("confidence", 0) or 0)
                 except Exception:
                     conf = 0.0
-                if conf < 0.90:
+                if conf < 0.80:
                     continue
                 problematic = str(item.get("problematic_text", "") or "").strip()
                 corrected = str(item.get("corrected_text", "") or "").strip()

@@ -54,7 +54,22 @@ def api_call_with_retry(func, max_retries=None, initial_wait=None):
         except Exception as e:
             last_error = e
             error_msg = str(e)
-            retry_errors = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
+            retry_errors = [
+                "429",
+                "503",
+                "500",
+                "RESOURCE_EXHAUSTED",
+                "UNAVAILABLE",
+                "overloaded",
+                "timeout",
+                "timed out",
+                "APITimeout",
+                "ReadTimeout",
+                "Connection error",
+                "APIConnectionError",
+                "ConnectTimeout",
+                "connect timeout",
+            ]
             if any(code in error_msg for code in retry_errors) and attempt < max_retries - 1:
                 print(f"API ERROR: {error_msg}")
                 wait = initial_wait * (attempt + 1)
@@ -69,7 +84,22 @@ def api_call_with_retry(func, max_retries=None, initial_wait=None):
 
 def is_retryable_api_error(error) -> bool:
     error_msg = str(error)
-    retry_errors = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
+    retry_errors = [
+        "429",
+        "503",
+        "500",
+        "RESOURCE_EXHAUSTED",
+        "UNAVAILABLE",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "APITimeout",
+        "ReadTimeout",
+        "Connection error",
+        "APIConnectionError",
+        "ConnectTimeout",
+        "connect timeout",
+    ]
     return any(code in error_msg for code in retry_errors)
 
 

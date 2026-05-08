@@ -49,11 +49,21 @@ def _build_judge_prompt(
     for i, c in enumerate(claims, 1):
         approx = " [근사치]" if c.get("is_approximate") else ""
         resolved = c.get("resolved_claim", c.get("claim_text", ""))
-        claim_lines.append(
-            f"{i}. [{c['utterance_id']}] ({c.get('claim_type', '?')}){approx}\n"
-            f"   원문: {c.get('claim_text', '')}\n"
-            f"   해소: {resolved}"
-        )
+        needs_context = bool(c.get("needs_context"))
+        resolution_status = str(c.get("resolution_status") or ("unresolved" if needs_context else "resolved"))
+        context_note = str(c.get("context_note") or "").strip()
+        lines = [
+            f"{i}. [{c['utterance_id']}] ({c.get('claim_type', '?')}){approx}",
+            f"   원문: {c.get('claim_text', '')}",
+            f"   해소: {resolved}",
+        ]
+        if c.get("utterance_ids"):
+            lines.append(f"   관련발화: {', '.join(str(x) for x in c.get('utterance_ids') or [])}")
+        if needs_context or resolution_status == "unresolved":
+            lines.append(f"   해소상태: {resolution_status}, 문맥필요: true")
+            if context_note:
+                lines.append(f"   문맥비고: {context_note}")
+        claim_lines.append("\n".join(lines))
 
     return f"""당신은 강의 발화에서 crosscheck에 올릴 문제 후보만 선별하는 판정자입니다.
 오늘 날짜: {current_date}
@@ -138,10 +148,10 @@ claim은 `utterance_id`로 공통 발화 문맥의 해당 발화를 참조하세
 1. **방향/극성 반전**: 증가↔감소, 촉진↔억제, 양성↔음성, 원인↔결과가 뒤바뀐 경우
 2. **부정어 누락/추가**: "~않다"가 빠지거나 추가되어 의미가 반전된 경우
 3. **범주 오귀속**: A에 속하는 것을 B에 속한다고 하는 경우
-4. **수량/범위 왜곡**: "모든/항상/반드시/유일/오직/~만"으로 단정했는데 실제로는 일부/조건부인 경우
+4. **수량/범위 왜곡**: "모든/항상/반드시/유일/오직/~만"으로 단정했고, 주변 문맥을 함께 봐도 다른 가능성/주체/조건을 실제로 배제하는 명제가 남는 경우
 5. **현행성 후보**: 현재/요즘/최신/지원 여부를 현재 사실처럼 강하게 말했고, 최신성 검증이 필요한 경우
 6. **핵심 개념 동일시**: 서로 다른 개념, 주체, 과정, 권한, 대상을 같은 것으로 외우게 만드는 경우
-7. **범위 과잉 단정**: 특정 조건/도메인에서는 맞지만, A만 맞는 것처럼 말하거나 다른 조건의 가능성을 닫아버린 경우
+7. **범위 과잉 단정**: 특정 조건/도메인에서는 맞지만, 학생이 A만 가능하다고 외울 정도로 다른 조건의 가능성을 닫아버린 경우
 8. **현실 대상의 틀린 예시 수치**: 예시 문맥이어도 실재 대상에 붙은 구체 수치/비율/연도/규모가 실제와 다르거나 오래된 경우
 
 ### 보고 안 하는 경우
@@ -161,6 +171,8 @@ claim은 `utterance_id`로 공통 발화 문맥의 해당 발화를 참조하세
 - 도메인의 실제 동작, 표준 관례, 강의 자료의 조건과 일치하는 발화
 - 해당 분야의 표준 표현이 역할·책임·범위를 설명할 뿐 다른 가능성을 배제하지 않는 경우.
   단, 발화가 실제로 배타적 사용, 다른 주체의 불가능성, 서로 다른 범주의 동일시를 주장할 때만 보고하세요.
+- "모든", "오직", "~만", "독점" 같은 표현이 있어도, 문맥상 역할/책임/관리 주체/대표 경로를 강조한 말이면 그 단어만으로 scope_overclaim으로 올리지 마세요.
+- 반례가 더 상위/하위 계층, 예외 구현, 고급 세부사항에만 의존하고 강의의 핵심 명제를 깨뜨리지 않으면 후보로 올리지 마세요.
 - 강의용 표현과 자료상의 표기 차이만 있는 경우
 - 지시어가 포함된 발화가 슬라이드와 함께 보면 맞는 설명이고, 문제가 되는 해석이 resolved_claim의 과도한 선행사 확정에서만 생기는 경우
 - "가장 유명하다", "대표적이다" 같은 주관적 평가
@@ -172,7 +184,7 @@ claim은 `utterance_id`로 공통 발화 문맥의 해당 발화를 참조하세
 - factual_error: 발언 자체의 객관 사실, 정의, 순서, 메커니즘이 틀림
 - temporal_error: 시대적/현행성 오류. 현재 날짜({current_date}) 기준으로 현재성, 최신성, 지원 여부가 틀림
 - confusing_explanation: 학생이 핵심 개념을 헷갈릴 만한 설명. 단순 비유 취향이나 더 자세한 설명 요구는 제외
-- scope_overclaim: A만 맞다고 설명했지만 조건/범위/도메인에 따라 B도 맞거나 예외가 있어 과도하게 단정함
+- scope_overclaim: A만 맞다고 설명했고, 문맥을 함께 봐도 학생이 B나 예외 가능성을 배제하는 닫힌 명제를 외울 위험이 큼
 
 ### 응답 (JSON만)
 

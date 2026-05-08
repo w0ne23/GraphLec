@@ -487,7 +487,11 @@ canonical issue는 최종 항목을 삭제하기 위한 것이 아니라, 교수
             prompt,
             max_tokens=min(8192, max(2048, 350 * len(issues))),
             temperature=0.0,
-            response_format={"type": "json_object"} if cluster_model.startswith(("gpt", "o1", "o3")) else None,
+            response_format=(
+                {"type": "json_object"}
+                if cv._supports_json_object_response_format(cluster_model)
+                else None
+            ),
             stage="cross_recheck",
         )
         cv._add_call_usage(token_usage, call_usage)

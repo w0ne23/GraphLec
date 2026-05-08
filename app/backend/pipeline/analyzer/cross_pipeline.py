@@ -1,7 +1,7 @@
 """
 교차 검증 (Cross-Model Verification)
 
-1단계 claim 추출 → gemini-2.5-flash 단일 추출
+1단계 claim 추출 → raw claim inventory 추출 (필요 시 반복 합의)
 2단계 claim 판정 → GPT/Claude 다중 모델 후보 합집합
 3단계 텍스트+문맥 교차검증 → 각 모델이 합집합 이슈를 재판정
 4단계 grounding → 통과한 이슈만 primary 모델로 재검증
@@ -14,6 +14,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -38,6 +39,7 @@ from .cross_utils import (
     _merge_token_usage,
     _write_claims_jsonl,
 )
+from .claim_crosscheck import _CRITERIA_WEIGHTS as CROSSCHECK_CRITERIA_WEIGHTS
 from .cross_workers import (
     cross_recheck_worker,
     extract_worker,
@@ -68,7 +70,83 @@ _CROSSCHECK_FEEDBACK_FIELDS = (
     "recommendation",
 )
 
+
+def _claim_consensus_key(claim: dict) -> str:
+    uid = str(claim.get("utterance_id", "") or "")
+    text = cv._compact_text(claim.get("claim_text", ""))
+    return f"{uid}::{text}"
+
+
+def _merge_claim_extraction_runs(extract_results: list[dict], min_rate: float) -> list[dict]:
+    if not extract_results:
+        return []
+    if len(extract_results) == 1:
+        return union_claims(extract_results)
+
+    threshold = max(1, math.ceil(len(extract_results) * max(0.0, min(1.0, float(min_rate)))))
+    buckets: dict[str, dict] = {}
+    order: list[str] = []
+
+    for run_idx, result in enumerate(extract_results):
+        seen_in_run = set()
+        for item in result.get("claims_by_batch", []):
+            for claim in item.get("claims", []):
+                key = _claim_consensus_key(claim)
+                if not key or key in seen_in_run:
+                    continue
+                seen_in_run.add(key)
+                if key not in buckets:
+                    buckets[key] = {"claim": claim, "runs": set()}
+                    order.append(key)
+                buckets[key]["runs"].add(run_idx)
+
+    return [
+        buckets[key]["claim"]
+        for key in order
+        if len(buckets[key]["runs"]) >= threshold
+    ]
+
+
+def _combine_extract_results(extract_results: list[dict], merged_claims: list[dict]) -> dict:
+    if not extract_results:
+        return {
+            "model": CLAIM_EXTRACT_MODEL,
+            "claims_by_batch": [],
+            "api_calls": 0,
+            "token_usage": _empty_token_usage(),
+            "claim_run_counts": [],
+        }
+
+    first = extract_results[0]
+    token_usage = _empty_token_usage()
+    api_calls = 0
+    run_counts = []
+    for result in extract_results:
+        api_calls += int(result.get("api_calls", 0) or 0)
+        token_usage = _merge_token_usage(token_usage, result.get("token_usage"))
+        run_counts.append(
+            sum(len(item.get("claims", [])) for item in result.get("claims_by_batch", []))
+        )
+
+    return {
+        "model": first.get("model", CLAIM_EXTRACT_MODEL),
+        "claims_by_batch": first.get("claims_by_batch", []),
+        "api_calls": api_calls,
+        "token_usage": token_usage,
+        "claim_run_counts": run_counts,
+        "consensus_claim_count": len(merged_claims),
+    }
+
 DEFAULT_CROSSCHECK_GEMINI_MODEL = "gemini-2.5-flash"
+
+
+_VERDICT_SCORE = {
+    "agree": 1.0,
+    "inconclusive": 0.5,
+    "disagree": 0.0,
+}
+_DEFAULT_CONFIRM_THRESHOLD = 0.8
+_DEFAULT_PROFESSOR_CHECK_THRESHOLD = 0.45
 
 
 def _split_model_specs(value: str | None) -> list[str]:
@@ -87,9 +165,19 @@ def _default_verifier_models() -> list[str]:
     return ["gpt-5.4", "claude-sonnet-4.5"]
 
 
+def _default_crosscheck_source_models(judge_models: list[str]) -> list[str]:
+    configured = _split_model_specs(os.getenv("CROSS_CHECK_MODELS"))
+    return configured or judge_models
+
+
 def _is_strong_feedback_model(model: str) -> bool:
     lowered = str(model or "").lower()
-    return lowered.startswith(("gpt", "o1", "o3")) or "claude" in lowered or "sonnet" in lowered or "opus" in lowered
+    return (
+        lowered.startswith(("gpt", "o1", "o3", "grok", "deepseek"))
+        or "claude" in lowered
+        or "sonnet" in lowered
+        or "opus" in lowered
+    )
 
 
 def _is_gemini_model(model: str) -> bool:
@@ -100,7 +188,331 @@ def _crosscheck_model_for(model: str) -> str:
     if not _is_gemini_model(model):
         return model
     configured = str(os.getenv("VERIFIER_CROSSCHECK_GEMINI_MODEL", "") or "").strip()
-    return configured or DEFAULT_CROSSCHECK_GEMINI_MODEL
+    if configured and str(model or "").strip().lower() in {"gemini", "gemini-default"}:
+        return configured
+    return model or configured or DEFAULT_CROSSCHECK_GEMINI_MODEL
+
+
+def _env_float(name: str, default: float, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _crosscheck_confirm_threshold() -> float:
+    return _env_float("CROSS_VERIFY_SCORE_CONFIRM_THRESHOLD", _DEFAULT_CONFIRM_THRESHOLD, minimum=0.0, maximum=1.0)
+
+
+def _crosscheck_professor_check_threshold() -> float:
+    return _env_float(
+        "CROSS_VERIFY_SCORE_PROFESSOR_CHECK_THRESHOLD",
+        _DEFAULT_PROFESSOR_CHECK_THRESHOLD,
+        minimum=0.0,
+        maximum=1.0,
+    )
+
+
+def _default_crosscheck_weight(model: str) -> float:
+    lowered = str(model or "").lower()
+    if lowered.startswith(("gpt-5.4", "gpt-5.3", "gpt-5.2", "o3")):
+        return 1.0
+    if lowered.startswith(("gpt", "o1")):
+        return 0.9
+    if "opus" in lowered:
+        return 1.0
+    if "claude" in lowered or "sonnet" in lowered:
+        return 0.95
+    if lowered.startswith("grok"):
+        return 0.85
+    if lowered.startswith("deepseek-v4-pro") or lowered.startswith("deepseek-reasoner"):
+        return 0.75
+    if lowered.startswith("deepseek-v4-flash") or lowered.startswith("deepseek-chat"):
+        return 0.6
+    if lowered.startswith("deepseek"):
+        return 0.55
+    if "haiku" in lowered:
+        return 0.55
+    if "gemini" in lowered and "pro" in lowered:
+        return 0.8
+    if "gemini" in lowered and "flash" in lowered:
+        return 0.6
+    if "qwen" in lowered:
+        return 0.55 if "32" in lowered else 0.45
+    if "llama" in lowered or "mistral" in lowered:
+        return 0.45
+    return 0.6
+
+
+def _parse_crosscheck_weight_overrides() -> dict[str, float]:
+    raw = str(os.getenv("CROSS_VERIFY_MODEL_WEIGHTS", "") or "").strip()
+    if not raw:
+        return {}
+    overrides: dict[str, float] = {}
+    for part in re.split(r"[,\n]+", raw):
+        item = part.strip()
+        if not item:
+            continue
+        if "=" in item:
+            key, value = item.split("=", 1)
+        elif ":" in item:
+            key, value = item.rsplit(":", 1)
+        else:
+            continue
+        key = key.strip()
+        try:
+            parsed = max(0.0, float(value.strip()))
+        except ValueError:
+            continue
+        if key:
+            overrides[key] = parsed
+            overrides[key.lower()] = parsed
+    return overrides
+
+
+def _crosscheck_weight_map(models: list[str], crosscheck_model_map: dict[str, str]) -> dict[str, float]:
+    overrides = _parse_crosscheck_weight_overrides()
+    weights: dict[str, float] = {}
+    for source_model in models:
+        resolved_model = crosscheck_model_map.get(source_model, source_model)
+        if not resolved_model:
+            continue
+        value = (
+            overrides.get(source_model)
+            if source_model in overrides
+            else overrides.get(
+                str(source_model).lower(),
+                overrides.get(
+                    resolved_model,
+                    overrides.get(str(resolved_model).lower(), _default_crosscheck_weight(resolved_model)),
+                ),
+            )
+        )
+        weights[str(resolved_model)] = round(float(value), 4)
+    return weights
+
+
+def _normalize_verdict(verdict: str) -> str:
+    value = str(verdict or "").lower().strip()
+    return value if value in _VERDICT_SCORE else "inconclusive"
+
+
+def _model_confidence(row: dict) -> float:
+    value = row.get("confidence", row.get("score", row.get("issue_score")))
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        confidence = float(_VERDICT_SCORE[_normalize_verdict(row.get("verdict", "inconclusive"))])
+    if confidence > 1.0 and confidence <= 100.0:
+        confidence = confidence / 100.0
+    return max(0.0, min(1.0, confidence))
+
+
+def _score_status(score: float) -> str:
+    confirm_threshold = _crosscheck_confirm_threshold()
+    professor_threshold = min(_crosscheck_professor_check_threshold(), confirm_threshold)
+    if score >= confirm_threshold:
+        return "confirmed"
+    if score >= professor_threshold:
+        return "professor_check"
+    return "rejected"
+
+
+def _score_verdict(score: float) -> str:
+    status = _score_status(score)
+    if status == "confirmed":
+        return "agree"
+    if status == "professor_check":
+        return "inconclusive"
+    return "disagree"
+
+
+def _bucket_from_confidence(confidence: float) -> str:
+    if confidence >= _crosscheck_confirm_threshold():
+        return "agree"
+    if confidence >= _crosscheck_professor_check_threshold():
+        return "inconclusive"
+    return "disagree"
+
+
+def _score_details(details: list[dict], weight_map: dict[str, float], *, excluded_model: str | None = None) -> dict:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    contributing_models: list[str] = []
+    vote_counts = {"agree": 0, "inconclusive": 0, "disagree": 0}
+    for row in details:
+        if not isinstance(row, dict):
+            continue
+        model = str(row.get("model") or row.get("resolved_model") or row.get("source_model") or "").strip()
+        if not model or model == excluded_model:
+            continue
+        if row.get("model_failed") or row.get("excluded_from_score"):
+            row["excluded_from_score"] = True
+            row["model_weight"] = 0.0
+            row["weighted_score"] = 0.0
+            row.setdefault("verdict", "inconclusive")
+            row.setdefault("decision", row.get("verdict", "inconclusive"))
+            continue
+        vote_score = _model_confidence(row)
+        verdict = _bucket_from_confidence(vote_score)
+        weight = float(weight_map.get(model, _default_crosscheck_weight(model)))
+        row["verdict"] = verdict
+        row["decision"] = verdict
+        row["confidence"] = round(vote_score, 4)
+        row["vote_score"] = round(vote_score, 4)
+        row["model_weight"] = round(weight, 4)
+        row["weighted_score"] = round(vote_score * weight, 4)
+        if weight <= 0:
+            continue
+        vote_counts[verdict] += 1
+        contributing_models.append(model)
+        weighted_sum += vote_score * weight
+        total_weight += weight
+    score = weighted_sum / total_weight if total_weight > 0 else 0.5
+    score = max(0.0, min(1.0, score))
+    return {
+        "score": round(score, 4),
+        "score_percent": round(score * 100, 1),
+        "score_verdict": _score_verdict(score),
+        "status": _score_status(score),
+        "total_weight": round(total_weight, 4),
+        "contributing_models": contributing_models,
+        "vote_counts": vote_counts,
+        "thresholds": {
+            "confirmed": _crosscheck_confirm_threshold(),
+            "professor_check": _crosscheck_professor_check_threshold(),
+        },
+    }
+
+
+def _build_crosscheck_score_report(scored_issues: list[dict], weight_map: dict[str, float]) -> dict:
+    model_stats: dict[str, dict] = {
+        model: {
+            "model": model,
+            "weight": weight,
+            "total": 0,
+            "agree": 0,
+            "disagree": 0,
+            "inconclusive": 0,
+            "failed": 0,
+            "mean_vote_score": 0.0,
+            "mean_weighted_score": 0.0,
+        }
+        for model, weight in weight_map.items()
+    }
+    issue_status_counts = {"confirmed": 0, "professor_check": 0, "rejected": 0}
+    for issue in scored_issues:
+        scoring = issue.get("crosscheck_scoring", {}) or {}
+        status = str(scoring.get("status") or "professor_check")
+        if status in issue_status_counts:
+            issue_status_counts[status] += 1
+        for row in issue.get("crosscheck_details", []) or []:
+            if not isinstance(row, dict):
+                continue
+            model = str(row.get("model") or "").strip()
+            if not model:
+                continue
+            stat = model_stats.setdefault(
+                model,
+                {
+                    "model": model,
+                    "weight": float(weight_map.get(model, _default_crosscheck_weight(model))),
+                    "total": 0,
+                    "agree": 0,
+                    "disagree": 0,
+                    "inconclusive": 0,
+                    "failed": 0,
+                    "mean_vote_score": 0.0,
+                    "mean_weighted_score": 0.0,
+                },
+            )
+            if row.get("model_failed") or row.get("excluded_from_score"):
+                stat["failed"] += 1
+                continue
+            vote_score = _model_confidence(row)
+            verdict = _bucket_from_confidence(vote_score)
+            row["verdict"] = verdict
+            row["decision"] = verdict
+            row["confidence"] = round(vote_score, 4)
+            stat["total"] += 1
+            stat[verdict] += 1
+            stat["mean_vote_score"] += vote_score
+            stat["mean_weighted_score"] += float(row.get("weighted_score", 0) or 0)
+
+    model_reports = []
+    for model, stat in model_stats.items():
+        total = int(stat.get("total", 0) or 0)
+        failed = int(stat.get("failed", 0) or 0)
+        attempted = total + failed
+        if total:
+            stat["agree_rate"] = round(stat["agree"] / total, 4)
+            stat["disagree_rate"] = round(stat["disagree"] / total, 4)
+            stat["inconclusive_rate"] = round(stat["inconclusive"] / total, 4)
+            stat["mean_vote_score"] = round(stat["mean_vote_score"] / total, 4)
+            stat["mean_weighted_score"] = round(stat["mean_weighted_score"] / total, 4)
+        else:
+            stat["agree_rate"] = 0.0
+            stat["disagree_rate"] = 0.0
+            stat["inconclusive_rate"] = 0.0
+            stat["mean_vote_score"] = 0.0
+            stat["mean_weighted_score"] = 0.0
+        stat["attempted_total"] = attempted
+        stat["failed_rate"] = round(failed / attempted, 4) if attempted else 0.0
+        flags = []
+        if attempted >= 3 and stat["failed_rate"] >= 0.5:
+            flags.append("api_failure_possible")
+        if total >= 5 and stat["agree_rate"] >= 0.9:
+            flags.append("agree_bias_possible")
+        if total >= 5 and stat["inconclusive_rate"] >= 0.75:
+            flags.append("low_decisiveness_possible")
+        stat["flags"] = flags
+        model_reports.append(stat)
+
+    leave_one_out = []
+    for excluded_model in weight_map:
+        counts = {"confirmed": 0, "professor_check": 0, "rejected": 0}
+        changed = 0
+        score_delta_sum = 0.0
+        for issue in scored_issues:
+            base_scoring = issue.get("crosscheck_scoring", {}) or {}
+            base_score = float(base_scoring.get("score", 0.5) or 0.5)
+            base_status = str(base_scoring.get("status") or "professor_check")
+            rescored = _score_details(
+                [dict(row) for row in issue.get("crosscheck_details", []) or []],
+                weight_map,
+                excluded_model=excluded_model,
+            )
+            counts[rescored["status"]] += 1
+            if rescored["status"] != base_status:
+                changed += 1
+            score_delta_sum += abs(base_score - float(rescored["score"]))
+        total_issues = len(scored_issues)
+        leave_one_out.append({
+            "excluded_model": excluded_model,
+            "counts": counts,
+            "changed_issue_count": changed,
+            "changed_issue_rate": round(changed / total_issues, 4) if total_issues else 0.0,
+            "mean_abs_score_delta": round(score_delta_sum / total_issues, 4) if total_issues else 0.0,
+        })
+
+    return {
+        "algorithm": "weighted_criteria_confidence_average",
+        "confidence_definition": "이 이슈를 교수에게 보여줄 만큼 문제가 실제로 남아 있는 정도",
+        "criteria_weights": {k: round(v, 4) for k, v in CROSSCHECK_CRITERIA_WEIGHTS.items()},
+        "thresholds": {
+            "confirmed": _crosscheck_confirm_threshold(),
+            "professor_check": _crosscheck_professor_check_threshold(),
+        },
+        "model_weights": weight_map,
+        "status_counts": issue_status_counts,
+        "model_reports": sorted(model_reports, key=lambda row: str(row.get("model", ""))),
+        "leave_one_out": sorted(leave_one_out, key=lambda row: str(row.get("excluded_model", ""))),
+    }
 
 
 def _best_crosscheck_detail(details: list[dict], verdict: str = "agree") -> dict:
@@ -188,6 +600,9 @@ def cross_verify(
     env_vars: dict,
     judge_batch_size: int | None = None,
     claims_jsonl: str | None = None,
+    crosscheck_models: list[str] | None = None,
+    claim_runs: int = 1,
+    claim_min_rate: float = 0.5,
 ) -> dict:
     root = str(_ROOT)
 
@@ -214,20 +629,33 @@ def cross_verify(
         print(f"  기존 claim 파일 사용: {claims_jsonl}")
     else:
         extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars)
+        claim_runs = max(1, int(claim_runs or 1))
+        extract_results = []
 
-        try:
-            extract_result = extract_worker(extract_args)
-        except Exception as e:
-            print(f"  ❌ [{CLAIM_EXTRACT_MODEL}] 추출 실패: {e}")
-            extract_result = {
-                "model": CLAIM_EXTRACT_MODEL,
-                "claims_by_batch": [],
-                "api_calls": 0,
-                "token_usage": _empty_token_usage(),
-            }
+        for run_idx in range(claim_runs):
+            if claim_runs > 1:
+                print(f"\n  [{CLAIM_EXTRACT_MODEL}] claim 추출 반복 {run_idx + 1}/{claim_runs}")
+            try:
+                extract_results.append(extract_worker(extract_args))
+            except Exception as e:
+                print(f"  ❌ [{CLAIM_EXTRACT_MODEL}] 추출 실패: {e}")
+                extract_results.append({
+                    "model": CLAIM_EXTRACT_MODEL,
+                    "claims_by_batch": [],
+                    "api_calls": 0,
+                    "token_usage": _empty_token_usage(),
+                })
 
-        merged_claims = union_claims([extract_result])
-        extract_claim_count = sum(len(item["claims"]) for item in extract_result["claims_by_batch"])
+        merged_claims = _merge_claim_extraction_runs(extract_results, claim_min_rate)
+        extract_result = _combine_extract_results(extract_results, merged_claims)
+        extract_claim_count = len(merged_claims)
+        if claim_runs > 1:
+            print(
+                "  claim 추출 합의: "
+                f"runs={claim_runs}, min_rate={claim_min_rate:g}, "
+                f"run_counts={extract_result.get('claim_run_counts', [])}, "
+                f"kept={extract_claim_count}개"
+            )
 
         # utterances 복원 (첫 모델의 배치에서)
         utterances = []
@@ -306,14 +734,21 @@ def cross_verify(
     cross_recheck_verified = []
     cross_recheck_rejected = []
     cross_recheck_inconclusive = []
-    cross_recheck_usage_per_model = {m: _empty_token_usage() for m in models}
-    crosscheck_mode = "independent_model_agreement"
-    crosscheck_model_map = {model: _crosscheck_model_for(model) for model in models}
-    crosscheck_models = list(dict.fromkeys(crosscheck_model_map.values()))
-    if total_union > 0 and models:
+    crosscheck_source_models = list(dict.fromkeys(crosscheck_models or _default_crosscheck_source_models(models)))
+    cross_recheck_usage_per_model = {m: _empty_token_usage() for m in crosscheck_source_models}
+    crosscheck_mode = "weighted_model_score"
+    crosscheck_model_map = {model: _crosscheck_model_for(model) for model in crosscheck_source_models}
+    resolved_crosscheck_models = list(dict.fromkeys(crosscheck_model_map.values()))
+    crosscheck_weights = _crosscheck_weight_map(crosscheck_source_models, crosscheck_model_map)
+    crosscheck_score_report = _build_crosscheck_score_report([], crosscheck_weights)
+    if total_union > 0 and crosscheck_source_models:
         print(f"\n{'='*60}")
-        print(f"  Phase 3: 텍스트+문맥 교차검증 — 모델별 독립 판정")
+        print(f"  Phase 3: 텍스트+문맥 교차검증 — 모델별 독립 판정 + 가중 점수")
         print(f"{'='*60}")
+        print("  crosscheck 가중치:")
+        for model, weight in crosscheck_weights.items():
+            if model in resolved_crosscheck_models:
+                print(f"    [{model}] weight={weight:g}")
         if any(source != target for source, target in crosscheck_model_map.items()):
             print("  crosscheck 실행 모델:")
             for source, target in crosscheck_model_map.items():
@@ -327,7 +762,7 @@ def cross_verify(
             source_model: (unioned, merged_path, cross_model, root, env_vars)
             for source_model, cross_model in crosscheck_model_map.items()
         }
-        with ProcessPoolExecutor(max_workers=len(models)) as executor:
+        with ProcessPoolExecutor(max_workers=len(crosscheck_source_models)) as executor:
             futures = {
                 executor.submit(cross_recheck_worker, args): source_model
                 for source_model, args in cross_args_by_source.items()
@@ -350,6 +785,7 @@ def cross_verify(
                         "token_usage": _empty_token_usage(),
                     }
 
+        scored_issues = []
         for issue in unioned:
             cv.normalize_issue_metadata(issue)
             key = _issue_match_key(issue)
@@ -358,12 +794,14 @@ def cross_verify(
             disagree_models = []
             inconclusive_models = []
 
-            for model in models:
+            for model in crosscheck_source_models:
                 cross_model = crosscheck_model_map.get(model, model)
                 verdict_row = cross_results.get(model, {}).get("verdicts", {}).get(key, {
                     "verdict": "inconclusive",
                     "reason": "crosscheck 결과 없음",
                     "resolved_model": cross_model,
+                    "model_failed": True,
+                    "excluded_from_score": True,
                 })
                 verdict = str(verdict_row.get("verdict", "inconclusive") or "inconclusive")
                 resolved_model = str(
@@ -388,6 +826,12 @@ def cross_verify(
                 else:
                     inconclusive_models.append(resolved_model)
 
+            scoring = _score_details(details, crosscheck_weights)
+            score = float(scoring["score"])
+            score_percent = float(scoring["score_percent"])
+            weighted_status = str(scoring["status"])
+            score_verdict = str(scoring["score_verdict"])
+
             issue["crosscheck_details"] = details
             crosscheck_context_text = next(
                 (
@@ -403,6 +847,15 @@ def cross_verify(
                 row["model"]: row.get("verdict", "inconclusive")
                 for row in details
             }
+            issue["crosscheck_scoring"] = scoring
+            issue["crosscheck_score"] = score
+            issue["crosscheck_score_percent"] = score_percent
+            issue["crosscheck_score_verdict"] = score_verdict
+            issue["crosscheck_weighted_status"] = weighted_status
+            issue["crosscheck_model_weights"] = {
+                row["model"]: row.get("model_weight", crosscheck_weights.get(row["model"], 0))
+                for row in details
+            }
             issue["cross_model_agreement"] = len(agree_models)
             issue["cross_recheck_model"] = ", ".join(agree_models)
 
@@ -411,8 +864,18 @@ def cross_verify(
                 for row in details
             ]
             combined_reason = " / ".join(reasons)
+            score_reason = (
+                f"가중 점수={score:.3f}({score_percent:.1f}점), "
+                f"판정={weighted_status}, "
+                f"기준 confirmed>={_crosscheck_confirm_threshold():.2f}, "
+                f"professor_check>={_crosscheck_professor_check_threshold():.2f}"
+            )
+            if combined_reason:
+                combined_reason = f"{score_reason} / {combined_reason}"
+            else:
+                combined_reason = score_reason
 
-            if len(agree_models) == len(models):
+            if weighted_status == "confirmed":
                 if cv.should_route_issue_to_professor_check(issue):
                     _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
                     issue["cross_recheck"] = None
@@ -425,28 +888,15 @@ def cross_verify(
                     issue["cross_recheck"] = True
                     issue["cross_recheck_reason"] = combined_reason
                     cross_recheck_verified.append(issue)
-            elif agree_models:
+            elif weighted_status == "professor_check":
                 _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
                 issue["cross_recheck"] = None
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = (
-                    f"일부 모델만 이슈를 유지했습니다. "
+                    f"가중 점수가 교수 확인 구간입니다. "
                     f"동의={', '.join(agree_models)}; "
                     f"비동의={', '.join(disagree_models) or '없음'}; "
                     f"불확실={', '.join(inconclusive_models) or '없음'}"
-                    f" / {combined_reason}"
-                )
-                issue["professor_check_reason"] = issue["rejection_reason"]
-                cross_recheck_inconclusive.append(issue)
-            elif inconclusive_models:
-                _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
-                issue["cross_recheck"] = None
-                issue["rejection_stage"] = "텍스트+문맥 교차검증"
-                issue["rejection_reason"] = (
-                    f"동의한 crosscheck 모델은 없지만 일부 모델이 불확실로 판단했습니다. "
-                    f"동의=없음; "
-                    f"비동의={', '.join(disagree_models) or '없음'}; "
-                    f"불확실={', '.join(inconclusive_models)}"
                     f" / {combined_reason}"
                 )
                 issue["professor_check_reason"] = issue["rejection_reason"]
@@ -455,12 +905,15 @@ def cross_verify(
                 issue["cross_recheck"] = False
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = (
-                    f"동의한 crosscheck 모델이 없습니다. "
+                    f"가중 점수가 기각 구간입니다. "
                     f"비동의={', '.join(disagree_models) or '없음'}; "
                     f"불확실={', '.join(inconclusive_models) or '없음'}"
                     f" / {combined_reason}"
                 )
                 cross_recheck_rejected.append(issue)
+            scored_issues.append(issue)
+
+        crosscheck_score_report = _build_crosscheck_score_report(scored_issues, crosscheck_weights)
 
         if cross_recheck_verified:
             print(f"\n    ✅ 텍스트+문맥 교차검증 통과: {len(cross_recheck_verified)}건")
@@ -485,7 +938,6 @@ def cross_verify(
     else:
         final = {
             "issues": [],
-            "slide_rejected": [],
             "grounding_rejected": [],
             "token_usage": _empty_token_usage(),
         }
@@ -504,13 +956,18 @@ def cross_verify(
         print(f"  ❌ [{primary}] 슬라이드 오타 검사 실패: {e}")
 
     # ── 결과 조합 ──
-    all_rejected = final["slide_rejected"] + final["grounding_rejected"] + cross_recheck_rejected
-    token_usage_per_model = {m: _empty_token_usage() for m in models}
+    all_rejected = final["grounding_rejected"] + cross_recheck_rejected
+    usage_model_keys = list(dict.fromkeys(models + crosscheck_source_models))
+    token_usage_per_model = {m: _empty_token_usage() for m in usage_model_keys}
     extract_token_usage = extract_result.get("token_usage")
     for m in models:
         token_usage_per_model[m] = _merge_token_usage(
             token_usage_per_model[m],
             judge_results.get(m, {}).get("token_usage"),
+        )
+    for m in crosscheck_source_models:
+        token_usage_per_model[m] = _merge_token_usage(
+            token_usage_per_model.get(m),
             cross_recheck_usage_per_model.get(m),
         )
     token_usage_per_model[primary] = _merge_token_usage(
@@ -529,10 +986,15 @@ def cross_verify(
         "crosscheck_context_mode": os.getenv("VERIFIER_CROSSCHECK_CONTEXT_MODE", "expanded") or "expanded",
         "crosscheck_focus_window": os.getenv("VERIFIER_CROSSCHECK_FOCUS_WINDOW", "5") or "5",
         "models": models,
-        "crosscheck_models": crosscheck_models,
+        "crosscheck_models": resolved_crosscheck_models,
+        "crosscheck_source_models": crosscheck_source_models,
         "crosscheck_model_map": crosscheck_model_map,
+        "crosscheck_model_weights": crosscheck_weights,
+        "crosscheck_score_report": crosscheck_score_report,
         "primary_model": primary,
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
+        "claim_extract_runs": extract_result.get("claim_run_counts", []),
+        "claim_extract_min_rate": claim_min_rate,
         "claims_source_path": claims_jsonl or "",
         "claims_per_model": {CLAIM_EXTRACT_MODEL: extract_claim_count},
         "merged_claims_count": len(merged_claims),
@@ -553,7 +1015,6 @@ def cross_verify(
         "slide_typos": slide_typo_result.get("slide_typos", []),
         "crosscheck_rejected_issues": cross_recheck_rejected,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
-        "slide_rejected_issues": final["slide_rejected"],
         "grounding_rejected_issues": final["grounding_rejected"],
         "rejected_issues": all_rejected,
         "claim_extract_token_usage": extract_token_usage,
@@ -567,9 +1028,7 @@ def cross_verify(
         },
         "crosscheck_filtered": len(cross_recheck_rejected),
         "crosscheck_inconclusive_filtered": len(cross_recheck_inconclusive),
-        "slide_recheck_filtered": len(final["slide_rejected"]),
         "grounding_filtered": len(final["grounding_rejected"]),
-        "slide_recheck_failures": len(final["slide_rejected"]),
         "grounding_failures": len(final["grounding_rejected"]),
         "slide_typo_failures": int(slide_typo_result.get("failures", 0) or 0),
     }
@@ -617,9 +1076,30 @@ def print_cross_result(result: dict):
     crosscheck_models = result.get("crosscheck_models") or models
     if crosscheck_models != models:
         print(f"  crosscheck 모델: {', '.join(crosscheck_models)}")
+    crosscheck_source_models = result.get("crosscheck_source_models") or []
+    if crosscheck_source_models and crosscheck_source_models != crosscheck_models:
+        print(f"  crosscheck source 모델: {', '.join(crosscheck_source_models)}")
+    score_report = result.get("crosscheck_score_report", {}) or {}
+    if score_report:
+        thresholds = score_report.get("thresholds", {}) or {}
+        print(
+            "  crosscheck 점수: "
+            f"confirmed>={float(thresholds.get('confirmed', _DEFAULT_CONFIRM_THRESHOLD) or 0):.2f}, "
+            f"professor_check>={float(thresholds.get('professor_check', _DEFAULT_PROFESSOR_CHECK_THRESHOLD) or 0):.2f}"
+        )
+        weights = score_report.get("model_weights", {}) or {}
+        if weights:
+            print("  crosscheck 가중치: " + ", ".join(f"{m}={w:g}" for m, w in weights.items()))
     extract_model = result.get("claim_extract_model", CLAIM_EXTRACT_MODEL)
     extract_counts = result.get("claims_per_model", {})
     print(f"  claim 추출: [{extract_model}] {extract_counts.get(extract_model, result['merged_claims_count'])}개")
+    extract_runs = result.get("claim_extract_runs") or []
+    if len(extract_runs) > 1:
+        print(
+            "  claim 추출 반복: "
+            f"runs={len(extract_runs)}, min_rate={result.get('claim_extract_min_rate', 0.5)}, "
+            f"run_counts={extract_runs}"
+        )
     print(f"  판정 입력 claim 수: {result['merged_claims_count']}개")
     print()
     print(f"  ── 판정 흐름 ──")
@@ -642,10 +1122,9 @@ def print_cross_result(result: dict):
     print(f"    ├─ 텍스트+문맥 교차검증 불확실: {xi}건")
     print(f"    └─ 확정 이슈 (grounding 진입): {confirmed}건")
 
-    sf = result.get("slide_recheck_failures", 0)
     gf = result.get("grounding_failures", 0)
-    if sf or gf:
-        print(f"    → 슬라이드 재검증 기각: {sf}건, grounding 기각: {gf}건")
+    if gf:
+        print(f"    → grounding 기각: {gf}건")
     print()
 
     token_usage_per_model = result.get("token_usage_per_model", {})
@@ -657,10 +1136,37 @@ def print_cross_result(result: dict):
             print(f"    [claim 추출:{extract_model}] {_format_token_summary({'total': extract_usage.get('total', {})}) if 'total' in extract_usage else _format_token_summary(extract_usage)}")
         if cluster_usage and cluster_usage.get("total", {}).get("total_tokens", 0):
             print(f"    [issue 묶음] {_format_token_summary(cluster_usage)}")
-        for model in models:
+        usage_models = list(dict.fromkeys(models + list((result.get("crosscheck_source_models") or []))))
+        for model in usage_models:
             usage = token_usage_per_model.get(model, {})
             print(f"    [{model}] {_format_token_summary(usage)}")
         print(f"    [전체] {_format_token_summary(result.get('token_usage', {}))}")
+        print()
+
+    score_report = result.get("crosscheck_score_report", {}) or {}
+    if score_report.get("model_reports"):
+        print(f"  ── crosscheck 모델 리포트 ──")
+        for row in score_report.get("model_reports", []):
+            flags = ", ".join(row.get("flags", []) or [])
+            print(
+                f"    [{row.get('model')}] weight={float(row.get('weight', 0) or 0):.2f} "
+                f"agree={float(row.get('agree_rate', 0) or 0):.0%} "
+                f"inconclusive={float(row.get('inconclusive_rate', 0) or 0):.0%} "
+                f"disagree={float(row.get('disagree_rate', 0) or 0):.0%}"
+                + (f" flags={flags}" if flags else "")
+            )
+        leave_one_out = score_report.get("leave_one_out", []) or []
+        if leave_one_out:
+            print("    제외 실험:")
+            for row in leave_one_out:
+                counts = row.get("counts", {}) or {}
+                print(
+                    f"      - {row.get('excluded_model')}: "
+                    f"confirmed={counts.get('confirmed', 0)}, "
+                    f"professor_check={counts.get('professor_check', 0)}, "
+                    f"rejected={counts.get('rejected', 0)}, "
+                    f"변경={row.get('changed_issue_count', 0)}건"
+                )
         print()
 
     issues = result.get("issues", [])
@@ -668,7 +1174,8 @@ def print_cross_result(result: dict):
         print(f"  ✅ 최종 확정 이슈: {len(issues)}건")
         for i, issue in enumerate(issues):
             src = "양쪽" if issue.get("cross_model_agreement", 0) >= 2 else f"교차검증({issue.get('cross_recheck_model','?')} 동의)"
-            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} conf={issue.get('confidence',0):.2f} ({src})")
+            score = float(issue.get("crosscheck_score", issue.get("confidence", 0)) or 0)
+            print(f"    [{i+1}] {issue['type']} sev={issue['severity']} score={score:.3f} ({src})")
             print(f"        {issue.get('claim_text','')[:100]}")
             print(f"        → {issue.get('issue','')[:100]}")
             confirmation_reason = str(issue.get("cross_recheck_reason", "") or issue.get("why_wrong", "") or "").strip()
@@ -736,8 +1243,16 @@ def main():
                         help="cross=교차검증(기본), independent=독립비교")
     parser.add_argument("--num-runs", type=int, default=1, help="1차 judge 반복 횟수 (기본 1)")
     parser.add_argument("--min-rate", type=float, default=0.5)
+    parser.add_argument("--claim-runs", type=int, default=1, help="claim 추출 반복 횟수 (기본 1)")
+    parser.add_argument("--claim-min-rate", type=float, default=0.5, help="claim 반복 추출 시 유지할 최소 탐지 비율")
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
+    parser.add_argument(
+        "--crosscheck-models",
+        nargs="+",
+        default=None,
+        help="3단계 crosscheck 전용 모델 목록. 지정하지 않으면 CROSS_CHECK_MODELS 또는 --models를 사용",
+    )
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
@@ -755,6 +1270,9 @@ def main():
             args.merged_path, models, args.num_runs,
             args.min_rate, args.batch_size, env_vars,
             claims_jsonl=args.claims_jsonl,
+            crosscheck_models=args.crosscheck_models,
+            claim_runs=args.claim_runs,
+            claim_min_rate=args.claim_min_rate,
         )
         print_cross_result(result)
     else:

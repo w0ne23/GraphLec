@@ -39,6 +39,11 @@ function formatPercent(value) {
   return `${Math.round(number * 100)}%`
 }
 
+function toNumberOrUndefined(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : undefined
+}
+
 function compactText(value, fallback = '-') {
   const text = String(value ?? '').trim()
   return text || fallback
@@ -54,9 +59,11 @@ function labelForStage(stage) {
     needs_review: '교수 확인',
     crosscheck_rejected: '교차검증 기각',
     crosscheck_inconclusive: '교차검증 불확실',
-    slide_rejected: '슬라이드 기각',
     grounding_rejected: '근거 기각',
     first_stage_rejected: '1차 제외',
+    agree: '확정',
+    inconclusive: '교수 확인',
+    disagree: '기각',
   }
   return labels[stage] || compactText(stage)
 }
@@ -224,11 +231,72 @@ function getRejectionReason(item) {
   )
 }
 
+function getModelVerdicts(item) {
+  const rows = asArray(item.checks?.crosscheck?.model_results)
+  return rows.reduce((acc, row) => {
+    const model = row?.model || row?.resolved_model || row?.source_model
+    if (model) acc[model] = row
+    return acc
+  }, {})
+}
+
+function getCrosscheckScoreFromModels(modelResults) {
+  const rows = asArray(modelResults)
+  let weightedSum = 0
+  let totalWeight = 0
+
+  rows.forEach((row) => {
+    const score = toNumberOrUndefined(row?.confidence ?? row?.vote_score ?? row?.score)
+    const weight = toNumberOrUndefined(row?.model_weight) ?? 1
+    if (score === undefined || weight <= 0) return
+    weightedSum += score * weight
+    totalWeight += weight
+  })
+
+  if (totalWeight <= 0) return undefined
+  return Math.max(0, Math.min(1, weightedSum / totalWeight))
+}
+
+function getCrosscheckScore(item, crosscheck = {}) {
+  return (
+    toNumberOrUndefined(item.crosscheck_score) ??
+    toNumberOrUndefined(item.score) ??
+    toNumberOrUndefined(crosscheck.score) ??
+    toNumberOrUndefined(crosscheck.scoring?.score) ??
+    getCrosscheckScoreFromModels(crosscheck.model_results)
+  )
+}
+
+function getCrosscheckScorePercent(item, crosscheck = {}, score) {
+  const direct = toNumberOrUndefined(item.crosscheck_score_percent ?? crosscheck.score_percent ?? crosscheck.scoring?.score_percent)
+  if (direct !== undefined) return direct
+  return score !== undefined ? score * 100 : undefined
+}
+
+function statusFromScore(score) {
+  if (score === undefined) return ''
+  if (score >= 0.8) return 'confirmed'
+  if (score >= 0.45) return 'professor_check'
+  return 'rejected'
+}
+
+function scoreLabel(score) {
+  return score !== undefined ? formatPercent(score) : ''
+}
+
 function feedbackItemToClaim(item, claimById) {
   const sourceClaim = claimById.get(item.source_claim_id) || {}
   const problem = item.problem || {}
   const feedback = item.professor_feedback || {}
   const evidence = item.evidence || {}
+  const crosscheck = item.checks?.crosscheck || {}
+  const crosscheckScore = getCrosscheckScore(item, crosscheck)
+  const crosscheckScorePercent = getCrosscheckScorePercent(item, crosscheck, crosscheckScore)
+  const crosscheckWeightedStatus =
+    item.crosscheck_weighted_status ||
+    crosscheck.status_by_score ||
+    crosscheck.scoring?.status ||
+    statusFromScore(crosscheckScore)
   const location = getItemLocation(item, sourceClaim)
   const utteranceIds = getFeedbackUtteranceIds(item, sourceClaim)
   const status = item.status === 'review_needed' ? 'professor_check' : item.status
@@ -268,6 +336,11 @@ function feedbackItemToClaim(item, claimById) {
     context_resolution: problem.context_resolution || evidence.context_resolution || feedback.context_resolution,
     recommendation: problem.recommendation || feedback.teaching_note,
     evidence_in_context: evidence.evidence_in_context || feedback.evidence_in_context,
+    crosscheck_score: crosscheckScore,
+    crosscheck_score_percent: crosscheckScorePercent,
+    crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
+    crosscheck_weighted_status: crosscheckWeightedStatus,
+    model_verdicts: getModelVerdicts(item),
     confirmation_reason: status === 'confirmed' ? getConfirmationReason(item) : '',
     rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
     evidence_sources: evidence.evidence_sources || item.evidence_sources,
@@ -351,10 +424,12 @@ function ModelVerdicts({ verdicts }) {
         {entries.map(([model, verdict]) => (
           <div className="vf-verdict" key={model}>
             <span>{model}</span>
-            <strong>{compactText(verdict?.verdict || verdict?.decision || verdict?.status)}</strong>
-            {verdict?.confidence !== undefined && (
-              <em>{formatPercent(verdict.confidence)}</em>
+            <strong>점수 {formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
+            {(verdict?.decision || verdict?.verdict || verdict?.status) && (
+              <em>{compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</em>
             )}
+            {verdict?.model_weight !== undefined && <em>가중치 {Number(verdict.model_weight).toFixed(2)}</em>}
+            {verdict?.weighted_score !== undefined && <em>반영점수 {Number(verdict.weighted_score).toFixed(2)}</em>}
           </div>
         ))}
       </div>
@@ -389,12 +464,13 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   const startTime = Number(claim.start_time)
   const canWatch = Number.isFinite(startTime)
   const grounding = claim.grounding || {}
-  const slideRecheck = claim.slide_recheck || {}
   const displayIssueKey = claimDisplayIssueKey(claim)
   const displayIssueLabel = labelForClaimIssue(claim)
   const sources = asArray(grounding.evidence_sources).length
     ? grounding.evidence_sources
     : asArray(claim.evidence_sources)
+  const hasCrosscheckScore = claim.crosscheck_score !== undefined && claim.crosscheck_score !== null
+  const crosscheckStatus = claim.crosscheck_weighted_status || claim.crosscheck_score_verdict
 
   return (
     <article className={`vf-claim-card ${expanded ? 'vf-claim-card--expanded' : ''}`}>
@@ -404,6 +480,11 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
           <div className="vf-chip-row">
             <span className="vf-chip vf-chip--stage">{labelForStage(claim.stage || section)}</span>
             {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
+            {hasCrosscheckScore && (
+              <span className={`vf-chip vf-chip--score vf-chip--score-${crosscheckStatus || 'unknown'}`}>
+                점수 {scoreLabel(claim.crosscheck_score)}
+              </span>
+            )}
           </div>
         </div>
         <div className="vf-claim-meta">
@@ -419,6 +500,14 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow label="등장 시각" value={canWatch ? `${formatTime(startTime)} (${startTime.toFixed(2)}s)` : '-'} />
             <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="상태" value={labelForStage(claim.stage || section)} />
+            <DetailRow
+              label="검증 점수"
+              value={
+                hasCrosscheckScore
+                  ? `${formatPercent(claim.crosscheck_score)} (${labelForStage(crosscheckStatus) || '-'})`
+                  : ''
+              }
+            />
             <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
             <DetailRow label="문제 유형" value={displayIssueLabel} />
             <DetailRow label="문제점" value={claim.issue} />
@@ -437,7 +526,6 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
             <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
-            <DetailRow label="Slide Recheck" value={slideRecheck.status || slideRecheck.reason || claim.slide_recheck_status} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
           <ModelVerdicts verdicts={claim.model_verdicts} />
@@ -594,7 +682,6 @@ export default function VerifierPage() {
         slideTypos: asArray(verifier?.slide_typos),
         crossRejected: rejected,
         inconclusive: [],
-        slideRejected: [],
         groundingRejected: [],
         filtered: rejected,
         firstStageRejected: [],
@@ -606,7 +693,6 @@ export default function VerifierPage() {
     const needsReview = asArray(verifier?.needs_review_claims)
     const crossRejected = asArray(verifier?.crosscheck_rejected_claims)
     const inconclusive = asArray(verifier?.crosscheck_inconclusive_claims)
-    const slideRejected = asArray(verifier?.slide_rejected_claims)
     const groundingRejected = asArray(verifier?.grounding_rejected_claims)
     const firstStageRejected = asArray(verifier?.first_stage_rejected_claims)
     return {
@@ -615,12 +701,10 @@ export default function VerifierPage() {
       slideTypos: asArray(verifier?.slide_typos),
       crossRejected,
       inconclusive,
-      slideRejected,
       groundingRejected,
       filtered: [
         ...crossRejected,
         ...inconclusive,
-        ...slideRejected,
         ...groundingRejected,
       ],
       firstStageRejected,
@@ -743,12 +827,6 @@ export default function VerifierPage() {
       }
 
       const filteredGroups = [
-        {
-          title: '문맥상 맞음',
-          items: sections.slideRejected,
-          section: 'slide_rejected',
-          empty: '슬라이드/발화 문맥상 맞는 설명으로 판단되어 제외된 후보가 없습니다.',
-        },
         {
           title: '교차검증 기각',
           items: sections.crossRejected,
