@@ -137,7 +137,7 @@ def verify_lecture_content(
         "  단계별 모델:"
         f" extract={cc._resolve_stage_model('extract')}"
         f" | judge={cc._resolve_stage_model('judge')}"
-        f" | recheck={cc._resolve_stage_model('recheck')}"
+        f" | slide_typo={cc._resolve_stage_model('slide_typo')}"
         f" | grounding={cc._resolve_stage_model('grounding')}"
     )
 
@@ -205,9 +205,6 @@ def verify_lecture_content(
 
     img_dir = _resolve_detector_img_dir(merged, merged_path)
 
-    slide_rejected = []
-    result["slide_recheck_failures"] = 0
-
     # ── 3단계: grounding 검증 (Google Search로 재검증) ──
     pre_grounding_issues = list(result.get("issues", []))
     grounding_rejected = []
@@ -246,15 +243,12 @@ def verify_lecture_content(
     result["token_usage"] = cc._merge_token_usage(result.get("token_usage"), typo_token_usage)
 
     # 단계별 기각 이슈 저장
-    result["slide_rejected_issues"] = slide_rejected
     result["grounding_rejected_issues"] = grounding_rejected
-    result["rejected_issues"] = slide_rejected + grounding_rejected
-    result["slide_recheck_filtered"] = len(slide_rejected)
+    result["rejected_issues"] = grounding_rejected
     result["grounding_filtered"] = len(grounding_rejected)
     result["is_complete"] = not any([
         result.get("parse_failures", 0),
         result.get("failed_calls", 0),
-        result.get("slide_recheck_failures", 0),
         result.get("grounding_failures", 0),
         result.get("slide_typo_failures", 0),
     ])
@@ -262,7 +256,6 @@ def verify_lecture_content(
         result["completion_warning"] = (
             f"incomplete_result(parse_failures={result.get('parse_failures', 0)}, "
             f"failed_calls={result.get('failed_calls', 0)}, "
-            f"slide_recheck_failures={result.get('slide_recheck_failures', 0)}, "
             f"grounding_failures={result.get('grounding_failures', 0)}, "
             f"slide_typo_failures={result.get('slide_typo_failures', 0)})"
         )
@@ -278,7 +271,7 @@ def verify_lecture_content(
         "verifier_model": VERIFIER_MODEL, "verifier_temperature": VERIFIER_TEMPERATURE,
         "verifier_extract_model": cc._resolve_stage_model("extract"),
         "verifier_judge_model": cc._resolve_stage_model("judge"),
-        "verifier_recheck_model": cc._resolve_stage_model("recheck"),
+        "verifier_slide_typo_model": cc._resolve_stage_model("slide_typo"),
         "verifier_grounding_model": cc._resolve_stage_model("grounding"),
         "total_claims_extracted": result.get("total_claims_extracted", 0),
         "slide_typo_count": len(result.get("slide_typos", [])),

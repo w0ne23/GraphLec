@@ -353,6 +353,36 @@
   color: var(--t3);
 }
 
+.vf-chip--score {
+  border-color: var(--b1);
+  background: var(--panel);
+  color: var(--t1);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.vf-chip--score-confirmed,
+.vf-chip--score-agree {
+  border-color: rgba(220, 38, 38, .24);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.vf-chip--score-professor_check,
+.vf-chip--score-inconclusive,
+.vf-chip--score-review_needed {
+  border-color: rgba(217, 119, 6, .32);
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.vf-chip--score-rejected,
+.vf-chip--score-disagree {
+  border-color: rgba(100, 116, 139, .22);
+  background: var(--card);
+  color: var(--t3);
+}
+
 .vf-claim-meta {
   display: flex;
   flex-direction: column;
@@ -417,8 +447,8 @@
 }
 
 .vf-verdict {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 7px 8px;
@@ -429,6 +459,7 @@
 }
 
 .vf-verdict span {
+  flex: 1 1 120px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

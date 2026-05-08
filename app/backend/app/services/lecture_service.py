@@ -821,7 +821,6 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
     needs_review_claims = flow.get("needs_review_claims", []) or []
     crosscheck_rejected_claims = flow.get("crosscheck_rejected_claims", []) or []
     crosscheck_inconclusive_claims = flow.get("crosscheck_inconclusive_claims", []) or []
-    slide_rejected_claims = flow.get("slide_rejected_claims", []) or []
     grounding_rejected_claims = flow.get("grounding_rejected_claims", []) or []
     first_stage_rejected_claims = flow.get("first_stage_rejected_claims", []) or []
     slide_image_urls = _load_slide_image_url_map(output_dir)
@@ -844,6 +843,9 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "models": data.get("models", {}) or [],
         "pipeline_models": data.get("pipeline_models", {}) or {},
         "primary_model": data.get("primary_model", ""),
+        "crosscheck_source_models": data.get("crosscheck_source_models", []) or [],
+        "crosscheck_model_weights": data.get("crosscheck_model_weights", {}) or {},
+        "crosscheck_score_report": data.get("crosscheck_score_report", {}) or {},
         "summary": content_summary,
         "overview": data.get("claim_decision_overview", []) or [],
         "counts": {
@@ -866,7 +868,6 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
             "slide_typo_needs_review": len(slide_typo_needs_review),
             "crosscheck_rejected": _safe_count(summary.get("crosscheck_rejected_claim_count", len(crosscheck_rejected_claims))),
             "crosscheck_inconclusive": _safe_count(summary.get("crosscheck_inconclusive_claim_count", len(crosscheck_inconclusive_claims))),
-            "slide_rejected": _safe_count(summary.get("slide_rejected_claim_count", len(slide_rejected_claims))),
             "grounding_rejected": _safe_count(summary.get("grounding_rejected_claim_count", len(grounding_rejected_claims))),
             "first_stage_rejected": _safe_count(summary.get("first_stage_rejected_claim_count", len(first_stage_rejected_claims))),
         },
@@ -884,12 +885,10 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "needs_review_claims": needs_review_claims,
         "crosscheck_rejected_claims": crosscheck_rejected_claims,
         "crosscheck_inconclusive_claims": crosscheck_inconclusive_claims,
-        "slide_rejected_claims": slide_rejected_claims,
         "grounding_rejected_claims": grounding_rejected_claims,
         "first_stage_rejected_claims": first_stage_rejected_claims,
         "unmatched_issue_records": flow.get("unmatched_issue_records", []) or [],
         "issues": data.get("issues", []) or [],
-        "needs_review_issues": data.get("needs_review_issues", []) or [],
         "slide_typos": slide_typos,
         "slide_typo_needs_review": slide_typo_needs_review,
         "slide_typo_consensus": data.get("slide_typo_consensus", {}) or {},
@@ -897,7 +896,6 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "rejected_issues": data.get("rejected_issues", []) or [],
         "crosscheck_rejected_issues": data.get("crosscheck_rejected_issues", []) or [],
         "crosscheck_inconclusive_issues": data.get("crosscheck_inconclusive_issues", []) or [],
-        "slide_rejected_issues": data.get("slide_rejected_issues", []) or [],
         "grounding_rejected_issues": data.get("grounding_rejected_issues", []) or [],
         "claim_decision_flow_summary": summary,
     }

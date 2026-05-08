@@ -117,7 +117,7 @@ def cross_recheck_worker(args_tuple):
             "token_usage": token_usage,
         }
     except Exception as e:
-        raise RuntimeError(f"[{args_tuple[2]}] cross recheck worker failed:\n{traceback.format_exc()}") from e
+        raise RuntimeError(f"[{args_tuple[2]}] crosscheck worker failed:\n{traceback.format_exc()}") from e
 
 
 def stages_3_4_worker(args_tuple):
@@ -133,7 +133,6 @@ def stages_3_4_worker(args_tuple):
         slides = ctx["slides"]
         token_usage = _empty_token_usage()
 
-        slide_rejected = []
         grounding_rejected = []
         if issues:
             verified, g_rejected, g_calls, g_failures, grounding_token_usage = cv._ground_verify_all_issues(
@@ -145,7 +144,6 @@ def stages_3_4_worker(args_tuple):
 
         return {
             "issues": issues,
-            "slide_rejected": slide_rejected,
             "grounding_rejected": grounding_rejected,
             "token_usage": token_usage,
         }
@@ -164,14 +162,15 @@ def slide_typo_worker(args_tuple):
         ctx = cv.prepare_verification(merged_path)
         merged = ctx["merged"]
         img_dir = cv._resolve_detector_img_dir(merged, merged_path)
+        typo_model = cv.cc._resolve_stage_model("slide_typo")
 
-        print(f"\n  [{model}] 슬라이드 오타 검사 시작", flush=True)
+        print(f"\n  [{typo_model}] 슬라이드 오타 검사 시작", flush=True)
         typos, api_calls, failures, token_usage = detect_slide_typos(
             ctx["slides"], img_dir=img_dir, max_workers=4, merged_path=merged_path
         )
-        print(f"  [{model}] 슬라이드 오타 검사 완료: {len(typos)}건", flush=True)
+        print(f"  [{typo_model}] 슬라이드 오타 검사 완료: {len(typos)}건", flush=True)
         return {
-            "model": model,
+            "model": typo_model,
             "slide_typos": typos,
             "api_calls": api_calls,
             "failures": failures,

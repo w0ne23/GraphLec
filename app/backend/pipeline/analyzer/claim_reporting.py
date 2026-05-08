@@ -49,7 +49,7 @@ def format_verification_report(result: dict) -> str:
             "단계별 모델: "
             f"extract={meta.get('verifier_extract_model', meta.get('verifier_model', 'N/A'))}, "
             f"judge={meta.get('verifier_judge_model', meta.get('verifier_model', 'N/A'))}, "
-            f"recheck={meta.get('verifier_recheck_model', meta.get('verifier_model', 'N/A'))}, "
+            f"slide_typo={meta.get('verifier_slide_typo_model', meta.get('verifier_model', 'N/A'))}, "
             f"grounding={meta.get('verifier_grounding_model', meta.get('verifier_model', 'N/A'))}"
         )
     lines.append(f"추출된 claim: {meta.get('total_claims_extracted', 0)}개")
@@ -112,28 +112,12 @@ def format_verification_report(result: dict) -> str:
             lines.append(f"  grounding: {gv}")
             if issue.get("grounding_reason"):
                 lines.append(f"  grounding 근거: {issue['grounding_reason'][:200]}")
-        if issue.get("slide_recheck_valid") is not None:
-            sv = "✅ 유지" if issue["slide_recheck_valid"] else "❌ 기각"
-            lines.append(f"  슬라이드 재검증: {sv}")
-            if issue.get("slide_recheck_reason"):
-                lines.append(f"  재검증 근거: {issue['slide_recheck_reason'][:200]}")
 
     if not result.get("issues"):
         lines.append("\n✅ 문제가 발견되지 않았습니다!")
 
-    slide_rejected = result.get("slide_rejected_issues", [])
     grounding_rejected = result.get("grounding_rejected_issues", [])
     legacy_rejected = result.get("rejected_issues", [])
-
-    if slide_rejected:
-        lines.append(f"\n{'─' * 40}")
-        lines.append(f"슬라이드 재검증 기각 ({len(slide_rejected)}건)")
-        lines.append(f"{'─' * 40}")
-        for i, issue in enumerate(slide_rejected, 1):
-            t = format_timestamp(issue.get("start_time", 0))
-            reason = issue.get("slide_recheck_reason") or "N/A"
-            lines.append(f"  [{i}] {t} | {issue.get('claim_text', issue.get('problematic_content', ''))[:60]}")
-            lines.append(f"       사유: {reason[:120]}")
 
     if grounding_rejected:
         lines.append(f"\n{'─' * 40}")
@@ -145,14 +129,14 @@ def format_verification_report(result: dict) -> str:
             lines.append(f"  [{i}] {t} | {issue.get('claim_text', issue.get('problematic_content', ''))[:60]}")
             lines.append(f"       사유: {reason[:120]}")
 
-    if not slide_rejected and not grounding_rejected and legacy_rejected:
+    if not grounding_rejected and legacy_rejected:
         lines.append(f"\n{'─' * 40}")
         lines.append(f"기각된 이슈 ({len(legacy_rejected)}건)")
         lines.append(f"{'─' * 40}")
         for i, issue in enumerate(legacy_rejected, 1):
             t = format_timestamp(issue.get("start_time", 0))
-            reason = issue.get("slide_recheck_reason") or issue.get("grounding_reason") or "N/A"
-            stage = "슬라이드 재검증" if issue.get("slide_recheck_valid") is False else "grounding"
+            reason = issue.get("grounding_reason") or "N/A"
+            stage = "grounding"
             lines.append(f"  [{i}] {t} | {stage} 기각 | {issue.get('claim_text', issue.get('problematic_content', ''))[:60]}")
             lines.append(f"       사유: {reason[:120]}")
 
@@ -201,11 +185,9 @@ def format_verification_report(result: dict) -> str:
         f"  추출 claim: {meta.get('total_claims_extracted', 0)}개",
         f"  슬라이드 오타: {meta.get('slide_typo_count', len(result.get('slide_typos', [])))}건",
         f"  파싱 실패: {result.get('parse_failures', 0)}건",
-        f"  슬라이드 재검증 실패: {result.get('slide_recheck_failures', 0)}건",
         f"  grounding 실패: {result.get('grounding_failures', 0)}건",
         f"  슬라이드 오타 검사 실패: {result.get('slide_typo_failures', 0)}건",
         f"  grounding 기각: {result.get('grounding_filtered', 0)}건",
-        f"  슬라이드 재검증 기각: {result.get('slide_recheck_filtered', 0)}건",
     ])
     stage_lines = []
     for stage in TOKEN_USAGE_STAGES:
