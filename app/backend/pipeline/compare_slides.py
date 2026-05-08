@@ -21,19 +21,15 @@ from collections import defaultdict
 
 try:
     from .slide_extractor import (
-        compute_dhash_hires,
-        count_changed_pixels,
-        grayscale_hist_correlation,
-        normalized_mse,
-        symmetric_edge_overlap,
+        Config,
+        duplicate_frame_features,
+        duplicate_pair_decision,
     )
 except ImportError:
     from slide_extractor import (
-        compute_dhash_hires,
-        count_changed_pixels,
-        grayscale_hist_correlation,
-        normalized_mse,
-        symmetric_edge_overlap,
+        Config,
+        duplicate_frame_features,
+        duplicate_pair_decision,
     )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -78,6 +74,8 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
 
     with open(meta_path, encoding="utf-8") as f:
         metadata = json.load(f)
+    cfg = Config()
+    cfg.DUPLICATE_HASH_THRESHOLD = int(threshold)
 
     # scene_index별 그룹화
     groups: dict[int, list] = defaultdict(list)
@@ -101,79 +99,40 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
         if img is None:
             log.warning(f"  이미지 로드 실패: {fname}")
             continue
-        frame = resize_frame(img, RESIZE_WIDTH)
-        representatives[idx] = {
-            "filename": fname,
-            "frame": frame,
-            "phash": compute_phash_hires(frame),
-            "dhash": compute_dhash_hires(frame),
-        }
+        representatives[idx] = duplicate_frame_features(img, cfg) | {"filename": fname}
         log.info(f"  representative 계산: scene {idx} ({fname})")
 
     scene_indices = sorted(representatives)
     duplicate_map: dict[int, set[int]] = defaultdict(set)
     duplicate_edges: set[frozenset[int]] = set()
 
-    strict_phash = max(8, min(int(threshold), 18))
-    loose_phash = int(threshold)
-    strict_dhash = 24
-    loose_dhash = 34
-
-    def duplicate_decision(rep_a: dict, rep_b: dict) -> tuple[bool, dict]:
-        frame_a = rep_a["frame"]
-        frame_b = rep_b["frame"]
-        phash_dist = int(rep_a["phash"] - rep_b["phash"])
-        dhash_dist = int(rep_a["dhash"] - rep_b["dhash"])
-        changed_ratio = float(count_changed_pixels(frame_a, frame_b, 15))
-        edge_overlap = float(symmetric_edge_overlap(frame_a, frame_b))
-        mse_norm = float(normalized_mse(frame_a, frame_b))
-        hist_corr = float(grayscale_hist_correlation(frame_a, frame_b))
-        strict_match = (
-            phash_dist <= strict_phash
-            and dhash_dist <= strict_dhash
-            and changed_ratio <= 0.12
-            and mse_norm <= 0.030
-            and edge_overlap >= 0.72
-        )
-        near_identical = (
-            phash_dist <= loose_phash
-            and dhash_dist <= loose_dhash
-            and changed_ratio <= 0.055
-            and mse_norm <= 0.018
-            and edge_overlap >= 0.86
-            and hist_corr >= 0.985
-        )
-        same = bool(strict_match or near_identical)
-        reason = "strict" if strict_match else "near-identical" if near_identical else ""
-        return same, {
-            "phash": phash_dist,
-            "dhash": dhash_dist,
-            "changed": changed_ratio,
-            "edge": edge_overlap,
-            "mse": mse_norm,
-            "hist": hist_corr,
-            "reason": reason,
-        }
-
     print("\n" + "═" * 70)
     print(f"  슬라이드 clean representative 중복 비교  |  phash threshold={threshold}")
     print("═" * 70)
-    print(f"  {'scene pair':<17} {'p':>3} {'d':>3} {'chg':>6} {'edge':>6} {'mse':>7} {'hist':>6}  {'판정'}")
-    print(f"  {'-'*17} {'-'*3} {'-'*3} {'-'*6} {'-'*6} {'-'*7} {'-'*6}  {'-'*12}")
+    print(
+        f"  {'scene pair':<17} {'p':>3} {'d':>3} {'cp':>3} "
+        f"{'cchg':>6} {'cedge':>6} {'hist':>6}  {'판정'}"
+    )
+    print(f"  {'-'*17} {'-'*3} {'-'*3} {'-'*3} {'-'*6} {'-'*6} {'-'*6}  {'-'*12}")
 
     results = []
     for i in range(len(scene_indices)):
         for j in range(i + 1, len(scene_indices)):
             idx_a = scene_indices[i]
             idx_b = scene_indices[j]
-            is_dup, metrics = duplicate_decision(representatives[idx_a], representatives[idx_b])
-            if is_dup or metrics["phash"] <= loose_phash or metrics["dhash"] <= loose_dhash:
+            is_dup, metrics = duplicate_pair_decision(representatives[idx_a], representatives[idx_b], cfg)
+            if (
+                is_dup
+                or metrics["phash"] <= cfg.DUPLICATE_HASH_THRESHOLD
+                or metrics["dhash"] <= cfg.DUPLICATE_DHASH_THRESHOLD
+                or metrics["content_phash"] <= cfg.DUPLICATE_CONTENT_HASH_THRESHOLD
+            ):
                 flag = f"★ 중복 후보/{metrics['reason']}" if is_dup else ""
                 print(
                     f"  {idx_a:03d} ↔ {idx_b:03d}       "
-                    f"{metrics['phash']:>3} {metrics['dhash']:>3} "
-                    f"{metrics['changed']:>6.4f} {metrics['edge']:>6.4f} "
-                    f"{metrics['mse']:>7.5f} {metrics['hist']:>6.4f}  {flag}"
+                    f"{metrics['phash']:>3} {metrics['dhash']:>3} {metrics['content_phash']:>3} "
+                    f"{metrics['content_changed']:>6.4f} {metrics['content_edge']:>6.4f} "
+                    f"{metrics['hist']:>6.4f}  {flag}"
                 )
             results.append({"scene_a": idx_a, "scene_b": idx_b, **metrics, "duplicate": is_dup})
 
