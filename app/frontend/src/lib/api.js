@@ -21,6 +21,7 @@ export async function uploadLecture({ file, title, category, description }) {
   const data = await res.json();
   return {
     id: data.id,
+    job_id: data.job_id,
     title: data.title || title,
     category: data.category || category,
     description: data.description || description,
@@ -155,7 +156,9 @@ export async function retryLecture(lectureId) {
     const msg = await res.text();
     throw new Error(msg || 'Retry failed');
   }
-  return res.json();
+  const data = await res.json();
+  // 새로 생성된 job_id를 반환 — 프론트에서 SSE 재연결에 사용
+  return { job_id: data.job_id };
 }
 
 export async function getLectureGraph(lectureId) {

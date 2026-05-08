@@ -85,11 +85,14 @@ export default function UploadPage({ onNavigate }) {
   }
 
   // 주기적으로(또는 처음 로드 시) 진행 중인 작업에 대해 SSE 연결을 맺는 함수
-  const setupSSEForJob = (lecture_id) => {
+  const setupSSEForJob = (lecture_id, job_id) => {
     if (eventSources.current[lecture_id]) return // 이미 연결되어 있음
 
-    console.log(`--- [SSE] Connecting to stream for lecture ${lecture_id} ---`)
-    const eventSource = new EventSource(`/api/jobs/${lecture_id}/stream`)
+    const url = job_id
+      ? `/api/jobs/${lecture_id}/stream?job_id=${job_id}`
+      : `/api/jobs/${lecture_id}/stream`
+    console.log(`--- [SSE] Connecting to stream for lecture ${lecture_id} (job ${job_id ?? 'latest'}) ---`)
+    const eventSource = new EventSource(url)
     eventSources.current[lecture_id] = eventSource
     startHealthCheck()
 
@@ -158,7 +161,7 @@ export default function UploadPage({ onNavigate }) {
       setLectures([...activeJobs, ...result.items])
       setTotalPages(result.totalPages)
       activeJobs.forEach(lec => {
-        setupSSEForJob(lec.id)
+        setupSSEForJob(lec.id, lec.job_id)
       })
     }).catch(e => setError(String(e.message || e)))
 
@@ -184,7 +187,7 @@ export default function UploadPage({ onNavigate }) {
       const created = await uploadLecture({ title: title || file.name, category, description, file })
       // created에는 id(lecture_id)와 job_id가 모두 있음
       setLectures(prev => [created, ...prev])
-      setupSSEForJob(created.id)
+      setupSSEForJob(created.id, created.job_id)
     } catch (e) {
       setError(String(e.message || e))
     } finally {
@@ -209,19 +212,19 @@ export default function UploadPage({ onNavigate }) {
     e.stopPropagation()
     if (!confirm('분석을 다시 시도하시겠습니까?')) return
     try {
-      await retryLecture(lectureId)
+      const { job_id } = await retryLecture(lectureId)
 
-      // 이전 SSE 정리 후 재연결
+      // 이전 SSE 정리 후 새 job_id로 재연결
       if (eventSources.current[lectureId]) {
         eventSources.current[lectureId].close()
         delete eventSources.current[lectureId]
       }
       setLectures(prev => prev.map(l =>
         l.id === lectureId
-          ? { ...l, status: 'pending', pipeline_stages: [], current_stage: 'Resuming pipeline...' }
+          ? { ...l, job_id, status: 'pending', pipeline_stages: [], current_stage: 'Resuming pipeline...' }
           : l
       ))
-      setupSSEForJob(lectureId)
+      setupSSEForJob(lectureId, job_id)
     } catch (err) { alert(`재시도 실패: ${err.message}`) }
   }
 
