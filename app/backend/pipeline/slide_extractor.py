@@ -1720,7 +1720,8 @@ def _extract_slides_staged(
     regions_dir = work_dir / "regions"
     scenes_dir = work_dir / "scenes"
     annotations_dir = work_dir / "annotations"
-    for path in (cache_dir, regions_dir, scenes_dir, annotations_dir):
+    review_dir = work_dir / "review_slides"
+    for path in (cache_dir, regions_dir, scenes_dir, annotations_dir, review_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     log.info("슬라이드 추출 staged pipeline 실행")
@@ -1744,27 +1745,37 @@ def _extract_slides_staged(
     detect_annotations(str(cache_dir), str(scenes_path), str(annotations_dir))
     annotations_path = annotations_dir / "scene_annotations.json"
 
-    log.info("  Step 4: 원본 frame materialize")
+    log.info("  Step 4A: LocalVLM review용 임시 frame materialize")
     materialize_frames(
         input_path,
         str(scenes_path),
         str(annotations_path),
-        str(out_path),
+        str(review_dir),
         regions_path=str(regions_path),
     )
 
-    metadata_path = out_path / "metadata.json"
-    with open(metadata_path, "r", encoding="utf-8") as f:
+    review_metadata_path = review_dir / "metadata.json"
+    with open(review_metadata_path, "r", encoding="utf-8") as f:
         metadata = json.load(f)
 
     cfg = Config()
     metadata = mark_clean_final_frames(metadata)
-    metadata = mark_visual_duplicates(metadata, out_path, cfg)
-    add_transition_review_candidates(out_path, scenes_path, metadata)
-    metadata = maybe_run_local_vlm_review(metadata, out_path)
+    metadata = mark_visual_duplicates(metadata, review_dir, cfg)
+    add_transition_review_candidates(review_dir, scenes_path, metadata)
+    metadata = maybe_run_local_vlm_review(metadata, review_dir)
+    metadata = remap_metadata_for_final_materialize(metadata)
+    fps, total_frames, _, _ = _video_metadata(input_path)
+    duration = total_frames / fps if fps > 0 and total_frames > 0 else 0.0
+    metadata = refresh_scene_time_ranges(metadata, duration)
+    metadata = mark_clean_final_frames(metadata)
     metadata = finalize_scene_slide_metadata(metadata)
+
+    log.info("  Step 4B: VLM 판정 반영 후 최종 frame materialize")
+    _materialize_metadata_frames(input_path, out_path, metadata)
+    copy_local_vlm_review_artifacts(review_dir, out_path)
     log_scene_slide_summary(metadata)
 
+    metadata_path = out_path / "metadata.json"
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
@@ -2111,6 +2122,261 @@ def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dic
     if local_vlm_apply_enabled():
         return apply_vlm_slide_decisions(metadata, review_payload)
     return metadata
+
+
+def _remap_optional_scene_index(value, index_map: dict[int, int]):
+    if value is None:
+        return None
+    try:
+        return index_map.get(int(value))
+    except (TypeError, ValueError):
+        return value
+
+
+def _remap_scene_index_list(values, index_map: dict[int, int]) -> list[int]:
+    remapped: list[int] = []
+    for value in values or []:
+        try:
+            mapped = index_map.get(int(value))
+        except (TypeError, ValueError):
+            continue
+        if mapped is not None and mapped not in remapped:
+            remapped.append(mapped)
+    return remapped
+
+
+def _filename_for_final_scene(item: dict, scene_index: int) -> str:
+    scene_type = item.get("scene_type", "slide")
+    capture_type = item.get("capture_type", "base")
+    if scene_type == "video":
+        return f"scene_{scene_index:03d}_video.jpg"
+    if capture_type == "annotation":
+        annot_index = int(item.get("annot_index", item.get("scene_annot_index", 0)) or 0)
+        return f"scene_{scene_index:03d}_annot_{annot_index:02d}.jpg"
+    return f"scene_{scene_index:03d}_base.jpg"
+
+
+def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
+    """Recompute same-slide relation fields after scene IDs are compacted."""
+    from collections import Counter, defaultdict
+
+    scenes = sorted({int(item["scene_index"]) for item in metadata if item.get("scene_index") is not None})
+    parent = {idx: idx for idx in scenes}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int):
+        if a not in parent or b not in parent:
+            return
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    for item in metadata:
+        idx = int(item["scene_index"])
+        for field in ("same_slide_group", "slide_group", "scene_group", "duplicate_of"):
+            for other in item.get(field) or []:
+                try:
+                    union(idx, int(other))
+                except (TypeError, ValueError):
+                    continue
+
+    groups: dict[int, set[int]] = defaultdict(set)
+    for idx in scenes:
+        groups[find(idx)].add(idx)
+
+    canonical_votes: dict[int, Counter] = defaultdict(Counter)
+    preferred_representatives: dict[int, set[int]] = defaultdict(set)
+    for item in metadata:
+        idx = int(item["scene_index"])
+        root = find(idx)
+        for field in ("slide_canonical_index", "same_slide_canonical", "scene_canonical"):
+            canonical = _remap_optional_scene_index(item.get(field), {x: x for x in scenes})
+            if canonical in groups[root]:
+                canonical_votes[root][canonical] += 1
+        if item.get("vlm_preferred_representative"):
+            preferred_representatives[root].add(idx)
+
+    group_by_scene = {idx: sorted(members) for members in groups.values() for idx in members}
+    canonical_by_root: dict[int, int] = {}
+    for root, members in groups.items():
+        preferred = sorted(preferred_representatives.get(root, set()) & members)
+        if preferred:
+            canonical_by_root[root] = preferred[0]
+        elif canonical_votes.get(root):
+            canonical_by_root[root] = canonical_votes[root].most_common(1)[0][0]
+        else:
+            canonical_by_root[root] = min(members)
+
+    visit_order: dict[int, int] = {}
+    prev_visit: dict[int, int | None] = {}
+    next_visit: dict[int, int | None] = {}
+    for members in groups.values():
+        ordered = sorted(members)
+        for pos, idx in enumerate(ordered, start=1):
+            visit_order[idx] = pos
+            prev_visit[idx] = ordered[pos - 2] if pos > 1 else None
+            next_visit[idx] = ordered[pos] if pos < len(ordered) else None
+
+    for item in metadata:
+        idx = int(item["scene_index"])
+        members = group_by_scene.get(idx, [idx])
+        canonical = canonical_by_root.get(find(idx), members[0])
+        others = [x for x in members if x != idx]
+        item["duplicate_of"] = others
+        item["scene_group"] = members
+        item["scene_canonical"] = canonical
+        item["scene_group_size"] = len(members)
+        item["same_slide_group"] = members
+        item["same_slide_canonical"] = canonical
+        item["same_slide_group_size"] = len(members)
+        item["same_slide_visit_order"] = visit_order.get(idx, 1)
+        item["same_slide_is_revisit"] = visit_order.get(idx, 1) > 1
+        item["same_slide_previous"] = prev_visit.get(idx)
+        item["same_slide_next"] = next_visit.get(idx)
+        item["slide_group"] = members
+        item["slide_canonical_index"] = canonical
+        item["slide_group_size"] = len(members)
+        item["slide_visit_order"] = visit_order.get(idx, 1)
+        item["slide_is_revisit"] = visit_order.get(idx, 1) > 1
+        item["previous_scene_index"] = prev_visit.get(idx)
+        item["next_scene_index"] = next_visit.get(idx)
+
+    return metadata
+
+
+def remap_metadata_for_final_materialize(metadata: list[dict]) -> list[dict]:
+    """Compact surviving timeline scenes and rewrite filenames before final materialize.
+
+    LocalVLM review runs against provisional images. After its decisions are
+    applied, dropped transition scenes can leave gaps such as scene 1, 3. The
+    final artifact should instead contain continuous scene indices and matching
+    filenames, so this remaps metadata before reading final frames from the
+    original video again.
+    """
+    if not metadata:
+        return metadata
+
+    old_scene_indices = sorted({int(item["scene_index"]) for item in metadata if item.get("scene_index") is not None})
+    index_map = {old_idx: new_idx for new_idx, old_idx in enumerate(old_scene_indices, start=1)}
+
+    scalar_scene_fields = (
+        "scene_index",
+        "scene_number",
+        "slide_index",
+        "slide_number",
+        "scene_canonical",
+        "same_slide_canonical",
+        "slide_canonical_index",
+        "same_slide_previous",
+        "same_slide_next",
+        "previous_scene_index",
+        "next_scene_index",
+    )
+    list_scene_fields = (
+        "duplicate_of",
+        "scene_group",
+        "same_slide_group",
+        "slide_group",
+    )
+
+    remapped: list[dict] = []
+    for raw_item in metadata:
+        item = dict(raw_item)
+        old_idx = int(item["scene_index"])
+        new_idx = index_map[old_idx]
+        item["pre_vlm_scene_index"] = old_idx
+        item["provisional_filename"] = item.get("filename")
+        item["scene_index"] = new_idx
+        item["scene_number"] = new_idx
+        item["slide_index"] = new_idx
+        item["slide_number"] = new_idx
+
+        for field in scalar_scene_fields:
+            if field in ("scene_index", "scene_number", "slide_index", "slide_number"):
+                continue
+            if field not in item:
+                continue
+            mapped = _remap_optional_scene_index(item.get(field), index_map)
+            item[field] = mapped
+
+        for field in list_scene_fields:
+            if field in item:
+                item[field] = _remap_scene_index_list(item.get(field), index_map)
+
+        decisions = item.get("vlm_review_decisions")
+        if isinstance(decisions, list):
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                for field in ("scene_indices", "middle_scene_indices"):
+                    if field in decision:
+                        decision[field] = _remap_scene_index_list(decision.get(field), index_map)
+                if "representative_scene_index" in decision:
+                    decision["representative_scene_index"] = _remap_optional_scene_index(
+                        decision.get("representative_scene_index"),
+                        index_map,
+                    )
+
+        item["filename"] = _filename_for_final_scene(item, new_idx)
+        remapped.append(item)
+
+    remapped.sort(key=lambda x: (int(x["scene_index"]), int(x.get("annot_index", 0) or 0), int(x.get("frame_no", 0) or 0)))
+    return refresh_slide_group_relations(remapped)
+
+
+def refresh_scene_time_ranges(metadata: list[dict], video_duration: float) -> list[dict]:
+    """Refresh scene/slide time ranges after transition scenes are dropped."""
+    from collections import defaultdict
+
+    by_scene: dict[int, list[dict]] = defaultdict(list)
+    for item in metadata:
+        by_scene[int(item["scene_index"])].append(item)
+
+    scene_starts: dict[int, float] = {}
+    scene_ends: dict[int, float] = {}
+    for scene_idx, items in by_scene.items():
+        base = next((x for x in items if x.get("capture_type") == "base"), items[0])
+        if base.get("scene_type") == "video":
+            scene_starts[scene_idx] = float(base.get("video_start_sec", base.get("timestamp_sec", 0.0)) or 0.0)
+        else:
+            scene_starts[scene_idx] = float(base.get("timestamp_sec", 0.0) or 0.0)
+
+    ordered = sorted(scene_starts)
+    for pos, scene_idx in enumerate(ordered):
+        base = next((x for x in by_scene[scene_idx] if x.get("capture_type") == "base"), by_scene[scene_idx][0])
+        if base.get("scene_type") == "video":
+            scene_ends[scene_idx] = float(base.get("video_end_sec", scene_starts[scene_idx]) or scene_starts[scene_idx])
+        elif pos + 1 < len(ordered):
+            scene_ends[scene_idx] = scene_starts[ordered[pos + 1]]
+        else:
+            scene_ends[scene_idx] = float(video_duration or scene_starts[scene_idx])
+
+    for item in metadata:
+        idx = int(item["scene_index"])
+        start = round(scene_starts.get(idx, float(item.get("timestamp_sec", 0.0) or 0.0)), 3)
+        end = round(scene_ends.get(idx, start), 3)
+        item["scene_start_sec"] = start
+        item["scene_end_sec"] = end
+        item["slide_start_sec"] = start
+        item["slide_end_sec"] = end
+
+    return metadata
+
+
+def copy_local_vlm_review_artifacts(review_dir: Path, out_path: Path) -> None:
+    """Keep LocalVLM debug artifacts next to the final slides output."""
+    for filename in ("llm_review_candidates.json", "llm_review_results.json"):
+        src = review_dir / filename
+        dst = out_path / filename
+        if src.exists():
+            shutil.copy2(src, dst)
+        else:
+            dst.unlink(missing_ok=True)
 
 
 def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata: list[dict]) -> None:
