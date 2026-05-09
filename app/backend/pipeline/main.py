@@ -1,6 +1,5 @@
 """
 main.py
-=======
 강의 영상 분석 통합 파이프라인
 
 실행 흐름:
@@ -130,6 +129,17 @@ def _format_emphasis_reason(ann: dict) -> dict:
     detail = ann.get("emphasis_detail")
     if isinstance(detail, dict):
         return detail
+    audio_emphasis = ann.get("audio_emphasis")
+    if isinstance(audio_emphasis, dict):
+        return {
+            **audio_emphasis,
+            "methods": ann.get("emphasis_methods", []),
+            "keywords": {
+                "all_keywords": ann.get("emphasis_keywords", []),
+                "by_method": ann.get("emphasis_keywords_by_method", {}),
+            },
+            "detection_count": ann.get("detection_count", 0),
+        }
     return {
         "score": ann.get("emphasis_score"),
         "methods": ann.get("emphasis_methods", []),
@@ -360,6 +370,9 @@ def stage3b_audio(
         detect_emphasis_by_keywords_weighted,
         detect_emphasis_by_topic_keyword_repetition,
         get_topic_keywords_filtered_v2,
+        get_topic_keyword_count_map,
+        get_topic_keyword_score_map,
+        topic_keyword_count_items,
     )
     from .emphasis_combiner import combine_emphasis_simple
 
@@ -375,7 +388,7 @@ def stage3b_audio(
                 payload = json.load(f)
             for scene in payload.get("scenes", []):
                 for ctx in scene.get("contexts", []):
-                    if "emphasis" not in ctx:
+                    if "audio_emphasis" not in ctx:
                         return False
             return True
         except Exception:
@@ -537,6 +550,8 @@ def stage3b_audio(
     scenes_structure = None
     emphasis_sections: list[dict] = []
     topic_kw_set: set[str] = set()
+    topic_keyword_counts: dict[str, int] = {}
+    topic_keyword_scores: dict[str, int] = {}
     try:
         y, sr = librosa.load(audio_path_temp, sr=16000)
         if slide_ranges:
@@ -551,12 +566,25 @@ def stage3b_audio(
             groups, min_freq=5, max_keywords=20, max_segment_ratio=1.0,
             min_keyword_len=2, candidate_pool_size=80, use_llm_filter=True,
         )
+        topic_keyword_counts = get_topic_keyword_count_map(
+            groups,
+            min_freq=5,
+            max_keywords=20,
+            max_segment_ratio=1.0,
+            min_keyword_len=2,
+            candidate_pool_size=80,
+            use_llm_filter=False,
+            _topic_keywords_override=topic_kw_set,
+        )
+        topic_keyword_scores = get_topic_keyword_score_map(topic_keyword_counts)
         audio_emphasis = detect_emphasis_by_std(y, sr, groups)
         keyword_emphasis = detect_emphasis_by_keywords_weighted(groups)
         topic_emphasis = detect_emphasis_by_topic_keyword_repetition(
             groups, window=2, min_keyword_len=2, max_segment_ratio=1.0,
             min_freq=5, max_keywords=20, use_llm_filter=False, min_keyword_count=1,
             _topic_keywords_override=topic_kw_set,
+            _topic_keyword_count_map=topic_keyword_counts,
+            _topic_keyword_score_map=topic_keyword_scores,
         )
         annotated_groups, emphasis_sections = combine_emphasis_simple(
             audio_emphasis, keyword_emphasis + topic_emphasis, groups,
@@ -573,6 +601,7 @@ def stage3b_audio(
                     "keywords": sorted(topic_kw_set),
                     "count": len(topic_kw_set),
                 },
+                "audio_topic_keywords": topic_keyword_count_items(topic_keyword_counts),
             },
             "statistics": {
                 "total_count": len(emphasis_sections),
@@ -641,7 +670,7 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
                 payload = json.load(f)
             for scene in payload.get("scenes", []):
                 for ctx in scene.get("contexts", []):
-                    if "emphasis" not in ctx:
+                    if "audio_emphasis" not in ctx:
                         return False
             return True
         except Exception:
@@ -705,6 +734,32 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
 
     scenes_with_emphasis = json.loads(json.dumps(scenes_structure))
     annot_by_start = {g.get("start"): g for g in annotated_groups}
+    empty_audio_emphasis = {
+        "audio": {
+            "std_based_score": 0.0,
+            "audio_signal_score": 0,
+            "volume_score": 0.0,
+            "pitch_score": 0.0,
+            "volume_metric": 0.0,
+            "pitch_metric": 0.0,
+            "volume_rank": None,
+            "pitch_rank": None,
+            "volume_ratio": 0.0,
+            "pitch_variation": 0.0,
+        },
+        "importance_keywords": {
+            "score": 0,
+            "category_scores": {"exam": 0, "strong": 0, "summary": 0},
+            "matched_categories": [],
+            "matched_keywords": {"exam": [], "strong": [], "summary": []},
+        },
+        "topic": {
+            "keywords": [],
+            "keyword_scores": {},
+            "topic_keyword_score": 0,
+            "audio_topic_total_count_sum": 0,
+        },
+    }
     for scene in scenes_with_emphasis:
         new_contexts = []
         for ctx in scene.get("contexts", []):
@@ -715,18 +770,17 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
                 "end": ctx.get("end"),
                 "text": ctx.get("text"),
             }
-            if ann and ann.get("emphasis") == "강조":
-                ordered_ctx["emphasis"] = {
-                    "state": "강조",
-                    "detected": True,
-                    "detail": _format_emphasis_reason(ann),
-                }
+            audio_emphasis = ann.get("audio_emphasis") if ann else None
+            ordered_ctx["audio_emphasis"] = audio_emphasis or empty_audio_emphasis
+
+            if ann:
+                ordered_ctx["emphasis_methods"] = ann.get("emphasis_methods", [])
+                ordered_ctx["detection_count"] = int(ann.get("detection_count", 0) or 0)
+                ordered_ctx["emphasis_detail"] = _format_emphasis_reason(ann)
             else:
-                ordered_ctx["emphasis"] = {
-                    "state": None,
-                    "detected": False,
-                    "detail": {},
-                }
+                ordered_ctx["emphasis_methods"] = []
+                ordered_ctx["detection_count"] = 0
+                ordered_ctx["emphasis_detail"] = {}
             ordered_ctx["segment_indices"] = ctx.get("segment_indices", [])
             ordered_ctx["segments"] = ctx.get("segments", [])
             new_contexts.append(ordered_ctx)
@@ -771,11 +825,8 @@ def stage5_fusion(
     )
     fused_output = run_fusion(cfg)
     fused_scenes = fused_output.get("scenes", [])
-    logical_slide_count = len({
-        scene.get("slide_number")
-        for scene in fused_scenes
-        if scene.get("slide_number") is not None
-    })
+    fused_slides = fused_output.get("slides", [])
+    logical_slide_count = len(fused_slides)
 
     # run_fusion 반환 스키마를 메인 파이프라인 출력 형식에 맞게 감싼다.
     _save_json(
@@ -786,6 +837,7 @@ def stage5_fusion(
             "scene_count": len(fused_scenes),
             "slide_count": logical_slide_count,
             "fusion_metadata": fused_output.get("metadata", {}),
+            "slides": fused_slides,
             "scenes": fused_scenes,
         },
     )
