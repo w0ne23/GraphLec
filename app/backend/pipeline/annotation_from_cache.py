@@ -515,7 +515,7 @@ def _record_capture(
         },
     }
     scene_result["annotations"].append(record)
-    log.info(
+    log.debug(
         "[scene %03d] annot_%02d @ %.3fs frame=%s",
         scene_index,
         annot_index,
