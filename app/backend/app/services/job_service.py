@@ -1015,12 +1015,13 @@ async def ensure_graphrag_concept_graph_loaded(db: AsyncSession, lecture_id: str
 
 
 async def unload_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
-    """강의 화면 이탈 시 해당 stem의 구조 그래프와 GraphRAG 그래프를 Neo4j에서 제거한다."""
+    """활성 시청자가 없을 때만 해당 stem의 구조 그래프와 GraphRAG 그래프를 Neo4j에서 제거한다."""
     detail = await get_lecture_detail(db, lecture_id)
     if not detail or not detail.get("stem"):
         raise HTTPException(status_code=404, detail="Lecture result not found")
 
     stem = str(detail["stem"])
+    active_count = await _active_session_count(db, stem)
     driver = get_neo4j_driver()
     if not driver:
         raise HTTPException(status_code=503, detail="Neo4j connection is not configured")
@@ -1028,6 +1029,15 @@ async def unload_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Di
     try:
         with driver.session() as session:
             before = _stem_graph_counts(session, stem)
+            if active_count > 0:
+                return {
+                    "status": "still_active",
+                    "lecture_id": lecture_id,
+                    "stem": stem,
+                    "active_sessions": active_count,
+                    "before": before,
+                    "after": before,
+                }
             session.execute_write(lambda tx: _delete_stem_graph_tx(tx, stem))
             after = _stem_graph_counts(session, stem)
     finally:
@@ -1037,6 +1047,7 @@ async def unload_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Di
         "status": "unloaded",
         "lecture_id": lecture_id,
         "stem": stem,
+        "active_sessions": active_count,
         "before": before,
         "after": after,
     }

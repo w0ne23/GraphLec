@@ -41,6 +41,11 @@ from PIL import Image
 from google.genai import types
 
 from .config import GEMINI_GENERATIVE_MODEL
+from .emphasis_keyword import (
+    get_topic_keyword_count_map,
+    summarize_topic_keyword_counts_for_text,
+    topic_keyword_count_items,
+)
 
 try:
     from json_repair import repair_json
@@ -509,15 +514,7 @@ class T1Extractor:
              - 같은 text(정규화 기준)가 여러 항목으로 등장하면 하나로 합침
              - type은 리스트로 수집 후 중복 제거: ["bold", "box"]
              - bbox는 첫 번째 항목 기준 유지
-          3. emphasis_weight 부여 (병합 후 적용)
-             - callout 타입 포함 : 0.3
-             - box 타입만 포함   : 0.5  (테두리 박스 — 레이아웃 요소일 수 있음)
-             - 그 외             : 1.0
         """
-        WEIGHT_CALLOUT = 0.3
-        WEIGHT_BOX     = 0.5
-        WEIGHT_NORMAL  = 1.0
-
         # 순번 단독 패턴: "1" / "2." / "3)" / "10. " 등
         _standalone_num = re.compile(r'^\d+[\.\)]*\s*$')
 
@@ -548,25 +545,17 @@ class T1Extractor:
                 if not buckets[key]["color"] and item.get("color"):
                     buckets[key]["color"] = item.get("color")
 
-        # ── 2단계: weight 부여 후 최종 리스트 생성 ──────────────────────────── #
+        # ── 2단계: 최종 리스트 생성 ────────────────────────────────────────── #
         filtered = []
         for bucket in buckets.values():
             types = bucket["types"]
             type_val = types[0] if len(types) == 1 else types  # 단일이면 str, 복수면 list
 
-            if "callout" in types:
-                weight = WEIGHT_CALLOUT
-            elif types == ["box"]:
-                weight = WEIGHT_BOX
-            else:
-                weight = WEIGHT_NORMAL
-
             filtered.append({
-                "text":             bucket["text"],
-                "type":             type_val,
-                "color":            bucket["color"],
-                "bbox":             bucket["bbox"],
-                "emphasis_weight":  weight,
+                "text":  bucket["text"],
+                "type":  type_val,
+                "color": bucket["color"],
+                "bbox":  bucket["bbox"],
             })
 
         return filtered
@@ -767,6 +756,35 @@ class TextualizationPipeline:
             slide["slide_id"] = f"slide_{slide['slide_number']:03d}"
             slide["scene_id"] = f"scene/{int(slide.get('scene_number', slide['slide_number'])):04d}"
 
+        slide_keyword_units = [
+            {
+                "text": s.get("t1") or "",
+                "slide_id": s["slide_id"],
+                "slide_number": s["slide_number"],
+            }
+            for s in slides
+            if (s.get("t1") or "").strip()
+        ]
+        slide_topic_keyword_counts = get_topic_keyword_count_map(
+            slide_keyword_units,
+            min_freq=2,
+            max_keywords=20,
+            max_segment_ratio=1.0,
+            min_keyword_len=2,
+            candidate_pool_size=80,
+            use_llm_filter=True,
+        )
+        for slide in slides:
+            summary = summarize_topic_keyword_counts_for_text(
+                slide.get("t1") or "",
+                slide_topic_keyword_counts,
+                min_keyword_len=2,
+            )
+            slide["slide_topic_keywords"] = summary["keywords"]
+            slide["slide_topic_total_count_sum"] = summary["total_count_sum"]
+            slide["slide_topic_keyword_scores"] = summary["keyword_scores"]
+            slide["slide_topic_keyword_score"] = summary["score_sum"]
+
         total_time = time.time() - start_time
 
         result = {
@@ -775,6 +793,11 @@ class TextualizationPipeline:
                 "processing_time": total_time,
                 "total_scenes":    len(slides),
                 "total_slides":    len({s.get("slide_canonical_number", s["slide_number"]) for s in slides}),
+            },
+            "slide_keyword_report": {
+                "description": "slide_textualized t1 전체에서 추출한 반복 주제 키워드와 전체 등장 횟수",
+                "min_freq": 2,
+                "slide_topic_keywords": topic_keyword_count_items(slide_topic_keyword_counts),
             },
             "scenes": [
                 {
@@ -795,6 +818,10 @@ class TextualizationPipeline:
                     "t1_structure":        s["t1_structure"],
                     "slide_type":          s.get("slide_type", "text"),
                     "slide_emphasis":      s.get("slide_emphasis", []),
+                    "slide_topic_keywords": s.get("slide_topic_keywords", []),
+                    "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),
+                    "slide_topic_keyword_scores": s.get("slide_topic_keyword_scores", {}),
+                    "slide_topic_keyword_score": s.get("slide_topic_keyword_score", 0),
                     "text_source":         s.get("text_source", "base"),
                     "has_teacher_annotation": s.get("has_teacher_annotation", s.get("has_annot", False)),
                     "text_image_has_annot": s.get("text_image_has_annot", False),

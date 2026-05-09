@@ -4,7 +4,7 @@
 - 가중치 키워드: 하드코딩된 중요/요약/시험 관련 표현 매칭
 - 주제 키워드 반복: 전사문 전체에서 반복 등장하는 내용어 기반
 
-키워드 추출: kiwipiepy 설치 시 형태소 분석(명사만), 미설치 시 어미 제거 방식.
+키워드 추출: kiwipiepy/Kiwi 형태소 분석 필수(명사만). 미설치 시 중단.
 주제 키워드 LLM 필터: Gemini로 강의 흐름과 무관한 후보 제거.
 
 진단: EMPHASIS_DEBUG=1 python main.py ... 로 실행하면 주제 키워드 진단 결과를 output/ 폴더에 저장.
@@ -32,44 +32,62 @@ from typing import Optional, Set
 # ---------------------------------------------------------------------------
 
 KEYWORDS_WEIGHTED = {
-    'strong':  (['중요', '핵심', '반드시', '꼭', '필수'], 30),
-    'summary': (['정리하면', '요약하면', '다시 말하면', '즉'], 25),
-    'exam':    (['시험', '문제', '출제', '나옵니다'], 40),
+    'exam':    (['시험', '문제', '출제', '나옵니다'], 5),
+    'strong':  (['중요', '핵심', '반드시', '꼭', '필수'], 3),
+    'summary': (['정리하면', '요약하면', '다시 말하면', '즉'], 1),
 }
 
 
 def detect_emphasis_by_keywords_weighted(segments: list[dict]) -> list[dict]:
-    """가중치 적용 키워드 감지"""
+    """중요 표현 키워드 점수 계산. 카테고리별로 한 번만 가산한다."""
     print("  [가중치 키워드] 분석 중...")
     emphasis_segments = []
 
     for seg in segments:
         text = seg['text']
-        matched_keywords = []
+        matched_keywords_by_category: dict[str, list[str]] = {}
+        category_scores = {}
+        matched_categories = []
         keyword_score = 0
 
         for category, (keywords, weight) in KEYWORDS_WEIGHTED.items():
+            matched = [keyword for keyword in keywords if keyword in text]
+            matched_keywords_by_category[category] = matched
+            if matched:
+                matched_categories.append(category)
+                category_scores[category] = weight
+                keyword_score += weight
+            else:
+                category_scores[category] = 0
+
+        flat_matched_keywords = []
+        for keywords in matched_keywords_by_category.values():
             for keyword in keywords:
-                if keyword in text:
-                    matched_keywords.append(keyword)
-                    keyword_score += weight
+                if keyword not in flat_matched_keywords:
+                    flat_matched_keywords.append(keyword)
 
-        if keyword_score >= 40:
-            emphasis_segments.append({
-                'start': seg['start'],
-                'end': seg['end'],
-                'text': text,
-                'emphasis_score': float(keyword_score),
-                'matched_keywords': matched_keywords,
-                'detection_method': 'keyword_weighted',
-            })
+        emphasis_segments.append({
+            'start': seg['start'],
+            'end': seg['end'],
+            'text': text,
+            'emphasis_score': float(keyword_score),
+            'importance_keyword_score': int(keyword_score),
+            'category_scores': category_scores,
+            'matched_categories': matched_categories,
+            'matched_keywords': flat_matched_keywords,
+            'matched_keywords_by_category': matched_keywords_by_category,
+            'detected': keyword_score > 0,
+            'detection_method': 'keyword_weighted',
+        })
 
-    print(f"    -> 가중치 키워드: {len(emphasis_segments)}개 (전체의 {len(emphasis_segments)/len(segments)*100:.1f}%)")
+    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
+    ratio = detected_count / len(segments) * 100 if segments else 0.0
+    print(f"    -> 가중치 키워드: {detected_count}개 detected (전체의 {ratio:.1f}%), 점수 {len(emphasis_segments)}개")
     return emphasis_segments
 
 
 # ---------------------------------------------------------------------------
-# 주제 키워드 추출 (형태소 분석 / 어미 제거)
+# 주제 키워드 추출 (Kiwi 형태소 분석 필수)
 # ---------------------------------------------------------------------------
 
 _KIWI = None
@@ -80,9 +98,12 @@ def _get_kiwi():
     if _KIWI is None:
         try:
             from kiwipiepy import Kiwi
-            _KIWI = Kiwi()
-        except ImportError:
-            pass
+        except ImportError as exc:
+            raise RuntimeError(
+                "kiwipiepy가 설치되어 있지 않아 Kiwi 기반 키워드 추출을 중단합니다. "
+                "app/backend/pipeline/requirements.txt를 설치하거나 `pip install kiwipiepy`를 실행하세요."
+            ) from exc
+        _KIWI = Kiwi()
     return _KIWI
 
 
@@ -157,28 +178,96 @@ def _extract_content_words(text: str, min_length: int = 3) -> list[str]:
     if not text:
         return []
     kiwi = _get_kiwi()
-    if kiwi is not None:
-        try:
-            tokens = kiwi.tokenize(text)
-            words: list[str] = []
-            noun_seq: list[str] = []
-            for t in tokens:
-                tag = getattr(t, "tag", None)
-                form = getattr(t, "form", None)
-                if tag in _NOUN_TAGS and form and len(form) >= min_length and form not in _MINIMAL_STOP:
-                    words.append(form)
-                    noun_seq.append(form)
-                else:
-                    if noun_seq:
-                        _add_compound_nouns_from_seq(noun_seq, words, min_length)
-                        noun_seq = []
+    try:
+        tokens = kiwi.tokenize(text)
+    except Exception as exc:
+        raise RuntimeError("Kiwi 형태소 분석 중 오류가 발생해 키워드 추출을 중단합니다.") from exc
+
+    words: list[str] = []
+    noun_seq: list[str] = []
+    for t in tokens:
+        tag = getattr(t, "tag", None)
+        form = getattr(t, "form", None)
+        if tag in _NOUN_TAGS and form and len(form) >= min_length and form not in _MINIMAL_STOP:
+            words.append(form)
+            noun_seq.append(form)
+        else:
             if noun_seq:
                 _add_compound_nouns_from_seq(noun_seq, words, min_length)
-            return words
-        except Exception:
-            pass
-    tokens = _tokenize(text)
-    return _content_stems(tokens, min_length=min_length)
+                noun_seq = []
+    if noun_seq:
+        _add_compound_nouns_from_seq(noun_seq, words, min_length)
+    return words
+
+
+def extract_content_words(text: str, min_length: int = 3) -> list[str]:
+    """Kiwi 기반 내용어 추출 공개 API. Kiwi 미설치/분석 실패 시 예외를 올린다."""
+    return _extract_content_words(text, min_length=min_length)
+
+
+def extract_contiguous_content_words(text: str, min_length: int = 3) -> list[str]:
+    """
+    원문에서 공백/기호 없이 붙어 있던 명사열만 복합어로 묶어 반환한다.
+
+    슬라이드 강조 키워드처럼 사용자에게 직접 노출되는 후보용이다.
+    예: "운영체제 개념" -> ["운영체제", "개념"]
+        "응용소프트웨어 운영체제" -> ["응용소프트웨어", "운영체제"]
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    kiwi = _get_kiwi()
+    try:
+        tokens = kiwi.tokenize(text)
+    except Exception as exc:
+        raise RuntimeError("Kiwi 형태소 분석 중 오류가 발생해 키워드 추출을 중단합니다.") from exc
+
+    result: list[str] = []
+    run: list = []
+    prev_end: Optional[int] = None
+
+    def flush_run() -> None:
+        nonlocal run
+        if not run:
+            return
+        forms = [getattr(t, "form", "") for t in run]
+        if len(forms) >= 2:
+            compound = "".join(forms)
+            if len(compound) >= min_length and compound not in _MINIMAL_STOP:
+                result.append(compound)
+        else:
+            form = forms[0]
+            if len(form) >= min_length and form not in _MINIMAL_STOP:
+                result.append(form)
+        run = []
+
+    for t in tokens:
+        tag = getattr(t, "tag", None)
+        form = getattr(t, "form", None)
+        start = getattr(t, "start", None)
+        length = getattr(t, "len", None)
+        is_content = (
+            tag in _NOUN_TAGS
+            and form
+            and len(form) >= min_length
+            and form not in _MINIMAL_STOP
+            and start is not None
+            and length is not None
+        )
+        if not is_content:
+            flush_run()
+            prev_end = None
+            continue
+
+        if run and prev_end == start:
+            run.append(t)
+        else:
+            flush_run()
+            run = [t]
+        prev_end = int(start) + int(length)
+
+    flush_run()
+    return result
 
 
 def _select_representative_keywords(candidates: set[str]) -> set[str]:
@@ -382,6 +471,98 @@ def get_topic_keywords_filtered_v2(
     return set(repr_sorted)
 
 
+def get_topic_keyword_count_map(
+    segments: list[dict],
+    *,
+    min_freq: int = 5,
+    max_keywords: int = 20,
+    max_segment_ratio: float = 1.0,
+    min_keyword_len: int = 2,
+    candidate_pool_size: int = 80,
+    use_llm_filter: bool = True,
+    _topic_keywords_override: Optional[Set[str]] = None,
+) -> dict[str, int]:
+    """
+    주제 키워드별 전체 등장 횟수를 반환.
+
+    반환값은 최종 주제 키워드로 살아남은 단어만 포함한다.
+    개별 context/slide 집계에서는 같은 키워드가 여러 번 등장해도 이 total_count를 한 번만 더한다.
+    """
+    if not segments:
+        return {}
+
+    counter: Counter = Counter()
+    for seg in segments:
+        text = (seg.get("text") or "").strip()
+        words = _extract_content_words(text, min_length=min_keyword_len)
+        for s in words:
+            counter[s] += 1
+
+    if _topic_keywords_override is not None:
+        topic_keywords = set(_topic_keywords_override)
+    else:
+        topic_keywords = get_topic_keywords_filtered_v2(
+            segments,
+            min_freq=min_freq,
+            max_keywords=max_keywords,
+            max_segment_ratio=max_segment_ratio,
+            min_keyword_len=min_keyword_len,
+            candidate_pool_size=candidate_pool_size,
+            use_llm_filter=use_llm_filter,
+        )
+
+    return {
+        kw: int(counter.get(kw, 0))
+        for kw in sorted(topic_keywords, key=lambda w: (-counter.get(w, 0), w))
+        if counter.get(kw, 0) >= min_freq
+    }
+
+
+def get_topic_keyword_score_map(topic_count_map: dict[str, int]) -> dict[str, int]:
+    """반복 키워드 count 내림차순으로 4개씩 5~1점을 부여한다."""
+    if not topic_count_map:
+        return {}
+    sorted_items = sorted(topic_count_map.items(), key=lambda item: (-int(item[1]), item[0]))
+    result = {}
+    for idx, (kw, _count) in enumerate(sorted_items[:20]):
+        result[kw] = max(1, 5 - idx // 4)
+    return result
+
+
+def topic_keyword_count_items(topic_count_map: dict[str, int]) -> list[dict]:
+    """JSON 저장용 [{keyword,total_count}] 목록으로 변환."""
+    score_map = get_topic_keyword_score_map(topic_count_map)
+    return [
+        {"keyword": kw, "total_count": int(total), "score": int(score_map.get(kw, 0))}
+        for kw, total in sorted(topic_count_map.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def summarize_topic_keyword_counts_for_text(
+    text: str,
+    topic_count_map: dict[str, int],
+    *,
+    min_keyword_len: int = 2,
+) -> dict:
+    """
+    특정 text에 포함된 반복 키워드와 그 키워드들의 total_count 합을 반환.
+
+    같은 text 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
+    """
+    if not text or not topic_count_map:
+        return {"keywords": [], "total_count_sum": 0, "keyword_scores": {}, "score_sum": 0}
+    words = set(_extract_content_words(text, min_length=min_keyword_len))
+    keywords = sorted(words & set(topic_count_map), key=lambda w: (-topic_count_map[w], w))
+    score_map = get_topic_keyword_score_map(topic_count_map)
+    keyword_scores = {kw: int(score_map.get(kw, 0)) for kw in keywords}
+    return {
+        "keywords": keywords,
+        "total_count_sum": int(sum(topic_count_map[kw] for kw in keywords)),
+        "keyword_scores": keyword_scores,
+        "score_sum": int(sum(keyword_scores.values())),
+    }
+
+
 def get_topic_keywords_list(
     segments: list[dict],
     *,
@@ -416,6 +597,8 @@ def detect_emphasis_by_topic_keyword_repetition(
     use_llm_filter: bool = True,
     min_keyword_count: int = 1,
     _topic_keywords_override: Optional[Set[str]] = None,
+    _topic_keyword_count_map: Optional[dict[str, int]] = None,
+    _topic_keyword_score_map: Optional[dict[str, int]] = None,
 ) -> list[dict]:
     """
     전사문 전체에서 반복되는 주제 키워드가 등장하는 구간을 강조로 표시.
@@ -424,9 +607,9 @@ def detect_emphasis_by_topic_keyword_repetition(
     - use_llm_filter: True면 Gemini로 주제 무관 키워드 제거.
     - _topic_keywords_override: 이미 추출된 키워드 집합을 넘기면 재추출/LLM 필터 생략.
     """
-    use_noun_only = _get_kiwi() is not None
     label = f"min_kw>={min_keyword_count}"
-    print(f"  [주제 키워드 반복 ({label})] 분석 중 (전사 전체 기준, {'명사만 사용' if use_noun_only else '스템 사용'})...")
+    _get_kiwi()
+    print(f"  [주제 키워드 반복 ({label})] 분석 중 (전사 전체 기준, Kiwi 명사만 사용)...")
     if not segments:
         return []
 
@@ -445,25 +628,36 @@ def detect_emphasis_by_topic_keyword_repetition(
     if not topic_keywords:
         print(f"    -> 주제 키워드 없음 (반복 단어 부족)")
         return []
+    topic_keyword_score_map = _topic_keyword_score_map
+    if topic_keyword_score_map is None:
+        topic_keyword_score_map = get_topic_keyword_score_map(_topic_keyword_count_map or {})
 
     emphasis_segments = []
     for seg in segments:
         words = _extract_content_words(seg.get("text") or "", min_length=min_keyword_len)
         here = set(words) & topic_keywords
-        if len(here) < min_keyword_count:
-            continue
         repeated_words = sorted(here)
-        score = min(25 + len(repeated_words) * 5 + sum(len(w) for w in repeated_words[:5]), 55)
+        topic_total_count_sum = 0
+        if _topic_keyword_count_map:
+            # 같은 context 안에 같은 키워드가 여러 번 나와도 total_count는 한 번만 더한다.
+            topic_total_count_sum = int(sum(_topic_keyword_count_map.get(w, 0) for w in repeated_words))
+        keyword_scores = {w: int(topic_keyword_score_map.get(w, 0)) for w in repeated_words}
+        topic_keyword_score = int(sum(keyword_scores.values()))
         emphasis_segments.append({
             "start": seg["start"],
             "end": seg["end"],
             "text": seg["text"],
-            "emphasis_score": float(score),
-            "repeated_topic_keywords": repeated_words[:10],
+            "emphasis_score": float(topic_keyword_score),
+            "repeated_topic_keywords": repeated_words,
+            "repeated_topic_keyword_scores": keyword_scores,
+            "audio_topic_total_count_sum": topic_total_count_sum,
+            "audio_topic_keyword_score": topic_keyword_score,
+            "detected": len(here) >= min_keyword_count and topic_keyword_score > 0,
             "detection_method": "topic_keyword_repeat",
         })
 
-    print(f"    -> 주제 키워드 반복 ({label}): {len(emphasis_segments)}개 (전체의 {len(emphasis_segments)/len(segments)*100:.1f}%)")
+    detected_count = sum(1 for s in emphasis_segments if s.get("detected"))
+    print(f"    -> 주제 키워드 반복 ({label}): {detected_count}개 (전체의 {detected_count/len(segments)*100:.1f}%)")
     return emphasis_segments
 
 
@@ -499,10 +693,6 @@ def diagnose_topic_keywords(
         except Exception as e:
             lines.append(f"Kiwi 예시 분석 실패: {e}")
             lines.append("")
-    else:
-        lines.append("Kiwi 미설치 (명사 추출 불가, 스템 방식 사용)")
-        lines.append("")
-
     counter: Counter = Counter()
     segment_presence: Counter = Counter()
     for seg in segments:
