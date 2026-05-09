@@ -102,6 +102,24 @@ class Config:
     DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
     DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
     DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
+    BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN = float(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
+    )
+    BUILD_CANDIDATE_CHANGED_RATIO_MIN = float(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MIN", "0.08")
+    )
+    BUILD_CANDIDATE_CHANGED_RATIO_MAX = float(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CHANGED_RATIO_MAX", "0.55")
+    )
+    BUILD_CANDIDATE_CONTENT_MSE_MAX = float(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_MSE_MAX", "0.022")
+    )
+    BUILD_CANDIDATE_CONTENT_HIST_MIN = float(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HIST_MIN", "0.80")
+    )
+    BUILD_CANDIDATE_CONTENT_HASH_MAX = int(
+        os.getenv("GRAPHLEC_BUILD_CANDIDATE_CONTENT_HASH_MAX", "90")
+    )
 
     # ── 필기 감지 ────────────────────────────────────────────────────
     ANNOT_DIFF_THRESHOLD         = 15    # 픽셀 변화 판정 절댓값 임계
@@ -340,6 +358,39 @@ def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool
         metrics["reason"] = ""
 
     return bool(strict_match or near_identical or content_match), metrics
+
+
+def build_pair_decision(prev_rep: dict, curr_rep: dict, cfg: Config) -> tuple[bool, dict]:
+    """Return whether adjacent base frames are plausible same-slide build steps.
+
+    This is intentionally a candidate detector, not an automatic merge rule.
+    A build step should preserve most of the previous slide structure while
+    adding or revealing a meaningful amount of content.
+    """
+    prev_content = prev_rep["content"]
+    curr_content = curr_rep["content"]
+    metrics = {
+        "prev_edge_preserve": float(edge_preservation_ratio(prev_content, curr_content)),
+        "curr_edge_preserve": float(edge_preservation_ratio(curr_content, prev_content)),
+        "content_changed": float(count_changed_pixels(prev_content, curr_content, cfg.ANNOT_DIFF_THRESHOLD)),
+        "content_mse": float(normalized_mse(prev_content, curr_content)),
+        "content_hist": float(grayscale_hist_correlation(prev_content, curr_content)),
+        "content_phash": int(prev_rep["content_phash"] - curr_rep["content_phash"]),
+        "content_dhash": int(prev_rep["content_dhash"] - curr_rep["content_dhash"]),
+        "phash": int(prev_rep["phash"] - curr_rep["phash"]),
+        "dhash": int(prev_rep["dhash"] - curr_rep["dhash"]),
+    }
+    additive_change = (
+        metrics["prev_edge_preserve"] >= cfg.BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN
+        and cfg.BUILD_CANDIDATE_CHANGED_RATIO_MIN
+        <= metrics["content_changed"]
+        <= cfg.BUILD_CANDIDATE_CHANGED_RATIO_MAX
+        and metrics["content_mse"] <= cfg.BUILD_CANDIDATE_CONTENT_MSE_MAX
+        and metrics["content_hist"] >= cfg.BUILD_CANDIDATE_CONTENT_HIST_MIN
+        and metrics["content_phash"] <= cfg.BUILD_CANDIDATE_CONTENT_HASH_MAX
+    )
+    metrics["reason"] = "additive-build-candidate" if additive_change else ""
+    return bool(additive_change), metrics
 
 
 
@@ -2048,6 +2099,7 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
 
     # 프레임 풀 구성: label → (scene_index, filename)
     pool: dict[str, tuple[int, str]] = {}
+    base_pool: dict[int, str] = {}
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
         base_list  = [f for f in frames if f["capture_type"] == "base"]
@@ -2055,6 +2107,7 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
 
         if base_list:
             pool[f"base{idx}"] = (idx, base_list[0]["filename"])
+            base_pool[idx] = base_list[0]["filename"]
         if annot_list:
             pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"])
 
@@ -2071,6 +2124,56 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     labels = sorted(representatives.keys())
     # duplicate_map[idx] = 이 scene과 같은 슬라이드로 판정된 다른 scene_index 집합
     duplicate_map: dict[int, set[int]] = defaultdict(set)
+    auto_confirmed_scene_pairs: set[tuple[int, int]] = set()
+    review_candidates_by_key: dict[tuple[str, int, int], dict] = {}
+
+    def _candidate_score(candidate: dict) -> tuple:
+        metrics = candidate.get("metrics", {})
+        if candidate.get("candidate_type") == "same_slide_duplicate":
+            return (
+                int(metrics.get("content_phash", 9999)),
+                int(metrics.get("phash", 9999)),
+                float(metrics.get("content_changed", 1.0)),
+            )
+        return (
+            -float(metrics.get("prev_edge_preserve", 0.0)),
+            float(metrics.get("content_changed", 1.0)),
+            int(metrics.get("content_phash", 9999)),
+        )
+
+    def _add_review_candidate(candidate: dict):
+        scene_a, scene_b = sorted(candidate["scene_indices"])
+        if (scene_a, scene_b) in auto_confirmed_scene_pairs:
+            return
+        key = (candidate["candidate_type"], scene_a, scene_b)
+        previous = review_candidates_by_key.get(key)
+        if previous is None or _candidate_score(candidate) < _candidate_score(previous):
+            review_candidates_by_key[key] = candidate
+
+    def _is_base_label(label: str) -> bool:
+        return label.startswith("base")
+
+    def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
+        """Only very strong base-base matches are reflected into metadata now.
+
+        Annot-derived matches and looser content matches stay in the LocalVLM
+        queue so metadata grouping only contains already-confirmed pairs.
+        """
+        if not (_is_base_label(label_a) and _is_base_label(label_b)):
+            return False
+        if metrics.get("reason") not in {"strict", "near-identical"}:
+            return False
+        return (
+            metrics["phash"] <= 12
+            and metrics["content_phash"] <= 12
+            and metrics["changed"] <= 0.025
+            and metrics["content_changed"] <= 0.025
+            and metrics["mse"] <= 0.006
+            and metrics["content_mse"] <= 0.006
+            and metrics["edge"] >= 0.92
+            and metrics["content_edge"] >= 0.92
+            and metrics["hist"] >= 0.995
+        )
 
     log.info("\n──────── 슬라이드 간 복합 비교 (같은 슬라이드 판정용) ────────")
     log.info(
@@ -2109,11 +2212,81 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
                 f"{metrics['hist']:>5.3f}  {flag}"
             )
 
-            if is_dup:
+            if is_dup and _is_auto_confirmed_duplicate(la, lb, metrics):
+                scene_pair = tuple(sorted((idx_a, idx_b)))
+                auto_confirmed_scene_pairs.add(scene_pair)
+                review_candidates_by_key.pop(("same_slide_duplicate", *scene_pair), None)
+                review_candidates_by_key.pop(("same_slide_build", *scene_pair), None)
                 duplicate_map[idx_a].add(idx_b)
                 duplicate_map[idx_b].add(idx_a)
+            elif is_dup:
+                _add_review_candidate({
+                    "candidate_type": "same_slide_duplicate",
+                    "source": "visual_duplicate_postprocess",
+                    "proposed_decision": "needs_vlm_same_slide_check",
+                    "scene_indices": [idx_a, idx_b],
+                    "labels": [la, lb],
+                    "filenames": [pool[la][1], pool[lb][1]],
+                    "reason": metrics["reason"],
+                    "metrics": metrics,
+                })
 
     log.info("──────────────────────────────────────────────────────────────\n")
+
+    base_representatives: dict[int, dict] = {}
+    for idx, fname in base_pool.items():
+        label = f"base{idx}"
+        if label in representatives:
+            base_representatives[idx] = representatives[label]
+
+    ordered_base_indices = sorted(base_representatives)
+    for pos in range(len(ordered_base_indices) - 1):
+        idx_a = ordered_base_indices[pos]
+        idx_b = ordered_base_indices[pos + 1]
+        if idx_b <= idx_a:
+            continue
+        is_build, build_metrics = build_pair_decision(
+            base_representatives[idx_a],
+            base_representatives[idx_b],
+            cfg,
+        )
+        if not is_build:
+            continue
+        if (idx_a, idx_b) in auto_confirmed_scene_pairs:
+            continue
+        review_candidates_by_key.pop(("same_slide_duplicate", idx_a, idx_b), None)
+        _add_review_candidate({
+            "candidate_type": "same_slide_build",
+            "source": "adjacent_base_build_postprocess",
+            "proposed_decision": "same_slide_build",
+            "scene_indices": [idx_a, idx_b],
+            "labels": [f"base{idx_a}", f"base{idx_b}"],
+            "filenames": [base_pool[idx_a], base_pool[idx_b]],
+            "reason": build_metrics["reason"],
+            "metrics": build_metrics,
+        })
+
+    review_candidates = sorted(
+        review_candidates_by_key.values(),
+        key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
+    )
+    review_payload = {
+        "version": 1,
+        "description": (
+            "LocalLLM/VLM 검증용 후보. same_slide_duplicate는 규칙 기반 같은 슬라이드 후보이고, "
+            "same_slide_build는 연속 base가 같은 강의자료 슬라이드의 build 단계일 가능성이 있는 후보이다."
+        ),
+        "candidate_count": len(review_candidates),
+        "candidates": review_candidates,
+    }
+    review_path = out_path / "llm_review_candidates.json"
+    with open(review_path, "w", encoding="utf-8") as f:
+        json.dump(review_payload, f, ensure_ascii=False, indent=2)
+    log.info(
+        "LocalLLM/VLM 검증 후보 저장: %s (count=%s)",
+        review_path,
+        len(review_candidates),
+    )
 
     # ── union-find로 전이적 같은 슬라이드 그룹 확정 ────────────────────── #
     all_indices = list(groups.keys())
