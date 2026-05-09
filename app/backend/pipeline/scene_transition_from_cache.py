@@ -156,15 +156,15 @@ def prune_transition_middle_frames(
     min_cluster_scenes: int = 3,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """
-    Remove only the middle candidates from rapid transition clusters.
+    Detect rapid transition clusters without removing frames.
 
     A real fast slide change often looks like:
 
       clean slide A -> transition frames -> clean slide B
 
-    The first and last candidates are therefore kept. Only candidates between
-    them are pruned. This is deliberately conservative: a lone quick pair is
-    left intact, and the final candidate in a burst is never removed here.
+    Older versions removed the middle candidates here. We now keep all records
+    and pass the middle candidates to LocalVLM so transition/noise decisions are
+    made with visual context instead of a fixed time-gap rule.
     """
     if len(records) < min_cluster_scenes:
         return records, [], []
@@ -190,8 +190,7 @@ def prune_transition_middle_frames(
             j += 1
 
         if len(cluster) >= min_cluster_scenes:
-            kept.append(cluster[0])
-            kept.append(cluster[-1])
+            kept.extend(cluster)
             middle = cluster[1:-1]
             review_candidates.append({
                 "reason": "transition_cluster",
@@ -217,20 +216,8 @@ def prune_transition_middle_frames(
                     for item in cluster
                 ],
             })
-            for item in middle:
-                pruned.append({
-                    "scene_index": item.get("scene_index"),
-                    "filename": item.get("filename"),
-                    "scene_start_sec": item.get("scene_start_sec"),
-                    "base_timestamp_sec": item.get("base_timestamp_sec"),
-                    "reason": item.get("reason"),
-                    "prune_reason": "transition_middle_frame",
-                    "cluster_start_scene_index": cluster[0].get("scene_index"),
-                    "cluster_end_scene_index": cluster[-1].get("scene_index"),
-                    "cluster_gap_sec": max_gap_sec,
-                })
             log.info(
-                "[prune] transition cluster %s-%s: removed %s middle candidates (%s)",
+                "[transition-review] cluster %s-%s: queued %s middle candidates (%s)",
                 cluster[0].get("scene_index"),
                 cluster[-1].get("scene_index"),
                 len(middle),
@@ -241,8 +228,6 @@ def prune_transition_middle_frames(
             kept.append(cluster[0])
             i += 1
 
-    if pruned:
-        _remove_pruned_scene_previews(out_dir, pruned)
     return kept, pruned, review_candidates
 
 
@@ -493,7 +478,9 @@ def run_cache_probe(
         "regions_path": str(regions_path) if regions_path else None,
         "region_guard_sec": region_guard_sec if regions_path else 0.0,
         "postprocess": {
-            "prune_transition_middle_frames": prune_bursts,
+            "detect_transition_clusters": prune_bursts,
+            "prune_transition_middle_frames": False,
+            "transition_candidates_are_vlm_review_only": True,
             "transient_burst_gap_sec": transient_burst_gap_sec,
             "transition_min_cluster_scenes": max(3, transient_burst_min_extra_scenes + 1),
             "pruned_count": len(pruned_records),
@@ -523,9 +510,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Output scene probe directory")
     parser.add_argument("--regions", help="timeline_segments.json from Step 1; only type=slide regions are processed")
     parser.add_argument("--region-guard-sec", type=float, default=1.0, help="Shrink slide regions next to non-slide regions by this many seconds")
-    parser.add_argument("--no-prune-transient-bursts", action="store_true", help="Disable rapid transition-cluster middle-frame pruning")
+    parser.add_argument("--no-prune-transient-bursts", action="store_true", help="Legacy name: disable rapid transition-cluster VLM candidate generation")
     parser.add_argument("--transient-burst-gap-sec", type=float, default=3.0, help="Max gap between adjacent scene candidates in one transition cluster")
-    parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="Legacy option: default 2 means prune only clusters with 3+ candidates")
+    parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="Legacy option: default 2 means review clusters with 3+ candidates")
     parser.add_argument("--resize-width", type=int, default=ProbeConfig.resize_width)
     parser.add_argument("--delay-sec", type=float, default=ProbeConfig.delay_sec)
     parser.add_argument("--max-pending-sec", type=float, default=ProbeConfig.max_pending_sec)
