@@ -2188,7 +2188,7 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
             if key in existing_keys:
                 continue
 
-            candidates.append({
+            candidates.append(limit_vlm_review_candidate_images({
                 "candidate_type": "transition_noise",
                 "source": "rapid_transition_cluster_postprocess",
                 "proposed_decision": "needs_vlm_transition_check",
@@ -2206,7 +2206,7 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
                     "cluster_end_sec": candidate.get("cluster_end_sec"),
                     "max_adjacent_gap_sec": candidate.get("max_adjacent_gap_sec"),
                 },
-            })
+            }))
             existing_keys.add(key)
             added += 1
 
@@ -2221,6 +2221,75 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     with open(candidates_path, "w", encoding="utf-8") as f:
         json.dump(candidates_payload, f, ensure_ascii=False, indent=2)
     log.info("LocalLLM/VLM transition 후보 병합: %s개 추가", added)
+
+
+def limit_vlm_review_candidate_images(candidate: dict) -> dict:
+    """Keep LocalVLM visual inputs small and type-specific.
+
+    - transition_noise: exactly the local [previous, middle, next] context.
+    - same_slide_duplicate: at most 3 images, preserving broad context if a
+      future grouped candidate contains more than pairwise inputs.
+    - same_slide_build: previous and completed/base candidate only.
+    """
+    candidate = dict(candidate)
+    candidate_type = candidate.get("candidate_type")
+    scene_indices = list(candidate.get("scene_indices") or [])
+    if not scene_indices:
+        return candidate
+
+    if candidate_type == "transition_noise":
+        max_images = 3
+        middle_indices = list(candidate.get("middle_scene_indices") or [])
+        positions: list[int] = []
+        for middle in middle_indices[:1]:
+            if middle in scene_indices:
+                mid_pos = scene_indices.index(middle)
+                positions = [
+                    max(0, mid_pos - 1),
+                    mid_pos,
+                    min(len(scene_indices) - 1, mid_pos + 1),
+                ]
+                break
+        if not positions:
+            positions = list(range(min(max_images, len(scene_indices))))
+    elif candidate_type == "same_slide_build":
+        max_images = 2
+        positions = [0, len(scene_indices) - 1] if len(scene_indices) > 1 else [0]
+    elif candidate_type == "same_slide_duplicate":
+        max_images = 3
+        if len(scene_indices) <= max_images:
+            positions = list(range(len(scene_indices)))
+        else:
+            positions = sorted({0, len(scene_indices) // 2, len(scene_indices) - 1})
+    else:
+        return candidate
+
+    positions = sorted(dict.fromkeys(pos for pos in positions if 0 <= pos < len(scene_indices)))
+    if len(positions) >= len(scene_indices):
+        candidate["vlm_image_policy"] = {
+            "max_images": max_images,
+            "selected_count": len(scene_indices),
+        }
+        return candidate
+
+    for field in ("scene_indices", "filenames", "labels"):
+        values = candidate.get(field)
+        if isinstance(values, list) and len(values) == len(scene_indices):
+            candidate[field] = [values[pos] for pos in positions]
+
+    if candidate_type == "transition_noise":
+        scenes = candidate.get("scene_indices") or []
+        middle = [idx for idx in candidate.get("middle_scene_indices", []) if idx in scenes]
+        context = [idx for idx in scenes if idx not in middle]
+        candidate["middle_scene_indices"] = middle
+        candidate["context_scene_indices"] = context
+
+    candidate["vlm_image_policy"] = {
+        "max_images": max_images,
+        "selected_count": len(candidate.get("scene_indices") or []),
+        "selected_positions": positions,
+    }
+    return candidate
 
 
 # ──────────────────────────────────────────────
@@ -2418,10 +2487,13 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             "metrics": build_metrics,
         })
 
-    review_candidates = sorted(
-        review_candidates_by_key.values(),
-        key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
-    )
+    review_candidates = [
+        limit_vlm_review_candidate_images(candidate)
+        for candidate in sorted(
+            review_candidates_by_key.values(),
+            key=lambda item: (item["scene_indices"][0], item["scene_indices"][1], item["candidate_type"]),
+        )
+    ]
     review_payload = {
         "version": 1,
         "description": (
