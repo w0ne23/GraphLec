@@ -88,6 +88,7 @@ class Config:
         "입니다", "이에요", "이다", "한다", "된다",
         # 일반 명사·대명사
         "것", "거", "수", "때", "더", "많이", "같은", "이런", "그런",
+        "시절", "이후", "전과", "앎",
         # 추상 메타 단어 (강의 구조어)
         "개념", "정의", "목표", "목적", "기능", "시작", "발전", "차이",
         "종류", "특징", "핵심", "단어", "강의", "내용", "설명", "이해",
@@ -98,6 +99,7 @@ class Config:
         # 영어 불용어
         "the", "a", "an", "is", "are", "was", "were", "to", "of", "in",
         "and", "or", "for", "with", "that", "this", "be", "by",
+        "chapter",
     })
 
 
@@ -274,11 +276,18 @@ def normalize_keyword(word: str) -> str:
     return word.strip()
 
 
+def _extract_content_words(text: str, min_len: int) -> list[str]:
+    try:
+        from .emphasis_keyword import extract_contiguous_content_words
+    except ImportError:
+        from emphasis_keyword import extract_contiguous_content_words
+    return extract_contiguous_content_words(text, min_length=min_len)
+
+
 def extract_keywords_from_text(text: str, stopwords: frozenset, min_len: int) -> set[str]:
-    tokens = re.split(r'[\s,，.·/\-–—()（）\[\]]+', text)
     result = set()
-    for t in tokens:
-        kw = normalize_keyword(t)
+    for word in _extract_content_words(text, min_len):
+        kw = normalize_keyword(word)
         if len(kw) >= min_len and kw not in stopwords:
             result.add(kw)
     return result
@@ -676,33 +685,16 @@ def run_fusion(cfg: Config) -> dict:
 
         # 4번째 소스: 슬라이드 본문 라인 단위 스캔
         # 강조 신호 없이도 슬라이드에 반복 등장하는 핵심 개념 포착
-        # 두 가지 방식 병행:
-        #   (a) 단어 분리: "독점", "자원" 등 단일 개념어
-        #   (b) 라인 전체: "파일 시스템", "메모리 관리" 등 공백 포함 복합어 보존
+        # Kiwi 기반 내용어 추출: 공백/기호 없이 붙어 있던 명사열만 복합어로 수집
         slide_text_kws: list[str] = []
         for line in cl_slide.get("t1", "").splitlines():
             line = line.strip()
             if len(line) < cfg.MIN_SLIDE_TEXT_LINE_LEN:
                 continue  # 불릿(•, □), 번호(1.), 짧은 기호 제외
 
-            # (a) 단어 분리 토큰
             slide_text_kws.extend(
                 extract_keywords_from_text(line, cfg.STOPWORDS, cfg.MIN_KEYWORD_LEN)
             )
-
-            # (b) 복합어 후보: 공백 포함 라인이 짧으면(2~4어절) 라인 자체도 후보로 추가
-            #     "파일 시스템 관리(file system management)" 같은 라인을
-            #     괄호·영문·불릿 제거 후 2~4어절 복합어로 포착
-            #     주의: normalize_keyword는 공백을 제거하므로 복합어에는 사용 금지
-            line_clean = re.sub(r'\(.*?\)', '', line).strip()           # 괄호 내용 제거
-            line_clean = re.sub(r'[a-zA-Z0-9/]', '', line_clean).strip() # 영문·숫자·슬래시 제거
-            line_clean = re.sub(r'^[\s\-·•□▪◦]+', '', line_clean)      # 앞 불릿·대시 제거
-            line_clean = re.sub(r'\s+', ' ', line_clean).strip()
-            words = [w for w in line_clean.split() if len(w) >= 2]       # 1글자 제거
-            compound = ' '.join(words)
-            if 2 <= len(words) <= 4 and compound not in cfg.STOPWORDS:
-                if len(compound) >= cfg.MIN_KEYWORD_LEN:
-                    slide_text_kws.append(compound)
 
         emphasized_keywords = build_emphasized_keywords(
             audio_kws, visual_kws, annot_kws, slide_text_kws, cfg
@@ -830,18 +822,18 @@ def run_fusion(cfg: Config) -> dict:
 
         # ── scene 통합 ───────────────────────────────────────────────────────
         fused_scene = {
-            "slide_id":     slide_id,
             "scene_id":     scene_id,
-            "slide_number": slide_num,
             "scene_number": scene_num,
             "scene_index": scene_index,
+            "start_sec":    start_sec,
+            "end_sec":      end_sec,
+            "role":         cl_slide.get("role"),
+            "slide_id":     slide_id,
+            "slide_number": slide_num,
             "slide_canonical_number": cl_slide.get("slide_canonical_number", slide_num),
             "slide_visit_order": cl_slide.get("slide_visit_order", 1),
             "slide_is_revisit": cl_slide.get("slide_is_revisit", False),
             "representative_scene_number": cl_slide.get("representative_scene_number", slide_num),
-            "role":         cl_slide.get("role"),
-            "start_sec":    start_sec,
-            "end_sec":      end_sec,
             "emphasis_score": {
                 "annotation": scene_annotation_score,
                 "total": scene_annotation_score,

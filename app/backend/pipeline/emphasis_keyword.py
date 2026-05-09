@@ -4,7 +4,7 @@
 - 가중치 키워드: 하드코딩된 중요/요약/시험 관련 표현 매칭
 - 주제 키워드 반복: 전사문 전체에서 반복 등장하는 내용어 기반
 
-키워드 추출: kiwipiepy 설치 시 형태소 분석(명사만), 미설치 시 어미 제거 방식.
+키워드 추출: kiwipiepy/Kiwi 형태소 분석 필수(명사만). 미설치 시 중단.
 주제 키워드 LLM 필터: Gemini로 강의 흐름과 무관한 후보 제거.
 
 진단: EMPHASIS_DEBUG=1 python main.py ... 로 실행하면 주제 키워드 진단 결과를 output/ 폴더에 저장.
@@ -87,7 +87,7 @@ def detect_emphasis_by_keywords_weighted(segments: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 주제 키워드 추출 (형태소 분석 / 어미 제거)
+# 주제 키워드 추출 (Kiwi 형태소 분석 필수)
 # ---------------------------------------------------------------------------
 
 _KIWI = None
@@ -98,9 +98,12 @@ def _get_kiwi():
     if _KIWI is None:
         try:
             from kiwipiepy import Kiwi
-            _KIWI = Kiwi()
-        except ImportError:
-            pass
+        except ImportError as exc:
+            raise RuntimeError(
+                "kiwipiepy가 설치되어 있지 않아 Kiwi 기반 키워드 추출을 중단합니다. "
+                "app/backend/pipeline/requirements.txt를 설치하거나 `pip install kiwipiepy`를 실행하세요."
+            ) from exc
+        _KIWI = Kiwi()
     return _KIWI
 
 
@@ -175,28 +178,96 @@ def _extract_content_words(text: str, min_length: int = 3) -> list[str]:
     if not text:
         return []
     kiwi = _get_kiwi()
-    if kiwi is not None:
-        try:
-            tokens = kiwi.tokenize(text)
-            words: list[str] = []
-            noun_seq: list[str] = []
-            for t in tokens:
-                tag = getattr(t, "tag", None)
-                form = getattr(t, "form", None)
-                if tag in _NOUN_TAGS and form and len(form) >= min_length and form not in _MINIMAL_STOP:
-                    words.append(form)
-                    noun_seq.append(form)
-                else:
-                    if noun_seq:
-                        _add_compound_nouns_from_seq(noun_seq, words, min_length)
-                        noun_seq = []
+    try:
+        tokens = kiwi.tokenize(text)
+    except Exception as exc:
+        raise RuntimeError("Kiwi 형태소 분석 중 오류가 발생해 키워드 추출을 중단합니다.") from exc
+
+    words: list[str] = []
+    noun_seq: list[str] = []
+    for t in tokens:
+        tag = getattr(t, "tag", None)
+        form = getattr(t, "form", None)
+        if tag in _NOUN_TAGS and form and len(form) >= min_length and form not in _MINIMAL_STOP:
+            words.append(form)
+            noun_seq.append(form)
+        else:
             if noun_seq:
                 _add_compound_nouns_from_seq(noun_seq, words, min_length)
-            return words
-        except Exception:
-            pass
-    tokens = _tokenize(text)
-    return _content_stems(tokens, min_length=min_length)
+                noun_seq = []
+    if noun_seq:
+        _add_compound_nouns_from_seq(noun_seq, words, min_length)
+    return words
+
+
+def extract_content_words(text: str, min_length: int = 3) -> list[str]:
+    """Kiwi 기반 내용어 추출 공개 API. Kiwi 미설치/분석 실패 시 예외를 올린다."""
+    return _extract_content_words(text, min_length=min_length)
+
+
+def extract_contiguous_content_words(text: str, min_length: int = 3) -> list[str]:
+    """
+    원문에서 공백/기호 없이 붙어 있던 명사열만 복합어로 묶어 반환한다.
+
+    슬라이드 강조 키워드처럼 사용자에게 직접 노출되는 후보용이다.
+    예: "운영체제 개념" -> ["운영체제", "개념"]
+        "응용소프트웨어 운영체제" -> ["응용소프트웨어", "운영체제"]
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    kiwi = _get_kiwi()
+    try:
+        tokens = kiwi.tokenize(text)
+    except Exception as exc:
+        raise RuntimeError("Kiwi 형태소 분석 중 오류가 발생해 키워드 추출을 중단합니다.") from exc
+
+    result: list[str] = []
+    run: list = []
+    prev_end: Optional[int] = None
+
+    def flush_run() -> None:
+        nonlocal run
+        if not run:
+            return
+        forms = [getattr(t, "form", "") for t in run]
+        if len(forms) >= 2:
+            compound = "".join(forms)
+            if len(compound) >= min_length and compound not in _MINIMAL_STOP:
+                result.append(compound)
+        else:
+            form = forms[0]
+            if len(form) >= min_length and form not in _MINIMAL_STOP:
+                result.append(form)
+        run = []
+
+    for t in tokens:
+        tag = getattr(t, "tag", None)
+        form = getattr(t, "form", None)
+        start = getattr(t, "start", None)
+        length = getattr(t, "len", None)
+        is_content = (
+            tag in _NOUN_TAGS
+            and form
+            and len(form) >= min_length
+            and form not in _MINIMAL_STOP
+            and start is not None
+            and length is not None
+        )
+        if not is_content:
+            flush_run()
+            prev_end = None
+            continue
+
+        if run and prev_end == start:
+            run.append(t)
+        else:
+            flush_run()
+            run = [t]
+        prev_end = int(start) + int(length)
+
+    flush_run()
+    return result
 
 
 def _select_representative_keywords(candidates: set[str]) -> set[str]:
@@ -536,9 +607,9 @@ def detect_emphasis_by_topic_keyword_repetition(
     - use_llm_filter: True면 Gemini로 주제 무관 키워드 제거.
     - _topic_keywords_override: 이미 추출된 키워드 집합을 넘기면 재추출/LLM 필터 생략.
     """
-    use_noun_only = _get_kiwi() is not None
     label = f"min_kw>={min_keyword_count}"
-    print(f"  [주제 키워드 반복 ({label})] 분석 중 (전사 전체 기준, {'명사만 사용' if use_noun_only else '스템 사용'})...")
+    _get_kiwi()
+    print(f"  [주제 키워드 반복 ({label})] 분석 중 (전사 전체 기준, Kiwi 명사만 사용)...")
     if not segments:
         return []
 
@@ -622,10 +693,6 @@ def diagnose_topic_keywords(
         except Exception as e:
             lines.append(f"Kiwi 예시 분석 실패: {e}")
             lines.append("")
-    else:
-        lines.append("Kiwi 미설치 (명사 추출 불가, 스템 방식 사용)")
-        lines.append("")
-
     counter: Counter = Counter()
     segment_presence: Counter = Counter()
     for seg in segments:
