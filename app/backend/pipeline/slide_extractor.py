@@ -1269,6 +1269,8 @@ def _extract_slides_core(
     metadata = add_slide_time_ranges(metadata, duration)
     metadata = mark_clean_final_frames(metadata)
     metadata = mark_visual_duplicates(metadata, out_path, cfg)
+    if run_postprocess:
+        metadata = maybe_run_local_vlm_review(metadata, out_path)
     metadata = finalize_scene_slide_metadata(metadata)
     log_scene_slide_summary(metadata)
 
@@ -1671,6 +1673,7 @@ def _extract_slides_legacy(
         metadata = add_slide_time_ranges(metadata, duration)
         metadata = mark_clean_final_frames(metadata)
         metadata = mark_visual_duplicates(metadata, out_path, cfg)
+        metadata = maybe_run_local_vlm_review(metadata, out_path)
         metadata = finalize_scene_slide_metadata(metadata)
         log_scene_slide_summary(metadata)
 
@@ -1757,6 +1760,8 @@ def _extract_slides_staged(
     cfg = Config()
     metadata = mark_clean_final_frames(metadata)
     metadata = mark_visual_duplicates(metadata, out_path, cfg)
+    add_transition_review_candidates(out_path, scenes_path, metadata)
+    metadata = maybe_run_local_vlm_review(metadata, out_path)
     metadata = finalize_scene_slide_metadata(metadata)
     log_scene_slide_summary(metadata)
 
@@ -2069,6 +2074,146 @@ def mark_clean_final_frames(metadata: list[dict]) -> list[dict]:
             item["is_clean_final"] = item is base
 
     return metadata
+
+
+def maybe_run_local_vlm_review(metadata: list[dict], out_path: Path) -> list[dict]:
+    """Optionally run LocalVLM review after candidate generation.
+
+    GRAPHLEC_VLM_ENABLED=1 writes llm_review_results.json.
+    GRAPHLEC_VLM_APPLY=1 additionally applies confident decisions to metadata.
+    """
+    try:
+        from .local_vlm import (
+            apply_vlm_slide_decisions,
+            local_vlm_apply_enabled,
+            local_vlm_enabled,
+            run_local_vlm_review,
+        )
+    except ImportError:  # pragma: no cover - direct script execution fallback
+        from local_vlm import (
+            apply_vlm_slide_decisions,
+            local_vlm_apply_enabled,
+            local_vlm_enabled,
+            run_local_vlm_review,
+        )
+
+    if not local_vlm_enabled():
+        return metadata
+
+    log.info("LocalVLM 후보 판정 실행: %s", out_path / "llm_review_candidates.json")
+    review_payload = run_local_vlm_review(out_path)
+    log.info(
+        "LocalVLM 후보 판정 완료: processed=%s errors=%s apply=%s",
+        review_payload.get("processed_count", 0),
+        review_payload.get("error_count", 0),
+        local_vlm_apply_enabled(),
+    )
+    if local_vlm_apply_enabled():
+        return apply_vlm_slide_decisions(metadata, review_payload)
+    return metadata
+
+
+def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata: list[dict]) -> None:
+    """Merge Step 2 rapid-transition clusters into LocalVLM review candidates.
+
+    Step 2 keeps all rapid cluster bases now. This converts its source
+    scene_index values into the final materialized scene_index values so the
+    VLM can judge [previous, middle, next] base images before anything is
+    dropped from metadata.
+    """
+    candidates_path = out_path / "llm_review_candidates.json"
+    if not candidates_path.exists() or not scenes_path.exists():
+        return
+
+    try:
+        with open(candidates_path, "r", encoding="utf-8") as f:
+            candidates_payload = json.load(f)
+        with open(scenes_path, "r", encoding="utf-8") as f:
+            scenes_payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("transition 후보 병합 실패: %s", exc)
+        return
+
+    transition_candidates = (
+        scenes_payload.get("postprocess", {}).get("review_candidates", [])
+    )
+    if not transition_candidates:
+        return
+
+    source_to_scene: dict[int, int] = {}
+    filename_by_scene: dict[int, str] = {}
+    for item in metadata:
+        if item.get("capture_type") != "base" or item.get("scene_type", "slide") != "slide":
+            continue
+        scene_index = int(item["scene_index"])
+        source_scene_index = int(item.get("source_scene_index") or scene_index)
+        source_to_scene[source_scene_index] = scene_index
+        filename_by_scene[scene_index] = item["filename"]
+
+    candidates = candidates_payload.setdefault("candidates", [])
+    existing_keys = {
+        (
+            candidate.get("candidate_type"),
+            tuple(candidate.get("scene_indices") or []),
+            tuple(candidate.get("middle_scene_indices") or []),
+        )
+        for candidate in candidates
+    }
+
+    added = 0
+    for candidate in transition_candidates:
+        source_cluster = [int(x) for x in candidate.get("cluster_scene_indices", [])]
+        scene_indices = [source_to_scene[x] for x in source_cluster if x in source_to_scene]
+        if len(scene_indices) < 3:
+            continue
+
+        source_middle = [int(x) for x in candidate.get("middle_scene_indices", [])]
+        middle_scene_indices = [source_to_scene[x] for x in source_middle if x in source_to_scene]
+        if not middle_scene_indices:
+            continue
+
+        source_context = [int(x) for x in candidate.get("context_scene_indices", [])]
+        context_scene_indices = [source_to_scene[x] for x in source_context if x in source_to_scene]
+        filenames = [filename_by_scene.get(idx) for idx in scene_indices]
+        if any(not filename for filename in filenames):
+            continue
+
+        key = ("transition_noise", tuple(scene_indices), tuple(middle_scene_indices))
+        if key in existing_keys:
+            continue
+
+        candidates.append({
+            "candidate_type": "transition_noise",
+            "source": "rapid_transition_cluster_postprocess",
+            "proposed_decision": "needs_vlm_transition_check",
+            "scene_indices": scene_indices,
+            "context_scene_indices": context_scene_indices,
+            "middle_scene_indices": middle_scene_indices,
+            "filenames": filenames,
+            "reason": candidate.get("reason", "transition_cluster"),
+            "metrics": {
+                "source_cluster_scene_indices": source_cluster,
+                "source_context_scene_indices": source_context,
+                "source_middle_scene_indices": source_middle,
+                "cluster_start_sec": candidate.get("cluster_start_sec"),
+                "cluster_end_sec": candidate.get("cluster_end_sec"),
+                "max_adjacent_gap_sec": candidate.get("max_adjacent_gap_sec"),
+            },
+        })
+        existing_keys.add(key)
+        added += 1
+
+    if not added:
+        return
+
+    candidates_payload["candidate_count"] = len(candidates)
+    candidates_payload["description"] = (
+        str(candidates_payload.get("description", ""))
+        + " transition_noise는 빠른 base cluster의 중간 scene이 전환 중 캡처인지 검증하는 후보이다."
+    ).strip()
+    with open(candidates_path, "w", encoding="utf-8") as f:
+        json.dump(candidates_payload, f, ensure_ascii=False, indent=2)
+    log.info("LocalLLM/VLM transition 후보 병합: %s개 추가", added)
 
 
 # ──────────────────────────────────────────────
