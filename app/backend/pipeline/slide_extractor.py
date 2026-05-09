@@ -2163,45 +2163,52 @@ def add_transition_review_candidates(out_path: Path, scenes_path: Path, metadata
     added = 0
     for candidate in transition_candidates:
         source_cluster = [int(x) for x in candidate.get("cluster_scene_indices", [])]
-        scene_indices = [source_to_scene[x] for x in source_cluster if x in source_to_scene]
-        if len(scene_indices) < 3:
+        if len(source_cluster) < 3:
             continue
 
         source_middle = [int(x) for x in candidate.get("middle_scene_indices", [])]
-        middle_scene_indices = [source_to_scene[x] for x in source_middle if x in source_to_scene]
-        if not middle_scene_indices:
-            continue
+        for source_mid in source_middle:
+            if source_mid not in source_cluster:
+                continue
+            pos = source_cluster.index(source_mid)
+            if pos <= 0 or pos >= len(source_cluster) - 1:
+                continue
+            source_triplet = [source_cluster[pos - 1], source_mid, source_cluster[pos + 1]]
+            if any(source not in source_to_scene for source in source_triplet):
+                continue
 
-        source_context = [int(x) for x in candidate.get("context_scene_indices", [])]
-        context_scene_indices = [source_to_scene[x] for x in source_context if x in source_to_scene]
-        filenames = [filename_by_scene.get(idx) for idx in scene_indices]
-        if any(not filename for filename in filenames):
-            continue
+            scene_indices = [source_to_scene[source] for source in source_triplet]
+            middle_scene_indices = [source_to_scene[source_mid]]
+            context_scene_indices = [scene_indices[0], scene_indices[2]]
+            filenames = [filename_by_scene.get(idx) for idx in scene_indices]
+            if any(not filename for filename in filenames):
+                continue
 
-        key = ("transition_noise", tuple(scene_indices), tuple(middle_scene_indices))
-        if key in existing_keys:
-            continue
+            key = ("transition_noise", tuple(scene_indices), tuple(middle_scene_indices))
+            if key in existing_keys:
+                continue
 
-        candidates.append({
-            "candidate_type": "transition_noise",
-            "source": "rapid_transition_cluster_postprocess",
-            "proposed_decision": "needs_vlm_transition_check",
-            "scene_indices": scene_indices,
-            "context_scene_indices": context_scene_indices,
-            "middle_scene_indices": middle_scene_indices,
-            "filenames": filenames,
-            "reason": candidate.get("reason", "transition_cluster"),
-            "metrics": {
-                "source_cluster_scene_indices": source_cluster,
-                "source_context_scene_indices": source_context,
-                "source_middle_scene_indices": source_middle,
-                "cluster_start_sec": candidate.get("cluster_start_sec"),
-                "cluster_end_sec": candidate.get("cluster_end_sec"),
-                "max_adjacent_gap_sec": candidate.get("max_adjacent_gap_sec"),
-            },
-        })
-        existing_keys.add(key)
-        added += 1
+            candidates.append({
+                "candidate_type": "transition_noise",
+                "source": "rapid_transition_cluster_postprocess",
+                "proposed_decision": "needs_vlm_transition_check",
+                "scene_indices": scene_indices,
+                "context_scene_indices": context_scene_indices,
+                "middle_scene_indices": middle_scene_indices,
+                "filenames": filenames,
+                "reason": candidate.get("reason", "transition_cluster"),
+                "metrics": {
+                    "source_cluster_scene_indices": source_cluster,
+                    "source_triplet_scene_indices": source_triplet,
+                    "source_context_scene_indices": [source_triplet[0], source_triplet[2]],
+                    "source_middle_scene_indices": [source_mid],
+                    "cluster_start_sec": candidate.get("cluster_start_sec"),
+                    "cluster_end_sec": candidate.get("cluster_end_sec"),
+                    "max_adjacent_gap_sec": candidate.get("max_adjacent_gap_sec"),
+                },
+            })
+            existing_keys.add(key)
+            added += 1
 
     if not added:
         return
