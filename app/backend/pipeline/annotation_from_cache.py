@@ -22,8 +22,10 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import cv2
 import numpy as np
@@ -97,6 +99,47 @@ def _sample_index_for_frame(frame_no: int, frame_to_sample: dict[int, int], samp
     return max(1, int(round(frame_no / max(1, sample_every))))
 
 
+def _iter_sample_cache_range(
+    cache_dir: str | Path,
+    manifest: dict,
+    start_sample_index: int,
+    end_sample_index: int,
+):
+    """Read a bounded interval from the sampled MJPG cache.
+
+    Random seeking is intentionally limited to the generated sample cache, not
+    the original lecture video. The cache is our analysis coordinate system and
+    is much safer to seek than arbitrary source encodings.
+    """
+    cache_path = Path(cache_dir)
+    video_path = cache_path / manifest["video_filename"]
+    frames = manifest.get("frames", [])
+    if not frames:
+        return
+
+    start_sample_index = max(1, int(start_sample_index))
+    end_sample_index = min(int(end_sample_index), len(frames))
+    if end_sample_index < start_sample_index:
+        return
+
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise FileNotFoundError(f"Cannot open sampled cache video: {video_path}")
+
+    try:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_sample_index - 1)
+        for offset, sample_index in enumerate(range(start_sample_index, end_sample_index + 1)):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                raise RuntimeError(
+                    f"Sample cache video ended early: {video_path} sample={sample_index}"
+                )
+            frame_info = frames[start_sample_index - 1 + offset]
+            yield frame_info, frame
+    finally:
+        cap.release()
+
+
 def _build_scene_intervals(scene_payload: dict, manifest: dict, cfg: AnnotationConfig) -> list[dict]:
     scenes = scene_payload["scenes"]
     frames = manifest.get("frames", [])
@@ -160,6 +203,20 @@ def _save_annotation_preview(
     filename = f"scene_{scene_index:03d}_annot_{annot_index:02d}.jpg"
     cv2.imwrite(str(output_dir / filename), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
     return filename
+
+
+def _new_scene_result(interval: dict) -> dict:
+    scene = interval["scene"]
+    return {
+        "scene_index": int(scene["scene_index"]),
+        "base_frame_no": int(interval["base_frame_no"]),
+        "base_timestamp_sec": float(interval["base_timestamp_sec"]),
+        "start_sample_index": int(interval["start_sample_index"]),
+        "detect_start_sample_index": int(interval["detect_start_sample_index"]),
+        "end_sample_index": int(interval["end_sample_index"]),
+        "region_segment_index": interval.get("region_segment_index"),
+        "annotations": [],
+    }
 
 
 class AnnotationState:
@@ -267,6 +324,85 @@ class AnnotationState:
         self.prev_decision = decision.copy()
 
 
+def _detect_interval_annotations(
+    cache_dir: str,
+    manifest: dict,
+    interval: dict,
+    cfg: AnnotationConfig,
+    sampled_fps: float,
+    output_dir: str,
+) -> dict:
+    out_dir = Path(output_dir)
+    scene_result = _new_scene_result(interval)
+    active_state: AnnotationState | None = None
+
+    for frame_info, frame in _iter_sample_cache_range(
+        cache_dir,
+        manifest,
+        int(interval["start_sample_index"]),
+        int(interval["end_sample_index"]),
+    ):
+        sample_index = int(frame_info["sample_index"])
+        decision = _decision_frame(frame, cfg)
+
+        if active_state is None:
+            active_state = AnnotationState(interval["scene"], decision, frame, cfg, sampled_fps)
+            continue
+
+        if sample_index < int(interval["detect_start_sample_index"]):
+            continue
+
+        capture = active_state.process(frame_info, frame, decision)
+        if capture is not None:
+            _record_capture(out_dir, interval, capture, 0, scene_result)
+
+    if active_state is not None:
+        capture = active_state.flush()
+        if capture is not None:
+            _record_capture(out_dir, interval, capture, 0, scene_result)
+
+    return scene_result
+
+
+def _detect_annotation_chunk_worker(args: tuple) -> list[dict]:
+    cache_dir, manifest, intervals, cfg_dict, sampled_fps, output_dir = args
+    cfg = AnnotationConfig(**cfg_dict)
+    results = []
+    for interval in intervals:
+        results.append(
+            _detect_interval_annotations(
+                cache_dir,
+                manifest,
+                interval,
+                cfg,
+                sampled_fps,
+                output_dir,
+            )
+        )
+    return results
+
+
+def _annotation_worker_count(interval_count: int) -> int:
+    requested = os.getenv("GRAPHLEC_ANNOT_WORKERS", "0").strip()
+    try:
+        workers = int(requested)
+    except ValueError:
+        workers = 0
+    if interval_count <= 1:
+        return 1
+    if workers <= 0:
+        cpu_count = os.cpu_count() or 2
+        workers = max(1, min(4, cpu_count // 2))
+    return max(1, min(workers, interval_count))
+
+
+def _chunk_intervals(intervals: list[dict], worker_count: int) -> list[list[dict]]:
+    if worker_count <= 1:
+        return [intervals]
+    chunk_size = max(1, (len(intervals) + worker_count - 1) // worker_count)
+    return [intervals[i:i + chunk_size] for i in range(0, len(intervals), chunk_size)]
+
+
 def detect_annotations(
     cache_dir: str,
     scene_path: str,
@@ -278,91 +414,63 @@ def detect_annotations(
     scene_payload = _load_scenes(scene_path)
     intervals = _build_scene_intervals(scene_payload, manifest, cfg)
     sampled_fps = float(manifest.get("cache", {}).get("sampled_fps") or 1.0)
+    worker_count = _annotation_worker_count(len(intervals))
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("scene_*_annot_*.jpg"):
         stale.unlink(missing_ok=True)
 
-    interval_by_start = {item["start_sample_index"]: item for item in intervals}
-    interval_iter = iter(sorted(intervals, key=lambda item: item["start_sample_index"]))
-    current_interval = next(interval_iter, None)
-    active_state: AnnotationState | None = None
-    active_interval: dict | None = None
-    scene_results: list[dict] = []
-    scene_result_by_index: dict[int, dict] = {}
-    total_annotations = 0
-
     log.info(
-        "annotation detection start: cache=%s scenes=%s intervals=%s",
+        "annotation detection start: cache=%s scenes=%s intervals=%s workers=%s",
         cache_dir,
         len(scene_payload["scenes"]),
         len(intervals),
+        worker_count,
     )
 
-    def finish_active() -> None:
-        nonlocal active_state, active_interval, total_annotations
-        if active_state is None or active_interval is None:
-            return
-        capture = active_state.flush()
-        if capture is not None:
+    scene_results: list[dict] = []
+    if worker_count <= 1:
+        for interval in intervals:
+            scene_results.append(
+                _detect_interval_annotations(
+                    cache_dir,
+                    manifest,
+                    interval,
+                    cfg,
+                    sampled_fps,
+                    str(out_dir),
+                )
+            )
+    else:
+        chunks = _chunk_intervals(intervals, worker_count)
+        cfg_dict = asdict(cfg)
+        tasks = [
+            (cache_dir, manifest, chunk, cfg_dict, sampled_fps, str(out_dir))
+            for chunk in chunks
+            if chunk
+        ]
+        with ProcessPoolExecutor(max_workers=len(tasks)) as executor:
+            futures = [executor.submit(_detect_annotation_chunk_worker, task) for task in tasks]
+            for future in as_completed(futures):
+                scene_results.extend(future.result())
+
+    scene_results.sort(key=lambda item: int(item["scene_index"]))
+    total_annotations = 0
+    for scene_result in scene_results:
+        scene_result["annotations"].sort(
+            key=lambda item: (float(item["timestamp_sec"]), int(item["annot_index"]))
+        )
+        for annotation in scene_result["annotations"]:
             total_annotations += 1
-            _record_capture(out_dir, active_interval, active_state, capture, total_annotations, scene_result_by_index)
-        active_state = None
-        active_interval = None
-
-    for frame_info, frame in iter_sample_cache(cache_dir):
-        sample_index = int(frame_info["sample_index"])
-        while current_interval is not None and sample_index > current_interval["end_sample_index"]:
-            if active_interval is current_interval:
-                finish_active()
-            current_interval = next(interval_iter, None)
-
-        if current_interval is None:
-            break
-        if sample_index < current_interval["start_sample_index"]:
-            continue
-
-        decision = _decision_frame(frame, cfg)
-        if sample_index in interval_by_start:
-            finish_active()
-            active_interval = interval_by_start[sample_index]
-            scene = active_interval["scene"]
-            active_state = AnnotationState(scene, decision, frame, cfg, sampled_fps)
-            result = {
-                "scene_index": int(scene["scene_index"]),
-                "base_frame_no": int(active_interval["base_frame_no"]),
-                "base_timestamp_sec": float(active_interval["base_timestamp_sec"]),
-                "start_sample_index": int(active_interval["start_sample_index"]),
-                "detect_start_sample_index": int(active_interval["detect_start_sample_index"]),
-                "end_sample_index": int(active_interval["end_sample_index"]),
-                "region_segment_index": active_interval.get("region_segment_index"),
-                "annotations": [],
-            }
-            scene_results.append(result)
-            scene_result_by_index[int(scene["scene_index"])] = result
-            continue
-
-        if active_state is None or active_interval is None:
-            continue
-        if sample_index < int(active_interval["detect_start_sample_index"]):
-            continue
-        if sample_index > active_interval["end_sample_index"]:
-            finish_active()
-            continue
-
-        capture = active_state.process(frame_info, frame, decision)
-        if capture is not None:
-            total_annotations += 1
-            _record_capture(out_dir, active_interval, active_state, capture, total_annotations, scene_result_by_index)
-
-    finish_active()
+            annotation["global_annot_index"] = total_annotations
 
     payload = {
         "schema_version": 1,
         "cache_dir": str(cache_dir),
         "scene_path": str(scene_path),
         "config": asdict(cfg),
+        "worker_count": worker_count,
         "cache": manifest.get("cache"),
         "source": manifest.get("source"),
         "scene_count": len(scene_results),
@@ -380,13 +488,11 @@ def detect_annotations(
 def _record_capture(
     out_dir: Path,
     interval: dict,
-    state: AnnotationState,
     capture: dict,
     global_annot_index: int,
-    scene_result_by_index: dict[int, dict],
+    scene_result: dict,
 ) -> None:
     scene_index = int(interval["scene_index"])
-    scene_result = scene_result_by_index[scene_index]
     annot_index = len(scene_result["annotations"]) + 1
     frame_info = capture["frame_info"]
     filename = _save_annotation_preview(out_dir, scene_index, annot_index, capture["frame"])
@@ -430,6 +536,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-gap-sec", type=float, default=AnnotationConfig.min_gap_sec)
     parser.add_argument("--scene-start-guard-sec", type=float, default=AnnotationConfig.scene_start_guard_sec)
     parser.add_argument("--scene-end-guard-sec", type=float, default=AnnotationConfig.scene_end_guard_sec)
+    parser.add_argument("--workers", type=int, help="Override GRAPHLEC_ANNOT_WORKERS for this run")
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -448,6 +555,8 @@ def main() -> None:
         scene_start_guard_sec=max(0.0, args.scene_start_guard_sec),
         scene_end_guard_sec=max(0.0, args.scene_end_guard_sec),
     )
+    if args.workers is not None:
+        os.environ["GRAPHLEC_ANNOT_WORKERS"] = str(max(1, args.workers))
     detect_annotations(args.cache, args.scenes, args.output, cfg)
 
 
