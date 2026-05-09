@@ -15,6 +15,7 @@ import re
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +62,13 @@ def local_vlm_enabled() -> bool:
 
 def local_vlm_apply_enabled() -> bool:
     return env_bool("GRAPHLEC_VLM_APPLY", False)
+
+
+def local_vlm_worker_count(candidate_count: int) -> int:
+    if candidate_count <= 1:
+        return 1
+    workers = env_int("GRAPHLEC_VLM_WORKERS", 2)
+    return max(1, min(workers, candidate_count))
 
 
 def _image_b64(path: Path) -> str:
@@ -214,7 +222,6 @@ class OllamaVLMProvider:
     def __init__(self):
         self.base_url = os.getenv("GRAPHLEC_OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
         self.model = os.getenv("GRAPHLEC_OLLAMA_MODEL", "gemma3:4b")
-        self.timeout = env_float("GRAPHLEC_VLM_TIMEOUT_SEC", 90.0)
 
     def review(self, candidate: dict[str, Any], slides_dir: Path) -> dict[str, Any]:
         images = []
@@ -246,7 +253,7 @@ class OllamaVLMProvider:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=self.timeout) as response:
+        with urllib.request.urlopen(req) as response:
             body = json.loads(response.read().decode("utf-8"))
         content = body.get("message", {}).get("content", "")
         return _normalize_result(candidate, _extract_json_object(content))
@@ -271,30 +278,61 @@ def run_local_vlm_review(slides_dir: str | Path) -> dict[str, Any]:
 
     candidates_payload = json.loads(candidates_path.read_text(encoding="utf-8"))
     candidates = candidates_payload.get("candidates", [])
-    max_candidates = env_int("GRAPHLEC_VLM_MAX_CANDIDATES", 20)
-    provider = load_provider()
+    worker_count = local_vlm_worker_count(len(candidates))
 
     results = []
     errors = []
     started = time.time()
-    for idx, candidate in enumerate(candidates[:max_candidates], start=1):
+
+    def review_one(idx: int, candidate: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        item_started = time.time()
         try:
+            provider = load_provider()
             result = provider.review(candidate, slides_dir)
             result["candidate_index"] = idx
-            results.append(result)
+            result["elapsed_sec"] = round(time.time() - item_started, 3)
+            return "result", result
         except (OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-            errors.append({
+            return "error", {
                 "candidate_index": idx,
                 "scene_indices": candidate.get("scene_indices"),
                 "filenames": candidate.get("filenames"),
+                "elapsed_sec": round(time.time() - item_started, 3),
                 "error": str(exc),
-            })
+            }
+
+    if worker_count <= 1:
+        iterator = (
+            review_one(idx, candidate)
+            for idx, candidate in enumerate(candidates, start=1)
+        )
+        for kind, payload_item in iterator:
+            if kind == "result":
+                results.append(payload_item)
+            else:
+                errors.append(payload_item)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(review_one, idx, candidate): idx
+                for idx, candidate in enumerate(candidates, start=1)
+            }
+            for future in as_completed(futures):
+                kind, payload_item = future.result()
+                if kind == "result":
+                    results.append(payload_item)
+                else:
+                    errors.append(payload_item)
+
+    results.sort(key=lambda item: int(item.get("candidate_index", 0) or 0))
+    errors.sort(key=lambda item: int(item.get("candidate_index", 0) or 0))
 
     payload = {
         "status": "ok" if not errors else "partial",
         "provider": os.getenv("GRAPHLEC_VLM_PROVIDER", "ollama"),
         "model": os.getenv("GRAPHLEC_OLLAMA_MODEL", "gemma3:4b"),
         "candidate_count": len(candidates),
+        "worker_count": worker_count,
         "processed_count": len(results),
         "error_count": len(errors),
         "elapsed_sec": round(time.time() - started, 3),
@@ -409,5 +447,12 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
             item["manual_review"] = False
         elif any(r.get("decision") == "uncertain" for r in scene_results):
             item["manual_review"] = True
+
+    if dropped_scenes:
+        return [
+            item
+            for item in metadata
+            if int(item.get("scene_index", 0) or 0) not in dropped_scenes
+        ]
 
     return metadata
