@@ -91,6 +91,40 @@ def _candidate_scene_indices(candidate: dict[str, Any]) -> list[int]:
     return indices
 
 
+def _limited_candidate_filenames(candidate: dict[str, Any]) -> list[str]:
+    filenames = list(candidate.get("filenames") or [])
+    scene_indices = list(candidate.get("scene_indices") or [])
+    if len(filenames) <= 2 or len(filenames) != len(scene_indices):
+        return filenames
+
+    candidate_type = candidate.get("candidate_type")
+    if candidate_type == "transition_noise":
+        middle_indices = list(candidate.get("middle_scene_indices") or [])
+        positions = []
+        for middle in middle_indices[:1]:
+            if middle in scene_indices:
+                mid_pos = scene_indices.index(middle)
+                positions = [
+                    max(0, mid_pos - 1),
+                    mid_pos,
+                    min(len(scene_indices) - 1, mid_pos + 1),
+                ]
+                break
+        if not positions:
+            positions = list(range(min(3, len(filenames))))
+    elif candidate_type == "same_slide_build":
+        positions = [0, len(filenames) - 1]
+    elif candidate_type == "same_slide_duplicate":
+        if len(filenames) <= 3:
+            return filenames
+        positions = sorted({0, len(filenames) // 2, len(filenames) - 1})
+    else:
+        return filenames
+
+    positions = sorted(dict.fromkeys(pos for pos in positions if 0 <= pos < len(filenames)))
+    return [filenames[pos] for pos in positions]
+
+
 def _normalize_result(candidate: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
     scene_indices = _candidate_scene_indices(candidate)
     context_scene_indices = _candidate_scene_indices({"scene_indices": candidate.get("context_scene_indices")})
@@ -184,7 +218,7 @@ class OllamaVLMProvider:
 
     def review(self, candidate: dict[str, Any], slides_dir: Path) -> dict[str, Any]:
         images = []
-        for filename in candidate.get("filenames", []):
+        for filename in _limited_candidate_filenames(candidate):
             path = slides_dir / filename
             if path.exists():
                 images.append(_image_b64(path))
