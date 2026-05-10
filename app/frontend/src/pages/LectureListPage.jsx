@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { listLectures } from '../lib/api'
+import LectureItem from '../components/lecture-list/LectureItem'
 
 import '../styles/lecture-list.css'
 
@@ -178,34 +179,12 @@ export default function LectureListPage() {
           <>
             <div className={viewMode === 'grid' ? 'll-grid' : 'll-list'}>
               {lectures.map(lec => (
-                <article 
-                  key={lec.id || lec.job_id} 
-                  className={`lecture-card ${viewMode === 'list' ? 'lecture-card--list' : ''}`}
-                  onClick={() => lec.status === 'done' && navigate(`/lectures/${lec.id}`)}
-                >
-                  <div className="lecture-card-thumb" style={{ background: 'var(--card)' }}>
-                    <span className="lecture-card-thumb-icon">
-                      {lec.category === '수학' ? '📐' : '🎬'}
-                    </span>
-                    {lec.status !== 'done' && (
-                      <span className={`lecture-card-status-badge status-${lec.status}`}>
-                        {lec.status === 'error' ? '오류' : '분석 중'}
-                      </span>
-                    )}
-                  </div>
-                  <div className="lecture-card-info">
-                    <div className="lecture-card-category">{lec.category}</div>
-                    <h3 className="lecture-card-title">{lec.title}</h3>
-                    <div className="lecture-card-meta">
-                      {new Date(lec.created_at).toLocaleDateString()}
-                    </div>
-                    <div className="lecture-card-tags">
-                      {lec.tags?.slice(0, 3).map(tag => (
-                        <span key={tag} className="lecture-card-tag">{tag}</span>
-                      ))}
-                    </div>
-                  </div>
-                </article>
+                <LectureItem 
+                  key={lec.id || lec.job_id}
+                  lecture={lec}
+                  viewMode={viewMode}
+                  onClick={() => navigate(`/lectures/${lec.id}`)}
+                />
               ))}
             </div>
 
