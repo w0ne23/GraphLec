@@ -30,11 +30,12 @@
   --amber:    #d97706;
   --amber-bg: rgba(245,158,11,.10);
 
-  /* 그린 (완료) */
-  --green:    #15803d;
-  --green-bg: #f0fdf4;
+  /* 그린 (positive) */
+  --green:      #3dad3d;
+  --green-text: #15803d;
+  --green-bg:   #f0fdf4;
 
-  /* 레드 (오류) */
+  /* 레드 (negative) */
   --red:    #dc2626;
   --red-bg: #fef2f2;
 

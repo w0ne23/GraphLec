@@ -108,7 +108,7 @@
 .upload-pipe-stages  { display: flex; flex-wrap: wrap; gap: 4px; }
 .upload-chip         { font-size: 10px; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--b1); color: var(--t3); }
 .upload-chip--run    { background: var(--blue-bg);  border-color: var(--blue-br); color: var(--blue); }
-.upload-chip--done   { background: var(--green-bg); border-color: rgba(21,128,61,.2); color: var(--green); }
+.upload-chip--done   { background: var(--green-bg); border-color: rgba(21,128,61,.2); color: var(--green-text); }
 
 /* 행 액션 버튼 */
 .upload-row-actions  { display: flex; gap: 6px; flex-shrink: 0; }
