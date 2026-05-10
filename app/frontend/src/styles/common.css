@@ -47,7 +47,7 @@
    여러 페이지/컴포넌트에서 공유하는 상태 색상 클래스.
    ============================================================ */
 .s-done,
-.status-done { background: var(--green-bg); color: var(--green); }
+.status-done { background: var(--green-bg); color: var(--green-text); }
 .s-proc,
 .status-proc { background: var(--amber-bg); color: var(--amber); }
 .s-wait,
