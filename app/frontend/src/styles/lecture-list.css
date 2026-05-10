@@ -427,9 +427,10 @@
     padding: 24px 16px;
   }
   
-  /* 모바일 그리드: 줄당 1개 (기존과 동일) */
+  /* 모바일 그리드: 줄당 2개 */
   .ll-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
   }
 
   /* 💡 모바일 리스트: 가로 배치 유지, 썸네일 크기 대폭 축소 */
@@ -452,5 +453,19 @@
     font-size: 13px; /* 폰트 약간 축소 */
     margin-bottom: 4px;
     -webkit-line-clamp: 2; /* 공간이 좁으므로 두 줄까지 허용 */
+  }
+
+  /* 모바일 검색바 영역 초과 해결 */
+  .ll-search-form {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .ll-search-main {
+    width: 100%;
+    order: 1;
+  }
+  .ll-detail-toggle-btn {
+    width: 100%;
+    order: 2;
   }
 }

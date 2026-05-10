@@ -125,27 +125,38 @@ function GraphViewer({ lectureId }) {
     
     network.on('mousemove', handleMouseMove);
 
-    let fitTimer = null;
-    network.once('afterDrawing', () => {
-      if (!networkRef.current) return;
-      network.moveTo({ scale: 0.15, position: { x: 0, y: 0 }, animation: false });
-      fitTimer = setTimeout(() => { 
-        if (networkRef.current) networkRef.current.fit({ animation: { duration: 1000 } }); 
-      }, 500);
-    });
+    // [개선] 초기 로딩 시 그래프 맞춤 (안정화 시 재정렬은 사용자 요청으로 제거)
+    const handleFit = () => {
+      if (networkRef.current) {
+        networkRef.current.fit({
+          animation: { duration: 1000, easingFunction: 'easeInOutQuad' }
+        });
+        // 너무 과하게 확대되는 것 방지 (노드가 적을 때)
+        const currentScale = networkRef.current.getScale();
+        if (currentScale > 1.2) {
+          networkRef.current.moveTo({ scale: 1.0, animation: { duration: 1000 } });
+        }
+      }
+    };
 
-    let fitInterval = setInterval(() => { 
-      if (networkRef.current) networkRef.current.fit(); 
-    }, 500);
-    
-    let clearIntervalTimer = setTimeout(() => {
-      clearInterval(fitInterval);
-    }, 3500);
+    // 패널이 열리면서 크기가 변할 때를 대비해 약간의 지연 후 fit 실행
+    const initialFitTimer = setTimeout(handleFit, 600);
+
+    // [개선] 컨테이너 크기 변화 감지 (ResizeObserver)
+    const resizeObserver = new ResizeObserver(() => {
+      if (networkRef.current) {
+        networkRef.current.fit();
+        const currentScale = networkRef.current.getScale();
+        if (currentScale > 1.2) {
+          networkRef.current.moveTo({ scale: 1.0 });
+        }
+      }
+    });
+    resizeObserver.observe(containerRef.current);
 
     return () => {
-      if (fitTimer) clearTimeout(fitTimer);
-      if (fitInterval) clearInterval(fitInterval);
-      if (clearIntervalTimer) clearTimeout(clearIntervalTimer);
+      if (initialFitTimer) clearTimeout(initialFitTimer);
+      resizeObserver.disconnect();
       
       if (networkRef.current) {
         networkRef.current.destroy();
