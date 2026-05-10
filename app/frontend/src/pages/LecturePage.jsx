@@ -11,7 +11,7 @@ import {
 import VideoPlayer from '../components/watch/VideoPlayer'
 import VideoTimeline from '../components/watch/VideoTimeline'
 import GraphViewer from '../components/watch/GraphViewer'
-import ChatPanel from '../components/chat/ChatPanel'
+import ChatPanel from '../components/watch/ChatPanel'
 import LectureInfoModal from '../components/watch/LectureInfoModal'
 
 import '../styles/lecture.css'
