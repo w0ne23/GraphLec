@@ -8,47 +8,84 @@ import {
   leaveLectureGraphSession,
 } from '../lib/api'
 
-import VideoPlayer  from '../components/watch/VideoPlayer'
-import LecturePanel from '../components/watch/LecturePanel'
-import ChatPanel    from '../components/chat/ChatPanel'
+import VideoPlayer from '../components/watch/VideoPlayer'
+import VideoTimeline from '../components/watch/VideoTimeline'
+import GraphViewer from '../components/watch/GraphViewer'
+import ChatPanel from '../components/chat/ChatPanel'
+import LectureInfoModal from '../components/watch/LectureInfoModal'
 
 import '../styles/lecture.css'
 
-const INIT_MSG = { id: 0, role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
+const INIT_MSG = { role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
+const graphRagUnloadTimers = new Map()
 
-/**
- * LecturePage — /lectures/:id
- * 좌: VideoPlayer + LecturePanel (가변 너비)
- * 우: ChatPanel 사이드패널 (리사이저로 너비 조절)
- *
- * @param {function} onNavigate - 페이지 전환 콜백
- */
+function cancelScheduledGraphRagUnload(lectureId) {
+  const timer = graphRagUnloadTimers.get(lectureId)
+  if (!timer) return
+  window.clearTimeout(timer)
+  graphRagUnloadTimers.delete(lectureId)
+}
+
+function scheduleGraphRagUnload(lectureId) {
+  cancelScheduledGraphRagUnload(lectureId)
+  const timer = window.setTimeout(() => {
+    graphRagUnloadTimers.delete(lectureId)
+    unloadLectureGraphRag(lectureId)
+  }, 600)
+  graphRagUnloadTimers.set(lectureId, timer)
+}
+
 export default function LecturePage({ onNavigate }) {
   const { id } = useParams()
   const navigate = useNavigate()
   const graphSessionIdRef = useRef(
-    (window.crypto && window.crypto.randomUUID)
-      ? window.crypto.randomUUID()
-      : (`sess-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    (window.crypto?.randomUUID?.())
+    ?? `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`
   )
 
-  const [lecture,      setLecture]      = useState(null)
-  const [loading,      setLoading]      = useState(false)
+  const [lecture, setLecture] = useState(null)
+  const [loading, setLoading] = useState(false)
   const [currentScene, setCurrentScene] = useState(0)
-  const [seekTo,       setSeekTo]       = useState(null)
+  const [seekTo, setSeekTo] = useState(null)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
-  const [chatWidth,    setChatWidth]    = useState(300)
-  const [isChatOpen,   setIsChatOpen]   = useState(true)
-  const [isFocusMode,  setIsFocusMode]  = useState(false) // 타임라인 집중 모드 추가
-  const isResizing = useRef(false)
 
-  // 채팅 상태를 부모로 끌어올림 (레이아웃 전환 시 컨텍스트 유지)
+  // 우측 패널
+  const [chatWidth, setChatWidth] = useState(300)
+  const [isChatOpen, setIsChatOpen] = useState(true)
+  const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false)
+
+  // 타임라인 패널
+  const [isTimelineOpen, setIsTimelineOpen] = useState(true)
+
+  // 영화관 모드: 타임라인 + 우측 패널 전부 숨김
+  const [isCinemaMode, setIsCinemaMode] = useState(false)
+
+  // 강의 정보 모달
+  const [isInfoOpen, setIsInfoOpen] = useState(false)
+
+  // 채팅 상태 (레이아웃 전환 시 컨텍스트 유지를 위해 부모에서 관리)
   const [chatMessages, setChatMessages] = useState([INIT_MSG])
   const [chatInput, setChatInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
 
+  const isResizing = useRef(false)
+  const leftRef = useRef(null)
+
   const toggleChat = () => setIsChatOpen(v => !v)
-  const toggleFocusMode = () => setIsFocusMode(v => !v)
+  const toggleGraphPanel = () => setIsGraphPanelOpen(v => !v)
+  const toggleTimeline = () => setIsTimelineOpen(v => !v)
+  const toggleCinemaMode = () => setIsCinemaMode(v => !v)
+
+  // ESC 키로 영화관 모드 종료
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape' && isCinemaMode) {
+        setIsCinemaMode(false)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [isCinemaMode])
 
   // 강의(id)가 변경될 때만 채팅 상태 초기화
   useEffect(() => {
@@ -58,7 +95,8 @@ export default function LecturePage({ onNavigate }) {
     setSeekToSeconds(null)
   }, [id])
 
-  const handleMouseDown = useCallback(() => {
+  // 좌우 리사이저
+  const handleResizerMouseDown = useCallback(() => {
     isResizing.current = true
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
@@ -67,10 +105,10 @@ export default function LecturePage({ onNavigate }) {
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isResizing.current) return
-      let newWidth = window.innerWidth - e.clientX
-      if (newWidth < 300) newWidth = 300
-      if (window.innerWidth - newWidth < 300) newWidth = window.innerWidth - 300
-      setChatWidth(newWidth)
+      let w = window.innerWidth - e.clientX
+      if (w < 260) w = 260
+      if (window.innerWidth - w < 300) w = window.innerWidth - 300
+      setChatWidth(w)
     }
     const handleMouseUp = () => {
       if (!isResizing.current) return
@@ -79,17 +117,18 @@ export default function LecturePage({ onNavigate }) {
       document.body.style.userSelect = 'auto'
     }
     document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup',   handleMouseUp)
+    document.addEventListener('mouseup', handleMouseUp)
     return () => {
       document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup',   handleMouseUp)
+      document.removeEventListener('mouseup', handleMouseUp)
     }
   }, [])
 
+  // 강의 데이터 로딩
   useEffect(() => {
     if (!id) return
     setLoading(true)
-    
+
     Promise.all([
       getLectureDetail(id),
       getLectureTimeline(id)
@@ -110,6 +149,7 @@ export default function LecturePage({ onNavigate }) {
       .finally(() => setLoading(false))
   }, [id])
 
+  // GraphRAG 세션
   useEffect(() => {
     if (!id) return
 
@@ -153,7 +193,7 @@ export default function LecturePage({ onNavigate }) {
     }
   }, [id])
 
-  const scenes      = lecture?.scenes ?? []
+  const scenes = lecture?.scenes ?? []
   const chatContext = { type: 'watch', lecture_id: id }
 
   function handleJumpToScene(idx, seconds = null) {
@@ -161,7 +201,7 @@ export default function LecturePage({ onNavigate }) {
       setCurrentScene(idx)
       setSeekTo({ index: idx, time: Date.now() })
     }
-    if (Number.isFinite(Number(seconds))) {
+    if (seconds !== null && Number.isFinite(Number(seconds))) {
       setSeekToSeconds({ seconds: Number(seconds), time: Date.now() })
     }
   }
@@ -170,35 +210,45 @@ export default function LecturePage({ onNavigate }) {
   if (!lecture) return <div className="lp-loading">강의를 찾을 수 없습니다</div>
 
   return (
-    <div className="lp-shell" style={{ '--chat-width': isChatOpen ? `${chatWidth}px` : '0px' }}>
-      {/* ── 본문: 전체 좌우 분할 ── */}
+    <div
+      className={`lp-shell ${isCinemaMode ? 'lp-shell--cinema' : ''}`}
+      style={{ '--chat-width': isChatOpen && !isCinemaMode ? `${chatWidth}px` : '0px' }}
+    >
       <div className="lp-body">
 
-        {/* 좌: 상단바 + 뷰어 */}
-        <div className={`lp-left ${isFocusMode ? 'lp-left--focus' : ''}`}>
-          {/* ── 상단바 ── */}
-          <div className="lp-topbar">
-            <div className="lp-topbar-left">
-              <button className="lp-back" onClick={() => navigate(-1)}>
-                ← 이전으로
-              </button>
-              <span className="lp-title">{lecture.title}</span>
-            </div>
-            <div className="lp-topbar-right">
-              <button 
-                className={`lp-focus-btn ${isFocusMode ? 'lp-focus-btn--active' : ''}`}
-                onClick={toggleFocusMode}
-                title={isFocusMode ? "일반 모드로 전환" : "타임라인 포커스 모드 (목록을 화면 가득히)"}
-              >
-                {isFocusMode ? '📺 일반 뷰' : '📜 타임라인 집중'}
-              </button>
-              <button className="lp-chat-open-btn" onClick={toggleChat} title="Chat 토글">
-                💬 Chat
-              </button>
+        {/* 좌: 상단바 + 뷰어 + 타임라인 */}
+        <div className="lp-left" ref={leftRef}>
+
+          {/* 상단바 래퍼 (공간 점유 및 애니메이션 주체) */}
+          <div className={`lp-topbar-wrap ${isCinemaMode ? 'lp-topbar-wrap--cinema' : ''}`}>
+            <div className={`lp-topbar ${isCinemaMode ? 'lp-topbar--cinema' : ''}`}>
+              <div className="lp-topbar-left">
+                <button className="lp-back" onClick={() => navigate(-1)}>
+                  ← 이전으로
+                </button>
+                <span className="lp-title">{lecture.title}</span>
+                <button
+                  className="lp-icon-btn"
+                  onClick={() => setIsInfoOpen(true)}
+                  title="강의 정보"
+                >ℹ️</button>
+              </div>
+              <div className="lp-topbar-right">
+                {!isCinemaMode && (
+                  <button 
+                    className="lp-chat-open-btn"
+                    onClick={toggleChat}
+                    title="Chat 토글"
+                  >
+                    💬 Chat
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          <div className="lp-viewer-container">
+          {/* 영상 뷰어 */}
+          <div className="lp-video-area">
             <VideoPlayer
               lecture={lecture}
               scenes={scenes}
@@ -206,54 +256,68 @@ export default function LecturePage({ onNavigate }) {
               seekTo={seekTo}
               seekToSeconds={seekToSeconds}
               onSceneChange={setCurrentScene}
-              isMini={isFocusMode}
-            />
-            <LecturePanel
-              lecture={lecture}
-              scenes={scenes}
-              currentScene={currentScene}
-              onSceneChange={handleJumpToScene}
+              isCinemaMode={isCinemaMode}
+              onToggleCinemaMode={toggleCinemaMode}
             />
           </div>
-          {/* 모바일: 채팅이 여기 아래로 붙음 */}
-          {!isFocusMode && (
-            <div className="lp-mobile-chat">
-              <ChatPanel
-                context={chatContext}
-                lecture={lecture}
-                onJumpToScene={handleJumpToScene}
-                mode="sidebar"
-                messages={chatMessages}
-                setMessages={setChatMessages}
-                input={chatInput}
-                setInput={setChatInput}
-                loading={chatLoading}
-                setLoading={setChatLoading}
-              />
-            </div>
-          )}
+
+          {/* 타임라인 (가로/세로 자동 전환) */}
+          <VideoTimeline
+            scenes={scenes}
+            currentScene={currentScene}
+            onSceneChange={handleJumpToScene}
+            leftRef={leftRef}
+            isOpen={isTimelineOpen}
+            onToggle={toggleTimeline}
+            isCinemaMode={isCinemaMode}
+          />
         </div>
 
-        {/* 우: 채팅 (PC만) */}
-        {isChatOpen && (
-          <div className="lp-right" style={{ width: chatWidth }}>
-            <div className="lp-resizer" onMouseDown={handleMouseDown} />
-            <ChatPanel
-              context={chatContext}
-              lecture={lecture}
-              onJumpToScene={handleJumpToScene}
-              onClose={toggleChat}
-              mode="sidebar"
-              messages={chatMessages}
-              setMessages={setChatMessages}
-              input={chatInput}
-              setInput={setChatInput}
-              loading={chatLoading}
-              setLoading={setChatLoading}
-            />
+        {/* 우: 그래프 + 채팅 */}
+        <div 
+          className={`lp-right ${!isChatOpen || isCinemaMode ? 'lp-right--closed' : ''}`}
+          style={{ width: isChatOpen && !isCinemaMode ? chatWidth : 0 }}
+        >
+          <div className="lp-resizer" onMouseDown={handleResizerMouseDown} />
+
+          {/* 그래프 */}
+          <div className={`mg-wrap ${isGraphPanelOpen ? 'mg-wrap--open' : ''}`}>
+            <div className="mg-header" onClick={toggleGraphPanel}>
+              <span className="mg-title">그래프</span>
+              <button className="mg-toggle-btn">{isGraphPanelOpen ? '▲' : '▼'}</button>
+            </div>
+            <div className="mg-body">
+              <GraphViewer lectureId={id} />
+            </div>
           </div>
-        )}
+
+          {/* 채팅 */}
+          <div className="lp-chat-area">
+          <ChatPanel
+            context={chatContext}
+            lecture={lecture}
+            onJumpToScene={handleJumpToScene}
+            onClose={toggleChat}
+            mode="sidebar"
+            messages={chatMessages}
+            setMessages={setChatMessages}
+            input={chatInput}
+            setInput={setChatInput}
+            loading={chatLoading}
+            setLoading={setChatLoading}
+          />
+          </div>
+        </div>
       </div>
+
+      {/* 강의 정보 모달 */}
+      {isInfoOpen && (
+        <LectureInfoModal
+          lecture={lecture}
+          scenes={scenes}
+          onClose={() => setIsInfoOpen(false)}
+        />
+      )}
     </div>
   )
 }
