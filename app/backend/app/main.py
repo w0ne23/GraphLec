@@ -1,8 +1,16 @@
 import asyncio
 import os
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # Try to load .env from project root (../../.env) if it exists, or from the current directory
 root_env = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -36,48 +44,47 @@ async def monitor_workers():
             if worker_tasks:
                 active = len([t for t in worker_tasks if not t.done()])
                 total = len(worker_tasks)
-                print(f"--- [Backend Heartbeat] Active Workers: {active}/{total} ---", flush=True)
+                logger.info(f"--- [Backend Heartbeat] Active Workers: {active}/{total} ---")
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"--- [Monitor Error]: {e} ---", flush=True)
+            logger.error(f"--- [Monitor Error]: {e} ---")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global worker_tasks
-    print("--- [FastAPI] Starting lifespan events... ---", flush=True)
+    logger.info("--- [FastAPI] Starting lifespan events... ---")
     
     # Ensure local storage directory exists
     os.makedirs(LOCAL_STORAGE_DIR, exist_ok=True)
-    print(f"--- [FastAPI] Local storage directory ensured: {LOCAL_STORAGE_DIR} ---", flush=True)
+    logger.info(f"--- [FastAPI] Local storage directory ensured: {LOCAL_STORAGE_DIR} ---")
     
     try:
-        print("--- [FastAPI] Initializing DB... ---", flush=True)
+        logger.info("--- [FastAPI] Initializing DB... ---")
         await init_db()
-        print("--- [FastAPI] DB initialized successfully. ---", flush=True)
+        logger.info("--- [FastAPI] DB initialized successfully. ---")
     except Exception as e:
-        print(f"--- [FastAPI] ERROR initializing DB: {e} ---", flush=True)
+        logger.error(f"--- [FastAPI] ERROR initializing DB: {e} ---")
 
     if os.getenv("GRAPHLEC_CLEAR_NEO4J_ON_START", "0").lower() not in {"0", "false", "no"}:
         cleanup = clear_runtime_lecture_graphs()
-        print(
-            f"--- [FastAPI] Neo4j runtime graph cleanup: before={cleanup['before']} after={cleanup['after']} ---",
-            flush=True,
+        logger.info(
+            f"--- [FastAPI] Neo4j runtime graph cleanup: before={cleanup['before']} after={cleanup['after']} ---"
         )
     
-    print("--- [FastAPI] Starting worker loops... ---", flush=True)
+    logger.info("--- [FastAPI] Starting worker loops... ---")
     worker_tasks = [asyncio.create_task(worker_loop()) for _ in range(3)]
     monitor_task = asyncio.create_task(monitor_workers())
-    print(f"--- [FastAPI] {len(worker_tasks)} worker tasks and monitor created. ---", flush=True)
+    logger.info(f"--- [FastAPI] {len(worker_tasks)} worker tasks and monitor created. ---")
     
     yield
     
-    print("--- [FastAPI] Shutting down... Cancelling workers. ---", flush=True)
+    logger.info("--- [FastAPI] Shutting down... Cancelling workers. ---")
     monitor_task.cancel()
     for task in worker_tasks:
         task.cancel()
     await asyncio.gather(monitor_task, *worker_tasks, return_exceptions=True)
-    print("--- [FastAPI] Shutdown complete. ---", flush=True)
+    logger.info("--- [FastAPI] Shutdown complete. ---")
 
 app = FastAPI(lifespan=lifespan)
 
