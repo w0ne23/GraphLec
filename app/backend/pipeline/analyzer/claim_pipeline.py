@@ -53,14 +53,21 @@ def extract_claims_only(
 
 def judge_claims_only(
     all_claims_by_batch: list[tuple], current_date: str, hint: dict,
-    slide_ctx: dict, num_runs: int = 1, min_detection_rate: float = 0.5,
+    num_runs: int = 1, min_detection_rate: float = 0.5,
     log_prefix: str = "",
+    context_mode: str | None = None,
 ) -> tuple[list[dict], int, dict]:
     """2단계: claim 판정 (N회 반복 + 합의)."""
     from analyzer.claim_verifier import judge_claims_only as _run
-    return _run(all_claims_by_batch, current_date, hint, slide_ctx,
-                num_runs=num_runs, min_detection_rate=min_detection_rate,
-                log_prefix=log_prefix)
+    return _run(
+        all_claims_by_batch,
+        current_date,
+        hint,
+        num_runs=num_runs,
+        min_detection_rate=min_detection_rate,
+        log_prefix=log_prefix,
+        context_mode=context_mode,
+    )
 
 
 def judge_single_claim(issue: dict, ctx: dict) -> tuple[dict, dict]:
@@ -182,7 +189,7 @@ def verify_lecture_content(
             batch_map = {u["utterance_id"]: u for u in batch}
             ids = f"{batch[0]['utterance_id']}..{batch[-1]['utterance_id']}"
             issues, parse_failed, api_calls, token_usage, ok = recover_claim_judgement(
-                claims, batch, current_date, hint, batch_map, slide_ctx,
+                claims, batch, current_date, hint, batch_map,
                 f"판정 {run+1} 배치 {batch_idx} {ids}",
             )
             run_issues.extend(issues)

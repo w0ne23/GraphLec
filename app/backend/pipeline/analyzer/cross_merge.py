@@ -528,33 +528,60 @@ def union_claims(results: list[dict]) -> list[dict]:
     return list(seen.values())
 
 
-def rebuild_claim_batches(merged_claims: list[dict], utterances: list[dict], batch_size: int) -> list[dict]:
-    """합집합 claim을 원래 배치 구조로 재구성."""
-    batches = [utterances[i:i + batch_size] for i in range(0, len(utterances), batch_size)]
-    batch_map = {}
-    for batch in batches:
-        uids = {u["utterance_id"] for u in batch}
-        for uid in uids:
-            batch_map[uid] = id(batch)
+def _judge_context_overlap(default: int = 5) -> int:
+    try:
+        value = int(os.getenv("VERIFIER_JUDGE_CONTEXT_OVERLAP", str(default)) or str(default))
+    except ValueError:
+        value = default
+    return max(0, value)
 
-    batch_claims: dict[int, tuple] = {}
-    for batch in batches:
-        bid = id(batch)
-        batch_claims[bid] = (batch, [])
+
+def rebuild_claim_batches(
+    merged_claims: list[dict],
+    utterances: list[dict],
+    batch_size: int,
+    context_overlap: int | None = None,
+) -> list[dict]:
+    """합집합 claim을 판정 batch로 재구성.
+
+    Claim은 20개 발화 core 기준으로 한 번만 판정하고, prompt 문맥에는 core 앞뒤
+    N개 발화를 추가한다. 이렇게 하면 batch 경계의 첫/마지막 claim도 인접 문맥을 본다.
+    """
+    safe_batch_size = max(1, int(batch_size or 1))
+    overlap = _judge_context_overlap() if context_overlap is None else max(0, int(context_overlap or 0))
+    if safe_batch_size > 1:
+        overlap = min(overlap, safe_batch_size - 1)
+
+    core_batches = [
+        (start, min(start + safe_batch_size, len(utterances)))
+        for start in range(0, len(utterances), safe_batch_size)
+    ]
+    batch_claims: list[dict] = []
+    uid_to_core_index = {}
+    for core_idx, (start, end) in enumerate(core_batches):
+        for u in utterances[start:end]:
+            uid_to_core_index[u.get("utterance_id", "")] = core_idx
+        ctx_start = max(0, start - overlap)
+        ctx_end = min(len(utterances), end + overlap)
+        batch_claims.append({
+            "batch": utterances[ctx_start:ctx_end],
+            "claims": [],
+            "core_start": start,
+            "core_end": end,
+            "context_overlap": overlap,
+        })
 
     for claim in merged_claims:
         uid = claim.get("utterance_id", "")
-        bid = batch_map.get(uid)
-        if bid and bid in batch_claims:
-            batch_claims[bid][1].append(claim)
+        core_idx = uid_to_core_index.get(uid)
+        if core_idx is not None:
+            batch_claims[core_idx]["claims"].append(claim)
 
-    result = []
-    for batch in batches:
-        bid = id(batch)
-        b, c = batch_claims[bid]
-        if c:
-            result.append({"batch": b, "claims": c})
-    return result
+    return [
+        item
+        for item in batch_claims
+        if item["claims"]
+    ]
 
 
 def _issue_match_key(issue: dict) -> str:

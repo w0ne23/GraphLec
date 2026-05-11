@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import traceback
+import os
 from collections import OrderedDict
 
 from .cross_merge import _issue_match_key
 from .cross_utils import _empty_token_usage, _merge_token_usage, _setup_worker
+
+
+def _crosscheck_max_issues_per_batch() -> int:
+    try:
+        value = int(os.getenv("VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH", "10") or "10")
+    except ValueError:
+        value = 10
+    return max(1, value)
 
 
 def extract_worker(args_tuple):
@@ -40,17 +49,26 @@ def extract_worker(args_tuple):
 
 def judge_worker(args_tuple):
     try:
-        merged_path, model, claims_serialized, num_runs, min_rate, root, env_vars = args_tuple
+        if len(args_tuple) >= 8:
+            merged_path, model, claims_serialized, num_runs, min_rate, root, env_vars, context_mode = args_tuple
+        else:
+            merged_path, model, claims_serialized, num_runs, min_rate, root, env_vars = args_tuple
+            context_mode = None
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
         ctx = cv.prepare_verification(merged_path)
-        print(f"\n  [{model}] 2단계: claim 판정 시작", flush=True)
+        print(
+            f"\n  [{model}] 2단계: claim 판정 시작 "
+            f"(context={context_mode or 'batch'})",
+            flush=True,
+        )
 
         claims_by_batch = [(item["batch"], item["claims"]) for item in claims_serialized]
         issues, api_calls, token_usage = cv.judge_claims_only(
-            claims_by_batch, ctx["current_date"], ctx["hint"], ctx["slide_ctx"], num_runs, min_rate,
+            claims_by_batch, ctx["current_date"], ctx["hint"], num_runs, min_rate,
             log_prefix=model,
+            context_mode=context_mode,
         )
 
         print(f"  [{model}] 판정 완료: {len(issues)}건 이슈", flush=True)
@@ -91,24 +109,36 @@ def cross_recheck_worker(args_tuple):
             f"\n  [{model}] 텍스트+문맥 교차검증: {len(issues)}건 / {total_groups}개 문맥 묶음 확인 중...",
             flush=True,
         )
+        max_issues_per_batch = _crosscheck_max_issues_per_batch()
         for group_idx, (slide_number, group) in enumerate(groups.items(), 1):
             slide_label = slide_number if slide_number > 0 else "unknown"
             print(
                 f"  [{model}] cross ({group_idx}/{total_groups}) slide {slide_label}: {len(group)}건",
                 flush=True,
             )
-            payloads, call_usage = cv.judge_claim_batch(group, ctx)
-            token_usage = _merge_token_usage(token_usage, call_usage)
-            for idx, issue in enumerate(group, 1):
-                issue_id = f"i{idx:04d}"
-                payload = payloads.get(
-                    issue_id,
-                    {"verdict": "inconclusive", "reason": "crosscheck batch 결과 없음"},
-                )
-                verdicts[_issue_match_key(issue)] = {
-                    **payload,
-                    "resolved_model": resolved_model,
-                }
+            chunks = [
+                group[start : start + max_issues_per_batch]
+                for start in range(0, len(group), max_issues_per_batch)
+            ]
+            for chunk_idx, chunk in enumerate(chunks, 1):
+                if len(chunks) > 1:
+                    print(
+                        f"  [{model}] cross ({group_idx}/{total_groups}) slide {slide_label} "
+                        f"batch {chunk_idx}/{len(chunks)}: {len(chunk)}건",
+                        flush=True,
+                    )
+                payloads, call_usage = cv.judge_claim_batch(chunk, ctx)
+                token_usage = _merge_token_usage(token_usage, call_usage)
+                for idx, issue in enumerate(chunk, 1):
+                    issue_id = f"i{idx:04d}"
+                    payload = payloads.get(
+                        issue_id,
+                        {"verdict": "inconclusive", "reason": "crosscheck batch 결과 없음"},
+                    )
+                    verdicts[_issue_match_key(issue)] = {
+                        **payload,
+                        "resolved_model": resolved_model,
+                    }
 
         print(f"  [{model}] 텍스트+문맥 교차검증 완료", flush=True)
         return {

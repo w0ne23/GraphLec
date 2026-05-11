@@ -740,10 +740,23 @@ VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {
     "factual_error": "발언 자체 오류",
-    "temporal_error": "시대적 오류",
-    "confusing_explanation": "혼동 가능 설명",
+    "temporal_error": "시간적 오류",
     "scope_overclaim": "범위 과잉 단정",
+    "confusing_explanation": "혼동 가능 설명",
 }
+ISSUE_TYPE_ORDER = (
+    "factual_error",
+    "temporal_error",
+    "scope_overclaim",
+    "confusing_explanation",
+)
+ISSUE_TYPE_CODES = {
+    "factual_error": "A",
+    "temporal_error": "B",
+    "scope_overclaim": "C",
+    "confusing_explanation": "D",
+}
+ISSUE_CODE_TO_TYPE = {code: issue_type for issue_type, code in ISSUE_TYPE_CODES.items()}
 FACT_GROUNDED_ISSUE_TYPES = {"factual_error", "temporal_error", "scope_overclaim"}
 PEDAGOGICAL_ISSUE_TYPES = {"confusing_explanation"}
 ALLOWED_ISSUE_TYPES = set(ISSUE_TYPE_LABELS)
@@ -766,10 +779,41 @@ ISSUE_METADATA_FIELDS = (
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
 VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES", "1"))
 VERIFIER_REQUIRE_COMPLETE = os.getenv("VERIFIER_REQUIRE_COMPLETE", "1") != "0"
+JUDGE_CONTEXT_MODES = {"batch"}
+
+
+def normalize_judge_context_mode(value: str | None = None) -> str:
+    raw = str(
+        value
+        if value is not None
+        else os.getenv("VERIFIER_JUDGE_CONTEXT_MODE", "batch")
+    ).strip().lower()
+    aliases = {
+        "": "batch",
+        "default": "batch",
+        "full": "batch",
+        "context": "batch",
+        "with_context": "batch",
+        "utterance": "batch",
+        "utterance_batch": "batch",
+        "no": "batch",
+        "false": "batch",
+        "off": "batch",
+        "0": "batch",
+        "no_context": "batch",
+        "without_context": "batch",
+    }
+    mode = aliases.get(raw, raw)
+    return mode if mode in JUDGE_CONTEXT_MODES else "batch"
 
 
 def normalize_issue_type(value: str) -> str:
     raw = str(value or "").strip().lower()
+    upper = raw.upper()
+    if upper in ISSUE_CODE_TO_TYPE:
+        return ISSUE_CODE_TO_TYPE[upper]
+    if len(raw) >= 2 and raw[0].upper() in ISSUE_CODE_TO_TYPE and raw[1] in {".", ":", ")", "-"}:
+        return ISSUE_CODE_TO_TYPE[raw[0].upper()]
     aliases = {
         "outdated": "temporal_error",
         "currentness_error": "temporal_error",
@@ -793,6 +837,17 @@ def normalize_issue_type(value: str) -> str:
 
 def issue_type_label(issue_type: str) -> str:
     return ISSUE_TYPE_LABELS.get(normalize_issue_type(issue_type), str(issue_type or "unknown"))
+
+
+def issue_type_code(issue_type: str) -> str:
+    return ISSUE_TYPE_CODES.get(normalize_issue_type(issue_type), "")
+
+
+def issue_type_code_label(issue_type: str) -> str:
+    normalized = normalize_issue_type(issue_type)
+    code = issue_type_code(normalized)
+    label = issue_type_label(normalized)
+    return f"{code}. {label}" if code else label
 
 
 def normalize_issue_metadata(issue: dict, issue_type: str | None = None) -> dict:
@@ -933,35 +988,6 @@ def metadata_review_reason(issue: dict) -> str:
     if issue.get("claim_scope") == "overgeneralized_from_context":
         reasons.append("원문보다 넓게 일반화된 claim")
     return ", ".join(reasons) or "자동 확정보다 교수 확인이 필요한 후보"
-
-
-
-def build_verification_question(claim: dict) -> str:
-    """후속 판정에서 살아남은 claim에만 짧은 검증 질문을 생성."""
-    text = str(
-        claim.get("resolved_claim")
-        or claim.get("claim_text")
-        or claim.get("problematic_content")
-        or ""
-    ).strip()
-    if not text:
-        return ""
-
-    text = " ".join(text.split()).strip(" \t\r\n.。?？!！")
-    if not text:
-        return ""
-
-    claim_type = str(claim.get("claim_type", "") or "").strip()
-    if claim_type == "numeric":
-        return f"'{text}'라는 수치나 기준이 정확한가?"
-    if claim_type == "causal":
-        return f"'{text}'라는 인과 또는 작동 방식 설명이 타당한가?"
-    if claim_type == "relationship":
-        return f"'{text}'라는 개념 간 관계 설명이 타당한가?"
-    if claim_type == "currentness":
-        return f"'{text}'라는 현행성 설명이 현재 기준으로 타당한가?"
-    return f"'{text}'라는 설명이 타당한가?"
-
 
 # ── 도메인 힌트 ──────────────────────────────────────────
 
@@ -1323,17 +1349,3 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
         }
     return ctx
 
-
-def _format_utterance_for_prompt(u: dict) -> str:
-    uid = u["utterance_id"]
-    ts = f"{u['start_time']:.1f}s"
-    corr = str(u.get("text_corrected", "") or "").strip()
-    orig = str(u.get("text_original", "") or "").strip()
-
-    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
-        return f"{uid} | {ts} | {orig or u.get('text', '')}"
-
-    if corr and orig and corr != orig:
-        return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"
-
-    return f"{uid} | {ts} | {u['text']}"

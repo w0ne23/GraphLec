@@ -22,6 +22,7 @@ _CROSSCHECK_EXTRA_FIELDS = (
     "suggested_rephrase",
     "teaching_note",
     "recommendation",
+    "issue_type_rationale",
 )
 
 _API_FAILURE_MARKERS = (
@@ -43,12 +44,35 @@ _API_FAILURE_MARKERS = (
 )
 
 _CRITERIA_WEIGHTS = {
-    "misinformation_risk": 0.15,
-    "nearby_context_unresolved": 0.25,
-    "slide_context_unresolved": 0.25,
-    "concrete_basis": 0.20,
-    "student_impact": 0.15,
+    "issue_presence": 0.40,
+    "context_unresolved": 0.35,
+    "evidence_strength": 0.25,
 }
+
+_CRITERIA_ALIASES = {
+    "issue_presence": ("claim_issue_strength", "misinformation_risk"),
+    "context_unresolved": (
+        "local_context_unresolved",
+        "nearby_context_unresolved",
+        "slide_context_unresolved",
+    ),
+    "evidence_strength": ("concrete_basis",),
+}
+
+
+def _issue_type_definitions_for_prompt() -> str:
+    return """- A. factual_error (발언 자체 오류): 발화 자체의 객관 사실, 정의, 분류, 수치, 순서, 원인-결과, 작동 방식이 강의 문맥을 함께 봐도 틀린 경우
+  포함: 잘못된 명제, 반례, 정답과의 직접 충돌, 주체/과정/대상의 명확한 혼동
+  제외: 표현이 조금 부정확하지만 학생이 최종적으로 맞는 개념을 가져가는 경우
+- B. temporal_error (시간적 오류): 현재성, 최신성, 지원 여부, 사용 여부, 시점 의존 수치나 상태를 현재 사실처럼 말했지만 기준 시점에서 틀리거나 확인이 필요한 경우
+  포함: 현재/요즘/최근/최신/지원 종료/시장 상태/현행 제도/시점 의존 통계
+  제외: 녹화 시점이나 역사적 관점 설명으로 자연스럽게 해석되는 경우
+- C. scope_overclaim (범위 과잉 단정): 특정 조건에서는 맞지만 모든 경우에 맞는 것처럼 범위, 조건, 예외, 다른 가능성을 닫아 말한 경우
+  포함: 항상/모든/반드시/오직/~만/유일 같은 닫힌 명제가 문맥 후에도 남고, 강의 수준에서 의미 있는 반례나 조건이 있는 경우
+  제외: 역할, 책임, 대표 경로, 일반적 관례를 강조한 표준적 설명일 뿐 다른 가능성을 실제로 배제하지 않는 경우
+- D. confusing_explanation (혼동 가능 설명): 명백한 사실 오류라고 단정되지는 않더라도 학생이 핵심 개념, 주체, 과정, 원인, 조건을 잘못 연결해 외울 가능성이 큰 경우
+  포함: 서로 다른 개념 동일시, 주체/과정 혼동, 순서 혼동, 설명 흐름 때문에 남는 구체적 오답 명제
+  제외: 단순 비유 취향, 더 자세히 설명 가능함, 막연한 오해 가능성, 지시어를 과하게 확정해야만 생기는 문제"""
 
 _TERM_RE = re.compile(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9_+-]{1,}")
 _KOREAN_SUFFIXES = (
@@ -276,17 +300,70 @@ def _coerce_confidence(value, default: float | None = None) -> float | None:
     return max(0.0, min(1.0, number))
 
 
+def _score_from_payload(value: dict, key: str, default: float = 0.0) -> float:
+    raw = value.get(key)
+    if isinstance(raw, bool):
+        return 1.0 if raw else 0.0
+    return _coerce_confidence(raw, default) or default
+
+
 def _normalized_score_map(value, allowed_keys: dict[str, float]) -> dict[str, float]:
     if not isinstance(value, dict):
         return {}
     scores: dict[str, float] = {}
     for key in allowed_keys:
-        raw = value.get(key)
-        if isinstance(raw, bool):
-            scores[key] = 1.0 if raw else 0.0
+        if key in value:
+            scores[key] = _score_from_payload(value, key)
             continue
-        scores[key] = _coerce_confidence(raw, 0.0) or 0.0
+        alias_scores = [
+            _score_from_payload(value, alias)
+            for alias in _CRITERIA_ALIASES.get(key, ())
+            if alias in value
+        ]
+        scores[key] = sum(alias_scores) / len(alias_scores) if alias_scores else 0.0
     return scores
+
+
+def _normalized_issue_type_scores(value) -> dict[str, float]:
+    from . import claim_common as cv
+
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, float] = {}
+    for issue_type in cv.ISSUE_TYPE_ORDER:
+        code = cv.issue_type_code(issue_type)
+        label = cv.issue_type_label(issue_type)
+        candidate_keys = (
+            issue_type,
+            code,
+            code.lower(),
+            f"{code}_{issue_type}",
+            f"{code.lower()}_{issue_type}",
+            f"{code}. {label}",
+            f"{code}.{label}",
+            label,
+        )
+        scores = [
+            _score_from_payload(value, key)
+            for key in candidate_keys
+            if key in value
+        ]
+        if scores:
+            normalized[issue_type] = max(scores)
+
+    return normalized
+
+
+def _primary_issue_type_from_scores(type_scores: dict[str, float]) -> str:
+    from . import claim_common as cv
+
+    if not type_scores:
+        return ""
+    return max(
+        cv.ISSUE_TYPE_ORDER,
+        key=lambda issue_type: float(type_scores.get(issue_type, 0.0) or 0.0),
+    )
 
 
 def _confidence_from_criteria(payload: dict) -> tuple[float | None, dict]:
@@ -301,15 +378,15 @@ def _confidence_from_criteria(payload: dict) -> tuple[float | None, dict]:
     score = max(0.0, min(1.0, score))
 
     gates = []
-    if criteria.get("misinformation_risk", 0.0) < 0.5:
-        score = min(score, 0.44)
-        gates.append("misinformation_risk_not_verified")
-    if criteria.get("nearby_context_unresolved", 0.0) < 0.5 and criteria.get("slide_context_unresolved", 0.0) < 0.5:
-        score = min(score, 0.44)
-        gates.append("resolved_by_nearby_context_and_slide")
-    if criteria.get("concrete_basis", 0.0) < 0.5 and criteria.get("student_impact", 0.0) < 0.5:
+    if criteria.get("issue_presence", 0.0) < 0.5:
+        score = min(score, 0.39)
+        gates.append("issue_not_verified")
+    if criteria.get("context_unresolved", 0.0) < 0.5:
+        score = min(score, 0.39)
+        gates.append("resolved_by_context")
+    if criteria.get("evidence_strength", 0.0) < 0.5:
         score = min(score, 0.79)
-        gates.append("weak_concrete_basis_and_student_impact")
+        gates.append("weak_evidence_strength")
 
     breakdown = {
         "criteria_weights": _CRITERIA_WEIGHTS,
@@ -339,7 +416,7 @@ def _verdict_from_confidence(confidence: float | None) -> str:
         return "inconclusive"
     if confidence >= 0.75:
         return "agree"
-    if confidence < 0.45:
+    if confidence < 0.4:
         return "disagree"
     return "inconclusive"
 
@@ -358,6 +435,8 @@ def _crosscheck_retry_message(error: Exception) -> str:
 
 
 def _pack_crosscheck_payload(payload: dict) -> dict:
+    from . import claim_common as cv
+
     raw_verdict = str(payload.get("verdict", "") or "").lower().strip()
     criteria_confidence, criteria_payload = _confidence_from_criteria(payload)
     confidence = _coerce_confidence(
@@ -376,6 +455,27 @@ def _pack_crosscheck_payload(payload: dict) -> dict:
         "confidence": confidence,
         "reason": str(payload.get("reason", "") or "").strip(),
     }
+    type_scores = _normalized_issue_type_scores(
+        payload.get("issue_type_scores")
+        or payload.get("type_scores")
+        or payload.get("type_confidence")
+        or payload.get("issue_type_confidence")
+        or {}
+    )
+    issue_type = cv.normalize_issue_type(payload.get("issue_type") or payload.get("type") or "")
+    if issue_type not in cv.ALLOWED_ISSUE_TYPES:
+        issue_type = _primary_issue_type_from_scores(type_scores)
+    if issue_type in cv.ALLOWED_ISSUE_TYPES:
+        result["issue_type"] = issue_type
+        result["issue_type_label"] = cv.issue_type_label(issue_type)
+        result["issue_type_code"] = cv.issue_type_code(issue_type)
+        result["issue_type_code_label"] = cv.issue_type_code_label(issue_type)
+    if type_scores:
+        result["issue_type_scores"] = {
+            issue_type: round(float(type_scores.get(issue_type, 0.0) or 0.0), 4)
+            for issue_type in cv.ISSUE_TYPE_ORDER
+            if issue_type in type_scores
+        }
     result.update(criteria_payload)
     for field in _CROSSCHECK_EXTRA_FIELDS:
         value = str(payload.get(field, "") or "").strip()
@@ -388,9 +488,9 @@ def _apply_transcript_artifact_cap(payload: dict, hint: dict | None) -> None:
     if not isinstance(payload, dict) or not isinstance(hint, dict) or not hint.get("likely"):
         return
     try:
-        cap = float(os.getenv("VERIFIER_TRANSCRIPT_ARTIFACT_SCORE_CAP", "0.44") or "0.44")
+        cap = float(os.getenv("VERIFIER_TRANSCRIPT_ARTIFACT_SCORE_CAP", "0.39") or "0.39")
     except ValueError:
-        cap = 0.44
+        cap = 0.39
     cap = max(0.0, min(1.0, cap))
     original_confidence = _coerce_confidence(payload.get("confidence"), 0.5)
     payload["transcript_artifact_likely"] = True
@@ -672,7 +772,7 @@ def _issue_line_for_batch(issue_id: str, issue: dict) -> str:
         f"### {issue_id}\n"
         f"- utterance_id: {issue.get('utterance_id', '')}\n"
         f"- issue_unit_id: {issue.get('issue_unit_id') or issue.get('canonical_issue_id') or ''}\n"
-        f"- 유형: {issue_label} ({issue_type})\n"
+        f"- 유형: {cv.issue_type_code_label(issue_type)} ({issue_type})\n"
         f"- claim: {issue.get('claim_text', '')}\n"
         f"- 문제: {issue.get('issue', '')}"
         f"{source_block}"
@@ -695,6 +795,8 @@ def _build_crosscheck_batch_prompt(
     valid: list[tuple[str, dict]],
     ctx: dict,
 ) -> tuple[str, str | None, str, set[str], dict[str, dict]]:
+    from . import claim_common as cv
+
     utterances = ctx["utterances"]
     hint = ctx["hint"]
     utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(utterances)}
@@ -734,9 +836,10 @@ def _build_crosscheck_batch_prompt(
         context_text = f"{context_text}\n\n전사 오류 가능성 힌트\n{artifact_block}"
     issue_block = "\n\n".join(_issue_line_for_batch(issue_id, issue) for issue_id, issue in valid)
     issue_ids = {issue_id for issue_id, _ in valid}
+    issue_type_definitions = _issue_type_definitions_for_prompt()
 
-    prompt = f"""다른 검증 모델이 아래 발화들에서 문제를 발견했습니다.
-당신은 각 지적이 타당한지 원문과 강의 문맥만 기준으로 독립 판단해야 합니다.
+    prompt = f"""이전 단계에서 아래 발화들에 대한 issue 후보가 생성되었습니다.
+당신은 각 후보가 타당한지 원문과 강의 문맥만 기준으로 독립 판단해야 합니다.
 
 ## 도메인
 {hint.get('label', '')}
@@ -765,41 +868,41 @@ issue 안에 묶인 발화/claim이 여러 개 있으면, 개별 문장 하나�
 잘못된 명제 또는 오해를 판단하세요.
 서로 다른 issue_id끼리는 독립적으로 판단하세요. 새로운 이슈를 만들지 말고, 제공된 issue_id 각각에 대해서만 criteria_scores와 criteria_evidence를 작성하세요.
 
+## 공통 issue type 정의
+아래 4개 유형은 이전 verifier 단계와 동일한 기준입니다.
+각 issue가 A-D 각각에 얼마나 해당하는지 `issue_type_scores`에 독립적으로 0.0~1.0 점수로 적으세요.
+A-D 점수는 합이 1이 될 필요가 없습니다. 하나의 issue가 A와 C에 동시에 높게 해당할 수 있습니다.
+`issue_type`과 `issue_type_code`에는 가장 높게 채점한 대표 유형을 적으세요.
+이전 verifier 유형이 문맥상 맞으면 유지할 수 있고, 문맥을 본 뒤 더 맞는 유형이 있으면 A-D 안에서만 바꿀 수 있습니다.
+중요: `criteria_scores`는 "이 issue를 유지할 근거가 남는가"를 판단하는 점수이고,
+`issue_type_scores`는 "유지될 경우 어떤 유형의 성격이 강한가"를 나타내는 독립 점수입니다.
+문맥을 보면 issue 자체가 성립하지 않는 경우에는 관련 A-D 유형 점수도 낮게 주세요.
+{issue_type_definitions}
+
 중요: 실재 대상의 구체 수치/비율/연도/규모를 다루는 이슈에서는 "핵심 설명용 예시라서 학생이 암기하지 않을 것"만으로
 가산 기준을 자동으로 낮추거나 감점하지 마세요. 강의의 핵심이 다른 개념이어도, 현실 대상에 붙은 수치가 틀리거나 오래되었으면 교수에게 확인 대상으로
 올릴 수 있습니다. 이 경우 문맥이 해결했다는 판단은 "해당 숫자가 임의값/가상값/변수값이라고 명시됨" 또는
 "같은 문맥에서 정확한 값이나 최신 값으로 바로 정정됨"일 때만 가능합니다.
 
 ## 채점 기준
-아래 5개 항목만 채우세요. 5개 항목의 가중치 합은 1.0입니다.
+아래 3개 항목만 채우세요. 3개 항목의 가중치 합은 1.0입니다.
 각 항목은 0.0 / 0.5 / 1.0 중 하나를 기본으로 쓰되, 꼭 필요하면 0.25나 0.75를 사용할 수 있습니다.
 
-1. **misinformation_risk (0.15)**
-   이 claim 또는 issue가 학생에게 잘못된 정보를 주게 되는 이유를 작성하고 검증하세요.
-   잘못 외울 명제가 구체적이고, 원문에 의해 실제로 유도될 수 있으면 높게 줍니다.
-   잘못된 명제를 재구성할 수 없거나 특정 단어/지시어만 과해석해야 성립하면 낮게 줍니다.
+1. **issue_presence (0.40)**
+   이 issue가 원문 발화와 강의 흐름 기준으로 실제 문제를 얼마나 강하게 포함하는지 검증하세요.
+   잘못 외울 명제, 정답 충돌, 현재성 오류, 범위 과잉, 주체/과정 혼동 같은 문제가 실제로 남으면 높게 줍니다.
+   잘못된 명제를 재구성할 수 없거나 특정 단어/지시어만 과해석해야 성립하거나 표현 취향 수준이면 낮게 줍니다.
 
-2. **nearby_context_unresolved (0.25)**
-   대상 발화 전후 ±5개 발화 안에서 해당 claim을 해소하는 발화가 있는지 확인하고 검증하세요.
-   주변 발화가 대상, 관계, 순서, 주체, 조건, 범위를 충분히 보완하면 낮게 줍니다.
-   주변 발화가 해소하지 못하거나 같은 오해를 반복/강화하면 높게 줍니다.
+2. **context_unresolved (0.35)**
+   제공된 강의 문맥 전체가 해당 issue를 해소하지 못하는 정도를 검증하세요.
+   여기서 문맥은 대상 발화 전후 ±5개 발화, 이전+현재 슬라이드 텍스트, 이전+현재 슬라이드의 강의자 발화를 모두 포함합니다.
+   이 문맥이 대상, 관계, 순서, 주체, 조건, 범위를 충분히 보완하면 낮게 줍니다.
+   문맥이 해소하지 못하거나 같은 오해를 반복/강화하면 높게 줍니다.
 
-3. **slide_context_unresolved (0.25)**
-   해당 슬라이드의 텍스트, 그림 설명, 구조가 해당 claim을 해소하는지 확인하고 검증하세요.
-   슬라이드가 문제를 명확히 보완하면 낮게 줍니다.
-   슬라이드가 보완하지 못하거나 발화와 충돌하거나 같은 혼동을 강화하면 높게 줍니다.
-
-4. **concrete_basis (0.20)**
-   반례, 정답 충돌, 현재성 오류, 범위 과잉, 주체/과정 혼동처럼 구체적인 판단 근거가 있는지 검증하세요.
-   현실 대상의 구체 수치/비율/연도/규모가 틀리거나 오래된 경우도 근거가 될 수 있습니다.
-   범위 과잉은 단순히 더 많은 예외나 더 넓은 설명이 가능하다는 뜻이 아닙니다.
-   강의 문맥 안에서 학생이 실제로 다른 가능성/주체/조건을 배제하는 명제를 외우게 될 때만 높게 줍니다.
-   단순히 더 엄밀히 말할 수 있다는 정도, 표현 취향, 세부 생략뿐이면 낮게 줍니다.
-
-5. **student_impact (0.15)**
-   학생이 실제로 잘못 외우거나 후속 개념을 혼동할 위험이 구체적인지 검증하세요.
-   어떤 오개념으로 이어지는지 설명 가능하면 높게 줍니다.
-   오해 가능성이 추상적이거나 교수 표현 취향 수준이면 낮게 줍니다.
+3. **evidence_strength (0.25)**
+   이 issue를 유지할 구체 근거가 얼마나 명확한지 검증하세요.
+   반례, 정의 차이, 수치 오류, 현행성 오류, 슬라이드/발화 직접 충돌, 조건/범위 차이처럼 설명 가능한 근거가 있으면 높게 줍니다.
+   단순히 더 자세히 말할 수 있다는 정도, 강의 수준 밖 세부 예외, 주관적 표현 개선이면 낮게 줍니다.
 
 추가 판단 원칙:
 - 슬라이드와 전사문은 서로 보완 근거입니다. 둘을 함께 봤을 때 학생이 자연스럽게 이해할 최종 의미를 판단하세요.
@@ -812,22 +915,24 @@ issue 안에 묶인 발화/claim이 여러 개 있으면, 개별 문장 하나�
 - 반박 근거는 학생이 이 강의 구간에서 배우는 개념 수준과 맞아야 합니다. 강의가 설명하지 않는 세부 구현, 특수 상황, 예외적 전제만으로는 issue를 유지하지 마세요.
 - "모든", "오직", "~만", "독점" 같은 닫힌 표현이 있어도, 문맥상 역할/책임/관리 주체/대표 경로를 강조한 표준적 설명이면 그 단어만으로 범위 과잉 점수를 올리지 마세요.
 - 범위 과잉 issue를 유지하려면, 원문과 문맥을 함께 본 뒤에도 "다른 가능성은 불가능하다", "다른 주체는 관여하지 않는다", "이 조건에서만 성립한다"처럼 학생이 잘못 외울 닫힌 명제가 구체적으로 남아야 합니다.
-- 반례가 강의 범위 밖의 더 상위/하위 계층, 예외적 구현, 고급 세부사항에만 의존하면 concrete_basis와 student_impact를 낮게 주세요.
+- 반례가 강의 범위 밖의 더 상위/하위 계층, 예외적 구현, 고급 세부사항에만 의존하면 issue_presence와 evidence_strength를 낮게 주세요.
 - 더 자세히 말할 수 있다는 정도, 더 엄밀한 표현 가능성, 표현 취향만이면 모든 항목을 낮게 채점하세요.
 
-최종 점수 기준:
-- 0.00~0.44: 기각
-- 0.45~0.79: 교수 확인
-- 0.80~1.00: 확정
-
-교수 확인 또는 확정 구간이 될 만한 채점이면 교수에게 보여줄 수 있는 설명 필드도 작성하세요.
-기각 구간이 될 만한 채점이면 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
+최종 점수와 최종 상태는 서버가 criteria_scores를 가중합해 계산합니다.
+모델은 최종 상태를 맞추려고 점수를 조정하지 말고, 위 3개 기준에 따라 독립적으로 채점하세요.
+세 기준에서 실제 문제가 남는다고 판단될 때만 교수에게 보여줄 수 있는 설명 필드를 작성하세요.
+문맥상 issue가 성립하지 않는다고 판단되면 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
 
 응답 규칙:
 - 반드시 JSON object 하나만 출력
 - markdown/code fence 금지
 - verdict는 출력하지 마세요
 - confidence는 출력하지 마세요
+- issue_type은 반드시 factual_error / temporal_error / scope_overclaim / confusing_explanation 중 하나
+- issue_type_code는 반드시 A / B / C / D 중 하나
+- issue_type_scores는 반드시 A-D 4개 유형 각각을 독립 0.0~1.0 점수로 출력
+- issue_type_scores의 합을 1로 맞추지 마세요
+- issue_type_rationale은 가장 높게 나온 대표 유형을 고른 이유를 1문장으로 출력
 - criteria_scores와 criteria_evidence는 반드시 출력
 - 입력된 모든 issue_id에 대해 정확히 하나의 criteria_scores와 criteria_evidence를 출력
 - 단일 issue를 받더라도 반드시 results 배열로 출력
@@ -840,37 +945,47 @@ issue 안에 묶인 발화/claim이 여러 개 있으면, 개별 문장 하나�
   "results": [
     {{
       "issue_id": "i0001",
+      "issue_type": "factual_error",
+      "issue_type_code": "A",
+      "issue_type_scores": {{
+        "A": 0.0,
+        "B": 0.0,
+        "C": 0.0,
+        "D": 0.0
+      }},
+      "issue_type_rationale": "대표 유형을 고른 이유",
       "criteria_scores": {{
-        "misinformation_risk": 0.0,
-        "nearby_context_unresolved": 0.0,
-        "slide_context_unresolved": 0.0,
-        "concrete_basis": 0.0,
-        "student_impact": 0.0
+        "issue_presence": 0.0,
+        "context_unresolved": 0.0,
+        "evidence_strength": 0.0
       }},
       "criteria_evidence": {{
-        "misinformation_risk": "잘못된 명제가 구체적으로 남지 않음",
-        "nearby_context_unresolved": "±5개 발화가 의미를 보완함",
-        "slide_context_unresolved": "슬라이드가 의미를 보완함",
-        "concrete_basis": "반례/충돌/조건 근거가 부족함",
-        "student_impact": "학생 오개념 위험이 낮음"
+        "issue_presence": "잘못된 명제나 구체 문제가 남지 않음",
+        "context_unresolved": "제공된 문맥이 의미를 보완함",
+        "evidence_strength": "반례나 직접 충돌 근거가 약함"
       }},
       "reason": "원문과 문맥 기준의 판단 이유"
     }},
     {{
       "issue_id": "i0002",
+      "issue_type": "scope_overclaim",
+      "issue_type_code": "C",
+      "issue_type_scores": {{
+        "A": 0.25,
+        "B": 0.0,
+        "C": 0.9,
+        "D": 0.6
+      }},
+      "issue_type_rationale": "닫힌 표현과 문맥 후에도 남는 반례 가능성이 가장 강하므로 C로 분류함",
       "criteria_scores": {{
-        "misinformation_risk": 1.0,
-        "nearby_context_unresolved": 1.0,
-        "slide_context_unresolved": 0.5,
-        "concrete_basis": 0.75,
-        "student_impact": 0.75
+        "issue_presence": 1.0,
+        "context_unresolved": 0.75,
+        "evidence_strength": 0.75
       }},
       "criteria_evidence": {{
-        "misinformation_risk": "잘못된 명제와 그 이유",
-        "nearby_context_unresolved": "±5개 발화 확인 결과",
-        "slide_context_unresolved": "슬라이드 확인 결과",
-        "concrete_basis": "반례/충돌/조건 근거",
-        "student_impact": "학생 오개념 가능성"
+        "issue_presence": "학생이 잘못 외울 명제가 남음",
+        "context_unresolved": "제공된 문맥이 조건을 충분히 보완하지 못함",
+        "evidence_strength": "강의 수준에서 설명 가능한 반례나 조건 차이가 있음"
       }},
       "reason": "원문과 문맥 기준의 판단 이유",
       "issue": "문제점 또는 교수 확인 후보 요약",

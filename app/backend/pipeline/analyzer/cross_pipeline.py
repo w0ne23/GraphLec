@@ -18,6 +18,7 @@ import math
 import os
 import re
 import sys
+from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
@@ -68,6 +69,7 @@ _CROSSCHECK_FEEDBACK_FIELDS = (
     "suggested_rephrase",
     "teaching_note",
     "recommendation",
+    "issue_type_rationale",
 )
 
 
@@ -146,7 +148,7 @@ _VERDICT_SCORE = {
     "disagree": 0.0,
 }
 _DEFAULT_CONFIRM_THRESHOLD = 0.8
-_DEFAULT_PROFESSOR_CHECK_THRESHOLD = 0.45
+_DEFAULT_PROFESSOR_CHECK_THRESHOLD = 0.4
 
 
 def _split_model_specs(value: str | None) -> list[str]:
@@ -340,9 +342,98 @@ def _bucket_from_confidence(confidence: float) -> str:
     return "disagree"
 
 
+def _type_score_threshold() -> float:
+    return _env_float("CROSS_VERIFY_SECONDARY_TYPE_THRESHOLD", 0.45, minimum=0.0, maximum=1.0)
+
+
+def _coerce_score(value, default: float = 0.0) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = default
+    if score > 1.0 and score <= 100.0:
+        score = score / 100.0
+    return max(0.0, min(1.0, score))
+
+
+def _normalize_type_scores(value) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    scores: dict[str, float] = {}
+    for issue_type in cv.ISSUE_TYPE_ORDER:
+        code = cv.issue_type_code(issue_type)
+        label = cv.issue_type_label(issue_type)
+        candidate_keys = (
+            issue_type,
+            code,
+            code.lower(),
+            f"{code}_{issue_type}",
+            f"{code.lower()}_{issue_type}",
+            f"{code}. {label}",
+            f"{code}.{label}",
+            label,
+        )
+        values = [
+            _coerce_score(value.get(key))
+            for key in candidate_keys
+            if key in value
+        ]
+        if values:
+            scores[issue_type] = max(values)
+    return scores
+
+
+def _row_issue_type_scores(row: dict) -> dict[str, float]:
+    scores = _normalize_type_scores(
+        row.get("issue_type_scores")
+        or row.get("type_scores")
+        or row.get("type_confidence")
+        or {}
+    )
+    if scores:
+        return scores
+    issue_type = cv.normalize_issue_type(row.get("issue_type") or row.get("type") or "")
+    if issue_type in cv.ALLOWED_ISSUE_TYPES:
+        return {issue_type: 1.0}
+    return {}
+
+
+def _issue_type_score_payload(type_scores: dict[str, float]) -> dict:
+    ordered_scores = {
+        issue_type: round(float(type_scores.get(issue_type, 0.0) or 0.0), 4)
+        for issue_type in cv.ISSUE_TYPE_ORDER
+    }
+    primary_type = max(cv.ISSUE_TYPE_ORDER, key=lambda key: ordered_scores.get(key, 0.0))
+    primary_score = ordered_scores.get(primary_type, 0.0)
+    threshold = _type_score_threshold()
+    secondary = [
+        {
+            "type": issue_type,
+            "code": cv.issue_type_code(issue_type),
+            "label": cv.issue_type_label(issue_type),
+            "score": ordered_scores.get(issue_type, 0.0),
+        }
+        for issue_type in cv.ISSUE_TYPE_ORDER
+        if issue_type != primary_type and ordered_scores.get(issue_type, 0.0) >= threshold
+    ]
+    return {
+        "issue_type_scores": ordered_scores,
+        "primary_issue_type": {
+            "type": primary_type,
+            "code": cv.issue_type_code(primary_type),
+            "label": cv.issue_type_label(primary_type),
+            "score": primary_score,
+        },
+        "secondary_issue_types": secondary,
+        "type_score_threshold": threshold,
+    }
+
+
 def _score_details(details: list[dict], weight_map: dict[str, float], *, excluded_model: str | None = None) -> dict:
     weighted_sum = 0.0
     total_weight = 0.0
+    type_weighted_sum = {issue_type: 0.0 for issue_type in cv.ISSUE_TYPE_ORDER}
+    total_type_weight = 0.0
     contributing_models: list[str] = []
     vote_counts = {"agree": 0, "inconclusive": 0, "disagree": 0}
     for row in details:
@@ -367,6 +458,19 @@ def _score_details(details: list[dict], weight_map: dict[str, float], *, exclude
         row["vote_score"] = round(vote_score, 4)
         row["model_weight"] = round(weight, 4)
         row["weighted_score"] = round(vote_score * weight, 4)
+        row_type_scores = _row_issue_type_scores(row)
+        if row_type_scores:
+            row["issue_type_scores"] = {
+                issue_type: round(float(row_type_scores.get(issue_type, 0.0) or 0.0), 4)
+                for issue_type in cv.ISSUE_TYPE_ORDER
+                if issue_type in row_type_scores
+            }
+            effective_type_weight = weight * vote_score
+            row["type_effective_weight"] = round(effective_type_weight, 4)
+            if effective_type_weight > 0:
+                for issue_type in cv.ISSUE_TYPE_ORDER:
+                    type_weighted_sum[issue_type] += effective_type_weight * float(row_type_scores.get(issue_type, 0.0) or 0.0)
+                total_type_weight += effective_type_weight
         if weight <= 0:
             continue
         vote_counts[verdict] += 1
@@ -375,6 +479,23 @@ def _score_details(details: list[dict], weight_map: dict[str, float], *, exclude
         total_weight += weight
     score = weighted_sum / total_weight if total_weight > 0 else 0.5
     score = max(0.0, min(1.0, score))
+    if total_type_weight > 0:
+        final_type_scores = {
+            issue_type: type_weighted_sum[issue_type] / total_type_weight
+            for issue_type in cv.ISSUE_TYPE_ORDER
+        }
+        type_payload = _issue_type_score_payload(final_type_scores)
+    else:
+        final_type_scores = {issue_type: 0.0 for issue_type in cv.ISSUE_TYPE_ORDER}
+        type_payload = {
+            "issue_type_scores": {
+                issue_type: 0.0
+                for issue_type in cv.ISSUE_TYPE_ORDER
+            },
+            "primary_issue_type": {},
+            "secondary_issue_types": [],
+            "type_score_threshold": _type_score_threshold(),
+        }
     return {
         "score": round(score, 4),
         "score_percent": round(score * 100, 1),
@@ -387,6 +508,7 @@ def _score_details(details: list[dict], weight_map: dict[str, float], *, exclude
             "confirmed": _crosscheck_confirm_threshold(),
             "professor_check": _crosscheck_professor_check_threshold(),
         },
+        **type_payload,
     }
 
 
@@ -501,12 +623,17 @@ def _build_crosscheck_score_report(scored_issues: list[dict], weight_map: dict[s
         })
 
     return {
-        "algorithm": "weighted_criteria_confidence_average",
+        "algorithm": "weighted_issue_score_with_independent_issue_type_scores",
         "confidence_definition": "이 이슈를 교수에게 보여줄 만큼 문제가 실제로 남아 있는 정도",
         "criteria_weights": {k: round(v, 4) for k, v in CROSSCHECK_CRITERIA_WEIGHTS.items()},
+        "issue_type_score_definition": (
+            "A-D 유형은 합이 1인 확률 분포가 아니라 각 유형에 독립적으로 해당하는 정도이며, "
+            "최종 유형 점수는 model_weight * issue_score를 유효 가중치로 사용해 결합합니다."
+        ),
         "thresholds": {
             "confirmed": _crosscheck_confirm_threshold(),
             "professor_check": _crosscheck_professor_check_threshold(),
+            "secondary_issue_type": _type_score_threshold(),
         },
         "model_weights": weight_map,
         "status_counts": issue_status_counts,
@@ -550,6 +677,30 @@ def _apply_crosscheck_feedback_fields(issue: dict, details: list[dict], *, profe
     sources = _ordered_crosscheck_details(details)
     if not sources:
         return
+    primary_type_payload = issue.get("primary_issue_type") if isinstance(issue.get("primary_issue_type"), dict) else {}
+    selected_type = cv.normalize_issue_type(primary_type_payload.get("type") or issue.get("issue_type") or issue.get("type") or "")
+    if selected_type in cv.ALLOWED_ISSUE_TYPES:
+        issue["type"] = selected_type
+        issue["issue_type"] = selected_type
+        issue["issue_type_label"] = cv.issue_type_label(selected_type)
+        issue["issue_type_code"] = cv.issue_type_code(selected_type)
+        issue["issue_type_code_label"] = cv.issue_type_code_label(selected_type)
+    else:
+        type_votes = Counter(
+            cv.normalize_issue_type(row.get("issue_type") or row.get("type") or "")
+            for row in sources
+            if row.get("verdict") in {"agree", "inconclusive"}
+            and cv.normalize_issue_type(row.get("issue_type") or row.get("type") or "") in cv.ALLOWED_ISSUE_TYPES
+        )
+        if type_votes:
+            selected_type = type_votes.most_common(1)[0][0]
+            issue["type"] = selected_type
+            issue["issue_type"] = selected_type
+            issue["issue_type_label"] = cv.issue_type_label(selected_type)
+            issue["issue_type_code"] = cv.issue_type_code(selected_type)
+            issue["issue_type_code_label"] = cv.issue_type_code_label(selected_type)
+            issue["crosscheck_issue_type_votes"] = dict(type_votes)
+
     for field in _CROSSCHECK_FEEDBACK_FIELDS:
         for source in sources:
             value = str(source.get(field, "") or "").strip()
@@ -603,8 +754,13 @@ def cross_verify(
     crosscheck_models: list[str] | None = None,
     claim_runs: int = 1,
     claim_min_rate: float = 0.5,
+    judge_context_mode: str | None = None,
 ) -> dict:
     root = str(_ROOT)
+    judge_context_mode = cv.normalize_judge_context_mode(judge_context_mode)
+    models = list(models or [])
+    env_vars = dict(env_vars or {})
+    env_vars["VERIFIER_JUDGE_CONTEXT_MODE"] = judge_context_mode
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
@@ -673,6 +829,7 @@ def cross_verify(
     print(f"\n  ── claim 입력 결과 ──")
     print(f"    [{extract_result['model']}]: {extract_claim_count}개")
     print(f"    판정 입력 claim 수: {len(merged_claims)}개")
+    print(f"    verifier judge 문맥 모드: {judge_context_mode}")
 
     merged_batches = rebuild_claim_batches(merged_claims, unique_utts, judge_batch_size or batch_size)
 
@@ -682,7 +839,7 @@ def cross_verify(
     print(f"{'='*60}")
 
     judge_args = [
-        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars)
+        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars, judge_context_mode)
         for model in models
     ]
 
@@ -852,6 +1009,16 @@ def cross_verify(
             issue["crosscheck_score_percent"] = score_percent
             issue["crosscheck_score_verdict"] = score_verdict
             issue["crosscheck_weighted_status"] = weighted_status
+            issue["issue_type_scores"] = scoring.get("issue_type_scores", {})
+            issue["primary_issue_type"] = scoring.get("primary_issue_type", {})
+            issue["secondary_issue_types"] = scoring.get("secondary_issue_types", [])
+            primary_issue_type = cv.normalize_issue_type((issue.get("primary_issue_type") or {}).get("type") or "")
+            if primary_issue_type in cv.ALLOWED_ISSUE_TYPES:
+                issue["type"] = primary_issue_type
+                issue["issue_type"] = primary_issue_type
+                issue["issue_type_label"] = cv.issue_type_label(primary_issue_type)
+                issue["issue_type_code"] = cv.issue_type_code(primary_issue_type)
+                issue["issue_type_code_label"] = cv.issue_type_code_label(primary_issue_type)
             issue["crosscheck_model_weights"] = {
                 row["model"]: row.get("model_weight", crosscheck_weights.get(row["model"], 0))
                 for row in details
@@ -983,6 +1150,7 @@ def cross_verify(
     result = {
         "mode": "cross_verification",
         "crosscheck_mode": crosscheck_mode,
+        "judge_context_mode": judge_context_mode,
         "crosscheck_context_mode": os.getenv("VERIFIER_CROSSCHECK_CONTEXT_MODE", "expanded") or "expanded",
         "crosscheck_focus_window": os.getenv("VERIFIER_CROSSCHECK_FOCUS_WINDOW", "5") or "5",
         "models": models,
@@ -1071,6 +1239,8 @@ def print_cross_result(result: dict):
     confirmed = result.get("confirmed_count", 0)
 
     print(f"  모델: {', '.join(models)}")
+    if result.get("judge_context_mode"):
+        print(f"  verifier judge 문맥 모드: {result.get('judge_context_mode')}")
     if result.get("crosscheck_mode"):
         print(f"  crosscheck: {result.get('crosscheck_mode')}")
     crosscheck_models = result.get("crosscheck_models") or models
@@ -1248,6 +1418,12 @@ def main():
     parser.add_argument("--batch-size", type=int, default=20)
     parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
+        "--judge-context-mode",
+        choices=["batch"],
+        default=None,
+        help="2단계 verifier judge 문맥 모드. batch=현재 발화 배치 문맥 방식",
+    )
+    parser.add_argument(
         "--crosscheck-models",
         nargs="+",
         default=None,
@@ -1273,6 +1449,7 @@ def main():
             crosscheck_models=args.crosscheck_models,
             claim_runs=args.claim_runs,
             claim_min_rate=args.claim_min_rate,
+            judge_context_mode=args.judge_context_mode,
         )
         print_cross_result(result)
     else:

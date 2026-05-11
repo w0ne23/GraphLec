@@ -230,6 +230,15 @@ def _claims_jsonl_path(output_json_path: str | Path) -> Path:
     return output_json_path.with_name(f"{prefix}_claims_extracted.jsonl")
 
 
+def _result_base_stem(base_stem: str, result_suffix: str | None = None) -> str:
+    suffix = str(result_suffix or "").strip()
+    if not suffix:
+        return base_stem
+    suffix = suffix.lstrip("_-")
+    suffix = re.sub(r"[^A-Za-z0-9가-힣_.-]+", "_", suffix).strip("_.-")
+    return f"{base_stem}_{suffix}" if suffix else base_stem
+
+
 def _claim_history_dir(claims_path: Path) -> Path:
     return claims_path.with_name(f"{claims_path.stem}_history")
 
@@ -410,7 +419,7 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         ),
         "temporal_error": (
             "incorrect",
-            "시대적 오류",
+            "시간적 오류",
             "현재 기준으로 유효하지 않은 정보를 현재 사실처럼 전달할 수 있습니다.",
         ),
         "confusing_explanation": (
@@ -447,6 +456,8 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         }
 
     return {
+        "issue_type_code": cv.issue_type_code(issue_type),
+        "issue_type_code_label": cv.issue_type_code_label(issue_type),
         "issue_type_label": cv.issue_type_label(issue_type),
         "pedagogical_type": category,
         "pedagogical_label": label,
@@ -613,6 +624,12 @@ def _claim_record_from_issue(
             "issue_type": issue_type,
             "type": issue_type,
             "issue_type_label": issue.get("issue_type_label") or cv.issue_type_label(issue_type),
+            "issue_type_code": issue.get("issue_type_code") or cv.issue_type_code(issue_type),
+            "issue_type_code_label": issue.get("issue_type_code_label") or cv.issue_type_code_label(issue_type),
+            "issue_type_scores": issue.get("issue_type_scores", {}),
+            "primary_issue_type": issue.get("primary_issue_type", {}),
+            "secondary_issue_types": issue.get("secondary_issue_types", []),
+            "issue_type_rationale": issue.get("issue_type_rationale", ""),
             "issue": issue.get("issue", ""),
             "correct_info": issue.get("correct_info", ""),
             "explanation": issue.get("explanation", ""),
@@ -1217,6 +1234,12 @@ def _compact_crosscheck_details(details: list[dict]) -> list[dict]:
         for scoring_field in ("criteria_scores", "criteria_evidence", "score_breakdown"):
             if isinstance(row.get(scoring_field), dict):
                 item[scoring_field] = row.get(scoring_field)
+        if isinstance(row.get("issue_type_scores"), dict):
+            item["issue_type_scores"] = row.get("issue_type_scores")
+        for field in ("issue_type", "issue_type_code", "issue_type_code_label", "issue_type_rationale"):
+            value = str(row.get(field, "") or "").strip()
+            if value:
+                item[field] = value
         for field in visible_fields:
             value = str(row.get(field, "") or "").strip()
             if value:
@@ -1331,6 +1354,13 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
         "claim_text": record.get("claim_text", ""),
         "resolved_claim": record.get("resolved_claim", ""),
         "claim_type": record.get("claim_type", ""),
+        "issue_type": feedback_type,
+        "issue_type_code": record.get("issue_type_code") or cv.issue_type_code(feedback_type),
+        "issue_type_code_label": record.get("issue_type_code_label") or cv.issue_type_code_label(feedback_type),
+        "issue_type_scores": record.get("issue_type_scores", {}),
+        "primary_issue_type": record.get("primary_issue_type", {}),
+        "secondary_issue_types": record.get("secondary_issue_types", []),
+        "issue_type_rationale": record.get("issue_type_rationale", ""),
         "feedback_type": feedback_type,
         "feedback_label": feedback_label,
         "severity": record.get("severity", ""),
@@ -1521,6 +1551,13 @@ def _build_v2_output(
         "crosscheck_model_weights": result.get("crosscheck_model_weights", {}),
         "crosscheck_score_report": result.get("crosscheck_score_report", {}),
         "summary": {
+            "issue_type_definitions": {
+                issue_type: {
+                    "code": cv.issue_type_code(issue_type),
+                    "label": cv.issue_type_label(issue_type),
+                }
+                for issue_type in cv.ISSUE_TYPE_ORDER
+            },
             "extracted_claim_count": len(claims),
             "issue_union_raw_count": result.get("issue_union_raw_count", result.get("issue_union_count", 0)),
             "issue_clustered_count": result.get("issue_clustered_count", result.get("issue_union_count", 0)),
@@ -1802,6 +1839,7 @@ def _reorder_result_for_output(result: dict) -> dict:
     preferred_order = [
         "schema_version",
         "mode",
+        "judge_context_mode",
         "crosscheck_mode",
         "crosscheck_context_mode",
         "crosscheck_focus_window",
@@ -1848,6 +1886,7 @@ def _reorder_result_for_output(result: dict) -> dict:
         "merged_claims",
         "claim_extract_token_usage",
         "token_usage_per_model",
+        "cross_recheck_token_usage_per_model",
         "source_claim_dedupe_token_usage",
         "token_usage",
         "crosscheck_filtered",
@@ -1873,6 +1912,7 @@ def _compact_result_for_output(result: dict) -> dict:
     compact_keys = [
         "schema_version",
         "mode",
+        "judge_context_mode",
         "crosscheck_mode",
         "crosscheck_context_mode",
         "crosscheck_focus_window",
@@ -1897,6 +1937,7 @@ def run_all_analyzers(
     merged_path: str,
     *,
     output_dir: str | None = None,
+    result_suffix: str | None = None,
     claims_jsonl: str | None = None,
     reuse_claims: bool = False,
     claim_runs: int = 1,
@@ -1908,6 +1949,7 @@ def run_all_analyzers(
     cross_runs: int = 1,
     cross_min_rate: float = 0.5,
     cross_batch_size: int = 20,
+    judge_context_mode: str | None = None,
     current_date: str | None = None,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
@@ -1915,11 +1957,12 @@ def run_all_analyzers(
         raise FileNotFoundError(f"merged_clean 파일 없음: {merged_file}")
 
     base_stem = _base_stem(merged_file)
+    result_stem = _result_base_stem(base_stem, result_suffix)
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    result_json_path = out_dir / f"{base_stem}_content_verification.json"
-    report_path = out_dir / f"{base_stem}_content_verification_report.txt"
+    result_json_path = out_dir / f"{result_stem}_content_verification.json"
+    report_path = out_dir / f"{result_stem}_content_verification_report.txt"
     effective_claims_jsonl = claims_jsonl
     if reuse_claims and not effective_claims_jsonl:
         previous_claims_path = _claims_jsonl_path(result_json_path)
@@ -1932,6 +1975,8 @@ def run_all_analyzers(
     from .cross_pipeline import cross_verify
 
     models = cross_models or _default_cross_models()
+    effective_judge_context_mode = cv.normalize_judge_context_mode(judge_context_mode)
+    models = list(models or [])
     effective_crosscheck_models = crosscheck_models or _default_crosscheck_models()
     if len(models) < 2:
         raise RuntimeError("cross verifier는 최소 2개 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --cross-models를 확인하세요.")
@@ -1949,6 +1994,9 @@ def run_all_analyzers(
     print(f"  verifier judge 모델: {', '.join(models)}")
     if effective_crosscheck_models:
         print(f"  crosscheck 전용 모델: {', '.join(effective_crosscheck_models)}")
+    print(f"  verifier judge 문맥 모드: {effective_judge_context_mode}")
+    env_vars = _collect_env_vars()
+    env_vars["VERIFIER_JUDGE_CONTEXT_MODE"] = effective_judge_context_mode
 
     verification_result = cross_verify(
         merged_path=str(merged_file),
@@ -1961,7 +2009,8 @@ def run_all_analyzers(
         crosscheck_models=effective_crosscheck_models or None,
         claim_runs=claim_runs,
         claim_min_rate=claim_min_rate,
-        env_vars=_collect_env_vars(),
+        judge_context_mode=effective_judge_context_mode,
+        env_vars=env_vars,
     )
 
     claims_for_log = verification_result.get("merged_claims")
@@ -2011,6 +2060,11 @@ def main():
     parser = argparse.ArgumentParser(description="merged_clean 입력 기준 verifier 실행")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--output-dir", default=None, help="결과 저장 디렉토리 (기본: merged 파일 폴더)")
+    parser.add_argument(
+        "--result-suffix",
+        default=None,
+        help="결과 파일명에 붙일 suffix. 예: test -> *_test_content_verification.json",
+    )
     parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
         "--reuse-claims",
@@ -2043,12 +2097,19 @@ def main():
     )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
+    parser.add_argument(
+        "--judge-context-mode",
+        choices=["batch"],
+        default=None,
+        help="2단계 verifier judge 문맥 모드. batch=현재 발화 배치 문맥 방식",
+    )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
 
     result = run_all_analyzers(
         args.merged_path,
         output_dir=args.output_dir,
+        result_suffix=args.result_suffix,
         claims_jsonl=args.claims_jsonl,
         reuse_claims=args.reuse_claims,
         claim_runs=args.claim_runs,
@@ -2060,6 +2121,7 @@ def main():
         cross_runs=args.cross_runs,
         cross_min_rate=args.cross_min_rate,
         cross_batch_size=args.cross_batch_size,
+        judge_context_mode=args.judge_context_mode,
         current_date=args.date,
     )
 

@@ -76,7 +76,7 @@
   padding: 12px;
   margin-bottom: 14px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
   gap: 8px;
 }
 
@@ -239,6 +239,37 @@
   font-size: 12px;
   line-height: 1.45;
   color: var(--t2);
+}
+
+.vf-sort-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding-top: 8px;
+}
+
+.vf-sort-btn {
+  appearance: none;
+  cursor: pointer;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 700;
+  transition: border-color .14s, background .14s, color .14s;
+}
+
+.vf-sort-btn:hover {
+  background: var(--hover);
+}
+
+.vf-sort-btn--active {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+  color: var(--blue);
 }
 
 .vf-claim-list,

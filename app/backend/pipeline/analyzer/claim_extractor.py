@@ -71,6 +71,21 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 """
 
 
+def _format_utterance_for_prompt(u: dict) -> str:
+    uid = u["utterance_id"]
+    ts = f"{u['start_time']:.1f}s"
+    corr = str(u.get("text_corrected", "") or "").strip()
+    orig = str(u.get("text_original", "") or "").strip()
+
+    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
+        return f"{uid} | {ts} | {orig or u.get('text', '')}"
+
+    if corr and orig and corr != orig:
+        return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"
+
+    return f"{uid} | {ts} | {u['text']}"
+
+
 def _build_slide_references(slide_numbers: list[int], slide_ctx: dict) -> str:
     refs = []
     mode = _claim_extract_context_mode()
@@ -95,8 +110,6 @@ def _build_slide_and_utterance_context(
     target_utterance_ids: set[str] | None = None,
 ) -> tuple[str, str]:
     """슬라이드 참조와 발화 문맥을 한 번의 순회로 생성."""
-    from . import claim_common as cv
-
     total = len(utterances)
     seen_slides = OrderedDict()
     cards = []
@@ -108,7 +121,7 @@ def _build_slide_and_utterance_context(
             current_sn = int(u.get("slide_number", 0) or 0)
             if current_sn not in seen_slides:
                 seen_slides[current_sn] = True
-            transcript_lines.append(f"  {cv._format_utterance_for_prompt(u)}")
+            transcript_lines.append(f"  {_format_utterance_for_prompt(u)}")
         context = (
             "[배치 발화 전체]\n"
             + "\n".join(transcript_lines)
@@ -129,7 +142,7 @@ def _build_slide_and_utterance_context(
                 seen_slides[current_sn] = True
             uid = str(u.get("utterance_id") or "")
             marker = "*" if uid in target_ids else " "
-            line = f"{marker} {cv._format_utterance_for_prompt(u)}"
+            line = f"{marker} {_format_utterance_for_prompt(u)}"
             transcript_lines.append(line)
             if uid in target_ids:
                 target_lines.append(f"- {uid} (슬라이드 {current_sn})")
@@ -161,20 +174,20 @@ def _build_slide_and_utterance_context(
 
         parts = [
             f"### 대상 발화 {u.get('utterance_id', '?')} (슬라이드 {current_sn})",
-            f"[현재 발화]\n{cv._format_utterance_for_prompt(u)}",
+            f"[현재 발화]\n{_format_utterance_for_prompt(u)}",
         ]
         if prev_context:
             parts.append("[직전 문맥]")
-            parts.extend(f"  {cv._format_utterance_for_prompt(x)}" for x in prev_context)
+            parts.extend(f"  {_format_utterance_for_prompt(x)}" for x in prev_context)
         if next_context:
             parts.append("[직후 문맥]")
-            parts.extend(f"  {cv._format_utterance_for_prompt(x)}" for x in next_context)
+            parts.extend(f"  {_format_utterance_for_prompt(x)}" for x in next_context)
         if same_slide_prev or same_slide_next:
             parts.append("[같은 슬라이드 추가 문맥]")
             for x in same_slide_prev[-3:]:
-                parts.append(f"  {cv._format_utterance_for_prompt(x)}")
+                parts.append(f"  {_format_utterance_for_prompt(x)}")
             for x in same_slide_next[:3]:
-                parts.append(f"  {cv._format_utterance_for_prompt(x)}")
+                parts.append(f"  {_format_utterance_for_prompt(x)}")
         cards.append("\n".join(parts))
 
     return _build_slide_references(list(seen_slides.keys()), slide_ctx), "\n\n".join(cards)
