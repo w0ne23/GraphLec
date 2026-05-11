@@ -1,3 +1,4 @@
+import asyncio
 import os
 import shutil
 import logging
@@ -453,8 +454,29 @@ def _str_cell(x: Any) -> str:
 
 # ── ProcessingJob CRUD ───────────────────────────────────────────────────────
 async def get_job(db: AsyncSession, job_id: str) -> Optional[ProcessingJob]:
+    try:
+        # UUID 형식 검증
+        uuid.UUID(str(job_id))
+    except (ValueError, TypeError):
+        return None
+        
     result = await db.execute(
         select(ProcessingJob).where(ProcessingJob.id == job_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_job(db: AsyncSession, lecture_id: str) -> Optional[ProcessingJob]:
+    """lecture_id로 가장 최근 job을 반환"""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+    result = await db.execute(
+        select(ProcessingJob)
+        .where(ProcessingJob.lecture_id == ident_uuid)
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
     )
     return result.scalar_one_or_none()
 
@@ -472,37 +494,76 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-async def list_jobs(db: AsyncSession) -> List[Dict[str, Any]]:
+ACTIVE_STATUSES = {'pending', 'running'}
+
+async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
-        select(ProcessingJob, Lecture)
-        .join(Lecture, ProcessingJob.lecture_id == Lecture.id)
-        .order_by(ProcessingJob.created_at.desc())
+        select(Lecture, ProcessingJob)
+        .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
     rows = result.unique().all()
-    return [format_job_dict(row[0], row[1]) for row in rows]
+
+    seen = set()
+    out = []
+    for lecture, job in rows:
+        if lecture.id in seen:
+            continue
+        seen.add(lecture.id)
+        job_status = job.status if job else 'unknown'
+        if status_filter == 'active' and job_status not in ACTIVE_STATUSES:
+            continue
+        is_done = job_status == "done"
+        out.append({
+            "id": str(lecture.id),
+            "status": job_status,
+            "current_stage": job.current_stage if job and not is_done else None,
+            "error_message": job.error_message if job else None,
+            "pipeline_stages": job.pipeline_stages or [] if job and not is_done else [],
+            "title": lecture.title or str(lecture.id),
+            "category": lecture.category or "기타",
+            "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+        })
+    return out
 
 
-async def retry_job(db: AsyncSession, job_id: str) -> bool:
-    job = await get_job(db, job_id)
-    if not job:
-        return False
-    job.status = "pending"
-    job.error_message = None
-    job.current_stage = "Resuming pipeline..."
-    job.pipeline_stages = []
+async def retry_lecture(db: AsyncSession, lecture_id: str):
+    """lecture_id로 새 ProcessingJob을 INSERT하여 재시도 이력을 누적.
+    성공 시 { status, job_id } dict 반환, 실패 시 None.
+    """
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, ident_uuid)
+    if not lecture:
+        return None
+
+    new_job = ProcessingJob(
+        id=uuid.uuid4(),
+        lecture_id=ident_uuid,
+        status="pending",
+        current_stage="Resuming pipeline...",
+        error_message=None,
+        pipeline_stages=[],
+    )
+    db.add(new_job)
     await db.commit()
-    return True
+    await db.refresh(new_job)
+    return {"status": "success", "job_id": str(new_job.id)}
 
 
-async def delete_lecture_by_job(db: AsyncSession, job_id: str) -> bool:
-    """job_id로 강의(Lecture) 전체 삭제 — DB, 로컬 파일, Neo4j 모두 정리"""
-    job = await get_job(db, job_id)
-    if not job:
+async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
+    """lecture_id로 강의 전체 삭제 — DB, 로컬 파일, Neo4j 모두 정리"""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
         return False
 
     lecture_result = await db.execute(
-        select(Lecture).where(Lecture.id == job.lecture_id)
+        select(Lecture).where(Lecture.id == ident_uuid)
     )
     lecture = lecture_result.scalar_one_or_none()
     if not lecture:
@@ -532,10 +593,14 @@ async def delete_lecture_by_job(db: AsyncSession, job_id: str) -> bool:
 
 
 # ── 결과 조회 (Lecture ID 기준) ───────────────────────────────────────────────
-async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
-    """강의 목록 — 각 강의의 최신 job 상태 포함"""
-    # 최신 job을 서브쿼리로 가져오기 위해 모든 job을 로드 후 Python에서 필터
-    # (추후 window function으로 최적화 가능)
+async def list_all_results(
+    db: AsyncSession,
+    page: int = 1,
+    limit: int = 12,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    scope: str = 'browse',
+) -> Dict[str, Any]:
     query = (
         select(Lecture, ProcessingJob)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
@@ -544,26 +609,39 @@ async def list_all_results(db: AsyncSession) -> List[Dict[str, Any]]:
     result = await db.execute(query)
     rows = result.unique().all()
 
-    # lecture별로 최신 job만 남기기
-    seen: set = set()
+    seen = set()
     out = []
     for lecture, job in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
-        stem = str(lecture.id)
+        job_status = job.status if job else 'unknown'
+
+        if scope == 'browse' and job_status != 'done':
+            continue
+        if scope == 'upload' and job_status in ACTIVE_STATUSES:
+            continue
+
+        if category and lecture.category != category:
+            continue
+        if search and search.lower() not in (lecture.title or '').lower():
+            continue
+
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
-            "status": job.status if job else "unknown",
-            "title": lecture.title or stem,
+            "status": job_status,
+            "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
-            "description": lecture.description,
-            "stem": stem,
-            "video_url": make_file_url(lecture.video_path),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "error_message": job.error_message if job else None,
+            "pipeline_stages": job.pipeline_stages or [] if job else [],
         })
-    return out
+
+    total_items = len(out)
+    start = (page - 1) * limit
+    paginated = out[start: start + limit]
+    return {"items": paginated, "total_items": total_items}
 
 
 async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict[str, Any]]:
@@ -593,17 +671,12 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
 
 
 
-async def _get_lecture_row(db: AsyncSession, identifier: str):
-    """
-    identifier가 lecture_id이거나 job_id인 경우 모두 처리.
-    프론트가 업로드 직후 job_id를 들고 있는 경우를 위해 job_id로도 조회.
-    """
+async def _get_lecture_row(db: AsyncSession, lecture_id: str):
+    """lecture_id로 Lecture + 최신 ProcessingJob을 함께 반환"""
     try:
-        ident_uuid = uuid.UUID(str(identifier))
+        ident_uuid = uuid.UUID(str(lecture_id))
     except (ValueError, TypeError):
         return None
-
-    # 먼저 lecture_id로 시도
     query = (
         select(Lecture, ProcessingJob)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
@@ -611,42 +684,17 @@ async def _get_lecture_row(db: AsyncSession, identifier: str):
         .order_by(ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
-    row = result.unique().first()
-    if row:
-        return row
-
-    # lecture_id로 못 찾으면 job_id로 재시도
-    query2 = (
-        select(Lecture, ProcessingJob)
-        .join(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
-        .where(ProcessingJob.id == ident_uuid)
-        .order_by(ProcessingJob.created_at.desc())
-    )
-    result2 = await db.execute(query2)
-    return result2.unique().first()
+    return result.unique().first()
 
 
-async def _get_lecture(db: AsyncSession, identifier: str) -> Optional[Lecture]:
-    """lecture_id 또는 job_id로 Lecture 객체를 반환"""
+async def _get_lecture(db: AsyncSession, lecture_id: str) -> Optional[Lecture]:
+    """lecture_id로 Lecture 객체를 반환"""
     try:
-        ident_uuid = uuid.UUID(str(identifier))
+        ident_uuid = uuid.UUID(str(lecture_id))
     except (ValueError, TypeError):
         return None
-
     result = await db.execute(select(Lecture).where(Lecture.id == ident_uuid))
-    lecture = result.scalar_one_or_none()
-    if lecture:
-        return lecture
-
-    # job_id로 재시도
-    job_result = await db.execute(
-        select(ProcessingJob).where(ProcessingJob.id == ident_uuid)
-    )
-    job = job_result.scalar_one_or_none()
-    if not job:
-        return None
-    result2 = await db.execute(select(Lecture).where(Lecture.id == job.lecture_id))
-    return result2.scalar_one_or_none()
+    return result.scalar_one_or_none()
 
 
 # ── GraphSession 관련 ────────────────────────────────────────────────────────
@@ -667,7 +715,8 @@ async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         now=now,
     )
 
-    load_info = _ensure_stem_loaded(stem, output_dir)
+    loop = asyncio.get_event_loop()
+    load_info = await loop.run_in_executor(None, _ensure_stem_loaded, stem, output_dir)
     active_count = await _active_session_count(db, lecture.id)
     return {
         "lecture_id": str(lecture.id),
@@ -719,18 +768,20 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         await db.commit()
 
     active_count = await _active_session_count(db, lecture.id)
+    loop = asyncio.get_event_loop()
     unloaded_now = False
-    if active_count == 0 and _is_stem_loaded(stem):
-        _unload_stem_from_neo4j(stem)
+    if active_count == 0 and await loop.run_in_executor(None, _is_stem_loaded, stem):
+        await loop.run_in_executor(None, _unload_stem_from_neo4j, stem)
         unloaded_now = True
 
+    loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
     return {
         "lecture_id": str(lecture.id),
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
         "unloaded_now": unloaded_now,
-        "loaded": _is_stem_loaded(stem),
+        "loaded": loaded,
     }
 
 
@@ -739,11 +790,14 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
     stem = str(lecture.id)
+    loop = asyncio.get_event_loop()
+    loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
+    active_count = await _active_session_count(db, lecture.id)
     return {
         "lecture_id": str(lecture.id),
         "stem": stem,
-        "loaded": _is_stem_loaded(stem),
-        "active_sessions": await _active_session_count(db, lecture.id),
+        "loaded": loaded,
+        "active_sessions": active_count,
         "session_ttl_sec": GRAPH_SESSION_TTL_SEC,
     }
 
@@ -755,7 +809,8 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
 
     stem = str(lecture.id)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
-    _ensure_stem_loaded(stem, lecture.output_dir)
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1092,11 +1147,11 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
 
 # ── 기타 유틸 ───────────────────────────────────────────────────────────────
-async def get_graph_info(db: AsyncSession, job_id: str) -> Dict[str, Any]:
-    job = await get_job(db, job_id)
-    if not job:
+async def get_graph_info(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
+    lecture = await _get_lecture(db, lecture_id)
+    if not lecture:
         return {"error": "Not Found"}
-    stem = str(job.lecture_id)
+    stem = str(lecture.id)
     node_count = 0
     driver = get_neo4j_driver()
     if driver:
@@ -1109,12 +1164,16 @@ async def get_graph_info(db: AsyncSession, job_id: str) -> Dict[str, Any]:
                     node_count = record["count"]
         finally:
             driver.close()
-    return {"job_id": job_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
+    return {"lecture_id": lecture_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
 
 
-async def retry_graph_only(db: AsyncSession, job_id: str) -> bool:
-    job = await get_job(db, job_id)
-    if not job: return False
-    job.status, job.current_stage, job.error_message = "pending", "Retrying Graph Ingestion...", None
+async def retry_graph_only(db: AsyncSession, lecture_id: str) -> bool:
+    """lecture_id로 최신 job을 그래프 재적재 상태로 초기화"""
+    job = await get_latest_job(db, lecture_id)
+    if not job:
+        return False
+    job.status = "pending"
+    job.current_stage = "Retrying Graph Ingestion..."
+    job.error_message = None
     await db.commit()
     return True

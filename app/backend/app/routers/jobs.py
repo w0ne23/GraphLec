@@ -2,8 +2,9 @@ import uuid
 import shutil
 import logging
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 import asyncio
@@ -11,21 +12,41 @@ import json
 
 from app.db import AsyncSessionLocal, get_db
 from app.models import Lecture, ProcessingJob
-from app.services import job_service
+from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
 
 
-@router.get("/{job_id}/stream")
-async def stream_job_status(job_id: str, request: Request):
+@router.get("")
+async def list_jobs(
+    db: AsyncSession = Depends(get_db),
+    status: Optional[str] = Query(None),
+):
+    return await lecture_service.list_jobs(db, status_filter=status)
+
+
+@router.get("/{lecture_id}/stream")
+async def stream_job_status(
+    lecture_id: str,
+    request: Request,
+    job_id: Optional[str] = Query(None),
+):
+    """
+    job_id 쿼리파라미터가 있으면 해당 job을 고정 추적.
+    없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
+    retry 후 새 job_id로 재연결하면 정확한 시도별 추적이 가능.
+    """
     async def event_generator():
         while True:
             if await request.is_disconnected():
                 break
             try:
                 async with AsyncSessionLocal() as db:
-                    job = await job_service.get_job(db, job_id)
+                    if job_id:
+                        job = await lecture_service.get_job(db, job_id)
+                    else:
+                        job = await lecture_service.get_latest_job(db, lecture_id)
                 if not job:
                     yield f"data: {json.dumps({'error': 'Job not found'})}\n\n"
                     break
@@ -40,7 +61,7 @@ async def stream_job_status(job_id: str, request: Request):
                 if job.status in ("done", "error"):
                     break
             except Exception as e:
-                logger.error(f"SSE error for {job_id}: {e}")
+                logger.error(f"SSE error for lecture {lecture_id}: {e}")
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
                 break
             await asyncio.sleep(1)
@@ -48,23 +69,6 @@ async def stream_job_status(job_id: str, request: Request):
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
-@router.get("")
-async def list_jobs(db: AsyncSession = Depends(get_db)):
-    return await job_service.list_jobs(db)
-
-
-@router.get("/{job_id}/graph_status")
-async def check_graph_status(job_id: str, db: AsyncSession = Depends(get_db)):
-    return await job_service.get_graph_info(db, job_id)
-
-
-@router.get("/{job_id}")
-async def get_job_detail(job_id: str, db: AsyncSession = Depends(get_db)):
-    job_detail = await job_service.get_job_detail(db, job_id)
-    if not job_detail:
-        raise HTTPException(status_code=404, detail="Job not found")
-    job_detail["video_url"] = job_service.make_file_url(job_detail.get("video_path"))
-    return job_detail
 
 
 @router.post("")
@@ -76,7 +80,7 @@ async def create_job(
     db: AsyncSession = Depends(get_db),
 ):
     lecture_id = uuid.uuid4()
-    base_dir = Path(job_service.LOCAL_STORAGE_DIR)
+    base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
     input_dir = base_dir / "inputs" / str(lecture_id)
     output_dir = base_dir / "results" / str(lecture_id)
@@ -90,6 +94,12 @@ async def create_job(
     try:
         input_dir.mkdir(parents=True, exist_ok=True)
         input_path = input_dir / safe_filename
+        
+        # 최초 시도 시 결과 디렉터리 초기화 (새로운 UUID이므로 보통 비어있음)
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         with open(input_path, "wb") as f:
             shutil.copyfileobj(video.file, f)
     except Exception as e:
@@ -126,31 +136,34 @@ async def create_job(
         raise HTTPException(status_code=500, detail="Failed to create job")
 
     return {
-        "job_id": str(job_id),
-        "lecture_id": str(lecture_id),
+        "id": str(lecture_id),
+        "title": final_title,
+        "category": category,
+        "description": description,
+        "status": "pending",
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
 
 
-@router.delete("/{job_id}")
-async def delete_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.delete_lecture_by_job(db, job_id)
+@router.delete("/{lecture_id}")
+async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    success = await lecture_service.delete_lecture(db, lecture_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Lecture not found")
     return {"status": "success"}
 
 
-@router.post("/{job_id}/retry")
-async def retry_job(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.retry_job(db, job_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return {"status": "success"}
+@router.post("/{lecture_id}/retry")
+async def retry_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    result = await lecture_service.retry_lecture(db, lecture_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    return result
 
 
-@router.post("/{job_id}/retry_graph")
-async def retry_graph_ingestion(job_id: str, db: AsyncSession = Depends(get_db)):
-    success = await job_service.retry_graph_only(db, job_id)
+@router.post("/{lecture_id}/retry_graph")
+async def retry_graph_ingestion(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    success = await lecture_service.retry_graph_only(db, lecture_id)
     if not success:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Lecture not found")
     return {"status": "success"}
