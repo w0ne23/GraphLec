@@ -3,6 +3,7 @@ import os
 import sys
 import multiprocessing
 import psycopg2
+import logging
 from psycopg2.extras import Json
 from pathlib import Path
 from dotenv import load_dotenv
@@ -13,6 +14,13 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sqlalchemy import text
 from app.db import AsyncSessionLocal
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT_DIR = Path(__file__).resolve().parent.parent.parent.parent
 root_env         = PROJECT_ROOT_DIR / ".env"
@@ -46,13 +54,13 @@ def update_job_stage_sync(job_id: str, current_stages: list, current_stage_text:
                 )
         conn.close()
     except Exception as e:
-        print(f"--- [Worker Sync DB Error] Failed to update stage: {e} ---", flush=True)
+        logger.error(f"--- [Worker Sync DB Error] Failed to update stage: {e} ---")
 
 
 def pipeline_process(job_id: str, lecture_id: str, input_path: str):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
 
-    print(f"--- [Child Process {job_id}] Setting sys.path to: {pipeline_path} ---", flush=True)
+    logger.info(f"--- [Child Process {job_id}] Setting sys.path to: {pipeline_path} ---")
     if pipeline_path not in sys.path:
         sys.path.insert(0, pipeline_path)
     os.chdir(pipeline_path)
@@ -62,7 +70,7 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
         if not video_path.is_absolute():
             video_path = Path(pipeline_path) / input_path
 
-        print(f"--- [Child Process {job_id}] Target video: {video_path} ---", flush=True)
+        logger.info(f"--- [Child Process {job_id}] Target video: {video_path} ---")
 
         output_dir    = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id
         slides_dir    = output_dir / "slides"
@@ -83,12 +91,12 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
             stages_array = [{"stage": k, "status": v} for k, v in stages_state.items()]
             stage_text   = f"Processing {stage_key}..." if status == "run" else f"Finished {stage_key}"
             update_job_stage_sync(job_id, stages_array, stage_text)
-            print(f"[{job_id}] Progress: {stage_key} -> {status}", flush=True)
+            logger.info(f"[{job_id}] Progress: {stage_key} -> {status}")
 
         with open(log_file_path, "w", encoding="utf-8") as log_file:
             with redirect_stdout(log_file), redirect_stderr(log_file):
                 try:
-                    print(f"[{job_id}] Importing pipeline...", flush=True)
+                    logger.info(f"[{job_id}] Importing pipeline...")
                     import pipeline.main as pipeline_main
 
                     init_array = [{"stage": k, "status": v} for k, v in stages_state.items()]
@@ -102,11 +110,11 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
                         "--metadata-dir", str(output_dir / "metadata"),
                         "--lance-root",   str(output_dir / "lancedb"),
                     ])
-                    print(f"[{job_id}] Starting pipeline...", flush=True)
+                    logger.info(f"[{job_id}] Starting pipeline...")
                     pipeline_main.run_pipeline(args, progress_callback=on_progress)
 
                 except ImportError as ie:
-                    print(f"[{job_id}] ImportError: {ie}. sys.path: {sys.path}", flush=True)
+                    logger.error(f"[{job_id}] ImportError: {ie}. sys.path: {sys.path}")
                     raise
 
         return True, str(output_dir), None
@@ -114,7 +122,7 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
     except BaseException as e:
         import traceback
         error_details = traceback.format_exc()
-        print(f"--- [Child Process {job_id}] FAILED: {e} ---", flush=True)
+        logger.error(f"--- [Child Process {job_id}] FAILED: {e} ---")
         log_file_path = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id / "pipeline.log"
         if log_file_path.parent.exists():
             with open(log_file_path, "a", encoding="utf-8") as log_file:
@@ -134,10 +142,10 @@ async def worker_loop():
             ))
             count = result.rowcount
             if count > 0:
-                print(f"--- [Worker Recovery] Marked {count} orphaned jobs as error. ---", flush=True)
+                logger.info(f"--- [Worker Recovery] Marked {count} orphaned jobs as error. ---")
             await db.commit()
 
-        print(f"--- [Worker] Started. Storage: {LOCAL_STORAGE_DIR} ---", flush=True)
+        logger.info(f"--- [Worker] Started. Storage: {LOCAL_STORAGE_DIR} ---")
 
         while True:
             try:
@@ -173,7 +181,7 @@ async def worker_loop():
 
                 job_id_str     = str(job_id_val)
                 job_lecture_str = str(job_lecture_id)
-                print(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}) ---", flush=True)
+                logger.info(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}) ---")
 
                 try:
                     loop = asyncio.get_running_loop()
@@ -181,21 +189,21 @@ async def worker_loop():
                         executor, pipeline_process, job_id_str, job_lecture_str, job_input_path
                     )
                 except concurrent.futures.process.BrokenProcessPool as bp_err:
-                    print(f"--- [Worker EXECUTOR BROKEN] {job_id_str}: {bp_err} ---", flush=True)
+                    logger.error(f"--- [Worker EXECUTOR BROKEN] {job_id_str}: {bp_err} ---")
                     error = f"파이프라인 프로세스 강제 종료 (메모리 부족 등): {str(bp_err)}"
                     success = False
                     output_dir = None
                     # 손상된 Executor 재시작
                     executor.shutdown(wait=False)
                     executor = ProcessPoolExecutor(max_workers=1, mp_context=mp_context)
-                    print("--- [Worker] Executor restarted ---", flush=True)
+                    logger.info("--- [Worker] Executor restarted ---")
                 except Exception as exec_err:
-                    print(f"--- [Worker EXECUTOR ERROR] {job_id_str}: {exec_err} ---", flush=True)
+                    logger.error(f"--- [Worker EXECUTOR ERROR] {job_id_str}: {exec_err} ---")
                     error = f"시스템/프로세스 오류: {str(exec_err)}"
                     success = False
                     output_dir = None
 
-                print(f"--- [Worker] Pipeline done: {job_id_str} success={success} ---", flush=True)
+                logger.info(f"--- [Worker] Pipeline done: {job_id_str} success={success} ---")
 
                 async with AsyncSessionLocal() as db:
                     if success:
@@ -205,7 +213,7 @@ async def worker_loop():
                             WHERE id = :id
                         """), {"id": job_id_val})
                     else:
-                        print(f"--- [Worker ERROR] {job_id_str}: {error} ---", flush=True)
+                        logger.error(f"--- [Worker ERROR] {job_id_str}: {error} ---")
                         await db.execute(text("""
                             UPDATE processing_jobs
                             SET status = 'error', error_message = :err, current_stage = 'Failed'
@@ -216,21 +224,22 @@ async def worker_loop():
             except asyncio.CancelledError:
                 raise  # 바깥 try의 CancelledError 처리로 전달
             except Exception as e:
-                print(f"--- [Worker FATAL ERROR in loop]: {e} ---", flush=True)
-                traceback.print_exc()
+                logger.error(f"--- [Worker FATAL ERROR in loop]: {e} ---")
+                # traceback.print_exc() 는 logger.error(..., exc_info=True)로 대체 가능
+                logger.error(traceback.format_exc())
                 await asyncio.sleep(5)
 
     except asyncio.CancelledError:
-        print("--- [Worker] Shutdown signal received. ---", flush=True)
+        logger.info("--- [Worker] Shutdown signal received. ---")
     except Exception as fatal_e:
-        print(f"--- [Worker FATAL ERROR ON STARTUP]: {fatal_e} ---", flush=True)
-        traceback.print_exc()
+        logger.error(f"--- [Worker FATAL ERROR ON STARTUP]: {fatal_e} ---")
+        logger.error(traceback.format_exc())
     finally:
         try:
             executor.shutdown(wait=True)
         except:
             pass
-        print("--- [Worker] Executor shut down. ---", flush=True)
+        logger.info("--- [Worker] Executor shut down. ---")
 
 if __name__ == "__main__":
     asyncio.run(worker_loop())
