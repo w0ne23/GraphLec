@@ -21,6 +21,16 @@ export default function ChatPanel({
   setLoading
 }) {
   const bottomRef = useRef(null)
+  // 인덱스별 펼침 상태를 관리하는 배열
+  const [expandedIndices, setExpandedIndices] = useState([])
+
+  const toggleExpand = (idx) => {
+    setExpandedIndices(prev => {
+      const next = [...prev]
+      next[idx] = !next[idx]
+      return next
+    })
+  }
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, loading])
 
@@ -130,20 +140,21 @@ export default function ChatPanel({
     const question = input.trim()
     if (!question || loading || !lecture?.id) return
     setInput('')
-    setMessages(prev => [...prev, { id: Date.now(), role: 'user', content: question, refs: [] }])
+    // id를 제거하고 간결하게 변경
+    setMessages(prev => [...prev, { role: 'user', content: question, refs: [] }])
     setLoading(true)
     
     try {
       const res = await askQa(lecture.id, question)
 
       setMessages(prev => [...prev, {
-        id: Date.now() + 1, role: 'assistant',
+        role: 'assistant',
         content: res.answer || '답변을 생성하지 못했습니다.',
         refs: refsFromResponse(res),
       }])
     } catch (e) {
       setMessages(prev => [...prev, {
-        id: Date.now() + 1, role: 'assistant',
+        role: 'assistant',
         content: `오류: ${e.message}`, refs: [],
       }])
     } finally {
@@ -161,30 +172,67 @@ export default function ChatPanel({
       </div>
 
       <div className="chat-messages">
-        {messages.map(msg =>
+        {messages.map((msg, msgIdx) =>
           msg.role === 'user' ? (
-            <div key={msg.id} className="chat-msg-user">
+            <div key={msgIdx} className="chat-msg-user">
               <div className="chat-bubble-user">{msg.content}</div>
             </div>
           ) : (
-            <div key={msg.id} className="chat-msg-ai">
+            <div key={msgIdx} className="chat-msg-ai">
               <div className="chat-bubble-ai">
                 <div className="chat-answer-text">{msg.content}</div>
                 {msg.refs?.length > 0 && (
-                  <div className="chat-refs">
-                    {msg.refs.map((ref, i) => {
-                      const idx = findRefSceneIndex(ref)
-                      const canOpen = canOpenRef(ref, idx)
-                      return (
-                        <button key={i} className="chat-ref-btn"
-                          title={ref.text || ref.label || '출처'}
-                          disabled={!canOpen}
-                          onClick={() => canOpen && onJumpToScene?.(idx, ref.startSec)}
+                  <div className="chat-refs-container">
+                    <div className="chat-refs-header">출처</div>
+                    
+                    {/* 첫 번째 출처 (단독 행) */}
+                    <div className="chat-refs-first-row">
+                      {(() => {
+                        const ref = msg.refs[0]
+                        const idx = findRefSceneIndex(ref)
+                        const canOpen = canOpenRef(ref, idx)
+                        return (
+                          <button className="chat-ref-btn"
+                            title={ref.text || ref.label || '출처'}
+                            disabled={!canOpen}
+                            onClick={() => canOpen && onJumpToScene?.(idx, ref.startSec)}
+                          >
+                            ▶ {ref.timestamp || (ref.slideNumber != null ? `S${ref.slideNumber}` : '출처')}{ref.label ? ` ${ref.label}` : ''}
+                          </button>
+                        )
+                      })()}
+                    </div>
+
+                    {/* 추가 출처 목록 (펼쳐졌을 때만 노출) */}
+                    {expandedIndices[msgIdx] && msg.refs.length > 1 && (
+                      <div className="chat-refs-list">
+                        {msg.refs.slice(1).map((ref, i) => {
+                          const idx = findRefSceneIndex(ref)
+                          const canOpen = canOpenRef(ref, idx)
+                          return (
+                            <button key={i} className="chat-ref-btn"
+                              title={ref.text || ref.label || '출처'}
+                              disabled={!canOpen}
+                              onClick={() => canOpen && onJumpToScene?.(idx, ref.startSec)}
+                            >
+                              ▶ {ref.timestamp || (ref.slideNumber != null ? `S${ref.slideNumber}` : '출처')}{ref.label ? ` ${ref.label}` : ''}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    )}
+
+                    {/* 더보기 / 접기 컨트롤 (우측 정렬) */}
+                    {msg.refs.length > 1 && (
+                      <div className="chat-refs-control">
+                        <button 
+                          className="chat-refs-toggle-btn"
+                          onClick={() => toggleExpand(msgIdx)}
                         >
-                          ▶ {ref.timestamp || (ref.slideNumber != null ? `S${ref.slideNumber}` : '출처')}{ref.label ? ` ${ref.label}` : ''}
+                          {expandedIndices[msgIdx] ? '접기' : '더보기'}
                         </button>
-                      )
-                    })}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

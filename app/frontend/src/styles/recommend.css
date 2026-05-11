@@ -168,61 +168,110 @@
    RecommendListItem (rec-item-*, rec-score-*)
    사용: RecommendListItem.jsx — RecommendPage 내부에서만 사용
    ============================================================ */
-.rec-item          { background: var(--panel); border-bottom: 1px solid var(--b1); overflow: hidden; transition: background .14s; }
-.rec-item:first-child { border-top: 1px solid var(--b1); }
-.rec-item:hover    { background: var(--hover); }
-.rec-item--expanded { background: var(--panel); }
+.rec-item {
+  background: var(--panel);
+  border: 1px solid var(--b1);
+  border-radius: var(--rl);
+  overflow: hidden;
+  margin-bottom: 12px;
+  transition: all .18s;
+}
+.rec-item:hover {
+  border-color: var(--b2);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0,0,0,.08);
+}
+.rec-item--expanded { background: var(--panel); border-color: var(--b2); }
 
 .rec-item-main {
-  display: grid; grid-template-columns: 80px 1fr 100px;
-  align-items: center; gap: 14px; padding: 14px 16px; cursor: pointer;
+  display: grid;
+  grid-template-columns: 80px 1fr 100px;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  cursor: pointer;
 }
 .rec-col { min-width: 0; }
 
 .rec-thumb {
-  width: 72px; height: 48px; border-radius: var(--r);
-  background: var(--card); border: 1px solid var(--b1);
-  display: flex; align-items: center; justify-content: center;
-  position: relative; flex-shrink: 0;
+  width: 72px;
+  height: 48px;
+  border-radius: var(--r);
+  background: var(--card);
+  border: 1px solid var(--b1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex-shrink: 0;
 }
-.rec-thumb-icon      { font-size: 22px; opacity: .55; }
-.rec-duration        { position: absolute; bottom: 3px; right: 4px; font-size: 9px; font-family: 'JetBrains Mono', monospace; background: rgba(0,0,0,.62); color: #fff; padding: 1px 4px; border-radius: 2px; line-height: 1.4; }
+.rec-thumb-icon { font-size: 22px; opacity: .55; }
+.rec-duration {
+  position: absolute; bottom: 3px; right: 4px;
+  font-size: 9px; font-family: 'JetBrains Mono', monospace;
+  background: rgba(0,0,0,.62); color: #fff;
+  padding: 1px 4px; border-radius: 2px; line-height: 1.4;
+}
 
-.rec-col-meta        { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.rec-col-tags        { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 1px; }
-.rec-tag             { font-size: 10px; color: var(--t3); background: none; border: none; padding: 0; }
-.rec-title-row       { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.rec-title           { font-size: 14px; font-weight: 700; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rec-col-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.rec-col-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 1px; }
+.rec-tag {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+
+.rec-title-row { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.rec-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .rec-duration-inline { font-size: 12px; color: var(--t3); flex-shrink: 0; white-space: nowrap; }
-.rec-sub             { font-size: 11px; color: var(--t3); }
+.rec-sub { font-size: 11px; color: var(--t3); }
 
-.rec-col-score       { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
-.rec-overall-score   { font-size: 22px; font-weight: 800; line-height: 1; color: #3dad3d; }
-.rec-toggle-btn      { font-size: 11px; color: var(--t3); background: none; border: none; padding: 0; white-space: nowrap; transition: color .14s; }
+.rec-col-score { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.rec-overall-score { font-size: 22px; font-weight: 800; line-height: 1; color: var(--green); }
+.rec-toggle-btn { font-size: 11px; color: var(--t3); background: none; border: none; padding: 0; white-space: nowrap; transition: color .14s; }
 .rec-toggle-btn:hover { color: var(--t1); }
 
-.rec-item-details    { border-top: 1px solid var(--b1); background: var(--card); }
+.rec-item-details { border-top: 1px solid var(--b1); background: var(--card); }
 .rec-details-content { padding: 16px; }
-.rec-details-title   { font-size: 12px; font-weight: 700; color: var(--t2); margin-bottom: 12px; }
+.rec-details-title { font-size: 12px; font-weight: 700; color: var(--t2); margin-bottom: 12px; }
 
 .rec-scores-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
-.rec-score-row   { display: flex; align-items: center; gap: 10px; }
+.rec-score-row { display: flex; align-items: center; gap: 10px; }
 .rec-score-label { font-size: 11px; color: var(--t2); width: 100px; flex-shrink: 0; }
-.rec-score-track { flex: 1; height: 4px; background: var(--hover); border-radius: 2px; overflow: hidden; }
-.rec-score-fill  { height: 100%; background: var(--blue); border-radius: 2px; transition: width .4s; }
-.rec-score-num   { font-size: 11px; color: var(--t2); width: 28px; text-align: right; font-family: 'JetBrains Mono', monospace; }
+.rec-score-track { flex: 1; height: 4px; background: var(--b1); border-radius: 2px; overflow: hidden; }
+.rec-score-fill { height: 100%; background: var(--blue); border-radius: 2px; transition: width .4s; }
+.rec-score-num { font-size: 11px; color: var(--t2); width: 28px; text-align: right; font-family: 'JetBrains Mono', monospace; }
 
 .rec-details-action { display: flex; justify-content: flex-end; }
-.rec-play-btn       { padding: 8px 20px; background: var(--blue); border: none; border-radius: var(--r); color: #fff; font-size: 13px; font-weight: 600; transition: opacity .15s; }
+.rec-play-btn {
+  padding: 8px 20px;
+  background: var(--blue);
+  border: none;
+  border-radius: var(--r);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  transition: opacity .15s;
+}
 .rec-play-btn:hover { opacity: .87; }
 
 /* 티어 배지 */
-.rec-item--related             { opacity: .92; }
-.rec-item--background          { opacity: .80; }
-.rec-overall-score--related    { color: var(--amber); }
+.rec-item--related { opacity: .92; }
+.rec-item--background { opacity: .80; }
+.rec-overall-score--related { color: var(--amber); }
 .rec-overall-score--background { color: var(--t3); }
-.rec-tier-badge                { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: var(--amber-bg); color: var(--amber); }
-.rec-tier-badge--background    { background: var(--card); color: var(--t3); }
-.rec-related-notice            { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
+.rec-tier-badge { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: var(--amber-bg); color: var(--amber); }
+.rec-tier-badge--background { background: var(--card); color: var(--t3); }
+.rec-related-notice { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
 .rec-related-notice--background { color: var(--t3); background: var(--card); }
-.rec-duration-warn             { font-size: 10px; color: var(--amber); }
+.rec-duration-warn { font-size: 10px; color: var(--amber); }
+

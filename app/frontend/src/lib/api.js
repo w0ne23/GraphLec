@@ -19,16 +19,14 @@ export async function uploadLecture({ file, title, category, description }) {
   }
   
   const data = await res.json();
-  const lectureId = data.lecture_id || data.id || data.job_id;
   return {
-    id: lectureId,
+    id: data.id,
     job_id: data.job_id,
-    lecture_id: data.lecture_id || lectureId,
-    title,
-    category,
-    description,
-    status: 'pending',
-    created_at: data.created_at,  // ← 이것만 추가
+    title: data.title || title,
+    category: data.category || category,
+    description: data.description || description,
+    status: data.status || 'pending',
+    created_at: data.created_at,
   };
 }
 
@@ -51,26 +49,58 @@ export async function getLectureStatus(jobId) {
   };
 }
 
-export async function listLectures() {
-  try {
-    const res = await fetch(`${API_BASE}/results`);
-    if (!res.ok) throw new Error('Failed to fetch lectures');
+// 1. SSE 영역 - pending/running
+export async function listActiveJobs() {
+  const res = await fetch(`${API_BASE}/jobs?status=active`)
+  if (!res.ok) throw new Error('Failed to fetch active jobs')
+  return res.json() // []
+}
 
-    const data = await res.json();
-    return data.map(lecture => ({
-      id: lecture.id,          // lecture_id — 라우팅 등 범용 식별자
-      job_id: lecture.job_id,  // job 제어용 (상태조회, 삭제, 재시도)
-      lecture_id: lecture.id,  // 결과 조회용 (그래프, 질의)
-      title: lecture.title || 'Untitled',
-      category: lecture.category || '기타',
-      status: lecture.status,
-      created_at: lecture.created_at,
-      error_message: lecture.error_message,
-      pipeline_stages: lecture.pipeline_stages || [],
-    }));
+// 2. UploadPage 완료 목록 - error/done/기타
+export async function listUploadedLectures(params = {}) {
+  return _fetchResults({ ...params, scope: 'upload' })
+}
+
+// 3. LectureListPage - done만
+export async function listLectures(params = {}) {
+  return _fetchResults({ ...params, scope: 'browse' })
+}
+
+async function _fetchResults(params) {
+  try {
+    const query = new URLSearchParams()
+    const limit = params.limit || 12
+    query.append('limit', limit)
+    query.append('scope', params.scope)
+    if (params.page) query.append('page', params.page)
+    if (params.category && params.category !== '전체') query.append('category', params.category)
+    if (params.search) query.append('search', params.search)
+
+    const res = await fetch(`${API_BASE}/results?${query.toString()}`)
+    if (!res.ok) throw new Error('Failed to fetch lectures')
+    const data = await res.json()
+
+    const items = Array.isArray(data) ? data : (data.items || [])
+    const totalItems = data.total_items || items.length
+    const totalPages = Math.max(1, Math.ceil(totalItems / limit))
+
+    return {
+      items: items.map(lec => ({
+        id: lec.id,
+        job_id: lec.job_id,
+        title: lec.title || 'Untitled',
+        category: lec.category || '기타',
+        status: lec.status,
+        created_at: lec.created_at,
+        error_message: lec.error_message,
+        pipeline_stages: lec.pipeline_stages || [],
+        tags: lec.tags || [],
+      })),
+      totalPages,
+    }
   } catch (error) {
-    console.error("listLectures error:", error);
-    return [];
+    console.error('_fetchResults error:', error)
+    return { items: [], totalPages: 1 }
   }
 }
 
@@ -107,8 +137,8 @@ export async function unloadLectureGraphRag(lectureId) {
   }).catch(() => null);
 }
 
-export async function deleteLecture(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+export async function deleteLecture(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}`, {
     method: 'DELETE',
   });
   if (!res.ok) {
@@ -118,15 +148,17 @@ export async function deleteLecture(jobId) {
   return res.json();
 }
 
-export async function retryLecture(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}/retry`, {
+export async function retryLecture(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry`, {
     method: 'POST',
   });
   if (!res.ok) {
     const msg = await res.text();
     throw new Error(msg || 'Retry failed');
   }
-  return res.json();
+  const data = await res.json();
+  // 새로 생성된 job_id를 반환 — 프론트에서 SSE 재연결에 사용
+  return { job_id: data.job_id };
 }
 
 export async function getLectureGraph(lectureId) {

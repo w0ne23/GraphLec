@@ -22,37 +22,61 @@ export default function VideoPlayer({
   seekTo,
   seekToSeconds = null,
   onSceneChange,
-  isMini = false,
+  isCinemaMode = false,
+  onToggleCinemaMode,
 }) {
   const videoRef = useRef(null)
   const trackRef = useRef(null)
   
-  const [playing, setPlaying]       = useState(false)
-  const [progress, setProgress]     = useState(0)
-  const [duration, setDuration]     = useState(0)
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [duration, setDuration] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
   const [isDragging, setIsDragging] = useState(false)
 
-  const togglePlay = () => {
+  // 씬 변경 감지 시 불필요한 함수 재생성을 막기 위해 Ref 사용
+  const currentSceneRef = useRef(currentScene)
+  useEffect(() => {
+    currentSceneRef.current = currentScene
+  }, [currentScene])
+
+  // 공통 플레이어 상태 업데이트 로직 (재생/드래그 공용)
+  const updatePlayerState = useCallback((sec) => {
+    const dur = videoRef.current?.duration || duration
+    if (!dur) return
+
+    setCurrentTime(sec)
+    setProgress((sec / dur) * 100 || 0)
+
+    // 장면(Scene) 동기화
+    if (scenes.length > 0) {
+      const activeSceneIndex = [...scenes].reverse().findIndex(s => tsToSec(s.timestamp) <= sec)
+      if (activeSceneIndex !== -1) {
+        const actualIndex = scenes.length - 1 - activeSceneIndex
+        // Ref를 참조하여 의존성 배열에서 currentScene 제거
+        if (actualIndex !== currentSceneRef.current) {
+          onSceneChange(actualIndex)
+        }
+      }
+    }
+  }, [scenes, onSceneChange, duration])
+
+  // 모든 버튼 클릭 시 포커스 해제 (컨트롤 패널 숨김 방해 방지)
+  const handleBtnClick = (e, callback) => {
+    e.currentTarget.blur()
+    if (callback) callback()
+  }
+
+  const togglePlay = (e) => {
+    if (e && e.currentTarget) e.currentTarget.blur()
     if (!videoRef.current) return
     if (playing) videoRef.current.pause()
-    else         videoRef.current.play()
+    else videoRef.current.play()
   }
 
   const handleTimeUpdate = () => {
-    if (!videoRef.current || isDragging) return // 드래그 중일 때는 비디오의 자연 갱신 무시
-    const cur = videoRef.current.currentTime
-    const dur = videoRef.current.duration
-    setCurrentTime(cur)
-    setProgress((cur / dur) * 100 || 0)
-
-    if (scenes.length > 0) {
-      const activeSceneIndex = [...scenes].reverse().findIndex(s => tsToSec(s.timestamp) <= cur)
-      if (activeSceneIndex !== -1) {
-        const actualIndex = scenes.length - 1 - activeSceneIndex
-        if (actualIndex !== currentScene) onSceneChange(actualIndex)
-      }
-    }
+    if (!videoRef.current || isDragging) return 
+    updatePlayerState(videoRef.current.currentTime)
   }
 
   const handleLoadedMetadata = () => {
@@ -64,30 +88,26 @@ export default function VideoPlayer({
     if (!trackRef.current || !duration) return null
     const rect = trackRef.current.getBoundingClientRect()
     let pct = (clientX - rect.left) / rect.width
-    pct = Math.max(0, Math.min(1, pct)) // 0~1 사이 고정
+    pct = Math.max(0, Math.min(1, pct))
     return pct
   }, [duration])
 
   const handleMouseDown = (e) => {
-    e.preventDefault() // 텍스트 선택 및 기본 드래그 앤 드롭 방지
+    e.preventDefault()
     setIsDragging(true)
     const pct = calculateProgress(e.clientX)
     if (pct !== null) {
-      setProgress(pct * 100)
-      setCurrentTime(pct * duration)
+      updatePlayerState(pct * duration)
     }
   }
 
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isDragging) return
-      e.preventDefault() // 드래그 중 텍스트 선택 방지
+      e.preventDefault()
       const pct = calculateProgress(e.clientX)
       if (pct !== null) {
-        setProgress(pct * 100)
-        setCurrentTime(pct * duration)
-        // (선택) 드래그 중에도 영상을 동기화하고 싶다면 주석 해제 (약간의 버벅임이 있을 수 있음)
-        // if (videoRef.current) videoRef.current.currentTime = pct * duration
+        updatePlayerState(pct * duration)
       }
     }
 
@@ -102,42 +122,59 @@ export default function VideoPlayer({
     }
 
     if (isDragging) {
-      // 드래그 중에는 전체 문서의 텍스트 선택을 막아 더 깔끔한 UX 제공
       document.body.style.userSelect = 'none'
       window.addEventListener('mousemove', handleMouseMove, { passive: false })
       window.addEventListener('mouseup', handleMouseUp)
     } else {
       document.body.style.userSelect = ''
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup',   handleMouseUp)
+      window.removeEventListener('mouseup', handleMouseUp)
     }
 
     return () => {
       document.body.style.userSelect = ''
       window.removeEventListener('mousemove', handleMouseMove)
-      window.removeEventListener('mouseup',   handleMouseUp)
+      window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [isDragging, calculateProgress, duration])
+  }, [isDragging, calculateProgress, duration, updatePlayerState])
+
+  // 공통 시점 이동 로직
+  const jumpToTime = useCallback((targetSec, autoPlay = false) => {
+    if (!videoRef.current) return
+    videoRef.current.currentTime = targetSec
+    updatePlayerState(targetSec)
+    if (autoPlay) videoRef.current.play()
+  }, [updatePlayerState])
 
   // 외부(목록 클릭 등)에서 명시적인 점프 요청이 왔을 때 영상 이동
   useEffect(() => {
-    if (!videoRef.current || !seekTo || !scenes[seekTo.index]) return
+    if (!seekTo || !scenes[seekTo.index]) return
     const targetSec = tsToSec(scenes[seekTo.index].timestamp)
-    videoRef.current.currentTime = targetSec
-    // 점프 시 자동 재생을 원한다면: videoRef.current.play()
-  }, [seekTo, scenes])
+    jumpToTime(targetSec, true)
+  }, [seekTo, scenes, jumpToTime])
 
   useEffect(() => {
-    if (!videoRef.current) return
     const target = typeof seekToSeconds === 'object' && seekToSeconds !== null
       ? seekToSeconds.seconds
       : seekToSeconds
     if (!Number.isFinite(Number(target))) return
-    const targetSec = Math.max(0, Number(target))
-    videoRef.current.currentTime = targetSec
-    setCurrentTime(targetSec)
-    setProgress((targetSec / videoRef.current.duration) * 100 || 0)
-  }, [seekToSeconds])
+    jumpToTime(Math.max(0, Number(target)))
+  }, [seekToSeconds, jumpToTime])
+
+  // 스페이스바 재생/일시정지
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // 입력창, 텍스트 영역 예외 처리
+      if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
+      
+      if (e.code === 'Space') {
+        e.preventDefault()
+        togglePlay()
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [playing])
 
   if (!lecture) {
     return (
@@ -149,7 +186,7 @@ export default function VideoPlayer({
   }
 
   return (
-    <div className={`vp-wrap ${isMini ? 'vp-wrap--mini' : ''}`}>
+    <div className={`vp-wrap`}>
       <div className="vp-video-container">
         <video
           ref={videoRef}
@@ -192,13 +229,30 @@ export default function VideoPlayer({
             })}
           </div>
           <div className="vp-ctrl-row">
-            <button className="vp-cbtn" onClick={() => { if(videoRef.current) videoRef.current.currentTime -= 10 }}>↺</button>
+            <button className="vp-cbtn" onClick={(e) => handleBtnClick(e, () => { if(videoRef.current) videoRef.current.currentTime -= 10 })}>↺</button>
             <button className="vp-cbtn" onClick={togglePlay}>{playing ? '⏸' : '▶'}</button>
-            <button className="vp-cbtn" onClick={() => { if(videoRef.current) videoRef.current.currentTime += 10 }}>↻</button>
+            <button className="vp-cbtn" onClick={(e) => handleBtnClick(e, () => { if(videoRef.current) videoRef.current.currentTime += 10 })}>↻</button>
+            
             <span className="vp-mono">{secToTs(currentTime)}</span>
             <span className="vp-muted">/ {secToTs(duration)}</span>
+
+            <span className="vp-scene-no">
+              Scene {currentScene + 1}
+            </span>
+
+            <span className="vp-scene-title">
+              {scenes[currentScene]?.text || ''}
+            </span>
+
             <div style={{ flex: 1 }} />
-            <span className="vp-scene-lbl">Scene <strong>{currentScene + 1}</strong></span>
+            <button
+              className={`vp-cbtn ${isCinemaMode ? 'vp-cbtn--active' : ''}`}
+              onClick={(e) => handleBtnClick(e, onToggleCinemaMode)}
+              title={isCinemaMode ? '일반 모드' : '영화관 모드'}
+              style={{ marginLeft: '8px', fontSize: '14px' }}
+            >
+              🎬
+            </button>
           </div>
         </div>
       </div>
