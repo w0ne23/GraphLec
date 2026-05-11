@@ -30,25 +30,6 @@ export async function uploadLecture({ file, title, category, description }) {
   };
 }
 
-export async function getLectureStatus(jobId) {
-  const res = await fetch(`${API_BASE}/jobs/${jobId}`);
-  if (!res.ok) throw new Error('Status check failed');
-  
-  const data = await res.json();
-  
-  const STAGE_KEYS = ['stt', 'voice', 'scene', 'integrate', 'summarize'];
-  const stages = STAGE_KEYS.map((key) => ({
-    stage: key,
-    status: data.status === 'done' ? 'done' : (data.status === 'running' ? 'run' : 'wait')
-  }));
-
-  return {
-    lecture_status: data.status,
-    stages: stages,
-    error_message: data.error_message
-  };
-}
-
 // 1. SSE 영역 - pending/running
 export async function listActiveJobs() {
   const res = await fetch(`${API_BASE}/jobs?status=active`)
@@ -224,10 +205,6 @@ export async function getLectureGraphSessionStatus(lectureId) {
     throw new Error(errorData.detail || 'Graph status fetch failed');
   }
   return res.json();
-}
-
-export async function getQaHistory(lectureId) {
-  return [];
 }
 
 export async function recommendLectures(query, topK = 3) {
