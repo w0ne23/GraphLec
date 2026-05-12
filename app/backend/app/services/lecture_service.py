@@ -10,6 +10,7 @@ import pandas as pd
 import httpx
 from pathlib import Path
 from typing import Optional, List, Any, Dict
+from contextlib import contextmanager
 
 from sqlalchemy import select, delete, and_, or_
 from sqlalchemy.exc import IntegrityError
@@ -133,13 +134,38 @@ def _load_metadata_lecture_items(existing_ids: set[str]) -> List[Dict[str, Any]]
 
 
 # ── Neo4j ────────────────────────────────────────────────────────────────────
+_neo4j_driver = None
+
 def get_neo4j_driver():
+    """Neo4j driver를 lazy singleton으로 반환한다.
+
+    환경 변수(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)가 설정되지 않은 경우 None을 반환한다.
+    """
+    global _neo4j_driver
+    if _neo4j_driver is not None:
+        return _neo4j_driver
     uri = os.getenv("NEO4J_URI")
     user = os.getenv("NEO4J_USER")
     pw = os.getenv("NEO4J_PASSWORD")
     if not all([uri, user, pw]):
         return None
-    return GraphDatabase.driver(uri, auth=(user, pw))
+    _neo4j_driver = GraphDatabase.driver(uri, auth=(user, pw))
+    return _neo4j_driver
+
+
+@contextmanager
+def neo4j_session():
+    """싱글톤 Neo4j driver에서 session을 열고 yield한다.
+
+    Neo4j 설정이 없으면 HTTPException 503을 발생시킨다.
+    앱 시작 시 선택적으로 실행되는 로직(clear_runtime_lecture_graphs 등)은
+    이 래퍼 대신 get_neo4j_driver()를 직접 사용한다.
+    """
+    driver = get_neo4j_driver()
+    if not driver:
+        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
+    with driver.session() as session:
+        yield session
 
 
 def _graphrag_layer_counts(session, stem: str) -> Dict[str, int]:
@@ -370,29 +396,17 @@ async def _commit_graph_session_touch(
 
 
 def _is_stem_loaded(stem: str) -> bool:
-    driver = get_neo4j_driver()
-    if not driver:
-        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
-    try:
-        with driver.session() as session:
-            record = session.run(
-                "MATCH (n {stem: $stem}) RETURN count(n) AS count",
-                stem=stem,
-            ).single()
-            return bool(record and int(record["count"] or 0) > 0)
-    finally:
-        driver.close()
+    with neo4j_session() as session:
+        record = session.run(
+            "MATCH (n {stem: $stem}) RETURN count(n) AS count",
+            stem=stem,
+        ).single()
+        return bool(record and int(record["count"] or 0) > 0)
 
 
 def _unload_stem_from_neo4j(stem: str) -> None:
-    driver = get_neo4j_driver()
-    if not driver:
-        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
-    try:
-        with driver.session() as session:
-            session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
-    finally:
-        driver.close()
+    with neo4j_session() as session:
+        session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
 
 
 def _load_graphrag_layer_for_stem(
@@ -404,29 +418,22 @@ def _load_graphrag_layer_for_stem(
     if not graphrag_dir:
         return {"graphrag_output_dir": None, "graphrag": {}}
 
-    driver = get_neo4j_driver()
-    if not driver:
-        raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
-
-    try:
-        with driver.session() as session:
-            graphrag_counts = session.execute_write(
-                lambda tx: (
-                    delete_graphrag_layer_tx(tx, stem),
-                    load_graphrag_layer_tx(tx, stem, graphrag_dir),
-                )[1]
-            )
-            fused_path = output_dir / f"{stem}_fused.json"
-            if fused_path.is_file():
-                graphrag_counts.update(compute_keyword_match(session, stem, fused_path))
-                graphrag_counts.update(compute_visual_match(session, stem, fused_path))
-            graphrag_counts.update(compute_annotation_match(session, stem))
-            graphrag_counts.update(compute_audio_segment_match(session, stem))
-            graphrag_counts.update(compute_final_weight(session, stem))
-            graphrag_counts.update(compute_relation_boost(session, stem))
-            graph_counts = _stem_graph_counts(session, stem)
-    finally:
-        driver.close()
+    with neo4j_session() as session:
+        graphrag_counts = session.execute_write(
+            lambda tx: (
+                delete_graphrag_layer_tx(tx, stem),
+                load_graphrag_layer_tx(tx, stem, graphrag_dir),
+            )[1]
+        )
+        fused_path = output_dir / f"{stem}_fused.json"
+        if fused_path.is_file():
+            graphrag_counts.update(compute_keyword_match(session, stem, fused_path))
+            graphrag_counts.update(compute_visual_match(session, stem, fused_path))
+        graphrag_counts.update(compute_annotation_match(session, stem))
+        graphrag_counts.update(compute_audio_segment_match(session, stem))
+        graphrag_counts.update(compute_final_weight(session, stem))
+        graphrag_counts.update(compute_relation_boost(session, stem))
+        graph_counts = _stem_graph_counts(session, stem)
 
     return {
         "graphrag_output_dir": str(graphrag_dir),
@@ -440,14 +447,8 @@ def _load_graphrag_layer_for_stem(
 def _ensure_stem_loaded(stem: str, output_dir: str) -> Dict[str, Any]:
     output_path = Path(output_dir)
     if _is_stem_loaded(stem):
-        driver = get_neo4j_driver()
-        if not driver:
-            raise HTTPException(status_code=503, detail="Neo4j 설정이 없습니다.")
-        try:
-            with driver.session() as session:
-                graphrag_counts = _graphrag_layer_counts(session, stem)
-        finally:
-            driver.close()
+        with neo4j_session() as session:
+            graphrag_counts = _graphrag_layer_counts(session, stem)
         if graphrag_counts.get("entities", 0) == 0:
             loaded = _load_graphrag_layer_for_stem(stem, output_path)
             return {"loaded_now": False, "graphrag_loaded_now": bool(loaded.get("graphrag")), **loaded}
@@ -658,11 +659,8 @@ async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
     # Neo4j 정리
     driver = get_neo4j_driver()
     if driver:
-        try:
-            with driver.session() as session:
-                session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
-        finally:
-            driver.close()
+        with driver.session() as session:
+            session.run("MATCH (n {stem: $stem}) DETACH DELETE n", stem=stem)
 
     # Lecture CASCADE로 ProcessingJob, GraphSession 함께 삭제
     await db.execute(delete(Lecture).where(Lecture.id == lecture.id))
@@ -1335,17 +1333,16 @@ async def get_graph_info(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
         return {"error": "Not Found"}
     stem = str(lecture.id)
     node_count = 0
-    driver = get_neo4j_driver()
-    if driver:
-        try:
-            with driver.session() as session:
-                record = session.run(
-                    "MATCH (n {stem: $stem}) RETURN count(n) AS count", stem=stem
-                ).single()
-                if record:
-                    node_count = record["count"]
-        finally:
-            driver.close()
+    try:
+        with neo4j_session() as session:
+            record = session.run(
+                "MATCH (n {stem: $stem}) RETURN count(n) AS count", stem=stem
+            ).single()
+            if record:
+                node_count = record["count"]
+    except Exception as e:
+        logger.warning("Failed to get graph info for %s: %s", stem, e)
+
     return {"lecture_id": lecture_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
 
 

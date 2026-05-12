@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from app.db import init_db
 from app.worker import worker_loop
-from app.services.lecture_service import clear_runtime_lecture_graphs
+from app.services.lecture_service import get_neo4j_driver, clear_runtime_lecture_graphs
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,13 @@ async def lifespan(app):
         logger.info("--- [FastAPI] DB initialized successfully. ---")
     except Exception as e:
         logger.error(f"--- [FastAPI] ERROR initializing DB: {e} ---")
+        
+    try:
+        logger.info("--- [FastAPI] Initializing Neo4j driver... ---")
+        get_neo4j_driver()
+        logger.info("--- [FastAPI] Neo4j driver initialized successfully. ---")
+    except Exception as e:
+        logger.error(f"--- [FastAPI] ERROR initializing Neo4j driver: {e} ---")
 
     if os.getenv("GRAPHLEC_CLEAR_NEO4J_ON_START", "0").lower() not in {"0", "false", "no"}:
         cleanup = clear_runtime_lecture_graphs()
