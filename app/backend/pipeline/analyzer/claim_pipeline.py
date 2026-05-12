@@ -63,6 +63,15 @@ def judge_claims_only(
                 log_prefix=log_prefix)
 
 
+def judge_issue_candidates_only(
+    all_claims_by_batch: list[tuple], current_date: str, hint: dict,
+    slide_ctx: dict, log_prefix: str = "",
+) -> tuple[list[dict], int, dict]:
+    """crosscheck 전 1차 issue 후보 judge만 실행."""
+    from analyzer.claim_verifier import judge_issue_candidates_only as _run
+    return _run(all_claims_by_batch, current_date, hint, slide_ctx, log_prefix=log_prefix)
+
+
 def judge_single_claim(issue: dict, ctx: dict) -> tuple[dict, dict]:
     """3단계: 교차 모델 단건 판정."""
     from analyzer.claim_crosscheck import judge_single_claim as _run

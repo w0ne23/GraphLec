@@ -511,6 +511,10 @@ canonical issue는 최종 항목을 삭제하기 위한 것이 아니라, 교수
 
 
 def _claim_key(claim: dict) -> str:
+    if claim.get("claim_fingerprint"):
+        return str(claim.get("claim_fingerprint"))
+    if claim.get("claim_id"):
+        return str(claim.get("claim_id"))
     uid = claim.get("utterance_id", "")
     text = claim.get("claim_text", "")[:60]
     return f"{uid}::{text}"
@@ -543,7 +547,7 @@ def rebuild_claim_batches(merged_claims: list[dict], utterances: list[dict], bat
         batch_claims[bid] = (batch, [])
 
     for claim in merged_claims:
-        uid = claim.get("utterance_id", "")
+        uid = claim.get("utterance_id", "") or claim.get("context_id", "")
         bid = batch_map.get(uid)
         if bid and bid in batch_claims:
             batch_claims[bid][1].append(claim)

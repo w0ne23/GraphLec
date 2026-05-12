@@ -164,6 +164,7 @@ export default function UploadPage({ onNavigate }) {
       activeJobs.forEach(lec => {
         setupSSEForJob(lec.id, lec.job_id)
       })
+    })
       .catch(e => setError(String(e.message || e)))
       .finally(() => setLoadingLectures(false))
 

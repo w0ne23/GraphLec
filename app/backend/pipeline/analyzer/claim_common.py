@@ -280,9 +280,9 @@ def _deepseek_request_timeout() -> float:
 
 def _deepseek_api_retry_config() -> tuple[int, float]:
     try:
-        max_retries = int(os.getenv("VERIFIER_DEEPSEEK_API_MAX_RETRIES", "1") or "1")
+        max_retries = int(os.getenv("VERIFIER_DEEPSEEK_API_MAX_RETRIES", "4") or "4")
     except ValueError:
-        max_retries = 1
+        max_retries = 4
     try:
         initial_wait = float(os.getenv("VERIFIER_DEEPSEEK_API_INITIAL_WAIT", "5") or "5")
     except ValueError:
@@ -1283,6 +1283,37 @@ def _parse_grounding_payload(text: str) -> dict:
 
 def _collect_utterances(slides: list[dict]) -> list[dict]:
     utterances = []
+    has_contexts = any(slide.get("contexts") for slide in slides)
+    if has_contexts:
+        for slide in slides:
+            slide_no = int(slide.get("slide_number", 0) or 0)
+            for ctx in slide.get("contexts", []) or []:
+                text = str(ctx.get("text", "") or "").strip()
+                if not text:
+                    continue
+                context_id = str(ctx.get("context_id", "") or "").strip()
+                if not context_id:
+                    context_id = f"S{slide_no:03d}-C{len(utterances) + 1:04d}"
+                utterances.append({
+                    "context_id": context_id,
+                    "utterance_id": context_id,
+                    "slide_number": slide_no,
+                    "scene_index": ctx.get("scene_index"),
+                    "context_index": ctx.get("context_index"),
+                    "start_time": float(ctx.get("start_time", ctx.get("start", 0)) or 0),
+                    "end_time": float(ctx.get("end_time", ctx.get("end", ctx.get("start", 0))) or 0),
+                    "text": text,
+                    "text_corrected": text,
+                    "text_original": "",
+                    "text_corrected_candidate": "",
+                    "correction_status": "context",
+                    "correction_risk": "",
+                    "correction_reason": "",
+                    "source_segment_indices": ctx.get("source_segment_indices", []),
+                })
+        utterances.sort(key=lambda u: u["start_time"])
+        return utterances
+
     for slide in slides:
         slide_no = int(slide.get("slide_number", 0) or 0)
         for seg in slide.get("transcript_segments", []) or []:

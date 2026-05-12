@@ -38,6 +38,8 @@ services:
       context: .
       dockerfile: ./query_service/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8001:8001"
     environment:
@@ -68,6 +70,8 @@ services:
       context: .
       dockerfile: ./app/backend/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     environment:
@@ -89,10 +93,10 @@ services:
       - VERIFIER_DEEPSEEK_REASONING_EFFORT=${VERIFIER_DEEPSEEK_REASONING_EFFORT:-}
       - VERIFIER_DEEPSEEK_TIMEOUT_SEC=${VERIFIER_DEEPSEEK_TIMEOUT_SEC:-180}
       - VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS=${VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS:-2048}
-      - VERIFIER_DEEPSEEK_API_MAX_RETRIES=${VERIFIER_DEEPSEEK_API_MAX_RETRIES:-1}
+      - VERIFIER_DEEPSEEK_API_MAX_RETRIES=${VERIFIER_DEEPSEEK_API_MAX_RETRIES:-4}
       - VERIFIER_DEEPSEEK_API_INITIAL_WAIT=${VERIFIER_DEEPSEEK_API_INITIAL_WAIT:-5}
       - GROQ_API_KEY=${GROQ_API_KEY}
-      - CROSS_VERIFY_MODELS=${CROSS_VERIFY_MODELS:-gpt-5.4,claude-sonnet-4.5,grok-4.3,gpt-5.4-mini}
+      - CROSS_VERIFY_MODELS=${CROSS_VERIFY_MODELS:-gpt-5.4,claude-sonnet-4.5,grok-4.3,deepseek-v4-pro}
       - CROSS_VERIFY_MODEL=${CROSS_VERIFY_MODEL:-gpt-5.4}
       - CROSS_CHECK_MODELS=${CROSS_CHECK_MODELS:-gpt-5.4,claude-sonnet-4.5,grok-4.3,deepseek-v4-pro}
       - CROSS_VERIFY_MODEL_WEIGHTS=${CROSS_VERIFY_MODEL_WEIGHTS:-gpt-5.4=0.40,claude-sonnet-4.5=0.35,deepseek-v4-pro=0.18,grok-4.3=0.07}
@@ -114,6 +118,8 @@ services:
       - LOCAL_STORAGE_DIR=/pipeline/local_storage
       - GRAPHLEC_SLIDE_DECODE_BACKEND=auto
       - GRAPHLEC_FFMPEG_HWACCEL=auto
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPYCACHEPREFIX=/tmp/graphlec-pycache
       - TRANSCRIBE_SILENCE_SPLIT_SEC=${TRANSCRIBE_SILENCE_SPLIT_SEC:-1.5}
       - TRANSCRIBE_CHUNK_MAX_SEC=${TRANSCRIBE_CHUNK_MAX_SEC:-180}
       - TRANSCRIBE_CHUNK_MIN_SEC=${TRANSCRIBE_CHUNK_MIN_SEC:-30}
@@ -138,6 +144,8 @@ services:
       context: .
       dockerfile: ./app/backend/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8002:8002"
     environment:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from collections import OrderedDict
@@ -22,6 +23,27 @@ def _claim_extract_context_mode() -> str:
     if mode in {"card_lite", "card-lite", "lite", "cards_lite", "cards-lite"}:
         return "card_lite"
     return "cards"
+
+
+def _claim_extract_batch_mode() -> str:
+    mode = str(os.getenv("VERIFIER_CLAIM_EXTRACT_BATCH_MODE", "context") or "context").strip().lower()
+    if mode in {"slide", "slides", "slide_batch", "slide-batch", "by_slide", "by-slide"}:
+        return "slide"
+    return "context"
+
+
+def _claim_extract_context_window() -> tuple[int, int]:
+    def _read_int(name: str, default: int) -> int:
+        raw = str(os.getenv(name, str(default)) or str(default)).strip()
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return default
+
+    return (
+        _read_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 2),
+        _read_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_NEXT", 1),
+    )
 
 
 def _claim_extract_prompt_profile() -> str:
@@ -149,6 +171,40 @@ def _build_slide_and_utterance_context(
         )
         return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
 
+    if target_utterance_ids:
+        target_lines = []
+        reference_lines = []
+        for u in utterances:
+            current_sn = int(u.get("slide_number", 0) or 0)
+            if current_sn not in seen_slides:
+                seen_slides[current_sn] = True
+            uid = str(u.get("utterance_id") or "")
+            line = f"  {cv._format_utterance_for_prompt(u)}"
+            if uid in target_utterance_ids:
+                target_lines.append(line)
+            else:
+                reference_lines.append(line)
+
+        context = (
+            "[검사 대상 context]\n"
+            + ("\n".join(target_lines) if target_lines else "(없음)")
+        )
+        if reference_lines:
+            context += (
+                "\n\n[참고 context - 지시어 해소/문장 완결용]\n"
+                + "\n".join(reference_lines)
+            )
+        context += (
+            "\n\n[context-window 추출 규칙]\n"
+            "- claim은 반드시 검사 대상 context에서 직접 말한 내용만 추출하세요.\n"
+            "- 참고 context는 지시어 선행사 해소, 생략된 주어 확인, 조각 문장 완결에만 사용하세요.\n"
+            "- 참고 context에만 있는 새 claim을 만들지 마세요.\n"
+            "- 지시어가 단일 후보로 확실히 해소되면 resolved_claim에 최소한으로 반영하세요.\n"
+            "- 참고 context로 지시어를 해소한 경우 antecedent_context_ids에 사용한 context id를 넣으세요.\n"
+            "- 후보가 둘 이상 가능하거나 검사 대상/참고 context/슬라이드 안에서 확정되지 않으면 unresolved로 두세요."
+        )
+        return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
+
     for i, u in enumerate(utterances):
         current_sn = int(u.get("slide_number", 0) or 0)
         if current_sn not in seen_slides:
@@ -269,6 +325,7 @@ def _build_extract_prompt(
       "claim_text": "현재 발화에서 직접 가져온 claim 원문",
       "resolved_claim": "원문 범위를 보존한 최소 정리문",
       "utterance_ids": ["U0001"],
+      "antecedent_context_ids": [],
       "is_approximate": false,
       "needs_context": false,
       "resolution_status": "resolved",
@@ -285,6 +342,7 @@ def _build_extract_prompt(
 - resolution_status는 `resolved` 또는 `unresolved`만 사용하세요.
 - verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
+- 참고 context로 지시어를 해소한 경우 antecedent_context_ids에 사용한 context id를 넣으세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
 - JSON 외 텍스트를 출력하지 마세요.
 """
@@ -323,6 +381,50 @@ def _normalize_claim_type(value: str) -> str | None:
         return "relationship"
 
     return "definition"
+
+
+def _build_claim_fingerprint(claim: dict) -> str:
+    anchor = str(claim.get("context_id") or claim.get("utterance_id") or "CTX").strip()
+    anchor = re.sub(r"[^A-Za-z0-9_-]+", "-", anchor).strip("-") or "CTX"
+    source = "|".join(
+        str(claim.get(key) or "")
+        for key in ("claim_type", "claim_text", "resolved_claim")
+    )
+    digest = hashlib.sha1(source.encode("utf-8")).hexdigest()[:10]
+    return f"CLM-{anchor}-{digest}"
+
+
+def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
+    """최종 추출 순서 기준으로 사람이 읽는 claim_id를 부여한다."""
+    sequence = 1
+    for _batch, claims in claims_by_batch:
+        for claim in claims:
+            claim["claim_id"] = f"CL{sequence:04d}"
+            _order_claim_fields(claim)
+            sequence += 1
+
+
+def _order_claim_fields(claim: dict) -> None:
+    preferred_keys = (
+        "claim_id",
+        "claim_text",
+        "resolved_claim",
+        "claim_type",
+        "context_id",
+        "context_ids",
+        "antecedent_context_ids",
+        "claim_fingerprint",
+        "utterance_id",
+        "utterance_ids",
+        "is_approximate",
+        "needs_context",
+        "resolution_status",
+        "context_note",
+    )
+    ordered = {key: claim[key] for key in preferred_keys if key in claim}
+    ordered.update({key: value for key, value in claim.items() if key not in ordered})
+    claim.clear()
+    claim.update(ordered)
 
 
 def _utterance_number(uid: str) -> int | None:
@@ -497,6 +599,22 @@ def _dedupe_overlapping_claims(claims: list[dict]) -> list[dict]:
     return deduped
 
 
+def _context_batches_by_slide(utterances: list[dict]) -> list[list[dict]]:
+    batches: list[list[dict]] = []
+    current_slide = None
+    current_batch: list[dict] = []
+    for utterance in utterances:
+        slide_no = int(utterance.get("slide_number", 0) or 0)
+        if current_batch and slide_no != current_slide:
+            batches.append(current_batch)
+            current_batch = []
+        current_slide = slide_no
+        current_batch.append(utterance)
+    if current_batch:
+        batches.append(current_batch)
+    return batches
+
+
 def _extract_claims(
     utterances: list[dict],
     current_date: str,
@@ -549,11 +667,22 @@ def _extract_claims(
                 c["claim_type"] = normalized
                 c["claim_text"] = claim_text
                 c["resolved_claim"] = resolved_claim
+                if not c.get("context_id"):
+                    c["context_id"] = str(c.get("utterance_id") or "")
                 utterance_ids = c.get("utterance_ids")
                 if isinstance(utterance_ids, list):
                     c["utterance_ids"] = [str(x) for x in utterance_ids if str(x).strip()]
                 else:
                     c["utterance_ids"] = [str(c.get("utterance_id") or "")]
+                if not c.get("context_ids"):
+                    c["context_ids"] = list(c["utterance_ids"])
+                antecedent_ids = c.get("antecedent_context_ids")
+                if isinstance(antecedent_ids, list):
+                    c["antecedent_context_ids"] = [str(x) for x in antecedent_ids if str(x).strip()]
+                else:
+                    c["antecedent_context_ids"] = []
+                c["claim_fingerprint"] = str(c.get("claim_fingerprint") or _build_claim_fingerprint(c))
+                c.pop("claim_id", None)
                 c["needs_context"] = bool(c.get("needs_context") or resolution_status == "unresolved")
                 c["resolution_status"] = resolution_status
                 c["context_note"] = str(c.get("context_note") or "").strip()
@@ -623,15 +752,40 @@ def extract_claims_only(
     total_api = 0
     total_token_usage = cv._empty_token_usage()
     total = len(utterances)
-    core_ranges = [(i, min(total, i + batch_size)) for i in range(0, total, batch_size)]
+    has_contexts = any(u.get("context_id") for u in utterances)
+    context_window_prev, context_window_next = _claim_extract_context_window()
+    if has_contexts:
+        batch_mode = _claim_extract_batch_mode()
+        if batch_mode == "slide":
+            core_batches = _context_batches_by_slide(utterances)
+        else:
+            core_batches = [[utterance] for utterance in utterances]
+        print(
+            f"  claim 추출 batch mode: {batch_mode}"
+            + (f" (prev={context_window_prev}, next={context_window_next})" if batch_mode == "context" else "")
+        )
+    else:
+        batch_mode = "utterance"
+        core_batches = [
+            utterances[i:min(total, i + batch_size)]
+            for i in range(0, total, batch_size)
+        ]
     context_mode = _claim_extract_context_mode()
     shared_context_mode = context_mode in {"compact", "card_lite"}
 
-    for i, (start, end) in enumerate(core_ranges):
-        core_batch = utterances[start:end]
+    cursor = 0
+    for i, core_batch in enumerate(core_batches):
         if not core_batch:
             continue
-        if shared_context_mode:
+        start = cursor
+        end = cursor + len(core_batch)
+        cursor = end
+        if has_contexts and batch_mode == "context":
+            context_batch = utterances[
+                max(0, start - context_window_prev):min(total, end + context_window_next)
+            ]
+            core_uids = {str(u.get("utterance_id") or "") for u in core_batch}
+        elif shared_context_mode and not any(u.get("context_id") for u in core_batch):
             context_batch = utterances[max(0, start - 3):min(total, end + 5)]
             core_uids = {str(u.get("utterance_id") or "") for u in core_batch}
         else:
@@ -639,15 +793,17 @@ def extract_claims_only(
             core_uids = None
 
         ids = f"{core_batch[0]['utterance_id']}..{core_batch[-1]['utterance_id']}"
-        print(f"    추출 [{i+1}/{len(core_ranges)}] {ids}")
+        print(f"    추출 [{i+1}/{len(core_batches)}] {ids}")
         claims, parse_failed, api_calls, token_usage, ok = recover_claim_extraction(
             context_batch,
             current_date,
             hint,
             slide_ctx,
             f"배치 {i+1} {ids}",
-            target_utterance_ids=core_uids if context_mode == "card_lite" else None,
+            target_utterance_ids=core_uids,
         )
+        if not ok:
+            print(f"    ⚠️ claim 추출 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")
         if core_uids is not None:
             claims = [c for c in claims if str(c.get("utterance_id") or "") in core_uids]
         all_claims_by_batch.append((context_batch, claims))
@@ -655,5 +811,6 @@ def extract_claims_only(
         total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)
 
     total_claims = sum(len(c) for _, c in all_claims_by_batch)
+    assign_claim_display_ids(all_claims_by_batch)
     print(f"  추출된 claim: {total_claims}개")
     return all_claims_by_batch, total_api, total_token_usage
