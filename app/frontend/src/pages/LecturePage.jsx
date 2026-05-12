@@ -17,23 +17,6 @@ import LectureInfoModal from '../components/watch/LectureInfoModal'
 import '../styles/lecture.css'
 
 const INIT_MSG = { role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
-const graphRagUnloadTimers = new Map()
-
-function cancelScheduledGraphRagUnload(lectureId) {
-  const timer = graphRagUnloadTimers.get(lectureId)
-  if (!timer) return
-  window.clearTimeout(timer)
-  graphRagUnloadTimers.delete(lectureId)
-}
-
-function scheduleGraphRagUnload(lectureId) {
-  cancelScheduledGraphRagUnload(lectureId)
-  const timer = window.setTimeout(() => {
-    graphRagUnloadTimers.delete(lectureId)
-    unloadLectureGraphRag(lectureId)
-  }, 600)
-  graphRagUnloadTimers.set(lectureId, timer)
-}
 
 export default function LecturePage({ onNavigate }) {
   const { id } = useParams()
