@@ -64,6 +64,37 @@ def judge_worker(args_tuple):
         raise RuntimeError(f"[{args_tuple[1]}] judge worker failed:\n{traceback.format_exc()}") from e
 
 
+def issue_judge_worker(args_tuple):
+    """crosscheck 전 1차 issue 후보 judge만 실행."""
+    try:
+        merged_path, model, claims_serialized, current_date, root, env_vars = args_tuple
+        _setup_worker(root, env_vars, model)
+        import analyzer.claim_pipeline as cv
+
+        ctx = cv.prepare_verification(merged_path, current_date=current_date)
+        print(f"\n  [{model}] 1차 issue judge 시작", flush=True)
+
+        claims_by_batch = [(item["batch"], item["claims"]) for item in claims_serialized]
+        issues, api_calls, token_usage = cv.judge_issue_candidates_only(
+            claims_by_batch,
+            ctx["current_date"],
+            ctx["hint"],
+            ctx["slide_ctx"],
+            log_prefix=model,
+        )
+
+        print(f"  [{model}] 1차 issue judge 완료: {len(issues)}건", flush=True)
+        return {
+            "model": model,
+            "ok": True,
+            "issues": issues,
+            "api_calls": api_calls,
+            "token_usage": token_usage,
+        }
+    except Exception as e:
+        raise RuntimeError(f"[{args_tuple[1]}] issue judge worker failed:\n{traceback.format_exc()}") from e
+
+
 def cross_recheck_worker(args_tuple):
     """합집합 전체 이슈를 각 모델이 텍스트+문맥으로 재검증."""
     try:

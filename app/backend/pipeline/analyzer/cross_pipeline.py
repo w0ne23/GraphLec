@@ -72,6 +72,10 @@ _CROSSCHECK_FEEDBACK_FIELDS = (
 
 
 def _claim_consensus_key(claim: dict) -> str:
+    if claim.get("claim_fingerprint"):
+        return str(claim.get("claim_fingerprint"))
+    if claim.get("claim_id"):
+        return str(claim.get("claim_id"))
     uid = str(claim.get("utterance_id", "") or "")
     text = cv._compact_text(claim.get("claim_text", ""))
     return f"{uid}::{text}"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 import json
 import os
@@ -19,7 +20,7 @@ from .claim_pipeline import (
     prepare_verification,
     verify_lecture_content,
 )
-from .cross_utils import _collect_env_vars, _write_claims_jsonl
+from .cross_utils import _ROOT, _collect_env_vars, _empty_token_usage, _merge_token_usage, _write_claims_jsonl
 
 
 CLAIM_TYPE_LABELS = {
@@ -375,7 +376,219 @@ def _write_claims_raw_diff(previous_path: str | None, current_path: str | None) 
     return str(diff_path), diff
 
 
+def _model_file_slug(model: str) -> str:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(model or "").strip()).strip("-")
+    return slug or "model"
+
+
+def _issue_judge_payload(
+    *,
+    model: str,
+    claims_path: str,
+    merged_path: Path,
+    input_claim_count: int,
+    result: dict,
+) -> dict:
+    issues = []
+    for index, issue in enumerate(result.get("issues", []) or [], start=1):
+        row = dict(issue)
+        row["issue_id"] = f"I{index:04d}"
+        ordered = {
+            "issue_id": row.get("issue_id", ""),
+            "claim_id": row.get("claim_id", ""),
+            "resolved_claim": row.get("resolved_claim", ""),
+            "claim_text": row.get("claim_text", ""),
+            "issue": row.get("issue", ""),
+            "candidate_reason": row.get("candidate_reason", ""),
+            "confidence": row.get("confidence", 0),
+            "context_id": row.get("context_id", ""),
+            "context_ids": row.get("context_ids", []),
+            "slide_number": row.get("slide_number"),
+            "start_time": row.get("start_time"),
+            "end_time": row.get("end_time"),
+            "needs_context": row.get("needs_context", False),
+            "resolution_status": row.get("resolution_status", ""),
+        }
+        ordered.update({
+            key: value
+            for key, value in row.items()
+            if key not in ordered and key not in {"utterance_id", "type", "issue_type", "claim_type"}
+        })
+        issues.append(ordered)
+
+    ok = bool(result.get("ok", True))
+    summary = {
+        "input_claim_count": input_claim_count,
+        "issue_count": len(issues),
+        "api_calls": int(result.get("api_calls", 0) or 0),
+        "status": "ok" if ok else "failed",
+    }
+    if not ok and result.get("error"):
+        summary["error"] = str(result.get("error"))
+
+    return {
+        "schema_version": "issue_judge_model.v1",
+        "stage": "claim_to_issue_judge",
+        "model": model,
+        "merged_path": str(merged_path),
+        "source_claims_path": claims_path,
+        "summary": summary,
+        "issues": issues,
+        "token_usage": result.get("token_usage", _empty_token_usage()),
+    }
+
+
+def _write_issue_judge_model_outputs(
+    *,
+    output_dir: Path,
+    base_stem: str,
+    merged_path: Path,
+    claims_path: str,
+    claims: list[dict],
+    judge_results: dict[str, dict],
+) -> dict[str, str]:
+    paths = {}
+    for model, result in judge_results.items():
+        payload = _issue_judge_payload(
+            model=model,
+            claims_path=claims_path,
+            merged_path=merged_path,
+            input_claim_count=len(claims),
+            result=result,
+        )
+        path = output_dir / f"{base_stem}_issue_judge_{_model_file_slug(model)}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        paths[model] = str(path)
+        result["issues"] = payload["issues"]
+    return paths
+
+
+def _build_issue_judge_comparison(
+    *,
+    models: list[str],
+    claims: list[dict],
+    judge_results: dict[str, dict],
+    issue_judge_paths: dict[str, str],
+    claims_path: str,
+) -> dict:
+    by_claim = []
+    exclusive_by_model = {model: [] for model in models}
+    failed_models = [
+        model
+        for model in models
+        if judge_results.get(model, {}).get("ok") is False
+    ]
+    evaluated_models = [model for model in models if model not in failed_models]
+    issue_counts = {model: len(judge_results.get(model, {}).get("issues", []) or []) for model in models}
+    issues_by_model_claim: dict[str, dict[str, list[dict]]] = {}
+
+    for model in models:
+        grouped: dict[str, list[dict]] = {}
+        for issue in judge_results.get(model, {}).get("issues", []) or []:
+            claim_id = str(issue.get("claim_id", "") or "")
+            if claim_id:
+                grouped.setdefault(claim_id, []).append(issue)
+        issues_by_model_claim[model] = grouped
+
+    all_model_agreed_count = 0
+    single_model_only_count = 0
+    no_issue_claim_count = 0
+    disagreement_count = 0
+    union_issue_claim_ids = set()
+
+    for claim in claims:
+        claim_id = str(claim.get("claim_id") or _claim_key(claim))
+        model_rows = {}
+        issue_models = []
+        for model in models:
+            if model in failed_models:
+                model_rows[model] = {
+                    "status": "failed",
+                    "has_issue": None,
+                    "error": str(judge_results.get(model, {}).get("error", "") or ""),
+                }
+                continue
+            model_issues = issues_by_model_claim.get(model, {}).get(claim_id, [])
+            if model_issues:
+                issue_models.append(model)
+                model_rows[model] = {
+                    "status": "ok",
+                    "has_issue": True,
+                    "issue_count": len(model_issues),
+                    "issues": [
+                        {
+                            "issue_id": issue.get("issue_id", ""),
+                            "issue": issue.get("issue", ""),
+                            "candidate_reason": issue.get("candidate_reason", ""),
+                            "confidence": issue.get("confidence", 0),
+                        }
+                        for issue in model_issues
+                    ],
+                }
+            else:
+                model_rows[model] = {"status": "ok", "has_issue": False}
+
+        evaluated_count = len(evaluated_models)
+        if evaluated_count == 0:
+            status = "all_models_failed"
+        elif not issue_models:
+            status = "no_issue"
+            no_issue_claim_count += 1
+        elif len(issue_models) == evaluated_count:
+            status = "all_models_agreed"
+            all_model_agreed_count += 1
+            union_issue_claim_ids.add(claim_id)
+        elif len(issue_models) == 1:
+            status = "single_model_only"
+            single_model_only_count += 1
+            union_issue_claim_ids.add(claim_id)
+            exclusive_by_model[issue_models[0]].append(claim_id)
+        else:
+            status = "partial_agreement"
+            disagreement_count += 1
+            union_issue_claim_ids.add(claim_id)
+
+        by_claim.append({
+            "claim_id": claim_id,
+            "resolved_claim": claim.get("resolved_claim", ""),
+            "claim_text": claim.get("claim_text", ""),
+            "context_id": claim.get("context_id") or claim.get("utterance_id", ""),
+            "context_ids": claim.get("context_ids", []),
+            "models": model_rows,
+            "agreement": {
+                "status": status,
+                "issue_model_count": len(issue_models),
+                "issue_models": issue_models,
+            },
+        })
+
+    return {
+        "schema_version": "issue_judge_comparison.v1",
+        "stage": "claim_to_issue_judge",
+        "models": models,
+        "source_claims_path": claims_path,
+        "issue_judge_result_paths": issue_judge_paths,
+        "summary": {
+            "input_claim_count": len(claims),
+            "evaluated_model_count": len(evaluated_models),
+            "failed_models": failed_models,
+            "union_issue_claim_count": len(union_issue_claim_ids),
+            "issue_counts_by_model": issue_counts,
+            "all_models_agreed_count": all_model_agreed_count,
+            "partial_agreement_count": disagreement_count,
+            "single_model_only_count": single_model_only_count,
+            "no_issue_claim_count": no_issue_claim_count,
+        },
+        "exclusive_by_model": exclusive_by_model,
+        "by_claim": by_claim,
+    }
+
+
 def _claim_key(payload: dict) -> str:
+    if payload.get("claim_fingerprint"):
+        return str(payload.get("claim_fingerprint"))
+    if payload.get("claim_id"):
+        return str(payload.get("claim_id"))
     uid = str(payload.get("utterance_id", "") or "")
     text = str(payload.get("claim_text", "") or "")[:60]
     return f"{uid}::{text}"
@@ -1110,7 +1323,7 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
     claim_type = str(claim.get("claim_type", "") or "")
     utt = utterance_lookup.get(uid, {})
     payload = {
-        "claim_id": _claim_key(claim),
+        "claim_id": str(claim.get("claim_id") or _claim_key(claim)),
         "utterance_id": uid,
         "utterance_ids": claim.get("utterance_ids") or [uid],
         "claim_type": claim_type,
@@ -1127,6 +1340,8 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
             "slide_number": utt.get("slide_number"),
         },
     }
+    if claim.get("claim_fingerprint"):
+        payload["claim_fingerprint"] = str(claim.get("claim_fingerprint"))
     if claim.get("verification_question"):
         payload["verification_question"] = claim.get("verification_question", "")
     return payload
@@ -1893,6 +2108,130 @@ def _compact_result_for_output(result: dict) -> dict:
     return {key: result[key] for key in compact_keys if key in result}
 
 
+def run_issue_judge_only(
+    merged_path: str,
+    *,
+    output_dir: str | None = None,
+    claims_jsonl: str | None = None,
+    cross_models: list[str] | None = None,
+    cross_batch_size: int = 20,
+    current_date: str | None = None,
+    issue_judge_min_confidence: float | None = None,
+) -> dict:
+    merged_file = Path(merged_path).resolve()
+    if not merged_file.exists():
+        raise FileNotFoundError(f"merged_clean 파일 없음: {merged_file}")
+    if not claims_jsonl:
+        raise FileNotFoundError("1차 issue judge에는 claims_jsonl 경로가 필요합니다.")
+
+    claims_path = Path(claims_jsonl).resolve()
+    if not claims_path.exists():
+        raise FileNotFoundError(f"claims jsonl 파일 없음: {claims_path}")
+
+    base_stem = _base_stem(merged_file)
+    out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    models = cross_models or _default_cross_models()
+    if len(models) < 1:
+        raise RuntimeError("issue judge 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --cross-models를 확인하세요.")
+    missing_judge_keys = [
+        f"{model}({missing} 없음)"
+        for model in models
+        for missing in [_missing_provider_key(model)]
+        if missing
+    ]
+    if missing_judge_keys:
+        raise RuntimeError(f"issue judge 모델 키가 필요합니다: {', '.join(missing_judge_keys)}")
+    if issue_judge_min_confidence is not None:
+        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(issue_judge_min_confidence)
+
+    ctx = prepare_verification(str(merged_file), current_date=current_date)
+    claims = _load_claims_jsonl(claims_path)
+    from .cross_merge import rebuild_claim_batches
+    from .cross_workers import issue_judge_worker
+
+    claims_by_batch = rebuild_claim_batches(claims, ctx["utterances"], cross_batch_size)
+    claims_serialized = [{"batch": item["batch"], "claims": item["claims"]} for item in claims_by_batch]
+
+    print(f"  issue judge 입력 claim 수: {len(claims)}개")
+    print(f"  issue judge 모델: {', '.join(models)}")
+
+    env_vars = _collect_env_vars()
+    root = str(_ROOT)
+    judge_results = {}
+    with ProcessPoolExecutor(max_workers=len(models)) as executor:
+        futures = {
+            executor.submit(
+                issue_judge_worker,
+                (str(merged_file), model, claims_serialized, current_date, root, env_vars),
+            ): model
+            for model in models
+        }
+        for future in as_completed(futures):
+            model = futures[future]
+            try:
+                judge_results[model] = future.result()
+            except Exception as e:
+                print(f"  ❌ [{model}] 1차 issue judge 실패: {e}")
+                judge_results[model] = {
+                    "model": model,
+                    "ok": False,
+                    "error": str(e),
+                    "issues": [],
+                    "api_calls": 0,
+                    "token_usage": _empty_token_usage(),
+                }
+
+    issue_judge_paths = _write_issue_judge_model_outputs(
+        output_dir=out_dir,
+        base_stem=base_stem,
+        merged_path=merged_file,
+        claims_path=str(claims_path),
+        claims=claims,
+        judge_results=judge_results,
+    )
+    comparison = _build_issue_judge_comparison(
+        models=models,
+        claims=claims,
+        judge_results=judge_results,
+        issue_judge_paths=issue_judge_paths,
+        claims_path=str(claims_path),
+    )
+    comparison_path = out_dir / f"{base_stem}_issue_judge_comparison.json"
+    comparison_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    total_token_usage = _empty_token_usage()
+    token_usage_per_model = {}
+    for model, result in judge_results.items():
+        token_usage_per_model[model] = result.get("token_usage", _empty_token_usage())
+        total_token_usage = _merge_token_usage(total_token_usage, token_usage_per_model[model])
+
+    summary_path = out_dir / f"{base_stem}_issue_judge_summary.json"
+    summary = {
+        "schema_version": "issue_judge_summary.v1",
+        "stage": "claim_to_issue_judge",
+        "merged_path": str(merged_file),
+        "source_claims_path": str(claims_path),
+        "models": models,
+        "issue_judge_result_paths": issue_judge_paths,
+        "issue_judge_comparison_path": str(comparison_path),
+        "summary": comparison.get("summary", {}),
+        "token_usage_per_model": token_usage_per_model,
+        "token_usage": total_token_usage,
+    }
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return {
+        "merged_path": str(merged_file),
+        "output_dir": str(out_dir),
+        "issue_judge_summary": str(summary_path),
+        "issue_judge_comparison": str(comparison_path),
+        "issue_judge_paths": issue_judge_paths,
+        "issue_judge_count": comparison.get("summary", {}).get("union_issue_claim_count", 0),
+    }
+
+
 def run_all_analyzers(
     merged_path: str,
     *,
@@ -2017,6 +2356,11 @@ def main():
         action="store_true",
         help="결과 폴더의 기존 *_claims_extracted.jsonl이 있으면 claim 추출을 건너뜀",
     )
+    parser.add_argument(
+        "--issue-judge-only",
+        action="store_true",
+        help="crosscheck/grounding 없이 claims_jsonl로 1차 issue judge 결과만 생성",
+    )
     parser.add_argument("--claim-runs", type=int, default=1)
     parser.add_argument("--claim-min-rate", type=float, default=0.5)
     parser.add_argument("--claim-batch-size", type=int, default=CLAIM_BATCH_SIZE)
@@ -2043,8 +2387,31 @@ def main():
     )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
+    parser.add_argument(
+        "--issue-judge-min-confidence",
+        type=float,
+        default=None,
+        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE 또는 0.8",
+    )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
+
+    if args.issue_judge_only:
+        result = run_issue_judge_only(
+            args.merged_path,
+            output_dir=args.output_dir,
+            claims_jsonl=args.claims_jsonl,
+            cross_models=args.cross_models,
+            cross_batch_size=args.cross_batch_size,
+            current_date=args.date,
+            issue_judge_min_confidence=args.issue_judge_min_confidence,
+        )
+        print("\n=== 1차 Issue Judge 완료 ===")
+        print(f"merged    : {result['merged_path']}")
+        print(f"summary   : {result['issue_judge_summary']}")
+        print(f"comparison: {result['issue_judge_comparison']}")
+        print(f"issue claim 후보: {result['issue_judge_count']}건")
+        return
 
     result = run_all_analyzers(
         args.merged_path,
