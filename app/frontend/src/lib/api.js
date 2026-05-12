@@ -103,24 +103,6 @@ export async function getLectureTimeline(lectureId) {
   return res.json();
 }
 
-export async function activateLectureGraphRag(lectureId) {
-  const res = await fetch(`${API_BASE}/results/${lectureId}/graph/activate`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'GraphRAG activate failed');
-  }
-  return res.json();
-}
-
-export async function unloadLectureGraphRag(lectureId) {
-  return fetch(`${API_BASE}/results/${lectureId}/graph/unload`, {
-    method: 'POST',
-    keepalive: true,
-  }).catch(() => null);
-}
-
 export async function deleteLecture(lectureId) {
   const res = await fetch(`${API_BASE}/jobs/${lectureId}`, {
     method: 'DELETE',
