@@ -634,6 +634,19 @@ class RecommendResult:
     tier:         str   # "direct" | "related" | "background"
 
 
+@dataclass
+class QueryContext:
+    query:             str
+    search_text:       str
+    query_keywords:    list[str]
+    inferred_keywords: list[str]
+    domain:            Optional[str]
+    focus_concept:     Optional[str]
+    duration_max_sec:  Optional[int]
+    difficulty_hint:   Optional[str]
+    comparison_intent: bool
+
+
 def _build_reason(detail: dict, tier: str = "direct") -> str:
     if tier == "background":
         parts = []
@@ -684,43 +697,19 @@ class Recommender:
         self._available_domains  = self.collection.available_domains()
         self._available_keywords = self.collection.available_keywords()
         # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지)
-        db = lancedb.connect(self.cfg.DB_DIR)
-        # 테이블 없으면 빈 인덱스로 시작
-        if "lectures" in db.table_names():
-            print("[LanceDB 레코드 로드 중...]")
-            table            = db.open_table("lectures")
-            self._index_rows = table.to_arrow().to_pylist()
-            print(f"  → {len(self._index_rows)}개 레코드 로드\n")
-        else:
-            print("[Recommender] LanceDB 테이블 없음, 빈 인덱스로 시작\n")
-            self._index_rows = []
-
+        print("[LanceDB 레코드 로드 중...]")
+        db               = lancedb.connect(self.cfg.DB_DIR)
+        table            = db.open_table("lectures")
+        self._index_rows = table.to_arrow().to_pylist()
+        self._row_by_video_id = {
+            row["video_id"]: row
+            for row in self._index_rows
+        }
+        print(f"  → {len(self._index_rows)}개 레코드 로드\n")
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
 
-    def recommend_from_query(
-        self,
-        query:     str,
-        top_k:     int             = 5,
-        min_score: Optional[float] = None,
-    ) -> list[RecommendResult]:
-        """
-        자연어 질의를 분석하고 관련 강의를 추천한다.
-
-        v11 흐름 (concept_relations 활용):
-          1. analyze_query — search_text / domain / focus_concept 추출
-          2. 비교 의도 감지 (_detect_comparison_intent)
-          3. search_text → Gemini embedding-001 벡터화
-          4. 모든 강의에 대해:
-             - vec_score / dm_score 계산
-             - depth_score: BFS 홉 거리 기반 (concept_relations 활용)
-             - contrast_bonus: 비교 의도 × 대조형 relation 비율
-          5. 패널티 체계:
-             - dm_keyword==0 패널티 (×0.6)
-             - 원본 query_keyword 완전 미매칭 패널티 (×Q_KW_MISMATCH_PENALTY)
-             - 도메인 상위 카테고리 불일치 패널티 (×DOMAIN_MISMATCH_PENALTY)
-          6. 이중 레이어 임계값 + gap 자연 경계 → direct/related 분류
-        """
+    def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
         search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
             query, self._available_domains, self._available_keywords
@@ -737,162 +726,189 @@ class Recommender:
             print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 소프트 패널티 적용")
         print()
 
-        if min_score is not None:
-            self.cfg.ABS_MIN_SCORE = min_score
+        return QueryContext(
+            query             = query,
+            search_text       = search_text,
+            query_keywords    = query_keywords,
+            inferred_keywords = inferred_keywords,
+            domain            = domain,
+            focus_concept     = focus_concept,
+            duration_max_sec  = duration_max_sec,
+            difficulty_hint   = difficulty_hint,
+            comparison_intent = comparison_intent,
+        )
 
-        query_concepts = set(query_keywords) | set(inferred_keywords)
+    def _get_initial_candidate_ids(self, ctx: QueryContext) -> list[str]:
+        """
+        현재 단계에서는 동작 보존을 위해 전체 강의를 후보로 사용한다.
+        이후 BM25/vector/RRF 후보 검색기가 이 경계를 대체한다.
+        """
+        return [row["video_id"] for row in self._index_rows]
 
-        # ── 질의 벡터화 ───────────────────────────────────────────────
-        query_vec = _embed(search_text)
-
-        # ── 강의별 점수 계산 ──────────────────────────────────────────
-        candidates = []
-        for row in self._index_rows:
-            lec = self.collection.get(row["video_id"])
-            if lec is None:
-                continue
-
-            # ── 길이 소프트 패널티 ────────────────────────────────────
-            # 기준 ±5분(300초) 이내 → 1.0
-            # 초과량에 따라 선형 감쇄 → 최소 0.1
-            if duration_max_sec:
-                over_sec = lec.duration_sec - (duration_max_sec + 300)
-                if over_sec <= 0:
-                    duration_score = 1.0
-                else:
-                    # 300초(5분) 초과부터 감쇄, 1200초(20분) 초과 시 0.1
-                    duration_score = max(1.0 - (over_sec / 1200) * 0.9, 0.1)
-            else:
+    def _score_candidate(
+        self,
+        row: dict,
+        lec: LectureMetadata,
+        ctx: QueryContext,
+        query_vec: list[float],
+        query_concepts: set[str],
+    ) -> dict:
+        # ── 길이 소프트 패널티 ────────────────────────────────────
+        # 기준 ±5분(300초) 이내 → 1.0
+        # 초과량에 따라 선형 감쇄 → 최소 0.1
+        if ctx.duration_max_sec:
+            over_sec = lec.duration_sec - (ctx.duration_max_sec + 300)
+            if over_sec <= 0:
                 duration_score = 1.0
+            else:
+                # 300초(5분) 초과부터 감쇄, 1200초(20분) 초과 시 0.1
+                duration_score = max(1.0 - (over_sec / 1200) * 0.9, 0.1)
+        else:
+            duration_score = 1.0
 
-            # 필드별 코사인 유사도
-            sim_title   = _cosine_sim(query_vec, row["title_vec"])
-            sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
-            sim_summary = _cosine_sim(query_vec, row["summary_vec"])
+        # 필드별 코사인 유사도
+        sim_title   = _cosine_sim(query_vec, row["title_vec"])
+        sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
+        sim_summary = _cosine_sim(query_vec, row["summary_vec"])
 
-            # keyword vec threshold 필터
-            sim_keyword_filtered = (
-                sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
-            )
-            vec_score = (
-                self.cfg.W_TITLE   * sim_title            +
-                self.cfg.W_KEYWORD * sim_keyword_filtered +
-                self.cfg.W_SUMMARY * sim_summary
-            )
+        # keyword vec threshold 필터
+        sim_keyword_filtered = (
+            sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
+        )
+        vec_score = (
+            self.cfg.W_TITLE   * sim_title            +
+            self.cfg.W_KEYWORD * sim_keyword_filtered +
+            self.cfg.W_SUMMARY * sim_summary
+        )
 
-            # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
-            dm       = _direct_match_score(query_keywords, inferred_keywords, lec)
-            dm_score = (
-                self.cfg.W_TITLE   * dm["title"]   +
-                self.cfg.W_KEYWORD * dm["keyword"]  +
-                self.cfg.W_SUMMARY * dm["summary"]
-            )
+        # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
+        dm       = _direct_match_score(ctx.query_keywords, ctx.inferred_keywords, lec)
+        dm_score = (
+            self.cfg.W_TITLE   * dm["title"]   +
+            self.cfg.W_KEYWORD * dm["keyword"]  +
+            self.cfg.W_SUMMARY * dm["summary"]
+        )
 
-            # 블렌딩 — content 최대 0.85로 제한 (boost 여유 확보)
-            content_score = min(
-                self.cfg.VEC_BLEND       * vec_score +
-                (1 - self.cfg.VEC_BLEND) * dm_score,
-                0.85
-            )
+        # 블렌딩 — content 최대 0.85로 제한 (boost 여유 확보)
+        content_score = min(
+            self.cfg.VEC_BLEND       * vec_score +
+            (1 - self.cfg.VEC_BLEND) * dm_score,
+            0.85
+        )
 
-            # domain boost 신호
-            domain_score = 1.0 if (domain and lec.domain == domain) else 0.0
+        # domain boost 신호
+        domain_score = 1.0 if (ctx.domain and lec.domain == ctx.domain) else 0.0
 
-            # difficulty boost 신호
-            difficulty_match = 1.0 if (difficulty_hint and lec.difficulty == difficulty_hint) else 0.0
+        # difficulty boost 신호
+        difficulty_match = 1.0 if (ctx.difficulty_hint and lec.difficulty == ctx.difficulty_hint) else 0.0
 
-            # depth boost 신호 — BFS 홉 거리 기반
-            depth_score = _compute_depth_score(focus_concept, lec) if focus_concept else 0.0
+        # depth boost 신호 — BFS 홉 거리 기반
+        depth_score = _compute_depth_score(ctx.focus_concept, lec) if ctx.focus_concept else 0.0
 
-            graph_score = _compute_graph_score(
-                lec,
-                query_concepts,
-                core_weight=self.cfg.GRAPH_CORE_WEIGHT,
-                intro_weight=self.cfg.GRAPH_INTRO_WEIGHT,
-            )
+        graph_score = _compute_graph_score(
+            lec,
+            query_concepts,
+            core_weight=self.cfg.GRAPH_CORE_WEIGHT,
+            intro_weight=self.cfg.GRAPH_INTRO_WEIGHT,
+        )
 
-            # ── 가중합 구조 점수 ──────────────────────────────────
-            MAX_BOOST = (
-                self.cfg.W_DOMAIN_BOOST +
-                self.cfg.W_DIFFICULTY_BOOST +
-                self.cfg.W_DEPTH_BOOST
-            )
-            raw_boost = (
-                self.cfg.W_DOMAIN_BOOST     * domain_score    +
-                self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
-                self.cfg.W_DEPTH_BOOST      * depth_score
-            )
-            boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0
+        # ── 가중합 구조 점수 ──────────────────────────────────
+        MAX_BOOST = (
+            self.cfg.W_DOMAIN_BOOST +
+            self.cfg.W_DIFFICULTY_BOOST +
+            self.cfg.W_DEPTH_BOOST
+        )
+        raw_boost = (
+            self.cfg.W_DOMAIN_BOOST     * domain_score    +
+            self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
+            self.cfg.W_DEPTH_BOOST      * depth_score
+        )
+        boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0
 
-            # 파편화 패널티
-            frag = _compute_fragmentation_penalty(lec.concept_roles)
+        # 파편화 패널티
+        frag = _compute_fragmentation_penalty(lec.concept_roles)
 
-            total = max(
-                self.cfg.W_CONTENT * content_score * duration_score
-                + self.cfg.W_GRAPH * graph_score
-                + self.cfg.W_BOOST * boost_signal
-                - self.cfg.FRAG_PENALTY_WEIGHT * frag,
-                0.0
-            )
+        total = max(
+            self.cfg.W_CONTENT * content_score * duration_score
+            + self.cfg.W_GRAPH * graph_score
+            + self.cfg.W_BOOST * boost_signal
+            - self.cfg.FRAG_PENALTY_WEIGHT * frag,
+            0.0
+        )
 
-            # ── 비교 분석형 보너스 ────────────────────────────────
-            # 비교 의도 질의 + 강의 내 대조형 relation 비율 → 가산
-            contrast_signal = _compute_contrast_signal(lec)
-            contrast_bonus  = (
-                self.cfg.W_CONTRAST_BOOST * contrast_signal
-                if comparison_intent else 0.0
-            )
-            total = min(total + contrast_bonus, 1.0)
+        # ── 비교 분석형 보너스 ────────────────────────────────
+        # 비교 의도 질의 + 강의 내 대조형 relation 비율 → 가산
+        contrast_signal = _compute_contrast_signal(lec)
+        contrast_bonus  = (
+            self.cfg.W_CONTRAST_BOOST * contrast_signal
+            if ctx.comparison_intent else 0.0
+        )
+        total = min(total + contrast_bonus, 1.0)
 
-            # ── 패널티 체계 ───────────────────────────────────────
-            # dm_keyword == 0 패널티
-            if dm["keyword"] == 0:
-                total *= 0.6
+        # ── 패널티 체계 ───────────────────────────────────────
+        # dm_keyword == 0 패널티
+        if dm["keyword"] == 0:
+            total *= 0.6
 
-            # 원본 query_keyword 완전 미매칭 패널티
-            if query_keywords and not dm.get("q_kw_matched", True):
-                total *= self.cfg.Q_KW_MISMATCH_PENALTY
+        # 원본 query_keyword 완전 미매칭 패널티
+        if ctx.query_keywords and not dm.get("q_kw_matched", True):
+            total *= self.cfg.Q_KW_MISMATCH_PENALTY
 
-            # 도메인 상위 카테고리 불일치 패널티
-            if domain:
-                query_top = domain.split("/")[0]
-                lec_top   = lec.domain.split("/")[0]
-                if query_top != lec_top:
-                    total *= self.cfg.DOMAIN_MISMATCH_PENALTY
+        # 도메인 상위 카테고리 불일치 패널티
+        if ctx.domain:
+            query_top = ctx.domain.split("/")[0]
+            lec_top   = lec.domain.split("/")[0]
+            if query_top != lec_top:
+                total *= self.cfg.DOMAIN_MISMATCH_PENALTY
 
-            detail = {
-                "score":                round(total, 4),
-                "content_score":        round(content_score, 4),
-                "content_pct":          round(content_score * 100, 1),
-                "vec_score":            round(vec_score, 4),
-                "dm_score":             round(dm_score, 4),
-                "sim_title":            round(sim_title, 4),
-                "sim_keyword":          round(sim_keyword, 4),
-                "sim_keyword_filtered": round(sim_keyword_filtered, 4),
-                "sim_summary":          round(sim_summary, 4),
-                "dm_title":             round(dm["title"], 4),
-                "dm_keyword":           round(dm["keyword"], 4),
-                "dm_summary":           round(dm["summary"], 4),
-                "domain_score":         round(domain_score, 4),
-                "q_kw_matched":         dm.get("q_kw_matched", True),
-                "domain_mismatch":      bool(domain and domain.split("/")[0] != lec.domain.split("/")[0]),
-                "difficulty_match":     round(difficulty_match, 4),
-                "graph_score":          round(graph_score, 4),
-                "depth_score":          round(depth_score, 4),
-                "contrast_signal":      round(contrast_signal, 4),
-                "contrast_bonus":       round(contrast_bonus, 4),
-                "boost_signal":         round(boost_signal, 4),
-                "combined_boost":       round(boost_signal, 4),
-                "duration_score":       round(duration_score, 4),
-                "duration_mismatch":    duration_score < 1.0,
-                "frag_penalty":         round(frag, 4),
-            }
+        return {
+            "score":                round(total, 4),
+            "content_score":        round(content_score, 4),
+            "content_pct":          round(content_score * 100, 1),
+            "vec_score":            round(vec_score, 4),
+            "dm_score":             round(dm_score, 4),
+            "sim_title":            round(sim_title, 4),
+            "sim_keyword":          round(sim_keyword, 4),
+            "sim_keyword_filtered": round(sim_keyword_filtered, 4),
+            "sim_summary":          round(sim_summary, 4),
+            "dm_title":             round(dm["title"], 4),
+            "dm_keyword":           round(dm["keyword"], 4),
+            "dm_summary":           round(dm["summary"], 4),
+            "domain_score":         round(domain_score, 4),
+            "q_kw_matched":         dm.get("q_kw_matched", True),
+            "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
+            "difficulty_match":     round(difficulty_match, 4),
+            "graph_score":          round(graph_score, 4),
+            "depth_score":          round(depth_score, 4),
+            "contrast_signal":      round(contrast_signal, 4),
+            "contrast_bonus":       round(contrast_bonus, 4),
+            "boost_signal":         round(boost_signal, 4),
+            "combined_boost":       round(boost_signal, 4),
+            "duration_score":       round(duration_score, 4),
+            "duration_mismatch":    duration_score < 1.0,
+            "frag_penalty":         round(frag, 4),
+        }
+
+    def _rank_candidates(
+        self,
+        candidate_ids: list[str],
+        ctx: QueryContext,
+        query_vec: list[float],
+    ) -> list[tuple[LectureMetadata, dict]]:
+        query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
+        candidates = []
+        for video_id in candidate_ids:
+            row = self._row_by_video_id.get(video_id)
+            lec = self.collection.get(video_id)
+            if row is None or lec is None:
+                continue
+            detail = self._score_candidate(row, lec, ctx, query_vec, query_concepts)
             candidates.append((lec, detail))
 
-        # ── 점수 기준 내림차순 정렬 ───────────────────────────────────
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
+        return candidates
 
-        # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
+    def _print_candidate_scores(self, candidates: list[tuple[LectureMetadata, dict]]) -> None:
         print(f"  {'video_id':<10} {'제목':<24} {'sim_t':>5} {'sim_k':>5} {'sim_k*':>6} {'sim_s':>5} "
               f"{'vec':>5} {'dm':>5} {'graph':>5} {'boost':>6} {'ctr':>5} {'dur':>5} {'→score':>7}")
         for lec, d in candidates:
@@ -907,7 +923,12 @@ class Recommender:
                   f"{d['graph_score']:>5.3f} {d['boost_signal']:>6.3f} {d['contrast_signal']:>5.3f} "
                   f"{d['duration_score']:>5.3f} {d['score']:>7.3f}{flags}")
 
-        # ── 이중 레이어 임계값 계산 ───────────────────────────────────
+    def _classify_tiers(
+        self,
+        candidates: list[tuple[LectureMetadata, dict]],
+        ctx: QueryContext,
+        top_k: int,
+    ) -> list[RecommendResult]:
         if not candidates:
             return []
 
@@ -941,7 +962,6 @@ class Recommender:
               f"background ≥ {background_threshold:.3f}  "
               f"(top={max_score:.3f})\n")
 
-        # ── 티어 분류 + top_k 반환 ───────────────────────────────────
         results = []
         for lec, detail in candidates:
             score      = detail["score"]
@@ -960,7 +980,7 @@ class Recommender:
             elif score >= related_threshold and dm_kw >= self.cfg.DM_KW_FLOOR_RELATED:
                 # graph_score == 0: 구조적으로 쿼리 개념과 이웃 겹침이 없는 강의
                 # focus_concept 없을 때만 적용 (있을 때는 depth_bonus로 graph가 0일 수 있음)
-                if graph_sc == 0.0 and not focus_concept:
+                if graph_sc == 0.0 and not ctx.focus_concept:
                     continue  # related에서도 제외
                 tier = "related"
             elif score >= background_threshold and background_signal:
@@ -987,6 +1007,43 @@ class Recommender:
                 break
 
         return results
+
+    def recommend_from_query(
+        self,
+        query:     str,
+        top_k:     int             = 5,
+        min_score: Optional[float] = None,
+    ) -> list[RecommendResult]:
+        """
+        자연어 질의를 분석하고 관련 강의를 추천한다.
+
+        v11 흐름 (concept_relations 활용):
+          1. analyze_query — search_text / domain / focus_concept 추출
+          2. 비교 의도 감지 (_detect_comparison_intent)
+          3. search_text → Gemini embedding-001 벡터화
+          4. 모든 강의에 대해:
+             - vec_score / dm_score 계산
+             - depth_score: BFS 홉 거리 기반 (concept_relations 활용)
+             - contrast_bonus: 비교 의도 × 대조형 relation 비율
+          5. 패널티 체계:
+             - dm_keyword==0 패널티 (×0.6)
+             - 원본 query_keyword 완전 미매칭 패널티 (×Q_KW_MISMATCH_PENALTY)
+             - 도메인 상위 카테고리 불일치 패널티 (×DOMAIN_MISMATCH_PENALTY)
+          6. 이중 레이어 임계값 + gap 자연 경계 → direct/related 분류
+        """
+        ctx = self._prepare_query_context(query)
+
+        if min_score is not None:
+            self.cfg.ABS_MIN_SCORE = min_score
+
+        # ── 질의 벡터화 ───────────────────────────────────────────────
+        query_vec = _embed(ctx.search_text)
+        candidate_ids = self._get_initial_candidate_ids(ctx)
+        candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
+
+        # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
+        self._print_candidate_scores(candidates)
+        return self._classify_tiers(candidates, ctx, top_k)
 
     def print_results(self, results: list[RecommendResult], title: str = "추천 결과", top_k: int = 3):
         top = results[:top_k]
