@@ -2,9 +2,7 @@ import asyncio
 import os
 import sys
 import multiprocessing
-import psycopg2
 import logging
-from psycopg2.extras import Json
 from pathlib import Path
 from dotenv import load_dotenv
 from concurrent.futures import ProcessPoolExecutor
@@ -14,6 +12,7 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sqlalchemy import text
 from app.db import AsyncSessionLocal
+from app.services.job_service import update_job_stage_sync
 
 # Setup logging
 logging.basicConfig(
@@ -30,36 +29,15 @@ if root_env.exists():
 else:
     load_dotenv()
 
-GEMINI_API_KEY_1 = os.getenv("GOOGLE_API_KEY_1")
-GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
-
-DATABASE_URL      = os.getenv("DATABASE_URL")
-DATABASE_URL_SYNC = DATABASE_URL.replace("+asyncpg", "") if DATABASE_URL else ""
-
 PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else PROJECT_ROOT_DIR
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
-
-
-def update_job_stage_sync(job_id: str, current_stages: list, current_stage_text: str):
-    if not DATABASE_URL_SYNC:
-        return
-    try:
-        conn = psycopg2.connect(DATABASE_URL_SYNC)
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE processing_jobs SET pipeline_stages = %s, current_stage = %s WHERE id = %s",
-                    (Json(current_stages), current_stage_text, job_id),
-                )
-        conn.close()
-    except Exception as e:
-        logger.error(f"--- [Worker Sync DB Error] Failed to update stage: {e} ---")
 
 
 def pipeline_process(job_id: str, lecture_id: str, input_path: str):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
 
+    # spawn된 자식 프로세스는 부모의 sys.path를 상속받지 않으므로 pipeline 패키지를 import하기 위해 명시적으로 경로를 추가한다.
+    # os.chdir은 pipeline 내부의 상대 경로 참조를 위해 필요하다.
     logger.info(f"--- [Child Process {job_id}] Setting sys.path to: {pipeline_path} ---")
     if pipeline_path not in sys.path:
         sys.path.insert(0, pipeline_path)
@@ -243,3 +221,4 @@ async def worker_loop():
 
 if __name__ == "__main__":
     asyncio.run(worker_loop())
+    
