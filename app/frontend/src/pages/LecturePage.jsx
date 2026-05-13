@@ -18,7 +18,7 @@ import '../styles/lecture.css'
 
 const INIT_MSG = { role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
 
-export default function LecturePage({ onNavigate }) {
+export default function LecturePage() {
   const { id } = useParams()
   const navigate = useNavigate()
   const graphSessionIdRef = useRef(
