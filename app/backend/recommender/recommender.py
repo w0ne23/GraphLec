@@ -28,8 +28,11 @@ CLI 실행:
 import json
 import os
 import argparse
+import math
+import re
 from pathlib import Path
 from dataclasses import dataclass
+from collections import Counter, defaultdict
 from typing import Optional
 
 import numpy as np
@@ -57,6 +60,7 @@ def _resolve_repo_root() -> Path:
 _REPO_ROOT     = _resolve_repo_root()
 DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
 DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
+_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 
 
 # ============================================================================
@@ -124,6 +128,24 @@ class LectureMetadata:
     keywords:          list[dict]
     concept_roles:     list[dict]
     concept_relations: list[dict]
+
+
+@dataclass
+class LectureLexicalDocument:
+    video_id:  str
+    field_tf:  dict[str, Counter]
+    term_tf:   Counter
+    doc_len:   float
+
+
+@dataclass
+class LexicalStats:
+    total_docs:  int
+    doc_freq:    dict[str, int]
+    irf:         dict[str, float]
+    bm25_idf:    dict[str, float]
+    documents:   dict[str, LectureLexicalDocument]
+    avg_doc_len: float
 
 
 # ============================================================================
@@ -206,6 +228,96 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     if denom == 0:
         return 0.0
     return float(np.dot(va, vb) / denom)
+
+
+def _normalize_term(text: str) -> str:
+    """lexical retrieval에서 공유할 term 정규화."""
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+
+def _tokenize_text(text: str) -> list[str]:
+    """한글/영문/숫자 혼합 텍스트를 가볍게 토큰화."""
+    normalized = _normalize_term(text)
+    return [
+        token
+        for token in _TERM_RE.findall(normalized)
+        if len(token) > 1
+    ]
+
+
+def _keyword_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
+    terms = []
+    for item in lec.keywords or []:
+        term = _normalize_term(item.get("keyword", ""))
+        if not term:
+            continue
+        try:
+            weight = float(item.get("score", 1.0))
+        except (TypeError, ValueError):
+            weight = 1.0
+        terms.append((term, max(weight, 0.0)))
+    return terms
+
+
+def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
+    """
+    BM25 후보 검색과 TF-IRF dm_score가 공유할 lexical statistics.
+    현재 단계에서는 추천 점수에 연결하지 않고, 다음 단계의 기반만 만든다.
+    """
+    documents: dict[str, LectureLexicalDocument] = {}
+    doc_freq: defaultdict[str, int] = defaultdict(int)
+
+    for lec in lectures:
+        field_tf = {
+            "title":   Counter(_tokenize_text(lec.title)),
+            "keyword": Counter(),
+            "summary": Counter(_tokenize_text(lec.summary)),
+        }
+
+        for term, weight in _keyword_terms(lec):
+            field_tf["keyword"][term] += weight
+            # 복합 키워드는 phrase term과 구성 토큰을 함께 보존한다.
+            for token in _tokenize_text(term):
+                field_tf["keyword"][token] += weight * 0.5
+
+        term_tf = Counter()
+        for field_counter in field_tf.values():
+            term_tf.update(field_counter)
+
+        doc_len = float(sum(term_tf.values()))
+        documents[lec.video_id] = LectureLexicalDocument(
+            video_id = lec.video_id,
+            field_tf = field_tf,
+            term_tf  = term_tf,
+            doc_len  = doc_len,
+        )
+
+        for term in term_tf:
+            doc_freq[term] += 1
+
+    total_docs = len(documents)
+    safe_total = max(total_docs, 1)
+    irf = {
+        term: math.log(safe_total / max(df, 1))
+        for term, df in doc_freq.items()
+    }
+    bm25_idf = {
+        term: math.log(1.0 + (safe_total - df + 0.5) / (df + 0.5))
+        for term, df in doc_freq.items()
+    }
+    avg_doc_len = (
+        sum(doc.doc_len for doc in documents.values()) / total_docs
+        if total_docs else 0.0
+    )
+
+    return LexicalStats(
+        total_docs  = total_docs,
+        doc_freq    = dict(doc_freq),
+        irf         = irf,
+        bm25_idf    = bm25_idf,
+        documents   = documents,
+        avg_doc_len = avg_doc_len,
+    )
 
 
 def _direct_match_score(
@@ -705,9 +817,19 @@ class Recommender:
             row["video_id"]: row
             for row in self._index_rows
         }
+        indexed_lectures = [
+            lec
+            for video_id in self._row_by_video_id
+            if (lec := self.collection.get(video_id)) is not None
+        ]
+        self._lexical_stats = _build_lexical_stats(indexed_lectures)
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
+        print(
+            f"[Lexical]   {len(self._lexical_stats.doc_freq)}개 term, "
+            f"avg_len={self._lexical_stats.avg_doc_len:.1f}\n"
+        )
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
