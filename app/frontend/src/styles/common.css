@@ -57,6 +57,293 @@
 
 
 /* ============================================================
+   Splash intro
+   ============================================================ */
+.splash-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    linear-gradient(180deg, rgba(124, 129, 184, .88) 0%, rgba(151, 91, 148, .88) 58%, rgba(185, 72, 105, .9) 100%),
+    radial-gradient(circle at 30% 8%, rgba(255, 255, 255, .16), transparent 34%),
+    #8e83b7;
+  cursor: pointer;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity .72s cubic-bezier(.22, 1, .36, 1),
+    transform .72s cubic-bezier(.22, 1, .36, 1),
+    filter .72s cubic-bezier(.22, 1, .36, 1);
+}
+
+.splash-screen--leaving {
+  opacity: 0;
+  transform: scale(1);
+  filter: blur(5px);
+  pointer-events: none;
+}
+
+.splash-inner {
+  width: min(92vw, 1320px);
+  min-height: min(100dvh, 760px);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  align-items: center;
+  gap: clamp(44px, 9dvh, 92px);
+  padding: clamp(28px, 6dvh, 68px) 0;
+}
+
+.splash-hero {
+  text-align: center;
+}
+
+.splash-logo {
+  font-size: clamp(58px, 7.4vw, 104px);
+  line-height: .96;
+  letter-spacing: 0;
+  color: #050408;
+  font-weight: 900;
+}
+
+.splash-logo span {
+  color: #57a9ff;
+}
+
+.splash-tagline {
+  margin-top: clamp(18px, 2.4dvh, 28px);
+  color: #fff;
+  font-size: clamp(18px, 2.15vw, 32px);
+  line-height: 1.25;
+  font-weight: 800;
+  text-align: center;
+}
+
+.splash-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: clamp(28px, 7vw, 122px);
+  align-items: center;
+}
+
+.splash-card {
+  aspect-ratio: 1 / 1.18;
+  min-height: 0;
+  border: 0;
+  border-radius: clamp(28px, 3vw, 44px);
+  background: rgba(39, 24, 43, .72);
+  color: #fff;
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  justify-items: center;
+  padding: clamp(22px, 2.8vw, 34px);
+}
+
+.splash-card h2 {
+  font-size: clamp(30px, 3.1vw, 52px);
+  line-height: 1;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.splash-icon {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 210px;
+}
+
+.screen-base {
+  position: absolute;
+  left: 9%;
+  bottom: 13%;
+  width: 56%;
+  height: 47%;
+  border: clamp(12px, 1.4vw, 18px) solid #000;
+  border-radius: 12px;
+}
+
+.play-mark {
+  position: absolute;
+  left: 31%;
+  bottom: 31%;
+  width: 0;
+  height: 0;
+  border-top: clamp(26px, 2.6vw, 42px) solid transparent;
+  border-bottom: clamp(26px, 2.6vw, 42px) solid transparent;
+  border-left: clamp(42px, 4vw, 64px) solid #000;
+}
+
+.search-ring {
+  position: absolute;
+  left: 22%;
+  bottom: 11%;
+  width: 62%;
+  aspect-ratio: 1;
+  border: clamp(18px, 2.4vw, 30px) solid #fff;
+  border-radius: 50%;
+}
+
+.search-handle {
+  position: absolute;
+  right: 5%;
+  bottom: 7%;
+  width: 39%;
+  height: clamp(18px, 2.2vw, 30px);
+  border-radius: 999px;
+  background: #fff;
+  transform: rotate(45deg);
+  transform-origin: left center;
+}
+
+.warning-triangle {
+  position: absolute;
+  left: 38%;
+  bottom: 28%;
+  width: 28%;
+  aspect-ratio: 1.1;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: #fff;
+}
+
+.warning-triangle::after {
+  content: "";
+  position: absolute;
+  inset: 16%;
+  clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  background: rgba(39, 24, 43, .72);
+}
+
+.warning-bang {
+  position: absolute;
+  left: 48%;
+  bottom: 32%;
+  color: #fff;
+  font-size: clamp(42px, 4vw, 70px);
+  line-height: .9;
+  font-weight: 900;
+}
+
+.splash-icon--qna {
+  width: min(88%, 360px);
+  justify-self: center;
+}
+
+.qna-node {
+  position: absolute;
+  width: 24%;
+  aspect-ratio: 1;
+  border: clamp(12px, 1.4vw, 18px) solid #000;
+  border-radius: 50%;
+}
+
+.qna-node--top { left: 31%; top: 7%; }
+.qna-node--left { left: 8%; bottom: 12%; }
+.qna-node--mid { left: 46%; top: 35%; }
+.qna-node--right-top { right: 6%; top: 33%; }
+.qna-node--right-bottom { right: 7%; bottom: 16%; }
+
+.qna-link {
+  position: absolute;
+  height: clamp(12px, 1.4vw, 18px);
+  border-radius: 999px;
+  background: #000;
+  transform-origin: left center;
+}
+
+.qna-link--a { left: 38%; top: 29%; width: 28%; transform: rotate(62deg); }
+.qna-link--b { left: 26%; bottom: 31%; width: 36%; transform: rotate(-28deg); }
+.qna-link--c { left: 55%; top: 46%; width: 28%; transform: rotate(-6deg); }
+.qna-link--d { left: 54%; bottom: 31%; width: 31%; transform: rotate(23deg); }
+
+.qna-mark {
+  position: absolute;
+  inset: 29% 0 auto 0;
+  text-align: center;
+  color: #fff;
+  font-size: clamp(82px, 9vw, 144px);
+  line-height: .85;
+  font-weight: 950;
+}
+
+.splash-icon--recommend .screen-base {
+  left: 12%;
+  bottom: 10%;
+  width: 58%;
+  height: 47%;
+}
+
+.recommend-tile {
+  position: absolute;
+  left: 38%;
+  top: 27%;
+  width: 31%;
+  aspect-ratio: 1.18;
+  border: clamp(7px, .75vw, 10px) solid #fff;
+  border-radius: 8px;
+  transform: rotate(-14deg);
+}
+
+.recommend-play {
+  position: absolute;
+  left: 49%;
+  top: 38%;
+  width: 0;
+  height: 0;
+  border-top: clamp(10px, 1vw, 14px) solid transparent;
+  border-bottom: clamp(10px, 1vw, 14px) solid transparent;
+  border-left: clamp(18px, 1.8vw, 26px) solid #fff;
+}
+
+.splash-icon--recommend .search-ring {
+  left: 25%;
+  bottom: 23%;
+  width: 61%;
+}
+
+.splash-icon--recommend .search-handle {
+  right: 3%;
+  bottom: 22%;
+  width: 36%;
+}
+
+@media (max-width: 840px) {
+  .splash-inner {
+    width: min(92vw, 520px);
+    gap: 28px;
+    padding: 28px 0;
+  }
+
+  .splash-cards {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .splash-card {
+    aspect-ratio: 1.8 / 1;
+    grid-template-columns: .7fr 1fr;
+    grid-template-rows: 1fr;
+    align-items: center;
+    padding: 20px 24px;
+  }
+
+  .splash-card h2 {
+    justify-self: start;
+    font-size: clamp(27px, 8vw, 42px);
+  }
+
+  .splash-icon {
+    min-height: 120px;
+  }
+}
+
+
+/* ============================================================
    PageHeader
    앱 상단 공통 헤더. 사용: 전체 페이지 공통
    ============================================================ */
