@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import LandingPage   from './pages/LandingPage'
 import DevUploadPage from './pages/dev/DevUploadPage'
@@ -7,8 +8,11 @@ import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
 import DevVerifierPage from './pages/dev/DevVerifierPage'
 import MainLayout    from './components/layout/MainLayout'
+import SplashScreen from './components/common/SplashScreen'
 
 export default function App() {
+  const [showSplash, setShowSplash] = useState(true)
+
   return (
     <BrowserRouter>
       <div className="app-shell">
@@ -32,6 +36,7 @@ export default function App() {
           </Routes>
         </div>
       </div>
+      {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
     </BrowserRouter>
   )
 }
