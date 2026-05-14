@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from app.models import Lecture, ProcessingJob, GraphSession
-from app.services.graph_service import (
+from app.services.neo4j_service import (
     neo4j_session,
     _is_stem_loaded,
     _unload_stem_from_neo4j,
@@ -432,29 +432,134 @@ async def _get_lecture(db: AsyncSession, lecture_id: str) -> Optional[Lecture]:
     return result.scalar_one_or_none()
 
 
+# ── GraphSession 헬퍼 ────────────────────────────────────────────────────────
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _session_expired(cutoff: datetime):
+    return and_(
+        GraphSession.ended_at.is_(None),
+        GraphSession.last_heartbeat_at < cutoff,
+    )
+
+
+async def _cleanup_stale_sessions(db: AsyncSession, lecture_id) -> int:
+    cutoff = _utcnow() - timedelta(seconds=GRAPH_SESSION_TTL_SEC)
+    q = select(GraphSession).where(
+        GraphSession.stem == str(lecture_id),
+        _session_expired(cutoff),
+    )
+    res = await db.execute(q)
+    rows = res.scalars().all()
+    for row in rows:
+        row.ended_at = _utcnow()
+    if rows:
+        await db.commit()
+    return len(rows)
+
+
+async def _active_session_count(db: AsyncSession, lecture_id) -> int:
+    await _cleanup_stale_sessions(db, lecture_id)
+    q = select(GraphSession).where(
+        GraphSession.stem == str(lecture_id),
+        GraphSession.ended_at.is_(None),
+    )
+    res = await db.execute(q)
+    return len(res.scalars().all())
+
+
+async def _touch_or_create_graph_session(
+    db: AsyncSession,
+    *,
+    lecture_id,
+    session_id: str,
+    now: datetime,
+) -> None:
+    """
+    (lecture_id, session_id) 세션을 upsert처럼 갱신한다.
+    - 기존 중복 행이 있으면 최신 1개만 활성 유지하고 나머지는 ended 처리
+    """
+    q = (
+        select(GraphSession)
+        .where(
+            GraphSession.lecture_id == lecture_id,
+            GraphSession.session_id == session_id,
+        )
+        .order_by(GraphSession.created_at.desc(), GraphSession.id.desc())
+    )
+    res = await db.execute(q)
+    rows = res.scalars().all()
+
+    if not rows:
+        db.add(
+            GraphSession(
+                lecture_id=lecture_id,
+                stem=str(lecture_id),
+                session_id=session_id,
+                last_heartbeat_at=now,
+                ended_at=None,
+            )
+        )
+        return
+
+    primary = rows[0]
+    primary.last_heartbeat_at = now
+    primary.ended_at = None
+    for extra in rows[1:]:
+        extra.ended_at = now
+
+
+async def _commit_graph_session_touch(
+    db: AsyncSession,
+    *,
+    lecture_id,
+    session_id: str,
+    now: datetime,
+) -> None:
+    try:
+        await _touch_or_create_graph_session(
+            db,
+            lecture_id=lecture_id,
+            session_id=session_id,
+            now=now,
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        await _touch_or_create_graph_session(
+            db,
+            lecture_id=lecture_id,
+            session_id=session_id,
+            now=now,
+        )
+        await db.commit()
+
+
 # ── GraphSession 관련 ────────────────────────────────────────────────────────
 async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dict[str, Any]:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    stem = str(lecture.id)
+    lecture_id_uuid = lecture.id
+    stem = str(lecture_id_uuid)
     output_dir = str(lecture.output_dir)
     now = _utcnow()
 
-    await _cleanup_stale_sessions(db, lecture.id)
+    await _cleanup_stale_sessions(db, lecture_id_uuid)
     await _commit_graph_session_touch(
         db,
-        lecture_id=lecture.id,
+        lecture_id=lecture_id_uuid,
         session_id=session_id,
         now=now,
     )
 
     loop = asyncio.get_event_loop()
     load_info = await loop.run_in_executor(None, _ensure_stem_loaded, stem, output_dir)
-    active_count = await _active_session_count(db, lecture.id)
+    active_count = await _active_session_count(db, lecture_id_uuid)
     return {
-        "lecture_id": str(lecture.id),
+        "lecture_id": stem,
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -468,18 +573,21 @@ async def graph_heartbeat(db: AsyncSession, lecture_id: str, session_id: str) ->
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
+    lecture_id_uuid = lecture.id
+    stem = str(lecture_id_uuid)
     now = _utcnow()
+
     await _commit_graph_session_touch(
         db,
-        lecture_id=lecture.id,
+        lecture_id=lecture_id_uuid,
         session_id=session_id,
         now=now,
     )
     return {
-        "lecture_id": str(lecture.id),
-        "stem": str(lecture.id),
+        "lecture_id": stem,
+        "stem": stem,
         "session_id": session_id,
-        "active_sessions": await _active_session_count(db, lecture.id),
+        "active_sessions": await _active_session_count(db, lecture_id_uuid),
     }
 
 
@@ -488,9 +596,10 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
-    stem = str(lecture.id)
+    lecture_id_uuid = lecture.id
+    stem = str(lecture_id_uuid)
     q = select(GraphSession).where(
-        GraphSession.lecture_id == lecture.id,
+        GraphSession.lecture_id == lecture_id_uuid,
         GraphSession.session_id == session_id,
         GraphSession.ended_at.is_(None),
     )
@@ -502,7 +611,7 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
             row.ended_at = now
         await db.commit()
 
-    active_count = await _active_session_count(db, lecture.id)
+    active_count = await _active_session_count(db, lecture_id_uuid)
     loop = asyncio.get_event_loop()
     unloaded_now = False
     if active_count == 0 and await loop.run_in_executor(None, _is_stem_loaded, stem):
@@ -511,7 +620,7 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
 
     loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
     return {
-        "lecture_id": str(lecture.id),
+        "lecture_id": stem,
         "stem": stem,
         "session_id": session_id,
         "active_sessions": active_count,
@@ -524,12 +633,14 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    stem = str(lecture.id)
+
+    lecture_id_uuid = lecture.id
+    stem = str(lecture_id_uuid)
     loop = asyncio.get_event_loop()
     loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
-    active_count = await _active_session_count(db, lecture.id)
+    active_count = await _active_session_count(db, lecture_id_uuid)
     return {
-        "lecture_id": str(lecture.id),
+        "lecture_id": stem,
         "stem": stem,
         "loaded": loaded,
         "active_sessions": active_count,

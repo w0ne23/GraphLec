@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from app.db import init_db
 from app.worker import worker_loop
-from app.services.graph_service import get_neo4j_driver, clear_runtime_lecture_graphs
+from app.services.neo4j_service import get_neo4j_driver, clear_runtime_lecture_graphs
 
 logger = logging.getLogger(__name__)
 
