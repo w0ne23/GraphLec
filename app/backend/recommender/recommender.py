@@ -110,6 +110,13 @@ class RecommenderConfig:
     W_DOMAIN_BOOST:      float = 0.20
     # difficulty boost 강도 (질의 난이도 힌트 일치 시)
     W_DIFFICULTY_BOOST:  float = 0.15
+    # BM25 후보 검색 파라미터
+    BM25_K1:             float = 1.2
+    BM25_B:              float = 0.75
+    BM25_TITLE_WEIGHT:   float = 1.5
+    BM25_KEYWORD_WEIGHT: float = 2.0
+    BM25_SUMMARY_WEIGHT: float = 0.5
+    VECTOR_CANDIDATE_TOP_N: int = 50
 
 
 # ============================================================================
@@ -146,6 +153,14 @@ class LexicalStats:
     bm25_idf:    dict[str, float]
     documents:   dict[str, LectureLexicalDocument]
     avg_doc_len: float
+
+
+@dataclass
+class VectorSearchIndex:
+    video_ids:       list[str]
+    title_matrix:    np.ndarray
+    keyword_matrix:  np.ndarray
+    summary_matrix:  np.ndarray
 
 
 # ============================================================================
@@ -228,6 +243,22 @@ def _cosine_sim(a: list[float], b: list[float]) -> float:
     if denom == 0:
         return 0.0
     return float(np.dot(va, vb) / denom)
+
+
+def _normalize_matrix(matrix: np.ndarray) -> np.ndarray:
+    if matrix.size == 0:
+        return matrix
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
+def _normalize_vector(vector: list[float]) -> np.ndarray:
+    arr = np.array(vector, dtype=np.float32)
+    norm = np.linalg.norm(arr)
+    if norm == 0:
+        return arr
+    return arr / norm
 
 
 def _normalize_term(text: str) -> str:
@@ -317,6 +348,33 @@ def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
         bm25_idf    = bm25_idf,
         documents   = documents,
         avg_doc_len = avg_doc_len,
+    )
+
+
+def _build_vector_search_index(index_rows: list[dict]) -> VectorSearchIndex:
+    video_ids = [row["video_id"] for row in index_rows]
+    if not index_rows:
+        empty = np.empty((0, 0), dtype=np.float32)
+        return VectorSearchIndex(video_ids, empty, empty, empty)
+
+    title_matrix = np.array(
+        [row["title_vec"] for row in index_rows],
+        dtype=np.float32,
+    )
+    keyword_matrix = np.array(
+        [row["keyword_vec"] for row in index_rows],
+        dtype=np.float32,
+    )
+    summary_matrix = np.array(
+        [row["summary_vec"] for row in index_rows],
+        dtype=np.float32,
+    )
+
+    return VectorSearchIndex(
+        video_ids      = video_ids,
+        title_matrix   = _normalize_matrix(title_matrix),
+        keyword_matrix = _normalize_matrix(keyword_matrix),
+        summary_matrix = _normalize_matrix(summary_matrix),
     )
 
 
@@ -817,6 +875,7 @@ class Recommender:
             row["video_id"]: row
             for row in self._index_rows
         }
+        self._vector_search_index = _build_vector_search_index(self._index_rows)
         indexed_lectures = [
             lec
             for video_id in self._row_by_video_id
@@ -830,6 +889,7 @@ class Recommender:
             f"[Lexical]   {len(self._lexical_stats.doc_freq)}개 term, "
             f"avg_len={self._lexical_stats.avg_doc_len:.1f}\n"
         )
+        print(f"[Vector]    matrix rows={len(self._vector_search_index.video_ids)}\n")
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
@@ -866,6 +926,126 @@ class Recommender:
         이후 BM25/vector/RRF 후보 검색기가 이 경계를 대체한다.
         """
         return [row["video_id"] for row in self._index_rows]
+
+    def _query_lexical_terms(self, ctx: QueryContext) -> Counter:
+        """
+        BM25/TF-IRF에서 공유할 질의 term 구성.
+        원본 키워드는 강하게, LLM 확장 키워드는 약하게 반영한다.
+        """
+        terms = Counter()
+
+        def add_term(text: str, weight: float) -> None:
+            phrase = _normalize_term(text)
+            if not phrase:
+                return
+            terms[phrase] += weight
+            for token in _tokenize_text(phrase):
+                if token != phrase:
+                    terms[token] += weight * 0.5
+
+        for keyword in ctx.query_keywords:
+            add_term(keyword, 1.0)
+        for keyword in ctx.inferred_keywords:
+            add_term(keyword, 0.5)
+
+        if not terms:
+            for token in _tokenize_text(ctx.search_text or ctx.query):
+                terms[token] += 1.0
+
+        return terms
+
+    def _bm25_tf(self, doc: LectureLexicalDocument, term: str) -> float:
+        return (
+            self.cfg.BM25_TITLE_WEIGHT   * doc.field_tf["title"].get(term, 0.0) +
+            self.cfg.BM25_KEYWORD_WEIGHT * doc.field_tf["keyword"].get(term, 0.0) +
+            self.cfg.BM25_SUMMARY_WEIGHT * doc.field_tf["summary"].get(term, 0.0)
+        )
+
+    def _bm25_score_document(self, doc: LectureLexicalDocument, query_terms: Counter) -> float:
+        stats = self._lexical_stats
+        avg_len = stats.avg_doc_len or 1.0
+        doc_len = doc.doc_len or avg_len
+        norm = self.cfg.BM25_K1 * (
+            1.0 - self.cfg.BM25_B + self.cfg.BM25_B * (doc_len / avg_len)
+        )
+
+        score = 0.0
+        for term, query_weight in query_terms.items():
+            tf = self._bm25_tf(doc, term)
+            if tf <= 0:
+                continue
+            idf = stats.bm25_idf.get(term, 0.0)
+            score += query_weight * idf * (
+                tf * (self.cfg.BM25_K1 + 1.0)
+                / (tf + norm)
+            )
+        return score
+
+    def _retrieve_bm25_candidates(
+        self,
+        ctx: QueryContext,
+        eligible_ids: Optional[set[str]] = None,
+        top_n: int = 50,
+    ) -> list[tuple[str, float]]:
+        """
+        lexical 후보 검색기. 아직 recommend_from_query에는 연결하지 않는다.
+        다음 단계에서 vector 후보와 RRF로 통합할 때 사용한다.
+        """
+        query_terms = self._query_lexical_terms(ctx)
+        if not query_terms:
+            return []
+
+        scores = []
+        for video_id, doc in self._lexical_stats.documents.items():
+            if eligible_ids is not None and video_id not in eligible_ids:
+                continue
+            score = self._bm25_score_document(doc, query_terms)
+            if score > 0:
+                scores.append((video_id, score))
+
+        scores.sort(key=lambda x: x[1], reverse=True)
+        return scores[:top_n]
+
+    def _retrieve_vector_candidates(
+        self,
+        query_vec: list[float],
+        eligible_ids: Optional[set[str]] = None,
+        top_n: Optional[int] = None,
+    ) -> list[tuple[str, float]]:
+        """
+        semantic 후보 검색기. 기존 vec_score와 같은 필드 가중치로 top-N을 뽑는다.
+        아직 recommend_from_query에는 연결하지 않는다.
+        """
+        index = self._vector_search_index
+        if not index.video_ids:
+            return []
+
+        q = _normalize_vector(query_vec)
+        sim_title = index.title_matrix @ q
+        sim_keyword = index.keyword_matrix @ q
+        sim_summary = index.summary_matrix @ q
+        sim_keyword_filtered = np.where(
+            sim_keyword >= self.cfg.KW_VEC_THRESHOLD,
+            sim_keyword,
+            0.0,
+        )
+        vec_scores = (
+            self.cfg.W_TITLE   * sim_title +
+            self.cfg.W_KEYWORD * sim_keyword_filtered +
+            self.cfg.W_SUMMARY * sim_summary
+        )
+
+        limit = top_n or self.cfg.VECTOR_CANDIDATE_TOP_N
+        scored = []
+        for idx, video_id in enumerate(index.video_ids):
+            if eligible_ids is not None and video_id not in eligible_ids:
+                continue
+            score = float(vec_scores[idx])
+            if score > 0:
+                scored.append((video_id, score))
+
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:limit]
 
     def _score_candidate(
         self,
