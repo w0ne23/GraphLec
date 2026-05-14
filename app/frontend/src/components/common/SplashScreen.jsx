@@ -1,4 +1,7 @@
 import { useEffect, useState } from 'react'
+import graphQnaIcon from '../../assets/splash-icons/graph-qna.png'
+import recommendIcon from '../../assets/splash-icons/recommend-combined.png'
+import verifyIcon from '../../assets/splash-icons/verify-combined.png'
 
 const EXIT_MS = 760
 
@@ -55,6 +58,8 @@ export default function SplashScreen({ onDone }) {
             </section>
           ))}
         </div>
+
+        <p className="splash-click-hint">아무곳이나 클릭하세요</p>
       </div>
     </div>
   )
@@ -64,40 +69,22 @@ function FeatureIcon({ type }) {
   if (type === 'qna') {
     return (
       <div className="splash-icon splash-icon--qna" aria-hidden="true">
-        <span className="qna-node qna-node--top" />
-        <span className="qna-node qna-node--left" />
-        <span className="qna-node qna-node--mid" />
-        <span className="qna-node qna-node--right-top" />
-        <span className="qna-node qna-node--right-bottom" />
-        <span className="qna-link qna-link--a" />
-        <span className="qna-link qna-link--b" />
-        <span className="qna-link qna-link--c" />
-        <span className="qna-link qna-link--d" />
-        <span className="qna-mark">?!</span>
+        <img className="splash-icon-img splash-icon-img--graph" src={graphQnaIcon} alt="" />
+      </div>
+    )
+  }
+
+  if (type === 'verify') {
+    return (
+      <div className="splash-icon splash-icon--verify" aria-hidden="true">
+        <img className="splash-icon-img splash-icon-img--combined splash-icon-img--verify" src={recommendIcon} alt="" />
       </div>
     )
   }
 
   return (
-    <div className={`splash-icon splash-icon--${type}`} aria-hidden="true">
-      <span className="screen-base" />
-      {type === 'verify' && (
-        <>
-          <span className="play-mark" />
-          <span className="search-ring" />
-          <span className="search-handle" />
-          <span className="warning-triangle" />
-          <span className="warning-bang">!</span>
-        </>
-      )}
-      {type === 'recommend' && (
-        <>
-          <span className="recommend-tile" />
-          <span className="recommend-play" />
-          <span className="search-ring" />
-          <span className="search-handle" />
-        </>
-      )}
+    <div className="splash-icon splash-icon--recommend" aria-hidden="true">
+      <img className="splash-icon-img splash-icon-img--combined splash-icon-img--recommend" src={verifyIcon} alt="" />
     </div>
   )
 }
