@@ -121,6 +121,8 @@ class RecommenderConfig:
     RRF_K:               int = 60
     HYBRID_CANDIDATE_TOP_N: int = 50
     MIN_HYBRID_CANDIDATES: int = 10
+    USE_TF_IRF_DM:       bool = True
+    TF_IRF_IDF_FLOOR:    float = 0.05
 
 
 # ============================================================================
@@ -446,6 +448,68 @@ def _direct_match_score(
         "summary":      sum_match,
         "q_kw_matched": q_kw > 0,  # 원본 query_keyword 매칭 여부
     }
+
+
+def _direct_match_score_tfirf(
+    query_keywords:    list[str],
+    inferred_keywords: list[str],
+    lec:               LectureMetadata,
+    stats:             LexicalStats,
+    idf_floor:         float = 0.05,
+    inferred_weight:   float = 0.5,
+) -> dict:
+    """
+    기존 직접 매칭 중 keyword 성분만 TF-IRF 방식으로 보정한다.
+    title/summary는 기존 휴리스틱을 유지해 동작 변화 폭을 줄인다.
+    """
+    base = _direct_match_score(
+        query_keywords,
+        inferred_keywords,
+        lec,
+        inferred_weight=inferred_weight,
+    )
+
+    q_tokens = {_normalize_term(t) for t in query_keywords if _normalize_term(t)}
+    i_tokens = {_normalize_term(t) for t in inferred_keywords if _normalize_term(t)}
+    if not (q_tokens or i_tokens):
+        base["keyword_legacy"] = base["keyword"]
+        return base
+
+    keyword_weights = []
+    for item in lec.keywords or []:
+        keyword = _normalize_term(item.get("keyword", ""))
+        if not keyword:
+            continue
+        try:
+            score = float(item.get("score", 1.0))
+        except (TypeError, ValueError):
+            score = 1.0
+        irf = max(stats.irf.get(keyword, 0.0), idf_floor)
+        keyword_weights.append((keyword, max(score, 0.0) * irf))
+
+    total_weight = sum(weight for _keyword, weight in keyword_weights) or 1.0
+
+    def matched_weight(tokens: set[str]) -> float:
+        return sum(
+            weight
+            for keyword, weight in keyword_weights
+            if any(
+                token == keyword or keyword.startswith(token) or token.startswith(keyword)
+                for token in tokens
+                if len(token) > 1
+            )
+        )
+
+    q_kw = matched_weight(q_tokens)
+    i_kw = matched_weight(i_tokens)
+    tfirf_keyword = (
+        q_kw * 1.0 + i_kw * inferred_weight
+    ) / (total_weight * (1.0 + inferred_weight))
+
+    base["keyword_legacy"] = base["keyword"]
+    base["keyword"] = tfirf_keyword
+    base["q_kw_matched"] = q_kw > 0
+    return base
 
 
 def _concept_match(concept: str, focus: str) -> bool:
@@ -1142,7 +1206,16 @@ class Recommender:
         )
 
         # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
-        dm       = _direct_match_score(ctx.query_keywords, ctx.inferred_keywords, lec)
+        if self.cfg.USE_TF_IRF_DM:
+            dm = _direct_match_score_tfirf(
+                ctx.query_keywords,
+                ctx.inferred_keywords,
+                lec,
+                self._lexical_stats,
+                idf_floor=self.cfg.TF_IRF_IDF_FLOOR,
+            )
+        else:
+            dm = _direct_match_score(ctx.query_keywords, ctx.inferred_keywords, lec)
         dm_score = (
             self.cfg.W_TITLE   * dm["title"]   +
             self.cfg.W_KEYWORD * dm["keyword"]  +
@@ -1233,6 +1306,7 @@ class Recommender:
             "sim_summary":          round(sim_summary, 4),
             "dm_title":             round(dm["title"], 4),
             "dm_keyword":           round(dm["keyword"], 4),
+            "dm_keyword_legacy":    round(dm.get("keyword_legacy", dm["keyword"]), 4),
             "dm_summary":           round(dm["summary"], 4),
             "domain_score":         round(domain_score, 4),
             "q_kw_matched":         dm.get("q_kw_matched", True),
