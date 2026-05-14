@@ -52,6 +52,84 @@ _RUNTIME_GRAPH_LABELS = {
 PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
+METADATA_DIR = Path(os.getenv("GRAPHLEC_METADATA_DIR", str(PROJECT_ROOT / "app" / "backend" / "metadata")))
+
+
+def _metadata_category(domain: str) -> str:
+    text = (domain or "").lower()
+    if "math" in text:
+        return "수학"
+    if any(token in text for token in ("cs", "eng", "software", "data")):
+        return "컴퓨터 과학"
+    return "기타"
+
+
+def _metadata_tags(meta: dict, limit: int = 3) -> List[str]:
+    tags: List[str] = []
+    for keyword in (meta.get("keywords") or [])[:limit]:
+        if isinstance(keyword, dict) and keyword.get("keyword"):
+            tags.append(str(keyword["keyword"]))
+        elif isinstance(keyword, str):
+            tags.append(keyword)
+    return tags
+
+
+def _metadata_created_at(meta: dict, video_id: str) -> str:
+    for key in ("created_at", "updated_at", "date", "published_at"):
+        value = meta.get(key)
+        if value:
+            return str(value)
+
+    digest = hashlib.sha1(video_id.encode("utf-8")).hexdigest()
+    offset_days = int(digest[:4], 16) % 180
+    base = datetime.now(timezone.utc).replace(hour=9, minute=0, second=0, microsecond=0)
+    return (base - timedelta(days=offset_days)).isoformat()
+
+
+def _load_metadata_by_video_id() -> Dict[str, dict]:
+    if not METADATA_DIR.exists():
+        return {}
+
+    by_id: Dict[str, dict] = {}
+    for path in sorted(METADATA_DIR.glob("*_metadata.json")):
+        try:
+            with path.open(encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as exc:
+            logger.warning("metadata lecture load failed: %s (%s)", path, exc)
+            continue
+
+        metas = raw if isinstance(raw, list) else [raw]
+        for meta in metas:
+            if not isinstance(meta, dict):
+                continue
+            video_id = str(meta.get("video_id") or "").strip()
+            if video_id:
+                by_id[video_id] = meta
+    return by_id
+
+
+def _load_metadata_lecture_items(existing_ids: set[str]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for video_id, meta in _load_metadata_by_video_id().items():
+        if video_id in existing_ids:
+            continue
+
+        items.append({
+            "id": video_id,
+            "job_id": None,
+            "status": "done",
+            "title": meta.get("title") or video_id,
+            "category": _metadata_category(meta.get("domain", "")),
+            "created_at": _metadata_created_at(meta, video_id),
+            "error_message": None,
+            "pipeline_stages": [],
+            "tags": _metadata_tags(meta),
+            "is_dummy": True,
+            "source": "metadata",
+        })
+
+    return items
 
 
 # ── Neo4j ────────────────────────────────────────────────────────────────────
@@ -608,6 +686,7 @@ async def list_all_results(
     )
     result = await db.execute(query)
     rows = result.unique().all()
+    metadata_by_id = _load_metadata_by_video_id() if scope == 'browse' else {}
 
     seen = set()
     out = []
@@ -627,8 +706,10 @@ async def list_all_results(
         if search and search.lower() not in (lecture.title or '').lower():
             continue
 
+        lecture_id = str(lecture.id)
+        metadata = metadata_by_id.get(lecture_id, {})
         out.append({
-            "id": str(lecture.id),
+            "id": lecture_id,
             "job_id": str(job.id) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
@@ -636,7 +717,20 @@ async def list_all_results(
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "error_message": job.error_message if job else None,
             "pipeline_stages": job.pipeline_stages or [] if job else [],
+            "tags": _metadata_tags(metadata) if metadata else [],
+            "is_dummy": False,
+            "source": "database",
         })
+
+    if scope == 'browse':
+        existing_ids = {str(lecture.id) for lecture, _job in rows}
+        metadata_items = _load_metadata_lecture_items(existing_ids)
+        for item in metadata_items:
+            if category and item["category"] != category:
+                continue
+            if search and search.lower() not in (item["title"] or '').lower():
+                continue
+            out.append(item)
 
     total_items = len(out)
     start = (page - 1) * limit
@@ -1109,21 +1203,15 @@ async def unload_graphrag_concept_graph(db: AsyncSession, lecture_id: str) -> Di
 
 
 def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
-    try:
-        from pipeline.analyzer.slide_typo_checker import is_reportable_slide_typo
-    except Exception:
-        return items
-
     filtered = []
     for item in items or []:
         if not isinstance(item, dict):
             continue
-        if is_reportable_slide_typo(
-            str(item.get("problematic_text", "") or ""),
-            str(item.get("corrected_text", "") or ""),
-            str(item.get("reason", "") or ""),
-        ):
-            filtered.append(item)
+        problematic = str(item.get("problematic_text", "") or "").strip()
+        corrected = str(item.get("corrected_text", "") or "").strip()
+        if not problematic or not corrected or problematic == corrected:
+            continue
+        filtered.append(item)
     return filtered
 
 
@@ -1157,7 +1245,13 @@ def _load_slide_image_url_map(output_dir: Path) -> dict[str, dict[Any, str]]:
             logger.warning("Failed to read slide image metadata: %s", classified_path, exc_info=True)
             continue
 
-        for slide in data.get("slides", []) or []:
+        slides = []
+        if isinstance(data.get("slides"), list):
+            slides.extend(data.get("slides") or [])
+        if isinstance(data.get("scenes"), list):
+            slides.extend(data.get("scenes") or [])
+
+        for slide in slides:
             if not isinstance(slide, dict):
                 continue
 
@@ -1189,6 +1283,8 @@ def _attach_slide_image_urls(items: list[dict], image_urls: dict[str, dict[Any, 
         slide_title = str(copied.get("slide_title") or "").strip()
         image_url = copied.get("slide_image_url") or copied.get("image_url")
         if not image_url:
+            image_url = make_file_url(copied.get("slide_image_path"))
+        if not image_url:
             image_url = by_title.get(slide_title)
             if not image_url and slide_number is not None:
                 image_url = by_number.get(slide_number)
@@ -1208,18 +1304,102 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
     output_dir = Path(detail["output_dir"])
     stem = str(detail["stem"])
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+
+    def _severity_issue_count(payload: dict) -> int:
+        summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+        count = summary.get("total_issue_count")
+        try:
+            if count is not None:
+                return int(count)
+        except (TypeError, ValueError):
+            pass
+        all_issues = payload.get("all_issues")
+        if isinstance(all_issues, list):
+            return len(all_issues)
+        issues_by_type = payload.get("issues_by_type")
+        if isinstance(issues_by_type, dict):
+            return sum(len(rows) for rows in issues_by_type.values() if isinstance(rows, list))
+        return 0
+
+    def _load_best_severity_result() -> tuple[Path | None, dict | None, int]:
+        candidates = [analyzer_dir / f"{stem}_issue_severity.json"]
+
+        loaded = []
+        seen = set()
+        for path in candidates:
+            path = Path(path)
+            if path in seen or not path.exists() or path.stat().st_size <= 0:
+                continue
+            seen.add(path)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    payload = json.load(f)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            loaded.append((path, payload, _severity_issue_count(payload), path.stat().st_mtime))
+
+        if not loaded:
+            return None, None, 0
+        non_empty = [row for row in loaded if row[2] > 0]
+        selected = max(non_empty or loaded, key=lambda row: row[3])
+        return selected[0], selected[1], selected[2]
 
     candidate_paths = [
-        output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
-        output_dir / f"{stem}_content_verification.json",
+        analyzer_dir / f"{stem}_verification.json",
+        output_dir / f"{stem}_verification.json",
     ]
     verifier_path = next((path for path in candidate_paths if path.exists()), None)
-    if not verifier_path:
+    severity_fallback_path, severity_fallback_data, severity_issue_count = _load_best_severity_result()
+    if not verifier_path and not severity_fallback_path:
         raise HTTPException(status_code=404, detail="Content verification file not found")
 
     try:
-        with open(verifier_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        verifier_data = None
+        verifier_feedback_count = 0
+        if verifier_path:
+            with open(verifier_path, "r", encoding="utf-8") as f:
+                verifier_data = json.load(f)
+            if isinstance(verifier_data, dict):
+                feedback = verifier_data.get("feedback_items")
+                verifier_feedback_count = len(feedback) if isinstance(feedback, list) else 0
+
+        use_severity_fallback = (
+            severity_fallback_path is not None
+            and severity_fallback_data is not None
+            and (
+                verifier_data is None
+                or (severity_issue_count > 0 and verifier_feedback_count == 0)
+                or (
+                    severity_fallback_path.stat().st_mtime >= verifier_path.stat().st_mtime
+                    and severity_issue_count >= verifier_feedback_count
+                )
+            )
+        )
+        if use_severity_fallback:
+            from pipeline.analyzer.classified_issue_severity_judge import build_content_verification_view
+            data = build_content_verification_view(severity_fallback_data)
+            if isinstance(verifier_data, dict):
+                for key in (
+                    "slide_errors",
+                    "slide_error_status",
+                    "slide_error_summary",
+                    "slide_error_token_usage",
+                    "slide_error_path",
+                    "slide_typos",
+                    "slide_typo_needs_review",
+                    "slide_typo_consensus",
+                    "slide_typo_status",
+                    "slide_typo_failures",
+                    "slide_typo_token_usage",
+                ):
+                    if verifier_data.get(key) not in (None, "", [], {}):
+                        data[key] = verifier_data.get(key)
+            verifier_path = severity_fallback_path
+        else:
+            data = verifier_data
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading content verification: {e}")
 
@@ -1287,6 +1467,7 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
                 content_summary.get("rejected_feedback_count", len(rejected_feedback_items))
             ),
             "slide_typos": len(slide_typos),
+            "slide_errors": _safe_count(content_summary.get("slide_error_count", len(data.get("slide_errors", []) or slide_typos))),
             "slide_typo_needs_review": len(slide_typo_needs_review),
             "crosscheck_rejected": _safe_count(summary.get("crosscheck_rejected_claim_count", len(crosscheck_rejected_claims))),
             "crosscheck_inconclusive": _safe_count(summary.get("crosscheck_inconclusive_claim_count", len(crosscheck_inconclusive_claims))),
@@ -1312,14 +1493,24 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "unmatched_issue_records": flow.get("unmatched_issue_records", []) or [],
         "issues": data.get("issues", []) or [],
         "slide_typos": slide_typos,
+        "slide_errors": _attach_slide_image_urls(
+            _filter_served_slide_typos(data.get("slide_errors", []) or data.get("slide_typos", []) or []),
+            slide_image_urls,
+        ),
         "slide_typo_needs_review": slide_typo_needs_review,
         "slide_typo_consensus": data.get("slide_typo_consensus", {}) or {},
         "slide_typo_status": data.get("slide_typo_status", ""),
+        "slide_error_status": data.get("slide_error_status", ""),
+        "slide_error_summary": data.get("slide_error_summary", {}) or {},
+        "slide_error_path": data.get("slide_error_path", ""),
         "rejected_issues": data.get("rejected_issues", []) or [],
         "crosscheck_rejected_issues": data.get("crosscheck_rejected_issues", []) or [],
         "crosscheck_inconclusive_issues": data.get("crosscheck_inconclusive_issues", []) or [],
         "grounding_rejected_issues": data.get("grounding_rejected_issues", []) or [],
         "claim_decision_flow_summary": summary,
+        "classified_issue_artifacts": data.get("classified_issue_artifacts", {}) or {},
+        "classified_issue_severity_path": data.get("classified_issue_severity_path", ""),
+        "classified_issue_severity": (data.get("views", {}) or {}).get("classified_issue_severity", {}),
     }
 
 

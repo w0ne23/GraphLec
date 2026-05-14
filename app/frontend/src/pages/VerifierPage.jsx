@@ -163,23 +163,6 @@ function groupTyposBySlide(items) {
   })
 }
 
-function uniqueStrings(values) {
-  return [...new Set(asArray(values).map((value) => String(value || '').trim()).filter(Boolean))]
-}
-
-function sortUtteranceIds(values) {
-  return uniqueStrings(values).sort((a, b) => {
-    const left = /^U\d+$/.test(a) ? Number(a.slice(1)) : Number.MAX_SAFE_INTEGER
-    const right = /^U\d+$/.test(b) ? Number(b.slice(1)) : Number.MAX_SAFE_INTEGER
-    return left - right || a.localeCompare(b)
-  })
-}
-
-function extractUtteranceIds(text) {
-  if (!text) return []
-  return uniqueStrings(String(text).match(/\bU\d{4,}\b/g) || [])
-}
-
 function getItemLocation(item, sourceClaim = {}) {
   return item.location || sourceClaim.location || {}
 }
@@ -188,21 +171,6 @@ function getItemStartTime(item, sourceClaim = {}) {
   const location = getItemLocation(item, sourceClaim)
   const value = Number(location.start_time ?? item.start_time ?? sourceClaim.start_time)
   return Number.isFinite(value) ? value : undefined
-}
-
-function getFeedbackUtteranceIds(item, sourceClaim = {}) {
-  const evidence = item.evidence || {}
-  const sourceIssues = asArray(evidence.source_issues)
-  return sortUtteranceIds([
-    ...asArray(item.utterance_ids),
-    ...asArray(item.related_utterance_ids),
-    ...asArray(evidence.related_utterance_ids),
-    item.utterance_id,
-    sourceClaim.utterance_id,
-    ...sourceIssues.map((issue) => issue?.utterance_id),
-    ...extractUtteranceIds(evidence.evidence_in_context),
-    ...extractUtteranceIds(item.confirmation_reason || evidence.confirmation_reason),
-  ])
 }
 
 function getConfirmationReason(item) {
@@ -298,7 +266,6 @@ function feedbackItemToClaim(item, claimById) {
     crosscheck.scoring?.status ||
     statusFromScore(crosscheckScore)
   const location = getItemLocation(item, sourceClaim)
-  const utteranceIds = getFeedbackUtteranceIds(item, sourceClaim)
   const status = item.status === 'review_needed' ? 'professor_check' : item.status
   const title =
     problem.problematic_content ||
@@ -312,10 +279,9 @@ function feedbackItemToClaim(item, claimById) {
   return {
     ...item,
     stage: status || 'professor_check',
-    utterance_id: utteranceIds.join(', ') || item.utterance_id || sourceClaim.utterance_id,
-    utterance_ids: utteranceIds,
     start_time: getItemStartTime(item, sourceClaim),
     slide_number: location.slide_number ?? evidence.slide_number,
+    original_claim_text: item.claim_text || sourceClaim.claim_text,
     claim_text: title,
     resolved_claim: item.resolved_claim || sourceClaim.resolved_claim,
     issue: problem.summary || feedback.summary,
@@ -460,7 +426,7 @@ function EvidenceSources({ sources }) {
 }
 
 function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
-  const title = claim.claim_text || claim.resolved_claim || claim.problematic_content || '-'
+  const title = claim.original_claim_text || claim.claim_text || claim.resolved_claim || claim.problematic_content || '-'
   const startTime = Number(claim.start_time)
   const canWatch = Number.isFinite(startTime)
   const grounding = claim.grounding || {}
@@ -488,7 +454,6 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
           </div>
         </div>
         <div className="vf-claim-meta">
-          <span>{claim.utterance_id || '-'}</span>
           <span>{canWatch ? formatTime(startTime) : '-'}</span>
           {claim.slide_number !== undefined && <span>slide {claim.slide_number}</span>}
         </div>
@@ -498,7 +463,6 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
         <div className="vf-claim-detail">
           <dl>
             <DetailRow label="등장 시각" value={canWatch ? `${formatTime(startTime)} (${startTime.toFixed(2)}s)` : '-'} />
-            <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="상태" value={labelForStage(claim.stage || section)} />
             <DetailRow
               label="검증 점수"
@@ -511,21 +475,16 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
             <DetailRow label="문제 유형" value={displayIssueLabel} />
             <DetailRow label="문제점" value={claim.issue} />
-            <DetailRow label="문제 근거" value={claim.issue_basis} />
             <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
-            <DetailRow label="왜 문제인가" value={claim.why_wrong} />
             <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
             <DetailRow label="문맥 해소 여부" value={claim.context_resolution} />
             <DetailRow label="학생 오해 가능성" value={claim.student_misunderstanding} />
-            <DetailRow label="올바른 정보/보충 조건" value={claim.correct_info} />
             <DetailRow label="왜 중요한가" value={claim.why_it_matters} />
             <DetailRow label="권장 수정" value={claim.recommendation || claim.teaching_note} />
-            <DetailRow label="대체 표현" value={claim.suggested_rephrase} />
             <DetailRow label="문맥 근거" value={claim.evidence_in_context} />
             <DetailRow label="확정 사유" value={claim.confirmation_reason} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
-            <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
           <ModelVerdicts verdicts={claim.model_verdicts} />
@@ -542,25 +501,40 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
   )
 }
 
-function TypoItem({ typo }) {
+function SlideErrorItem({ typo }) {
   const candidates = asArray(typo.correction_candidates)
   const runCount = Number(typo.run_count || 0)
   return (
     <div className="vf-typo-item">
       <div className="vf-typo-main">
-        <div>
-          <div className="vf-typo-title">
-            {compactText(typo.problematic_text)} <span>→</span> {compactText(typo.corrected_text)}
+        <div className="vf-typo-fields">
+          <div className="vf-typo-correction">
+            <span>수정</span>
+            <strong>
+              {compactText(typo.problematic_text)}
+              <em>→</em>
+              {compactText(typo.corrected_text)}
+            </strong>
           </div>
-          <div className="vf-typo-reason">{compactText(typo.reason, '')}</div>
+          {typo.error_type_label && (
+            <div className="vf-typo-field">
+              <span>오류 유형</span>
+              <p>{compactText(typo.error_type_label, '')}</p>
+            </div>
+          )}
+          <div className="vf-typo-field">
+            <span>이유</span>
+            <p>{compactText(typo.reason, '')}</p>
+          </div>
         </div>
         <div className="vf-typo-meta">
-          {typo.confidence !== undefined && <span>{formatPercent(typo.confidence)}</span>}
-          {runCount > 1 && <span>{typo.support_count || 0}/{runCount}</span>}
+          {typo.confidence !== undefined && <span>신뢰도 {formatPercent(typo.confidence)}</span>}
+          {runCount > 1 && <span>지지 {typo.support_count || 0}/{runCount}</span>}
         </div>
       </div>
       {candidates.length > 1 && (
         <div className="vf-candidate-list">
+          <b>후보 수정안</b>
           {candidates.map((candidate, idx) => (
             <span key={`${candidate.corrected_text}-${idx}`}>
               {candidate.corrected_text} ({candidate.support_count || 0})
@@ -572,7 +546,7 @@ function TypoItem({ typo }) {
   )
 }
 
-function SlideTypoCard({ group, review = false }) {
+function SlideErrorCard({ group, review = false }) {
   return (
     <article className={`vf-typo-slide-card ${review ? 'vf-typo-slide-card--review' : ''}`}>
       <div className={`vf-typo-slide-layout ${group.imageUrl ? '' : 'vf-typo-slide-layout--no-image'}`}>
@@ -588,7 +562,7 @@ function SlideTypoCard({ group, review = false }) {
           </div>
           <div className="vf-typo-items">
             {group.items.map((typo) => (
-              <TypoItem
+              <SlideErrorItem
                 key={`${group.key}-${typo.problematic_text}-${typo.corrected_text}-${typo._typoIndex}`}
                 typo={typo}
               />
@@ -679,7 +653,9 @@ export default function VerifierPage() {
       return {
         finalClaims,
         needsReview,
-        slideTypos: asArray(verifier?.slide_typos),
+        slideTypos: asArray(verifier?.slide_errors).length > 0
+          ? asArray(verifier?.slide_errors)
+          : asArray(verifier?.slide_typos),
         crossRejected: rejected,
         inconclusive: [],
         groundingRejected: [],
@@ -698,7 +674,9 @@ export default function VerifierPage() {
     return {
       finalClaims,
       needsReview,
-      slideTypos: asArray(verifier?.slide_typos),
+      slideTypos: asArray(verifier?.slide_errors).length > 0
+        ? asArray(verifier?.slide_errors)
+        : asArray(verifier?.slide_typos),
       crossRejected,
       inconclusive,
       groundingRejected,
@@ -737,7 +715,7 @@ export default function VerifierPage() {
     return (
       <div className="vf-claim-list">
         {items.map((claim, idx) => {
-          const claimKey = `${section}-${claim.utterance_id || claim.source_claim_key || 'claim'}-${idx}`
+          const claimKey = `${section}-${claim.feedback_id || claim.issue_id || claim.source_claim_id || claim.claim_id || claim.source_claim_key || 'claim'}-${idx}`
           return (
             <ClaimCard
               key={claimKey}
@@ -761,7 +739,7 @@ export default function VerifierPage() {
     return (
       <div className="vf-typo-list">
         {groupTyposBySlide(items).map((group) => (
-          <SlideTypoCard key={`${review ? 'review' : 'typo'}-${group.key}`} group={group} review={review} />
+          <SlideErrorCard key={`${review ? 'review' : 'slide-error'}-${group.key}`} group={group} review={review} />
         ))}
       </div>
     )
@@ -803,10 +781,10 @@ export default function VerifierPage() {
     if (activeTab === 'typos') {
       return (
         <Section
-          title="슬라이드 오타"
+          title="슬라이드 오류"
           count={sections.slideTypos.length}
           tone="typo"
-          empty="확정된 슬라이드 오타가 없습니다."
+          empty="확정된 슬라이드 오류가 없습니다."
         >
           {renderTypoGroups(sections.slideTypos)}
         </Section>
@@ -962,7 +940,7 @@ export default function VerifierPage() {
               onClick={() => selectTab('review')}
             />
             <SummaryMetric
-              label="슬라이드 오타"
+              label="슬라이드 오류"
               value={typoCount}
               tone="typo"
               active={activeTab === 'typos'}

@@ -49,8 +49,12 @@ _ENV_KEYS = [
     "CROSS_VERIFY_MODEL_WEIGHTS",
     "CROSS_VERIFY_SCORE_CONFIRM_THRESHOLD",
     "CROSS_VERIFY_SCORE_PROFESSOR_CHECK_THRESHOLD",
+    "CROSS_VERIFY_MAX_WORKERS",
+    "CROSS_CHECK_MAX_WORKERS",
     "VERIFIER_MODEL",
     "VERIFIER_CLAIM_EXTRACT_MODEL",
+    "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
+    "VERIFIER_CLAIM_EXTRACT_MAX_WORKERS",
     "VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE",
     "VERIFIER_CLAIM_JUDGE_MODEL",
     "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE",
@@ -114,11 +118,11 @@ def _write_claims_jsonl(claims: list[dict], output_json_path: str | Path) -> str
         return None
     output_json_path = Path(output_json_path)
     stem = output_json_path.name
-    if stem.endswith("_content_verification.json"):
-        prefix = stem[: -len("_content_verification.json")]
+    if stem.endswith("_verification.json"):
+        prefix = stem[: -len("_verification.json")]
     else:
         prefix = output_json_path.stem
-    out_path = output_json_path.with_name(f"{prefix}_claims_extracted.jsonl")
+    out_path = output_json_path.with_name(f"{prefix}_claims.jsonl")
     with out_path.open("w", encoding="utf-8") as f:
         for claim in claims:
             f.write(json.dumps(claim, ensure_ascii=False) + "\n")
