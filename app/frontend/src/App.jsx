@@ -1,4 +1,4 @@
-import { useCallback } from 'react'
+import { useCallback, useState } from 'react'
 import { BrowserRouter, Routes, Route, useNavigate, useLocation, NavLink } from 'react-router-dom'
 import LandingPage   from './pages/LandingPage'
 import UploadPage    from './pages/UploadPage'
@@ -6,6 +6,7 @@ import RecommendPage from './pages/RecommendPage'
 import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
+import SplashScreen from './components/common/SplashScreen'
 
 const HIDE_HEADER_PATHS = ['/']
 const HIDE_HEADER_PATTERNS = [/^\/lectures\/[^/]+(\/verifier)?$/]
@@ -91,9 +92,12 @@ function MainLayout() {
 }
 
 export default function App() {
+  const [showSplash, setShowSplash] = useState(true)
+
   return (
     <BrowserRouter>
       <MainLayout />
+      {showSplash && <SplashScreen onDone={() => setShowSplash(false)} />}
     </BrowserRouter>
   )
 }
