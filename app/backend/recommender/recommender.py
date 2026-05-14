@@ -116,7 +116,11 @@ class RecommenderConfig:
     BM25_TITLE_WEIGHT:   float = 1.5
     BM25_KEYWORD_WEIGHT: float = 2.0
     BM25_SUMMARY_WEIGHT: float = 0.5
-    VECTOR_CANDIDATE_TOP_N: int = 50
+    BM25_RETRIEVE_TOP_N: int = 80
+    VECTOR_RETRIEVE_TOP_N: int = 80
+    RRF_K:               int = 60
+    HYBRID_CANDIDATE_TOP_N: int = 50
+    MIN_HYBRID_CANDIDATES: int = 10
 
 
 # ============================================================================
@@ -920,12 +924,68 @@ class Recommender:
             comparison_intent = comparison_intent,
         )
 
-    def _get_initial_candidate_ids(self, ctx: QueryContext) -> list[str]:
-        """
-        현재 단계에서는 동작 보존을 위해 전체 강의를 후보로 사용한다.
-        이후 BM25/vector/RRF 후보 검색기가 이 경계를 대체한다.
-        """
+    def _all_candidate_ids(self) -> list[str]:
         return [row["video_id"] for row in self._index_rows]
+
+    def _rrf_fuse(
+        self,
+        rankings: list[list[str]],
+        top_n: Optional[int] = None,
+    ) -> list[str]:
+        scores: defaultdict[str, float] = defaultdict(float)
+        best_rank: dict[str, int] = {}
+
+        for ranking in rankings:
+            for rank, video_id in enumerate(ranking, start=1):
+                scores[video_id] += 1.0 / (self.cfg.RRF_K + rank)
+                best_rank[video_id] = min(best_rank.get(video_id, rank), rank)
+
+        fused = sorted(
+            scores,
+            key=lambda video_id: (
+                -scores[video_id],
+                best_rank.get(video_id, 10**9),
+                video_id,
+            ),
+        )
+        limit = top_n or self.cfg.HYBRID_CANDIDATE_TOP_N
+        return fused[:limit]
+
+    def _get_initial_candidate_ids(self, ctx: QueryContext, query_vec: list[float]) -> list[str]:
+        """
+        BM25 lexical 후보와 vector semantic 후보를 RRF로 통합한다.
+        후보가 너무 적으면 기존 전체 후보 방식으로 되돌린다.
+        """
+        bm25_candidates = self._retrieve_bm25_candidates(
+            ctx,
+            top_n=self.cfg.BM25_RETRIEVE_TOP_N,
+        )
+        vector_candidates = self._retrieve_vector_candidates(
+            query_vec,
+            top_n=self.cfg.VECTOR_RETRIEVE_TOP_N,
+        )
+        candidate_ids = self._rrf_fuse(
+            [
+                [video_id for video_id, _score in bm25_candidates],
+                [video_id for video_id, _score in vector_candidates],
+            ],
+            top_n=self.cfg.HYBRID_CANDIDATE_TOP_N,
+        )
+
+        print(
+            f"[후보 검색] BM25 {len(bm25_candidates)}개, "
+            f"Vector {len(vector_candidates)}개, RRF {len(candidate_ids)}개"
+        )
+
+        if len(candidate_ids) < self.cfg.MIN_HYBRID_CANDIDATES:
+            all_ids = self._all_candidate_ids()
+            print(
+                f"[후보 검색] RRF 후보 부족({len(candidate_ids)}개) — "
+                f"전체 후보 {len(all_ids)}개로 fallback"
+            )
+            return all_ids
+
+        return candidate_ids
 
     def _query_lexical_terms(self, ctx: QueryContext) -> Counter:
         """
@@ -988,8 +1048,7 @@ class Recommender:
         top_n: int = 50,
     ) -> list[tuple[str, float]]:
         """
-        lexical 후보 검색기. 아직 recommend_from_query에는 연결하지 않는다.
-        다음 단계에서 vector 후보와 RRF로 통합할 때 사용한다.
+        lexical 후보 검색기. vector 후보와 RRF로 통합해 1차 후보군을 만든다.
         """
         query_terms = self._query_lexical_terms(ctx)
         if not query_terms:
@@ -1014,7 +1073,6 @@ class Recommender:
     ) -> list[tuple[str, float]]:
         """
         semantic 후보 검색기. 기존 vec_score와 같은 필드 가중치로 top-N을 뽑는다.
-        아직 recommend_from_query에는 연결하지 않는다.
         """
         index = self._vector_search_index
         if not index.video_ids:
@@ -1035,7 +1093,7 @@ class Recommender:
             self.cfg.W_SUMMARY * sim_summary
         )
 
-        limit = top_n or self.cfg.VECTOR_CANDIDATE_TOP_N
+        limit = top_n or self.cfg.VECTOR_RETRIEVE_TOP_N
         scored = []
         for idx, video_id in enumerate(index.video_ids):
             if eligible_ids is not None and video_id not in eligible_ids:
@@ -1319,19 +1377,20 @@ class Recommender:
         """
         자연어 질의를 분석하고 관련 강의를 추천한다.
 
-        v11 흐름 (concept_relations 활용):
+        v12 흐름 (BM25/vector 후보 검색 + RRF 통합):
           1. analyze_query — search_text / domain / focus_concept 추출
           2. 비교 의도 감지 (_detect_comparison_intent)
           3. search_text → Gemini embedding-001 벡터화
-          4. 모든 강의에 대해:
+          4. BM25 후보 + vector 후보 → RRF 통합
+          5. RRF candidate_ids에 대해:
              - vec_score / dm_score 계산
              - depth_score: BFS 홉 거리 기반 (concept_relations 활용)
              - contrast_bonus: 비교 의도 × 대조형 relation 비율
-          5. 패널티 체계:
+          6. 패널티 체계:
              - dm_keyword==0 패널티 (×0.6)
              - 원본 query_keyword 완전 미매칭 패널티 (×Q_KW_MISMATCH_PENALTY)
              - 도메인 상위 카테고리 불일치 패널티 (×DOMAIN_MISMATCH_PENALTY)
-          6. 이중 레이어 임계값 + gap 자연 경계 → direct/related 분류
+          7. 이중 레이어 임계값 + gap 자연 경계 → direct/related 분류
         """
         ctx = self._prepare_query_context(query)
 
@@ -1340,7 +1399,7 @@ class Recommender:
 
         # ── 질의 벡터화 ───────────────────────────────────────────────
         query_vec = _embed(ctx.search_text)
-        candidate_ids = self._get_initial_candidate_ids(ctx)
+        candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
         candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
 
         # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
