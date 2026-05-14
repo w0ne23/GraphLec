@@ -59,7 +59,7 @@ export default function SplashScreen({ onDone }) {
           ))}
         </div>
 
-        <p className="splash-click-hint">아무곳이나 클릭하세요</p>
+        <p className="splash-click-hint">Click Anywhere</p>
       </div>
     </div>
   )
