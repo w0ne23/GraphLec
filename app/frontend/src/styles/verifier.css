@@ -530,8 +530,8 @@
 
 .vf-typo-slide-layout {
   display: grid;
-  grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
-  gap: 12px;
+  grid-template-columns: minmax(360px, 1.35fr) minmax(260px, .85fr);
+  gap: 14px;
   align-items: stretch;
 }
 
@@ -586,8 +586,8 @@
 }
 
 .vf-typo-items {
-  max-height: 320px;
-  max-height: calc((50cqw - 18px) * 9 / 16);
+  max-height: 380px;
+  max-height: calc((61cqw - 22px) * 9 / 16);
   overflow-y: auto;
 }
 
@@ -607,24 +607,51 @@
   gap: 14px;
 }
 
-.vf-typo-title {
-  font-size: 13px;
+.vf-typo-fields {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.vf-typo-correction,
+.vf-typo-field {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vf-typo-correction span,
+.vf-typo-field span {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--t3);
+}
+
+.vf-typo-correction strong {
+  min-width: 0;
+  font-size: 15px;
   font-weight: 800;
   color: var(--t1);
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
-.vf-typo-title span {
+.vf-typo-correction em {
+  margin: 0 7px;
   color: var(--t3);
-  font-weight: 700;
+  font-style: normal;
+  font-weight: 800;
 }
 
-.vf-typo-reason {
-  margin-top: 5px;
-  font-size: 12px;
+.vf-typo-field p {
+  margin: 0;
+  min-width: 0;
+  font-size: 13px;
   color: var(--t2);
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .vf-typo-meta {
@@ -636,7 +663,7 @@
 }
 
 .vf-typo-meta span {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--t3);
   font-family: 'JetBrains Mono', monospace;
 }
@@ -646,6 +673,13 @@
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+  align-items: center;
+}
+
+.vf-candidate-list b {
+  font-size: 12px;
+  color: var(--t3);
+  margin-right: 3px;
 }
 
 .vf-candidate-list span {
@@ -653,7 +687,7 @@
   border-radius: 4px;
   padding: 3px 6px;
   background: var(--card);
-  font-size: 11px;
+  font-size: 12px;
   color: var(--t2);
 }
 

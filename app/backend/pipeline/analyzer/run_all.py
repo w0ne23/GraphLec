@@ -15,7 +15,6 @@ from pathlib import Path
 
 from . import claim_common as cv
 from .claim_pipeline import (
-    BATCH_SIZE as CLAIM_BATCH_SIZE,
     format_verification_report,
     prepare_verification,
     verify_lecture_content,
@@ -59,6 +58,38 @@ SEVERITY_SORT_ORDER = {
     "minor": 2,
 }
 _DOCKER_LOG_TEE_ENABLED = False
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
+def _json_file_exists(path: Path) -> bool:
+    return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _load_json_file(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return payload if isinstance(payload, dict) else {}
+
+
+def _list_count(payload: dict, key: str) -> int:
+    value = payload.get(key)
+    return len(value) if isinstance(value, list) else 0
+
+
+DEFAULT_CLAIM_BATCH_SIZE = _env_int(
+    "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
+    _env_int("VERIFIER_BATCH_SIZE", 2),
+)
+DEFAULT_CLAIM_MAX_WORKERS = _env_int("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 4)
+DEFAULT_VERIFIER_MAX_WORKERS = _env_int("CROSS_VERIFY_MAX_WORKERS", 6)
+DEFAULT_CROSSCHECK_MAX_WORKERS = _env_int("CROSS_CHECK_MAX_WORKERS", 6)
 
 
 class _DockerLogTee:
@@ -170,6 +201,14 @@ def _default_cross_models() -> list[str]:
     return ["gpt-5.4", "claude-sonnet-4.5"]
 
 
+def _default_issue_judge_models() -> list[str]:
+    configured = (
+        _split_model_specs(os.getenv("ISSUE_JUDGE_MODELS"))
+        or _split_model_specs(os.getenv("VERIFIER_ISSUE_JUDGE_MODELS"))
+    )
+    return configured or ["gpt-5.4", "claude-sonnet-4.5"]
+
+
 def _default_crosscheck_models() -> list[str]:
     return _split_model_specs(os.getenv("CROSS_CHECK_MODELS"))
 
@@ -224,11 +263,11 @@ def _load_verifier():
 def _claims_jsonl_path(output_json_path: str | Path) -> Path:
     output_json_path = Path(output_json_path)
     stem = output_json_path.name
-    if stem.endswith("_content_verification.json"):
-        prefix = stem[: -len("_content_verification.json")]
+    if stem.endswith("_verification.json"):
+        prefix = stem[: -len("_verification.json")]
     else:
         prefix = output_json_path.stem
-    return output_json_path.with_name(f"{prefix}_claims_extracted.jsonl")
+    return output_json_path.with_name(f"{prefix}_claims.jsonl")
 
 
 def _claim_history_dir(claims_path: Path) -> Path:
@@ -359,8 +398,8 @@ def _write_claims_raw_diff(previous_path: str | None, current_path: str | None) 
     diff["previous_claims_log_path"] = str(previous_path)
     diff["current_claims_log_path"] = str(current)
 
-    if current.name.endswith("_claims_extracted.jsonl"):
-        prefix = current.name[: -len("_claims_extracted.jsonl")]
+    if current.name.endswith("_claims.jsonl"):
+        prefix = current.name[: -len("_claims.jsonl")]
     else:
         prefix = current.stem
     diff_path = current.with_name(f"{prefix}_claims_raw_diff.json")
@@ -582,6 +621,99 @@ def _build_issue_judge_comparison(
         "exclusive_by_model": exclusive_by_model,
         "by_claim": by_claim,
     }
+
+
+def _write_issue_judge_merged_output(
+    *,
+    output_dir: Path,
+    base_stem: str,
+    merged_path: Path,
+    claims_path: str,
+    models: list[str],
+    judge_results: dict[str, dict],
+) -> tuple[str, dict]:
+    merged_issues: list[dict] = []
+    seen_by_claim: dict[str, dict] = {}
+    duplicate_claim_ids: list[str] = []
+    skipped_without_claim_id = 0
+
+    for model in models:
+        result = judge_results.get(model, {}) or {}
+        if result.get("ok") is False:
+            continue
+        for issue in result.get("issues", []) or []:
+            if not isinstance(issue, dict):
+                continue
+            claim_id = str(issue.get("claim_id", "") or "").strip()
+            if not claim_id:
+                skipped_without_claim_id += 1
+                continue
+
+            source_summary = {
+                "model": model,
+                "issue_id": issue.get("issue_id", ""),
+                "issue": issue.get("issue", ""),
+                "candidate_reason": issue.get("candidate_reason", ""),
+                "confidence": issue.get("confidence", 0),
+            }
+            if claim_id in seen_by_claim:
+                existing = seen_by_claim[claim_id]
+                existing.setdefault("detected_by_models", [])
+                if model not in existing["detected_by_models"]:
+                    existing["detected_by_models"].append(model)
+                existing.setdefault("source_model_issues", []).append(source_summary)
+                duplicate_claim_ids.append(claim_id)
+                try:
+                    new_conf = float(issue.get("confidence", 0) or 0)
+                    old_conf = float(existing.get("confidence", 0) or 0)
+                except Exception:
+                    new_conf = old_conf = 0.0
+                if new_conf > old_conf:
+                    for key in ("issue", "candidate_reason", "confidence"):
+                        existing[key] = issue.get(key, existing.get(key))
+                    existing["representative_model"] = model
+                continue
+
+            row = dict(issue)
+            row["detected_by_models"] = [model]
+            row["representative_model"] = model
+            row["source_model_issues"] = [source_summary]
+            seen_by_claim[claim_id] = row
+            merged_issues.append(row)
+
+    for index, issue in enumerate(merged_issues, start=1):
+        issue["issue_id"] = f"I{index:04d}"
+
+    model_issue_counts = {
+        model: len((judge_results.get(model, {}) or {}).get("issues", []) or [])
+        for model in models
+    }
+    failed_models = [
+        model for model in models
+        if (judge_results.get(model, {}) or {}).get("ok") is False
+    ]
+    summary = {
+        "input_model_count": len(models),
+        "failed_models": failed_models,
+        "model_issue_counts": model_issue_counts,
+        "merged_issue_count": len(merged_issues),
+        "dedupe_key": "claim_id",
+        "duplicate_claim_count": len(set(duplicate_claim_ids)),
+        "skipped_without_claim_id": skipped_without_claim_id,
+    }
+    payload = {
+        "schema_version": "issue_judge_merged.v1",
+        "stage": "claim_to_issue_judge_merged",
+        "merged_path": str(merged_path),
+        "source_claims_path": claims_path,
+        "models": models,
+        "dedupe_key": "claim_id",
+        "summary": summary,
+        "issues": merged_issues,
+    }
+    path = output_dir / f"{base_stem}_issue_judge.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(path), payload
 
 
 def _claim_key(payload: dict) -> str:
@@ -2117,6 +2249,7 @@ def run_issue_judge_only(
     cross_batch_size: int = 20,
     current_date: str | None = None,
     issue_judge_min_confidence: float | None = None,
+    verifier_max_workers: int = DEFAULT_VERIFIER_MAX_WORKERS,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
     if not merged_file.exists():
@@ -2131,8 +2264,31 @@ def run_issue_judge_only(
     base_stem = _base_stem(merged_file)
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
+    comparison_path = out_dir / f"{base_stem}_issue_judge_compare.json"
+    merged_issue_judge_path = out_dir / f"{base_stem}_issue_judge.json"
+    summary_path = out_dir / f"{base_stem}_issue_judge_summary.json"
 
-    models = cross_models or _default_cross_models()
+    if (
+        _json_file_exists(summary_path)
+        and _json_file_exists(comparison_path)
+        and _json_file_exists(merged_issue_judge_path)
+    ):
+        print(f"  ⏭  issue judge — 출력 파일 존재, 스킵")
+        print(f"     {merged_issue_judge_path}")
+        merged_issue_judge = _load_json_file(merged_issue_judge_path)
+        summary_payload = _load_json_file(summary_path)
+        return {
+            "merged_path": str(merged_file),
+            "output_dir": str(out_dir),
+            "issue_judge_summary": str(summary_path),
+            "issue_judge_comparison": str(comparison_path),
+            "issue_judge_merged": str(merged_issue_judge_path),
+            "issue_judge_paths": summary_payload.get("issue_judge_result_paths", {}) or {},
+            "issue_judge_count": (merged_issue_judge.get("summary", {}) or {}).get("merged_issue_count", 0),
+            "skipped": True,
+        }
+
+    models = cross_models or _default_issue_judge_models()
     if len(models) < 1:
         raise RuntimeError("issue judge 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --cross-models를 확인하세요.")
     missing_judge_keys = [
@@ -2160,7 +2316,9 @@ def run_issue_judge_only(
     env_vars = _collect_env_vars()
     root = str(_ROOT)
     judge_results = {}
-    with ProcessPoolExecutor(max_workers=len(models)) as executor:
+    verifier_max_workers = _env_int("CROSS_VERIFY_MAX_WORKERS", verifier_max_workers)
+    print(f"  issue judge worker: {verifier_max_workers}개")
+    with ProcessPoolExecutor(max_workers=verifier_max_workers) as executor:
         futures = {
             executor.submit(
                 issue_judge_worker,
@@ -2198,8 +2356,15 @@ def run_issue_judge_only(
         issue_judge_paths=issue_judge_paths,
         claims_path=str(claims_path),
     )
-    comparison_path = out_dir / f"{base_stem}_issue_judge_comparison.json"
     comparison_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2), encoding="utf-8")
+    merged_issue_judge_path_str, merged_issue_judge = _write_issue_judge_merged_output(
+        output_dir=out_dir,
+        base_stem=base_stem,
+        merged_path=merged_file,
+        claims_path=str(claims_path),
+        models=models,
+        judge_results=judge_results,
+    )
 
     total_token_usage = _empty_token_usage()
     token_usage_per_model = {}
@@ -2207,7 +2372,6 @@ def run_issue_judge_only(
         token_usage_per_model[model] = result.get("token_usage", _empty_token_usage())
         total_token_usage = _merge_token_usage(total_token_usage, token_usage_per_model[model])
 
-    summary_path = out_dir / f"{base_stem}_issue_judge_summary.json"
     summary = {
         "schema_version": "issue_judge_summary.v1",
         "stage": "claim_to_issue_judge",
@@ -2216,7 +2380,9 @@ def run_issue_judge_only(
         "models": models,
         "issue_judge_result_paths": issue_judge_paths,
         "issue_judge_comparison_path": str(comparison_path),
+        "issue_judge_merged_path": merged_issue_judge_path_str,
         "summary": comparison.get("summary", {}),
+        "merged_summary": merged_issue_judge.get("summary", {}),
         "token_usage_per_model": token_usage_per_model,
         "token_usage": total_token_usage,
     }
@@ -2227,8 +2393,410 @@ def run_issue_judge_only(
         "output_dir": str(out_dir),
         "issue_judge_summary": str(summary_path),
         "issue_judge_comparison": str(comparison_path),
+        "issue_judge_merged": merged_issue_judge_path_str,
         "issue_judge_paths": issue_judge_paths,
-        "issue_judge_count": comparison.get("summary", {}).get("union_issue_claim_count", 0),
+        "issue_judge_count": merged_issue_judge.get("summary", {}).get("merged_issue_count", 0),
+    }
+
+
+def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
+    context_ids = claim.get("context_ids")
+    if not isinstance(context_ids, list) or not context_ids:
+        context_ids = claim.get("utterance_ids")
+    if not isinstance(context_ids, list) or not context_ids:
+        context_ids = [claim.get("context_id") or claim.get("utterance_id")]
+    context_ids = [str(item) for item in context_ids if str(item or "").strip()]
+
+    context_id = str(claim.get("context_id") or (context_ids[0] if context_ids else "")).strip()
+    payload = {
+        "claim_id": claim.get("claim_id", ""),
+        "claim_text": claim.get("claim_text", ""),
+        "resolved_claim": claim.get("resolved_claim", ""),
+        "claim_type": claim.get("claim_type", ""),
+        "context_id": context_id,
+        "context_ids": context_ids,
+        "antecedent_context_ids": claim.get("antecedent_context_ids", []),
+        "claim_fingerprint": claim.get("claim_fingerprint", ""),
+        "is_approximate": bool(claim.get("is_approximate")),
+        "needs_context": bool(claim.get("needs_context")),
+        "resolution_status": claim.get("resolution_status", ""),
+        "context_note": claim.get("context_note", ""),
+    }
+    return {key: value for key, value in payload.items() if value not in ("", [], None)}
+
+
+def _extract_or_reuse_claims_for_classified_pipeline(
+    merged_file: Path,
+    out_dir: Path,
+    *,
+    claims_jsonl: str | None = None,
+    reuse_claims: bool = False,
+    current_date: str | None = None,
+) -> dict:
+    base_stem = _base_stem(merged_file)
+    result_json_path = out_dir / f"{base_stem}_verification.json"
+    claims_jsonl_path = out_dir / f"{base_stem}_claims.jsonl"
+    claims_json_path = out_dir / f"{base_stem}_claims.json"
+
+    effective_claims_jsonl = claims_jsonl
+    if not effective_claims_jsonl and _json_file_exists(claims_jsonl_path):
+        effective_claims_jsonl = str(claims_jsonl_path)
+        print(f"  ⏭  claim 추출 — 출력 파일 존재, 스킵")
+        print(f"     {effective_claims_jsonl}")
+    elif not effective_claims_jsonl and reuse_claims and claims_jsonl_path.exists():
+        effective_claims_jsonl = str(claims_jsonl_path)
+        print(f"  기존 claim 추출 결과 재사용: {effective_claims_jsonl}")
+    if effective_claims_jsonl:
+        claims = _load_claims_jsonl(effective_claims_jsonl)
+        return {
+            "claims_jsonl": str(Path(effective_claims_jsonl).resolve()),
+            "claims_json": str(claims_json_path) if claims_json_path.exists() else "",
+            "claims": claims,
+            "claim_count": len(claims),
+            "api_calls": 0,
+            "token_usage": _empty_token_usage(),
+            "reused": True,
+        }
+
+    from .claim_extractor import extract_claims_only
+
+    print("  classified issue pipeline: claim 추출 시작")
+    ctx = prepare_verification(str(merged_file), current_date=current_date)
+    claims_by_batch, api_calls, token_usage = extract_claims_only(
+        ctx["utterances"],
+        ctx["current_date"],
+        ctx["hint"],
+        ctx["slide_ctx"],
+    )
+    claims: list[dict] = []
+    for _, batch_claims in claims_by_batch:
+        claims.extend(_claim_output_payload_for_classified_pipeline(claim) for claim in batch_claims)
+
+    claims_log_path = _write_claims_jsonl(claims, result_json_path)
+    claims_json_path.write_text(
+        json.dumps(
+            {
+                "mode": "claim_extraction",
+                "merged_path": str(merged_file),
+                "claims_log_path": claims_log_path,
+                "claim_count": len(claims),
+                "api_calls": api_calls,
+                "token_usage": token_usage,
+                "claims": claims,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "claims_jsonl": claims_log_path,
+        "claims_json": str(claims_json_path),
+        "claims": claims,
+        "claim_count": len(claims),
+        "api_calls": api_calls,
+        "token_usage": token_usage,
+        "reused": False,
+    }
+
+
+def _related_pipeline_path(merged_file: Path, suffix: str) -> Path:
+    base_stem = _base_stem(merged_file)
+    output_dir = merged_file.parent.parent if merged_file.parent.name.endswith("_analyzer") else merged_file.parent
+    return output_dir / f"{base_stem}{suffix}"
+
+
+def _format_classified_issue_report(content_view: dict) -> str:
+    feedback_items = content_view.get("feedback_items", []) or []
+    confirmed = [item for item in feedback_items if item.get("status") == STATUS_CONFIRMED]
+    needs_review = [item for item in feedback_items if item.get("status") == STATUS_PROFESSOR_CHECK]
+    rejected = [item for item in feedback_items if item.get("status") == STATUS_REJECTED]
+    slide_errors = content_view.get("slide_errors", []) or content_view.get("slide_typos", []) or []
+    severity_result = (content_view.get("views", {}) or {}).get("classified_issue_severity", {}) or {}
+    summary = content_view.get("summary", {}) or {}
+
+    lines = [
+        "=" * 60,
+        "강의 내용 검증 리포트 (classified issue pipeline)",
+        "=" * 60,
+        f"\n검증일: {content_view.get('verification_date', '')}",
+        f"전체 후보: {summary.get('total_feedback_count', len(feedback_items))}건",
+        f"확정: {len(confirmed)}건 / 검토 필요: {len(needs_review)}건 / 기각: {len(rejected)}건",
+        f"슬라이드 오류: {len(slide_errors)}건",
+    ]
+
+    breakdown = summary.get("breakdown_by_type", {}) if isinstance(summary.get("breakdown_by_type"), dict) else {}
+    if breakdown:
+        labels = {
+            "factual_error": "사실 오류",
+            "temporal_error": "시대적 오류",
+            "confusing_explanation": "혼동 오류",
+            "scope_overclaim": "범위 오류",
+        }
+        parts = [f"{labels.get(key, key)} {value}건" for key, value in breakdown.items()]
+        lines.append(f"유형별: {', '.join(parts)}")
+
+    def add_feedback_section(title: str, rows: list[dict], limit: int | None = None) -> None:
+        if not rows:
+            return
+        shown = rows if limit is None else rows[:limit]
+        lines.append(f"\n{'-' * 40}")
+        lines.append(f"{title} ({len(rows)}건)")
+        lines.append("-" * 40)
+        for index, item in enumerate(shown, 1):
+            location = item.get("location") if isinstance(item.get("location"), dict) else {}
+            score = float(item.get("crosscheck_score", 0.0) or 0.0)
+            problem = item.get("problem") if isinstance(item.get("problem"), dict) else {}
+            lines.append(
+                f"\n  [{index}] {item.get('feedback_label', item.get('feedback_type', ''))}"
+                f" | {score * 100:.1f}점"
+                f" | 슬라이드 {location.get('slide_number', '?')}"
+            )
+            claim = item.get("resolved_claim") or item.get("claim_text") or ""
+            if claim:
+                lines.append(f"    claim: {claim[:180]}")
+            summary_text = problem.get("summary") or problem.get("why_wrong") or ""
+            if summary_text:
+                lines.append(f"    근거: {summary_text[:240]}")
+            recommendation = problem.get("recommendation") or ""
+            if recommendation:
+                lines.append(f"    수정안: {recommendation[:180]}")
+        if limit is not None and len(rows) > limit:
+            lines.append(f"\n  ... 외 {len(rows) - limit}건")
+
+    add_feedback_section("확정 이슈", confirmed)
+    add_feedback_section("검토 필요", needs_review)
+    add_feedback_section("기각", rejected, limit=10)
+
+    if slide_errors:
+        lines.append(f"\n{'-' * 40}")
+        lines.append(f"슬라이드 오류 ({len(slide_errors)}건)")
+        lines.append("-" * 40)
+        for index, error in enumerate(slide_errors, 1):
+            lines.append(f"\n  [{index}] 슬라이드 {error.get('slide_number', '?')} ({error.get('slide_title', '')})")
+            lines.append(f"    유형: {error.get('error_type_label', error.get('error_type', ''))}")
+            lines.append(f"    문제: {error.get('problematic_text', '')}")
+            lines.append(f"    수정: {error.get('corrected_text', '')}")
+            lines.append(f"    이유: {error.get('reason', '')}")
+            lines.append(f"    신뢰도: {float(error.get('confidence', 0) or 0):.0%}")
+
+    slide_error_status = content_view.get("slide_error_status", "")
+    if slide_error_status and slide_error_status != "ok":
+        lines.append(f"\n슬라이드 오류 검사 상태: {slide_error_status}")
+
+    model_breakdown = (severity_result.get("summary", {}) or {}).get("model_breakdown", {})
+    if model_breakdown:
+        lines.append(f"\n{'=' * 60}")
+        lines.append("모델 판정 요약")
+        lines.append("=" * 60)
+        for model, row in model_breakdown.items():
+            lines.append(
+                f"  {model}: {row.get('status', '')}, "
+                f"parsed={row.get('judgment_count', 0)}, "
+                f"parse_failed={row.get('parse_failed_count', 0)}"
+            )
+
+    return "\n".join(lines)
+
+
+def run_classified_issue_pipeline(
+    merged_path: str,
+    *,
+    output_dir: str | None = None,
+    claims_jsonl: str | None = None,
+    reuse_claims: bool = False,
+    current_date: str | None = None,
+    issue_judge_min_confidence: float | None = None,
+    issue_judge_models: list[str] | None = None,
+    issue_type_models: list[str] | None = None,
+    severity_models: list[str] | None = None,
+    issue_type_model_weights: str | None = None,
+    severity_model_weights: str | None = None,
+    issue_type_batch_size: int = 10,
+    severity_batch_size: int = 4,
+    max_workers: int = 1,
+    max_tokens: int = 8192,
+) -> dict:
+    """Run the user's classified issue flow end-to-end.
+
+    Flow:
+    claim extraction -> first issue judge -> issue type classifier ->
+    category-specific severity judge -> web-friendly verification.json.
+    """
+
+    merged_file = Path(merged_path).resolve()
+    if not merged_file.exists():
+        raise FileNotFoundError(f"merged_clean 파일 없음: {merged_file}")
+    base_stem = _base_stem(merged_file)
+    out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    claims_result = _extract_or_reuse_claims_for_classified_pipeline(
+        merged_file,
+        out_dir,
+        claims_jsonl=claims_jsonl,
+        reuse_claims=reuse_claims,
+        current_date=current_date,
+    )
+    issue_judge_result = run_issue_judge_only(
+        str(merged_file),
+        output_dir=str(out_dir),
+        claims_jsonl=claims_result["claims_jsonl"],
+        cross_models=issue_judge_models,
+        current_date=current_date,
+        issue_judge_min_confidence=issue_judge_min_confidence,
+        verifier_max_workers=max_workers,
+    )
+
+    from .issue_type_classifier import (
+        build_next_stage_input,
+        classify_issues,
+        _default_output_path as _issue_type_default_output_path,
+        _default_next_input_path as _issue_type_default_next_input_path,
+        _default_models as _issue_type_default_models,
+    )
+    from .classified_issue_severity_judge import (
+        build_content_verification_view,
+        judge_classified_issues,
+        _default_output_path as _severity_default_output_path,
+        _default_models as _severity_default_models,
+    )
+    from .classified_slide_error_checker import (
+        detect_classified_slide_errors,
+    )
+
+    issue_judge_merged_path = Path(issue_judge_result["issue_judge_merged"]).resolve()
+    issue_judge_payload = json.loads(issue_judge_merged_path.read_text(encoding="utf-8"))
+    issue_type_output_path = _issue_type_default_output_path(issue_judge_merged_path)
+    classified_input_path = _issue_type_default_next_input_path(issue_type_output_path)
+    if _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path):
+        print(f"  ⏭  issue type classifier — 출력 파일 존재, 스킵")
+        print(f"     {issue_type_output_path}")
+        issue_type_result = _load_json_file(issue_type_output_path)
+        classified_input = _load_json_file(classified_input_path)
+    else:
+        issue_type_models = issue_type_models or _issue_type_default_models()
+        print(f"  issue type classifier 모델: {', '.join(issue_type_models)}")
+        issue_type_result = classify_issues(
+            issue_judge_payload,
+            input_path=issue_judge_merged_path,
+            models=issue_type_models,
+            list_keys=["issues"],
+            batch_size=max(1, issue_type_batch_size),
+            current_date=current_date or datetime.now().date().isoformat(),
+            max_tokens=max(256, max_tokens),
+            max_workers=max(1, max_workers),
+            model_weights_spec=issue_type_model_weights,
+        )
+        issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
+        classified_input_path.write_text(json.dumps(classified_input, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    severity_output_path = _severity_default_output_path(classified_input_path)
+    if _json_file_exists(severity_output_path):
+        print(f"  ⏭  classified severity judge — 출력 파일 존재, 스킵")
+        print(f"     {severity_output_path}")
+        severity_result = _load_json_file(severity_output_path)
+        severity_result["output_path"] = str(severity_output_path)
+    else:
+        severity_models = severity_models or _severity_default_models()
+        print(f"  classified severity judge 모델: {', '.join(severity_models)}")
+        severity_result = judge_classified_issues(
+            classified_input,
+            input_path=classified_input_path,
+            merged_clean_path=merged_file,
+            slide_textualized_path=_related_pipeline_path(merged_file, "_slide_textualized.json"),
+            slide_classified_path=_related_pipeline_path(merged_file, "_slide_classified.json"),
+            models=severity_models,
+            batch_size=max(1, severity_batch_size),
+            current_date=current_date or datetime.now().date().isoformat(),
+            max_tokens=max(256, max_tokens),
+            max_workers=max(1, max_workers),
+            context_window=2,
+            model_weights_spec=severity_model_weights,
+        )
+        severity_result["output_path"] = str(severity_output_path)
+        severity_output_path.write_text(json.dumps(severity_result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    content_view = build_content_verification_view(severity_result)
+    slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
+    slide_classified_path = _related_pipeline_path(merged_file, "_slide_classified.json")
+    slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
+    if _json_file_exists(slide_error_output_path):
+        print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
+        print(f"     {slide_error_output_path}")
+        slide_error_result = _load_json_file(slide_error_output_path)
+        slide_error_result["output_path"] = str(slide_error_output_path)
+    else:
+        slide_error_result = detect_classified_slide_errors(
+            merged_clean_path=merged_file,
+            slide_textualized_path=slide_textualized_path,
+            slide_classified_path=slide_classified_path,
+            batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
+            max_workers=max(1, int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", str(max_workers)))),
+            max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
+            current_date=current_date or datetime.now().date().isoformat(),
+        )
+        slide_error_result["output_path"] = str(slide_error_output_path)
+        slide_error_output_path.write_text(json.dumps(slide_error_result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    slide_errors = slide_error_result.get("slide_errors", []) or []
+    content_view["slide_errors"] = slide_errors
+    content_view["slide_error_status"] = "ok"
+    content_view["slide_error_summary"] = slide_error_result.get("summary", {})
+    content_view["slide_error_token_usage"] = slide_error_result.get("token_usage", {})
+    content_view["slide_error_path"] = str(slide_error_output_path)
+    # Web compatibility: the current verifier page renders this tab from slide_typos.
+    content_view["slide_typos"] = slide_errors
+    content_view["slide_typo_needs_review"] = []
+    content_view["slide_typo_consensus"] = slide_error_result.get("summary", {})
+    content_view["slide_typo_status"] = "classified_slide_error_checker"
+    content_view["slide_typo_failures"] = sum(
+        len((row.get("batch_errors") or []))
+        for row in (slide_error_result.get("model_results", {}) or {}).values()
+        if isinstance(row, dict)
+    )
+    content_view["summary"]["slide_error_count"] = len(slide_errors)
+    content_view["summary"]["slide_typo_count"] = len(slide_errors)
+    content_view["summary"]["slide_typo_needs_review_count"] = 0
+    content_view["counts"]["slide_errors"] = len(slide_errors)
+    content_view["counts"]["slide_typos"] = len(slide_errors)
+    content_view["counts"]["slide_typo_needs_review"] = 0
+    content_view["classified_issue_artifacts"] = {
+        "claims_jsonl": claims_result.get("claims_jsonl", ""),
+        "claims_json": claims_result.get("claims_json", ""),
+        "issue_judge_summary": issue_judge_result.get("issue_judge_summary", ""),
+        "issue_judge": issue_judge_result.get("issue_judge_merged", ""),
+        "issue_types": str(issue_type_output_path),
+        "classified_issues": str(classified_input_path),
+        "issue_severity": str(severity_output_path),
+        "slide_errors": str(slide_error_output_path),
+    }
+    result_json_path = out_dir / f"{base_stem}_verification.json"
+    report_path = out_dir / f"{base_stem}_report.txt"
+    if _json_file_exists(result_json_path):
+        print(f"  ⏭  content verification view — 출력 파일 존재, 스킵")
+        print(f"     {result_json_path}")
+    else:
+        result_json_path.write_text(json.dumps(content_view, ensure_ascii=False, indent=2), encoding="utf-8")
+    if report_path.exists() and report_path.stat().st_size > 0:
+        print(f"  ⏭  content verification report — 출력 파일 존재, 스킵")
+        print(f"     {report_path}")
+    else:
+        report_path.write_text(_format_classified_issue_report(content_view), encoding="utf-8")
+
+    return {
+        "merged_path": str(merged_file),
+        "output_dir": str(out_dir),
+        "claim_output": str(result_json_path),
+        "claim_report": str(report_path),
+        "claim_issue_count": len(content_view.get("feedback_items", []) or []),
+        "used_cross": False,
+        "classified_issue_pipeline": True,
+        "classified_issue_artifacts": content_view["classified_issue_artifacts"],
+        "slide_error_count": len(slide_errors),
+        "slide_typo_count": len(slide_errors),
+        "slide_typo_failures": content_view["slide_typo_failures"],
     }
 
 
@@ -2240,13 +2808,15 @@ def run_all_analyzers(
     reuse_claims: bool = False,
     claim_runs: int = 1,
     claim_min_rate: float = 0.5,
-    claim_batch_size: int = CLAIM_BATCH_SIZE,
-    claim_max_workers: int = 4,
+    claim_batch_size: int = DEFAULT_CLAIM_BATCH_SIZE,
+    claim_max_workers: int = DEFAULT_CLAIM_MAX_WORKERS,
     cross_models: list[str] | None = None,
     crosscheck_models: list[str] | None = None,
     cross_runs: int = 1,
     cross_min_rate: float = 0.5,
     cross_batch_size: int = 20,
+    verifier_max_workers: int = DEFAULT_VERIFIER_MAX_WORKERS,
+    crosscheck_max_workers: int = DEFAULT_CROSSCHECK_MAX_WORKERS,
     current_date: str | None = None,
 ) -> dict:
     merged_file = Path(merged_path).resolve()
@@ -2257,8 +2827,8 @@ def run_all_analyzers(
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    result_json_path = out_dir / f"{base_stem}_content_verification.json"
-    report_path = out_dir / f"{base_stem}_content_verification_report.txt"
+    result_json_path = out_dir / f"{base_stem}_verification.json"
+    report_path = out_dir / f"{base_stem}_report.txt"
     effective_claims_jsonl = claims_jsonl
     if reuse_claims and not effective_claims_jsonl:
         previous_claims_path = _claims_jsonl_path(result_json_path)
@@ -2300,6 +2870,9 @@ def run_all_analyzers(
         crosscheck_models=effective_crosscheck_models or None,
         claim_runs=claim_runs,
         claim_min_rate=claim_min_rate,
+        extract_max_workers=claim_max_workers,
+        judge_max_workers=verifier_max_workers,
+        crosscheck_max_workers=crosscheck_max_workers,
         env_vars=_collect_env_vars(),
     )
 
@@ -2350,21 +2923,31 @@ def main():
     parser = argparse.ArgumentParser(description="merged_clean 입력 기준 verifier 실행")
     parser.add_argument("merged_path", help="merged_clean.json 경로")
     parser.add_argument("--output-dir", default=None, help="결과 저장 디렉토리 (기본: merged 파일 폴더)")
-    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
+    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
         "--reuse-claims",
         action="store_true",
-        help="결과 폴더의 기존 *_claims_extracted.jsonl이 있으면 claim 추출을 건너뜀",
+        help="결과 폴더의 기존 *_claims.jsonl이 있으면 claim 추출을 건너뜀",
     )
     parser.add_argument(
         "--issue-judge-only",
         action="store_true",
         help="crosscheck/grounding 없이 claims_jsonl로 1차 issue judge 결과만 생성",
     )
+    parser.add_argument(
+        "--classified-issue-pipeline",
+        action="store_true",
+        help="기본값입니다. claim 추출 → 1차 issue judge → issue 유형 분류 → 분류별 severity judge를 실행합니다.",
+    )
+    parser.add_argument(
+        "--legacy-cross-pipeline",
+        action="store_true",
+        help="이전 cross verifier 파이프라인을 명시적으로 실행합니다.",
+    )
     parser.add_argument("--claim-runs", type=int, default=1)
     parser.add_argument("--claim-min-rate", type=float, default=0.5)
-    parser.add_argument("--claim-batch-size", type=int, default=CLAIM_BATCH_SIZE)
-    parser.add_argument("--claim-max-workers", type=int, default=4)
+    parser.add_argument("--claim-batch-size", type=int, default=DEFAULT_CLAIM_BATCH_SIZE)
+    parser.add_argument("--claim-max-workers", type=int, default=DEFAULT_CLAIM_MAX_WORKERS)
     parser.add_argument(
         "--cross-models",
         nargs="+",
@@ -2387,6 +2970,8 @@ def main():
     )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
     parser.add_argument("--cross-batch-size", type=int, default=20)
+    parser.add_argument("--verifier-max-workers", type=int, default=DEFAULT_VERIFIER_MAX_WORKERS)
+    parser.add_argument("--crosscheck-max-workers", type=int, default=DEFAULT_CROSSCHECK_MAX_WORKERS)
     parser.add_argument(
         "--issue-judge-min-confidence",
         type=float,
@@ -2405,12 +2990,35 @@ def main():
             cross_batch_size=args.cross_batch_size,
             current_date=args.date,
             issue_judge_min_confidence=args.issue_judge_min_confidence,
+            verifier_max_workers=args.verifier_max_workers,
         )
         print("\n=== 1차 Issue Judge 완료 ===")
         print(f"merged    : {result['merged_path']}")
         print(f"summary   : {result['issue_judge_summary']}")
         print(f"comparison: {result['issue_judge_comparison']}")
+        print(f"merged issues: {result['issue_judge_merged']}")
         print(f"issue claim 후보: {result['issue_judge_count']}건")
+        return
+
+    if not args.legacy_cross_pipeline:
+        result = run_classified_issue_pipeline(
+            args.merged_path,
+            output_dir=args.output_dir,
+            claims_jsonl=args.claims_jsonl,
+            reuse_claims=args.reuse_claims,
+            current_date=args.date,
+            issue_judge_min_confidence=args.issue_judge_min_confidence,
+            issue_judge_models=args.cross_models,
+            max_workers=args.verifier_max_workers,
+            max_tokens=int(os.getenv("CLASSIFIED_ISSUE_PIPELINE_MAX_TOKENS", "8192")),
+        )
+        print("\n=== Classified Issue Pipeline 완료 ===")
+        print(f"merged    : {result['merged_path']}")
+        print(f"web result: {result['claim_output']}")
+        print(f"issue 후보: {result['claim_issue_count']}건")
+        print(f"slide 오류: {result.get('slide_error_count', 0)}건")
+        for label, path in (result.get("classified_issue_artifacts") or {}).items():
+            print(f"{label}: {path}")
         return
 
     result = run_all_analyzers(
@@ -2427,6 +3035,8 @@ def main():
         cross_runs=args.cross_runs,
         cross_min_rate=args.cross_min_rate,
         cross_batch_size=args.cross_batch_size,
+        verifier_max_workers=args.verifier_max_workers,
+        crosscheck_max_workers=args.crosscheck_max_workers,
         current_date=args.date,
     )
 

@@ -1116,8 +1116,8 @@ def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dic
 
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
-    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
-    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
+    claim_output_path = analyzer_dir / f"{stem}_verification.json"
+    claim_report_path = analyzer_dir / f"{stem}_report.txt"
 
     if (
         not args.force
@@ -1204,9 +1204,9 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
-    claim_stub_path = analyzer_dir / f"{stem}_content_verification.json"
-    claims_jsonl_path = analyzer_dir / f"{stem}_claims_extracted.jsonl"
-    claims_json_path = analyzer_dir / f"{stem}_claims_extracted.json"
+    claim_stub_path = analyzer_dir / f"{stem}_verification.json"
+    claims_jsonl_path = analyzer_dir / f"{stem}_claims.jsonl"
+    claims_json_path = analyzer_dir / f"{stem}_claims.json"
     merged_file = Path(merged_clean_path)
     claim_batch_mode = _claim_extract_batch_mode()
     claim_context_window = _claim_extract_context_window()
@@ -1295,8 +1295,8 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
-    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
-    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
+    claim_output_path = analyzer_dir / f"{stem}_verification.json"
+    claim_report_path = analyzer_dir / f"{stem}_report.txt"
     analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
 
     if (
@@ -1327,6 +1327,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         merged_clean_path,
         "--output-dir",
         str(analyzer_dir),
+        "--classified-issue-pipeline",
     ]
 
     with open(analyzer_log_path, "a", encoding="utf-8") as log_fp:
@@ -1335,7 +1336,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         )
         log_fp.write(f"cwd       : {pkg_root}\n")
         log_fp.write(f"cmd       : {' '.join(cmd)}\n")
-        log_fp.write("mode      : cross_verification (forced)\n")
+        log_fp.write("mode      : classified_issue_pipeline (forced)\n")
         log_fp.flush()
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -1352,7 +1353,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     elapsed = time.time() - t0
     print(f"\n  ✓ verifier 백그라운드 시작  ({elapsed:.1f}초)")
     print(f"     PID : {proc.pid}")
-    print("     mode: cross_verification (forced)")
+    print("     mode: classified_issue_pipeline (forced)")
     print(f"     로그: {analyzer_log_path}")
     print("─" * 70)
     return {
@@ -2030,7 +2031,7 @@ def run_pipeline(args, progress_callback=None):
                 stem=stem,
                 output_dir=output_dir,
                 timings=timings,
-                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
+                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_verification.json",
             )
             print(f"\n  ✓ 비용 리포트 저장: {cost_report_path}")
         except Exception as e:

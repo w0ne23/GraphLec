@@ -142,6 +142,10 @@ def _combine_extract_results(extract_results: list[dict], merged_claims: list[di
     }
 
 DEFAULT_CROSSCHECK_GEMINI_MODEL = "gemini-2.5-flash"
+DEFAULT_CLAIM_EXTRACT_BATCH_SIZE = 2
+DEFAULT_CLAIM_EXTRACT_MAX_WORKERS = 4
+DEFAULT_VERIFIER_MAX_WORKERS = 6
+DEFAULT_CROSSCHECK_MAX_WORKERS = 6
 
 
 _VERDICT_SCORE = {
@@ -207,6 +211,14 @@ def _env_float(name: str, default: float, *, minimum: float | None = None, maxim
     if maximum is not None:
         value = min(maximum, value)
     return value
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
 
 
 def _crosscheck_confirm_threshold() -> float:
@@ -607,8 +619,23 @@ def cross_verify(
     crosscheck_models: list[str] | None = None,
     claim_runs: int = 1,
     claim_min_rate: float = 0.5,
+    extract_max_workers: int | None = None,
+    judge_max_workers: int | None = None,
+    crosscheck_max_workers: int | None = None,
 ) -> dict:
     root = str(_ROOT)
+    extract_max_workers = _env_int(
+        "VERIFIER_CLAIM_EXTRACT_MAX_WORKERS",
+        extract_max_workers or DEFAULT_CLAIM_EXTRACT_MAX_WORKERS,
+    )
+    judge_max_workers = _env_int(
+        "CROSS_VERIFY_MAX_WORKERS",
+        judge_max_workers or DEFAULT_VERIFIER_MAX_WORKERS,
+    )
+    crosscheck_max_workers = _env_int(
+        "CROSS_CHECK_MAX_WORKERS",
+        crosscheck_max_workers or DEFAULT_CROSSCHECK_MAX_WORKERS,
+    )
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
@@ -632,7 +659,7 @@ def cross_verify(
         extract_claim_count = len(loaded_claims)
         print(f"  기존 claim 파일 사용: {claims_jsonl}")
     else:
-        extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars)
+        extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, extract_max_workers, root, env_vars)
         claim_runs = max(1, int(claim_runs or 1))
         extract_results = []
 
@@ -691,7 +718,8 @@ def cross_verify(
     ]
 
     judge_results = {}
-    with ProcessPoolExecutor(max_workers=len(models)) as executor:
+    print(f"  verifier worker: {judge_max_workers}개")
+    with ProcessPoolExecutor(max_workers=judge_max_workers) as executor:
         futures = {executor.submit(judge_worker, a): a[1] for a in judge_args}
         for future in as_completed(futures):
             model = futures[future]
@@ -766,7 +794,8 @@ def cross_verify(
             source_model: (unioned, merged_path, cross_model, root, env_vars)
             for source_model, cross_model in crosscheck_model_map.items()
         }
-        with ProcessPoolExecutor(max_workers=len(crosscheck_source_models)) as executor:
+        print(f"  cross_check worker: {crosscheck_max_workers}개")
+        with ProcessPoolExecutor(max_workers=crosscheck_max_workers) as executor:
             futures = {
                 executor.submit(cross_recheck_worker, args): source_model
                 for source_model, args in cross_args_by_source.items()
@@ -1249,8 +1278,18 @@ def main():
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--claim-runs", type=int, default=1, help="claim 추출 반복 횟수 (기본 1)")
     parser.add_argument("--claim-min-rate", type=float, default=0.5, help="claim 반복 추출 시 유지할 최소 탐지 비율")
-    parser.add_argument("--batch-size", type=int, default=20)
-    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=_env_int(
+            "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
+            _env_int("VERIFIER_BATCH_SIZE", DEFAULT_CLAIM_EXTRACT_BATCH_SIZE),
+        ),
+    )
+    parser.add_argument("--extract-max-workers", type=int, default=DEFAULT_CLAIM_EXTRACT_MAX_WORKERS)
+    parser.add_argument("--verifier-max-workers", type=int, default=DEFAULT_VERIFIER_MAX_WORKERS)
+    parser.add_argument("--crosscheck-max-workers", type=int, default=DEFAULT_CROSSCHECK_MAX_WORKERS)
+    parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
         "--crosscheck-models",
         nargs="+",
@@ -1277,6 +1316,9 @@ def main():
             crosscheck_models=args.crosscheck_models,
             claim_runs=args.claim_runs,
             claim_min_rate=args.claim_min_rate,
+            extract_max_workers=args.extract_max_workers,
+            judge_max_workers=args.verifier_max_workers,
+            crosscheck_max_workers=args.crosscheck_max_workers,
         )
         print_cross_result(result)
     else:
@@ -1286,7 +1328,8 @@ def main():
             for m in models
         ]
         results = {}
-        with ProcessPoolExecutor(max_workers=len(models)) as executor:
+        worker_count = _env_int("CROSS_VERIFY_MAX_WORKERS", DEFAULT_VERIFIER_MAX_WORKERS)
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
             futures = {executor.submit(independent_worker, a): a[1] for a in worker_args}
             for future in as_completed(futures):
                 model = futures[future]

@@ -44,11 +44,11 @@ def prepare_verification(merged_path: str, current_date: str = None):
 
 def extract_claims_only(
     utterances: list[dict], current_date: str, hint: dict,
-    slide_ctx: dict, batch_size: int = BATCH_SIZE,
+    slide_ctx: dict, batch_size: int | None = None, max_workers: int | None = None,
 ) -> tuple[list[tuple], int, dict]:
     """1단계: claim 추출."""
     from analyzer.claim_extractor import extract_claims_only as _run
-    return _run(utterances, current_date, hint, slide_ctx, batch_size=batch_size)
+    return _run(utterances, current_date, hint, slide_ctx, batch_size=batch_size, max_workers=max_workers)
 
 
 def judge_claims_only(
@@ -322,7 +322,7 @@ if __name__ == "__main__":
         out_json = Path(args.output).resolve()
     else:
         stem = merged_path.stem.replace("_merged", "")
-        out_json = merged_path.with_name(f"{stem}_content_verification_v8.json")
+        out_json = merged_path.with_name(f"{stem}_verification.json")
 
     out_json.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     claims_log_path = write_claims_jsonl(result, out_json)

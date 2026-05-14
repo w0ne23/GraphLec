@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 _CANONICAL_CLAIM_TYPES = {
@@ -33,17 +34,31 @@ def _claim_extract_batch_mode() -> str:
 
 
 def _claim_extract_context_window() -> tuple[int, int]:
-    def _read_int(name: str, default: int) -> int:
-        raw = str(os.getenv(name, str(default)) or str(default)).strip()
-        try:
-            return max(0, int(raw))
-        except ValueError:
-            return default
-
     return (
-        _read_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 2),
-        _read_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_NEXT", 1),
+        _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 2, minimum=0),
+        _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_NEXT", 1, minimum=0),
     )
+
+
+def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    raw = str(os.getenv(name, str(default)) or str(default)).strip()
+    try:
+        return max(minimum, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def _claim_extract_batch_size(default: int | None = None) -> int:
+    if default is not None:
+        return max(1, int(default))
+    fallback = _read_int_env("VERIFIER_BATCH_SIZE", 2, minimum=1)
+    return _read_int_env("VERIFIER_CLAIM_EXTRACT_BATCH_SIZE", fallback, minimum=1)
+
+
+def _claim_extract_max_workers(default: int | None = None) -> int:
+    if default is not None:
+        return max(1, int(default))
+    return _read_int_env("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 4, minimum=1)
 
 
 def _claim_extract_prompt_profile() -> str:
@@ -741,12 +756,13 @@ def extract_claims_only(
     hint: dict,
     slide_ctx: dict,
     batch_size: int | None = None,
+    max_workers: int | None = None,
 ) -> tuple[list[tuple], int, dict]:
     """1단계만 실행: claim 추출. (batch_list, total_claims) 반환."""
     from . import claim_common as cv
 
-    if batch_size is None:
-        batch_size = cv.BATCH_SIZE
+    batch_size = _claim_extract_batch_size(batch_size)
+    max_workers = _claim_extract_max_workers(max_workers)
 
     all_claims_by_batch = []
     total_api = 0
@@ -759,7 +775,10 @@ def extract_claims_only(
         if batch_mode == "slide":
             core_batches = _context_batches_by_slide(utterances)
         else:
-            core_batches = [[utterance] for utterance in utterances]
+            core_batches = [
+                utterances[i:min(total, i + batch_size)]
+                for i in range(0, total, batch_size)
+            ]
         print(
             f"  claim 추출 batch mode: {batch_mode}"
             + (f" (prev={context_window_prev}, next={context_window_next})" if batch_mode == "context" else "")
@@ -774,6 +793,7 @@ def extract_claims_only(
     shared_context_mode = context_mode in {"compact", "card_lite"}
 
     cursor = 0
+    work_items = []
     for i, core_batch in enumerate(core_batches):
         if not core_batch:
             continue
@@ -793,19 +813,47 @@ def extract_claims_only(
             core_uids = None
 
         ids = f"{core_batch[0]['utterance_id']}..{core_batch[-1]['utterance_id']}"
-        print(f"    추출 [{i+1}/{len(core_batches)}] {ids}")
+        work_items.append({
+            "index": i,
+            "context_batch": context_batch,
+            "core_uids": core_uids,
+            "ids": ids,
+        })
+
+    def _run_item(item: dict) -> tuple[int, list[dict], list[dict], int, dict]:
+        ids = item["ids"]
+        print(f"    추출 [{item['index']+1}/{len(core_batches)}] {ids}", flush=True)
         claims, parse_failed, api_calls, token_usage, ok = recover_claim_extraction(
-            context_batch,
+            item["context_batch"],
             current_date,
             hint,
             slide_ctx,
-            f"배치 {i+1} {ids}",
-            target_utterance_ids=core_uids,
+            f"배치 {item['index']+1} {ids}",
+            target_utterance_ids=item["core_uids"],
         )
         if not ok:
             print(f"    ⚠️ claim 추출 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")
-        if core_uids is not None:
-            claims = [c for c in claims if str(c.get("utterance_id") or "") in core_uids]
+        if item["core_uids"] is not None:
+            claims = [c for c in claims if str(c.get("utterance_id") or "") in item["core_uids"]]
+        return item["index"], item["context_batch"], claims, api_calls, token_usage
+
+    if work_items:
+        worker_count = min(max_workers, len(work_items))
+        print(
+            f"  claim 추출 병렬 실행: batch_size={batch_size}, workers={worker_count}, batches={len(work_items)}",
+            flush=True,
+        )
+    if len(work_items) <= 1 or max_workers <= 1:
+        results = [_run_item(item) for item in work_items]
+    else:
+        results = [None] * len(work_items)
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(work_items))) as executor:
+            futures = {executor.submit(_run_item, item): item for item in work_items}
+            for future in as_completed(futures):
+                index, context_batch, claims, api_calls, token_usage = future.result()
+                results[index] = (index, context_batch, claims, api_calls, token_usage)
+
+    for _index, context_batch, claims, api_calls, token_usage in [r for r in results if r is not None]:
         all_claims_by_batch.append((context_batch, claims))
         total_api += api_calls
         total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)

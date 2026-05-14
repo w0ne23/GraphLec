@@ -11,7 +11,11 @@ from .cross_utils import _empty_token_usage, _merge_token_usage, _setup_worker
 
 def extract_worker(args_tuple):
     try:
-        merged_path, model, batch_size, root, env_vars = args_tuple
+        if len(args_tuple) >= 6:
+            merged_path, model, batch_size, max_workers, root, env_vars = args_tuple
+        else:
+            merged_path, model, batch_size, root, env_vars = args_tuple
+            max_workers = 4
         _setup_worker(root, env_vars, model)
         import analyzer.claim_pipeline as cv
 
@@ -19,7 +23,7 @@ def extract_worker(args_tuple):
         print(f"\n  [{model}] 1단계: claim 추출 시작", flush=True)
 
         claims_by_batch, api_calls, token_usage = cv.extract_claims_only(
-            ctx["utterances"], ctx["current_date"], ctx["hint"], ctx["slide_ctx"], batch_size
+            ctx["utterances"], ctx["current_date"], ctx["hint"], ctx["slide_ctx"], batch_size, max_workers
         )
 
         serialized = []
