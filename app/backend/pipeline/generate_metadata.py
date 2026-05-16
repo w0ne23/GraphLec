@@ -83,6 +83,8 @@ W_CENTRALITY = 0.4
 CORE_CENT_THRESHOLD  = 0.5   # norm_cent 이 이상이면 core 후보
 CORE_EMPH_THRESHOLD  = 0.35  # norm_emph + norm_slide_freq 조합 기준
 CORE_FREQ_THRESHOLD  = 0.25
+MAX_COMMUNITIES_IN_METADATA = int(os.getenv("GRAPHLEC_METADATA_MAX_COMMUNITIES", "12"))
+MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY_CHARS", "800"))
 
 
 # ── fused.json 파싱 ────────────────────────────────────────────────────────────
@@ -227,6 +229,71 @@ def collect_pedagogy(fused: dict) -> dict:
     }
 
 
+def collect_graphrag_communities(output_dir: Path) -> list[dict]:
+    """GraphRAG community_reports를 추천용 metadata에 저장할 compact 구조로 변환."""
+    reports_path = output_dir / "graphrag" / "output" / "community_reports.parquet"
+    if not reports_path.exists():
+        return []
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        print("[경고] pyarrow 없음 — GraphRAG communities metadata 저장 생략")
+        return []
+
+    try:
+        table = pq.read_table(reports_path)
+    except Exception as exc:
+        print(f"[경고] community_reports 로드 실패: {exc}")
+        return []
+
+    rows = table.to_pylist()
+    if not rows:
+        return []
+
+    if "rank" in table.column_names:
+        rows.sort(
+            key=lambda row: as_float(row.get("rank")),
+            reverse=True,
+        )
+
+    communities = []
+    for row in rows[:MAX_COMMUNITIES_IN_METADATA]:
+        title = str(row.get("title") or "").strip()
+        summary = str(row.get("summary") or "").strip()
+        if not title and not summary:
+            continue
+        if len(summary) > MAX_COMMUNITY_SUMMARY_CHARS:
+            summary = summary[:MAX_COMMUNITY_SUMMARY_CHARS].rstrip() + "..."
+
+        def as_int(value, default=0):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        communities.append({
+            "id":        str(row.get("id") or row.get("community") or ""),
+            "community": str(row.get("community") or ""),
+            "level":     as_int(row.get("level")),
+            "title":     title,
+            "summary":   summary,
+            "rank":      round(as_float(row.get("rank")), 4),
+            "size":      as_int(row.get("size")),
+        })
+
+    print(f"[디버그] GraphRAG communities metadata 저장: {len(communities)}개")
+    return communities
+
+
+def as_float(value, default=0.0):
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
+    except (TypeError, ValueError):
+        return default
+
+
 def collect_slide_role_freq(
     fused: dict,
     all_names: set[str],
@@ -258,31 +325,6 @@ def collect_slide_role_freq(
 
 
 # ── Neo4j: Concept 노드 degree 조회 ──────────────────────────────────────────
-
-def fetch_concept_degrees(stem: str) -> dict[str, int]:
-    """
-    stem에 해당하는 Concept 노드 name → degree 반환
-    lecture_video/{stem} 노드로부터 연결된 Concept 탐색
-    """
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-    result = {}
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (v:Video {id: $vid})
-                  -[:HAS_SLIDES]->(:Slides)
-                  -[:CONTAINS]->(s:Slide)
-                  -[:MENTIONS|APPEARS_IN]-(c:Concept)
-            RETURN c.name AS name, COUNT { (c)-[]-() } AS degree
-            """,
-            vid=f"lecture_video/{stem}",
-        )
-        for r in records:
-            if r["name"]:
-                result[r["name"]] = r["degree"]
-    driver.close()
-    return result
-
 
 def fetch_concept_degrees(stem: str) -> dict[str, int]:
     """
@@ -357,28 +399,6 @@ def fetch_concept_relations(
                 })
     driver.close()
     print(f"       → concept_relations {len(result)}개")
-    return result
-    """
-    stem에 해당하는 Concept 노드 name → degree 반환
-    lecture_video/{stem} 노드로부터 연결된 Concept 탐색
-    """
-    driver = GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
-    result = {}
-    with driver.session() as session:
-        records = session.run(
-            """
-            MATCH (v:Video {id: $vid})
-                  -[:HAS_SLIDES]->(:Slides)
-                  -[:CONTAINS]->(s:Slide)
-                  -[:MENTIONS|APPEARS_IN]-(c:Concept)
-            RETURN c.name AS name, COUNT { (c)-[]-() } AS degree
-            """,
-            vid=f"lecture_video/{stem}",
-        )
-        for r in records:
-            if r["name"]:
-                result[r["name"]] = r["degree"]
-    driver.close()
     return result
 
 
@@ -962,6 +982,9 @@ def generate_metadata(
     # difficulty: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
     difficulty = estimate_difficulty(concept_roles, norm_cent)
 
+    print(f"[{stem}] GraphRAG community report 수집 중...")
+    communities = collect_graphrag_communities(output_dir)
+
     metadata = {
         "video_id":            stem,
         "title":               title,
@@ -974,6 +997,7 @@ def generate_metadata(
         "keywords":            keywords,
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
+        "communities":         communities,
         "pedagogy":            pedagogy,
     }
 
