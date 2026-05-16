@@ -56,7 +56,7 @@ export default function RecommendPage() {
   }
 
   function handlePlay(lectureId) {
-    onNavigate?.({ page: 'lecture', lectureId })
+    navigate(`/lectures/${lectureId}`)
   }
 
   return (
