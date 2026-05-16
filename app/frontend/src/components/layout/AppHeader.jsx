@@ -7,9 +7,9 @@ export default function AppHeader() {
         Graph<span>Lec</span>
       </NavLink>
       <nav className="app-header-nav">
-        <NavLink to="/upload" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Upload</NavLink>
+        <NavLink to="/upload" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Verify</NavLink>
         <NavLink to="/recommend" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Recommend</NavLink>
-        <NavLink to="/lectures" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Browse</NavLink>
+        <NavLink to="/lectures" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>QnA</NavLink>
       </nav>
     </header>
   )

@@ -18,12 +18,7 @@ export default function LandingPage() {
           <div className="ld-logo">
             Graph<span>Lec</span>
           </div>
-          <p className="ld-desc">
-            Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod
-            tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim
-            veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea
-            commodo consequat.
-          </p>
+          <p className="ld-subtitle">영상 강의 토탈 솔루션</p>
         </header>
 
         {/* ── 메인 영역: 3개 선택지 카드 ── */}
@@ -33,10 +28,10 @@ export default function LandingPage() {
             className="ld-card"
             onClick={() => navigate('/upload')}
           >
-            <div className="ld-card-icon">📤</div>
-            <h3 className="ld-card-title">강의 업로드</h3>
+            <div className="ld-card-icon">✅</div>
+            <h3 className="ld-card-title">Verify</h3>
             <p className="ld-card-desc">
-              강의를 업로드하고 AI의 분석을 통해 검토해 보세요
+              강의를 업로드하여 강의 내용을 검토해 보세요
             </p>
           </button>
 
@@ -45,7 +40,7 @@ export default function LandingPage() {
             onClick={() => navigate('/recommend')}
           >
             <div className="ld-card-icon">💡</div>
-            <h3 className="ld-card-title">원하는 강의 추천받기</h3>
+            <h3 className="ld-card-title">Recommend</h3>
             <p className="ld-card-desc">
               지금 내가 원하는 강의를 추천받으세요
             </p>
@@ -55,10 +50,10 @@ export default function LandingPage() {
             className="ld-card"
             onClick={() => navigate('/lectures')}
           >
-            <div className="ld-card-icon">📚</div>
-            <h3 className="ld-card-title">모든 강의 둘러보기</h3>
+            <div className="ld-card-icon">💬</div>
+            <h3 className="ld-card-title">QnA</h3>
             <p className="ld-card-desc">
-              어떤 강의가 있는지 살펴보세요
+              영상 강의를 보며 궁금한 점을 AI에게 바로 질문해 보세요
             </p>
           </button>
 
