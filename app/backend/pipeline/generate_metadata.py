@@ -85,6 +85,8 @@ CORE_EMPH_THRESHOLD  = 0.35  # norm_emph + norm_slide_freq 조합 기준
 CORE_FREQ_THRESHOLD  = 0.25
 MAX_COMMUNITIES_IN_METADATA = int(os.getenv("GRAPHLEC_METADATA_MAX_COMMUNITIES", "12"))
 MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY_CHARS", "800"))
+MAX_VISUAL_CONCEPT_TERMS = int(os.getenv("GRAPHLEC_METADATA_MAX_VISUAL_TERMS", "80"))
+_VISUAL_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 
 
 # ── fused.json 파싱 ────────────────────────────────────────────────────────────
@@ -207,9 +209,14 @@ def collect_pedagogy(fused: dict) -> dict:
 
     image_only_count = sum(1 for s in slides if s.get("slide_type") == "image_only")
     mixed_count      = sum(1 for s in slides if s.get("slide_type") == "mixed")
+    structure_count  = sum(
+        1 for s in slides
+        if str(s.get("t1_structure") or "").strip()
+    )
 
     # image_only는 전체 기여, mixed는 절반 기여
     visual_ratio = round((image_only_count + mixed_count * 0.5) / total, 3)
+    structure_ratio = round(structure_count / total, 3)
 
     style_tags: list[str] = []
     if visual_ratio >= 0.5:
@@ -219,14 +226,92 @@ def collect_pedagogy(fused: dict) -> dict:
 
     print(
         f"[디버그] pedagogy: visual_ratio={visual_ratio:.3f} "
-        f"(image_only={image_only_count}, mixed={mixed_count}, total={total}) "
+        f"structure_ratio={structure_ratio:.3f} "
+        f"(image_only={image_only_count}, mixed={mixed_count}, "
+        f"structure={structure_count}, total={total}) "
         f"tags={style_tags}"
     )
 
     return {
-        "visual_ratio": visual_ratio,
-        "style_tags":   style_tags,
+        "visual_ratio":    visual_ratio,
+        "structure_ratio": structure_ratio,
+        "style_tags":      style_tags,
     }
+
+
+def _iter_t1_structure_texts(fused: dict) -> list[str]:
+    """scene 기준 t1_structure 수집. 구형 fused는 slides에서 fallback한다."""
+    texts = []
+    seen = set()
+    slide_by_id = {
+        slide.get("slide_id"): slide
+        for slide in fused.get("slides", [])
+        if slide.get("slide_id")
+    }
+
+    for scene in fused_scene_entries(fused):
+        if scene.get("role") == "objectives":
+            continue
+        text = str(scene.get("t1_structure") or "").strip()
+        if not text:
+            slide = slide_by_id.get(scene.get("slide_id"))
+            text = str((slide or {}).get("t1_structure") or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            texts.append(text)
+
+    if texts:
+        return texts
+
+    for slide in fused.get("slides", []):
+        text = str(slide.get("t1_structure") or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            texts.append(text)
+    return texts
+
+
+def collect_visual_concept_terms(fused: dict, concept_terms: list[str]) -> list[str]:
+    """
+    t1_structure 안에서 실제 강의 개념으로 등장하는 term을 미리 저장한다.
+    추천 시점에는 query term과 set intersection만 수행하도록 비용을 앞당긴다.
+    """
+    structure_text = "\n".join(_iter_t1_structure_texts(fused))
+    if not structure_text.strip():
+        return []
+
+    structure_lower = structure_text.lower()
+    candidates = []
+    for term in concept_terms:
+        term = str(term or "").strip()
+        if term and _is_valid_concept(term):
+            candidates.append(term)
+
+    matched = []
+    seen = set()
+    for term in candidates:
+        key = term.lower()
+        if key in seen:
+            continue
+        if key in structure_lower:
+            seen.add(key)
+            matched.append(term)
+            if len(matched) >= MAX_VISUAL_CONCEPT_TERMS:
+                break
+
+    if matched:
+        return matched
+
+    # concept 후보와 직접 매칭되지 않는 image_only 슬라이드를 위한 fallback.
+    fallback = []
+    for token in _VISUAL_TERM_RE.findall(structure_text):
+        if token in seen or not _is_valid_concept(token):
+            continue
+        seen.add(token)
+        fallback.append(token)
+        if len(fallback) >= min(MAX_VISUAL_CONCEPT_TERMS, 30):
+            break
+    return fallback
 
 
 def collect_graphrag_communities(output_dir: Path) -> list[dict]:
@@ -946,6 +1031,13 @@ def generate_metadata(
         debug=True,
     )
     print(f"       → {len(keywords)}개 선택")
+    visual_concept_terms = collect_visual_concept_terms(
+        fused,
+        [k.get("keyword", "") for k in keywords]
+        + list(concept_degrees.keys())
+        + list(scored.keys()),
+    )
+    print(f"       → visual_concept_terms {len(visual_concept_terms)}개")
 
     # concept_roles: scored 평균 × 0.6 이상 + 노이즈 필터 통과한 개념만 분류
     # (keywords 임계값 1.2보다 낮게 → prerequisite/introduced도 충분히 포함)
@@ -998,6 +1090,7 @@ def generate_metadata(
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
         "communities":         communities,
+        "visual_concept_terms": visual_concept_terms,
         "pedagogy":            pedagogy,
     }
 

@@ -834,6 +834,10 @@ def run_fusion(cfg: Config) -> dict:
             "slide_visit_order": cl_slide.get("slide_visit_order", 1),
             "slide_is_revisit": cl_slide.get("slide_is_revisit", False),
             "representative_scene_number": cl_slide.get("representative_scene_number", slide_num),
+            "title":        cl_slide.get("title", ""),
+            "slide_text":   cl_slide.get("t1", ""),
+            "t1_structure": cl_slide.get("t1_structure", ""),
+            "slide_type":   cl_slide.get("slide_type", "text"),
             "emphasis_score": {
                 "annotation": scene_annotation_score,
                 "total": scene_annotation_score,

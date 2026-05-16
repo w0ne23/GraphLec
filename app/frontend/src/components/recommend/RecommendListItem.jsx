@@ -107,6 +107,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
                   </div>
                   <DetailScoreBar label="개념 그래프" score={pct(detail.graph_score)} color="#10b981" />
                   <DetailScoreBar label="커뮤니티 점수" score={pct(detail.community_score)} color="#14b8a6" />
+                  {detail.visual_preference && (
+                    <DetailScoreBar label="시각 자료" score={pct(detail.visual_score)} color="#ec4899" />
+                  )}
                   <DetailScoreBar label="조건 부스트" score={pct(detail.combined_boost)} color="#64748b" />
                 </div>
               </>
