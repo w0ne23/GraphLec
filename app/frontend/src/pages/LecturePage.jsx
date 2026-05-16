@@ -1,12 +1,13 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   getLectureDetail,
   getLectureTimeline,
-  enterLectureGraphSession,
-  heartbeatLectureGraphSession,
-  leaveLectureGraphSession,
 } from '../lib/api'
+
+import { useChatSession } from '../hooks/useChatSession'
+import { useGraphSession } from '../hooks/useGraphSession'
+import { useResizer } from '../hooks/useResizer'
 
 import VideoPlayer from '../components/watch/VideoPlayer'
 import VideoTimeline from '../components/watch/VideoTimeline'
@@ -16,15 +17,13 @@ import LectureInfoModal from '../components/watch/LectureInfoModal'
 
 import '../styles/lecture.css'
 
-const INIT_MSG = { role: 'assistant', content: '강의에 대해 질문해보세요.', refs: [] }
-
-export default function LecturePage({ onNavigate }) {
+export default function LecturePage() {
   const { id } = useParams()
   const navigate = useNavigate()
-  const graphSessionIdRef = useRef(
-    (window.crypto?.randomUUID?.())
-    ?? `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  )
+
+  const { chatWidth, handleResizerMouseDown } = useResizer(300)
+  const { messages: chatMessages, setMessages: setChatMessages, input: chatInput, setInput: setChatInput, loading: chatLoading, setLoading: setChatLoading } = useChatSession(id)
+  useGraphSession(id)
 
   const [lecture, setLecture] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -33,7 +32,6 @@ export default function LecturePage({ onNavigate }) {
   const [seekToSeconds, setSeekToSeconds] = useState(null)
 
   // 우측 패널
-  const [chatWidth, setChatWidth] = useState(300)
   const [isChatOpen, setIsChatOpen] = useState(true)
   const [isGraphPanelOpen, setIsGraphPanelOpen] = useState(false)
 
@@ -46,12 +44,6 @@ export default function LecturePage({ onNavigate }) {
   // 강의 정보 모달
   const [isInfoOpen, setIsInfoOpen] = useState(false)
 
-  // 채팅 상태 (레이아웃 전환 시 컨텍스트 유지를 위해 부모에서 관리)
-  const [chatMessages, setChatMessages] = useState([INIT_MSG])
-  const [chatInput, setChatInput] = useState('')
-  const [chatLoading, setChatLoading] = useState(false)
-
-  const isResizing = useRef(false)
   const leftRef = useRef(null)
 
   const toggleChat = () => setIsChatOpen(v => !v)
@@ -70,47 +62,11 @@ export default function LecturePage({ onNavigate }) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [isCinemaMode])
 
-  // 강의(id)가 변경될 때만 채팅 상태 초기화
-  useEffect(() => {
-    setChatMessages([INIT_MSG])
-    setChatInput('')
-    setChatLoading(false)
-    setSeekToSeconds(null)
-  }, [id])
-
-  // 좌우 리사이저
-  const handleResizerMouseDown = useCallback(() => {
-    isResizing.current = true
-    document.body.style.cursor = 'col-resize'
-    document.body.style.userSelect = 'none'
-  }, [])
-
-  useEffect(() => {
-    const handleMouseMove = (e) => {
-      if (!isResizing.current) return
-      let w = window.innerWidth - e.clientX
-      if (w < 260) w = 260
-      if (window.innerWidth - w < 300) w = window.innerWidth - 300
-      setChatWidth(w)
-    }
-    const handleMouseUp = () => {
-      if (!isResizing.current) return
-      isResizing.current = false
-      document.body.style.cursor = 'default'
-      document.body.style.userSelect = 'auto'
-    }
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [])
-
   // 강의 데이터 로딩
   useEffect(() => {
     if (!id) return
     setLoading(true)
+    setSeekToSeconds(null)
 
     Promise.all([
       getLectureDetail(id),
@@ -130,50 +86,6 @@ export default function LecturePage({ onNavigate }) {
         setLecture(null)
       })
       .finally(() => setLoading(false))
-  }, [id])
-
-  // GraphRAG 세션
-  useEffect(() => {
-    if (!id) return
-
-    let alive = true
-    let timer = null
-    const sessionId = graphSessionIdRef.current
-
-    const startGraphSession = async () => {
-      try {
-        await enterLectureGraphSession(id, sessionId)
-        if (!alive) return
-        timer = setInterval(async () => {
-          try {
-            await heartbeatLectureGraphSession(id, sessionId)
-          } catch (e) {
-            // heartbeat 실패는 다음 주기에서 재시도
-          }
-        }, 25000)
-      } catch (e) {
-        // 질의 API에서 로드 fallback이 있어 여기 실패해도 페이지는 계속 사용 가능
-        console.error('graph enter failed:', e)
-      }
-    }
-
-    const sendLeave = () => {
-      leaveLectureGraphSession(id, sessionId).catch(() => {})
-    }
-
-    const handleBeforeUnload = () => {
-      sendLeave()
-    }
-
-    startGraphSession()
-    window.addEventListener('beforeunload', handleBeforeUnload)
-
-    return () => {
-      alive = false
-      if (timer) clearInterval(timer)
-      window.removeEventListener('beforeunload', handleBeforeUnload)
-      sendLeave()
-    }
   }, [id])
 
   const scenes = lecture?.scenes ?? []
