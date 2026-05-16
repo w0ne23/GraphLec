@@ -100,6 +100,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
                 <div className="rec-scores-grid">
                   <DetailScoreBar label="내용 관련도"     score={detail.content_pct ?? 0} color="#3b82f6" />
                   <DetailScoreBar label="개념 그래프"     score={pct(detail.graph_score)} color="#10b981" />
+                  {detail.community_score > 0 && (
+                    <DetailScoreBar label="커뮤니티 맥락" score={pct(detail.community_score)} color="#14b8a6" />
+                  )}
                   <DetailScoreBar label="키워드 직접 매칭" score={pct(detail.dm_keyword)}  color="#f59e0b" />
                   <DetailScoreBar label="벡터 유사도"     score={pct(detail.vec_score)}   color="#8b5cf6" />
                 </div>

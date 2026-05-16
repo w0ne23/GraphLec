@@ -88,6 +88,7 @@ class ScoreDetail(BaseModel):
     sim_summary:       float
     dm_keyword:        float
     graph_score:       float
+    community_score:   float
     domain_score:      float
     difficulty_match:  float
     depth_score:       float
@@ -169,6 +170,7 @@ def recommend(req: RecommendRequest):
                     sim_summary       = r.score_detail.get("sim_summary",        0.0),
                     dm_keyword        = r.score_detail.get("dm_keyword",         0.0),
                     graph_score       = r.score_detail.get("graph_score",        0.0),
+                    community_score   = r.score_detail.get("community_score",    0.0),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     difficulty_match  = r.score_detail.get("difficulty_match",   0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
