@@ -245,8 +245,20 @@
 .rec-details-title { font-size: 12px; font-weight: 700; color: var(--t2); margin-bottom: 12px; }
 
 .rec-scores-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.rec-score-group { display: flex; flex-direction: column; gap: 6px; }
+.rec-score-subrows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-left: 14px;
+  padding-left: 12px;
+  border-left: 1px solid var(--b1);
+}
 .rec-score-row { display: flex; align-items: center; gap: 10px; }
 .rec-score-label { font-size: 11px; color: var(--t2); width: 100px; flex-shrink: 0; }
+.rec-score-row--primary .rec-score-label { font-weight: 700; color: var(--t1); }
+.rec-score-row--sub .rec-score-label { color: var(--t3); }
+.rec-score-row--sub .rec-score-track { height: 3px; }
 .rec-score-track { flex: 1; height: 4px; background: var(--b1); border-radius: 2px; overflow: hidden; }
 .rec-score-fill { height: 100%; background: var(--blue); border-radius: 2px; transition: width .4s; }
 .rec-score-num { font-size: 11px; color: var(--t2); width: 28px; text-align: right; font-family: 'JetBrains Mono', monospace; }
@@ -274,4 +286,3 @@
 .rec-related-notice { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
 .rec-related-notice--background { color: var(--t3); background: var(--card); }
 .rec-duration-warn { font-size: 10px; color: var(--amber); }
-

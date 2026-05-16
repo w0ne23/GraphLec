@@ -98,13 +98,16 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
               <>
                 <h4 className="rec-details-title">AI 세부 분석 지표</h4>
                 <div className="rec-scores-grid">
-                  <DetailScoreBar label="내용 관련도"     score={detail.content_pct ?? 0} color="#3b82f6" />
-                  <DetailScoreBar label="개념 그래프"     score={pct(detail.graph_score)} color="#10b981" />
-                  {detail.community_score > 0 && (
-                    <DetailScoreBar label="커뮤니티 맥락" score={pct(detail.community_score)} color="#14b8a6" />
-                  )}
-                  <DetailScoreBar label="키워드 직접 매칭" score={pct(detail.dm_keyword)}  color="#f59e0b" />
-                  <DetailScoreBar label="벡터 유사도"     score={pct(detail.vec_score)}   color="#8b5cf6" />
+                  <div className="rec-score-group">
+                    <DetailScoreBar label="내용 점수" score={detail.content_pct ?? 0} color="#3b82f6" variant="primary" />
+                    <div className="rec-score-subrows">
+                      <DetailScoreBar label="의미 유사도" score={pct(detail.vec_score)} color="#8b5cf6" variant="sub" />
+                      <DetailScoreBar label="직접 매칭" score={pct(detail.dm_keyword ?? detail.dm_score)} color="#f59e0b" variant="sub" />
+                    </div>
+                  </div>
+                  <DetailScoreBar label="개념 그래프" score={pct(detail.graph_score)} color="#10b981" />
+                  <DetailScoreBar label="커뮤니티 점수" score={pct(detail.community_score)} color="#14b8a6" />
+                  <DetailScoreBar label="조건 부스트" score={pct(detail.combined_boost)} color="#64748b" />
                 </div>
               </>
             )}
@@ -123,20 +126,26 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   )
 }
 
-function DetailScoreBar({ label, score, color }) {
+function DetailScoreBar({ label, score, color, variant = '' }) {
+  const safeScore = clampScore(score)
   return (
-    <div className="rec-score-row">
+    <div className={`rec-score-row${variant ? ` rec-score-row--${variant}` : ''}`}>
       <span className="rec-score-label">{label}</span>
       <div className="rec-score-track">
-        <div className="rec-score-fill" style={{ width: `${score}%`, backgroundColor: color }} />
+        <div className="rec-score-fill" style={{ width: `${safeScore}%`, backgroundColor: color }} />
       </div>
-      <span className="rec-score-num">{score}</span>
+      <span className="rec-score-num">{safeScore}</span>
     </div>
   )
 }
 
 function pct(value) {
   return Math.round((value || 0) * 100)
+}
+
+function clampScore(value) {
+  const numeric = Number(value) || 0
+  return Math.max(0, Math.min(100, Math.round(numeric)))
 }
 
 function formatDuration(durationSec) {
