@@ -867,6 +867,7 @@ class RecommendResult:
     domain:       str
     instructor:   str
     score:        float
+    display_score: int
     duration_sec: float
     score_detail: dict
     reason:       str
@@ -924,6 +925,25 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
     if detail.get("frag_penalty", 0) > 0.3:
         parts.append(f"파편화 -{detail['frag_penalty']:.0%}")
     return " · ".join(parts) if parts else "관련 강의"
+
+
+def _display_score(internal_score: float, tier: str) -> int:
+    """
+    내부 랭킹 점수를 사용자 표시용 추천 적합도로 보정한다.
+    추천 순위와 tier 판단에는 영향을 주지 않는다.
+    """
+    # 0.30~0.85 내부 점수를 55~95점대로 완만하게 매핑한다.
+    normalized = (internal_score - 0.30) / 0.55
+    score = 55 + max(0.0, min(normalized, 1.0)) * 40
+
+    if tier == "direct":
+        score = max(score, 75)
+    elif tier == "related":
+        score = min(max(score, 55), 82)
+    else:
+        score = min(max(score, 45), 70)
+
+    return int(round(score))
 
 
 # ============================================================================
@@ -1489,6 +1509,7 @@ class Recommender:
                 domain       = lec.domain,
                 instructor   = lec.instructor_id,
                 score        = detail["score"],
+                display_score= _display_score(detail["score"], tier),
                 duration_sec = lec.duration_sec,
                 score_detail = detail,
                 reason       = _build_reason(detail, tier),

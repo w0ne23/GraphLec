@@ -2,12 +2,12 @@ import { useState } from 'react'
 
 /**
  * 추천 강의 목록 아이템
- * 레이아웃: [썸네일] [태그·제목·강의자] [점수% + 간접관련배지 / 자세히▼]
+ * 레이아웃: [썸네일] [태그·제목·강의자] [추천 점수 + 간접관련배지 / 자세히▼]
  */
 export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const detail        = lecture.score_detail || {}
-  const overallScore  = Math.round((lecture.score || 0) * 100)
+  const overallScore  = lecture.display_score ?? Math.round((lecture.score || 0) * 100)
   const durationLabel = formatDuration(lecture.duration_sec)
 
   // tier 판단: API 필드 우선, 없으면 reason 텍스트로 fallback
@@ -62,7 +62,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
         <div className="rec-col rec-col-score">
           {lecture.score != null && (
             <div className={`rec-overall-score${hasSupportTier ? ' rec-overall-score--related' : ''}${isBackground ? ' rec-overall-score--background' : ''}`}>
-              {overallScore}%
+              {overallScore}점
             </div>
           )}
           {hasSupportTier && (
