@@ -123,6 +123,8 @@ class RecommenderConfig:
     MIN_HYBRID_CANDIDATES: int = 10
     USE_TF_IRF_DM:       bool = True
     TF_IRF_IDF_FLOOR:    float = 0.05
+    USE_METADATA_PREFILTER: bool = True
+    METADATA_DURATION_GRACE_SEC: int = 300
 
 
 # ============================================================================
@@ -1015,11 +1017,41 @@ class Recommender:
         limit = top_n or self.cfg.HYBRID_CANDIDATE_TOP_N
         return fused[:limit]
 
+    def _metadata_preferred_ids(self, ctx: QueryContext) -> Optional[set[str]]:
+        """
+        metadata 조건을 만족하는 우선 후보군.
+        hard filter가 아니라 RRF에 preferred ranking을 추가하는 soft signal로만 쓴다.
+        """
+        if not self.cfg.USE_METADATA_PREFILTER:
+            return None
+        if not (ctx.domain or ctx.difficulty_hint or ctx.duration_max_sec):
+            return None
+
+        preferred = set()
+        for video_id in self._row_by_video_id:
+            lec = self.collection.get(video_id)
+            if lec is None:
+                continue
+
+            if ctx.domain and lec.domain != ctx.domain:
+                continue
+            if ctx.difficulty_hint and lec.difficulty != ctx.difficulty_hint:
+                continue
+            if ctx.duration_max_sec and lec.duration_sec > (
+                ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
+            ):
+                continue
+
+            preferred.add(video_id)
+
+        return preferred or None
+
     def _get_initial_candidate_ids(self, ctx: QueryContext, query_vec: list[float]) -> list[str]:
         """
         BM25 lexical 후보와 vector semantic 후보를 RRF로 통합한다.
         후보가 너무 적으면 기존 전체 후보 방식으로 되돌린다.
         """
+        preferred_ids = self._metadata_preferred_ids(ctx)
         bm25_candidates = self._retrieve_bm25_candidates(
             ctx,
             top_n=self.cfg.BM25_RETRIEVE_TOP_N,
@@ -1028,11 +1060,31 @@ class Recommender:
             query_vec,
             top_n=self.cfg.VECTOR_RETRIEVE_TOP_N,
         )
+        rankings = [
+            [video_id for video_id, _score in bm25_candidates],
+            [video_id for video_id, _score in vector_candidates],
+        ]
+
+        pref_bm25_candidates = []
+        pref_vector_candidates = []
+        if preferred_ids:
+            pref_bm25_candidates = self._retrieve_bm25_candidates(
+                ctx,
+                eligible_ids=preferred_ids,
+                top_n=self.cfg.BM25_RETRIEVE_TOP_N,
+            )
+            pref_vector_candidates = self._retrieve_vector_candidates(
+                query_vec,
+                eligible_ids=preferred_ids,
+                top_n=self.cfg.VECTOR_RETRIEVE_TOP_N,
+            )
+            rankings.extend([
+                [video_id for video_id, _score in pref_bm25_candidates],
+                [video_id for video_id, _score in pref_vector_candidates],
+            ])
+
         candidate_ids = self._rrf_fuse(
-            [
-                [video_id for video_id, _score in bm25_candidates],
-                [video_id for video_id, _score in vector_candidates],
-            ],
+            rankings,
             top_n=self.cfg.HYBRID_CANDIDATE_TOP_N,
         )
 
@@ -1040,6 +1092,12 @@ class Recommender:
             f"[후보 검색] BM25 {len(bm25_candidates)}개, "
             f"Vector {len(vector_candidates)}개, RRF {len(candidate_ids)}개"
         )
+        if preferred_ids:
+            print(
+                f"[메타데이터 우선 후보] {len(preferred_ids)}개 "
+                f"(BM25 {len(pref_bm25_candidates)}개, "
+                f"Vector {len(pref_vector_candidates)}개)"
+            )
 
         if len(candidate_ids) < self.cfg.MIN_HYBRID_CANDIDATES:
             all_ids = self._all_candidate_ids()
