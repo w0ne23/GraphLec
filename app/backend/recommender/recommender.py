@@ -175,9 +175,10 @@ class RecommenderConfig:
     # keyword vec 유사도 threshold — 미만이면 기여 0으로 처리
     KW_VEC_THRESHOLD:    float = 0.60
     # 메인 점수 컴포넌트 가중치
-    W_CONTENT:           float = 0.65
+    W_CONTENT:           float = 0.60
     W_GRAPH:             float = 0.20
-    W_BOOST:             float = 0.15
+    W_COMMUNITY:         float = 0.10
+    W_BOOST:             float = 0.10
     # graph_score role 가중치
     GRAPH_CORE_WEIGHT:   float = 1.00
     GRAPH_INTRO_WEIGHT:  float = 0.35
@@ -241,6 +242,7 @@ class LectureMetadata:
     keywords:          list[dict]
     concept_roles:     list[dict]
     concept_relations: list[dict]
+    communities:       list[dict]
 
 
 @dataclass
@@ -267,6 +269,15 @@ class VectorSearchIndex:
     title_matrix:    np.ndarray
     keyword_matrix:  np.ndarray
     summary_matrix:  np.ndarray
+
+
+@dataclass
+class CommunityReportDocument:
+    video_id:    str
+    title_terms: Counter
+    summary_terms: Counter
+    rank:        float
+    level:       int
 
 
 # ============================================================================
@@ -302,6 +313,7 @@ class MetadataCollection:
                     keywords          = item.get("keywords", []),
                     concept_roles     = item.get("concept_roles", []),
                     concept_relations = item.get("concept_relations", []),
+                    communities       = item.get("communities", []),
                 )
                 self.lectures[lec.video_id] = lec
         print(f"[로드] {len(self.lectures)}개 강의 메타데이터 로드 완료\n")
@@ -431,6 +443,16 @@ def _append_topic_expansions(
     return expanded
 
 
+def _community_report_terms(text: str) -> Counter:
+    terms = Counter()
+    normalized = _normalize_term(text)
+    if not normalized:
+        return terms
+    for token in _tokenize_text(normalized):
+        terms[token] += 1.0
+    return terms
+
+
 def _keyword_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
     terms = []
     for item in lec.keywords or []:
@@ -531,6 +553,86 @@ def _build_vector_search_index(index_rows: list[dict]) -> VectorSearchIndex:
         keyword_matrix = _normalize_matrix(keyword_matrix),
         summary_matrix = _normalize_matrix(summary_matrix),
     )
+
+
+class CommunityIndex:
+    """
+    metadata.communities 기반 reranking 보조 신호.
+    community 정보가 없는 강의는 0.0으로 동작해 기존 데모 강의에는 영향을 주지 않는다.
+    """
+
+    def __init__(self, lectures: list[LectureMetadata]):
+        self.reports_by_video_id: dict[str, list[CommunityReportDocument]] = {}
+        self._load(lectures)
+
+    def _load(self, lectures: list[LectureMetadata]) -> None:
+        report_count = 0
+        for lec in lectures:
+            reports = []
+            for row in lec.communities or []:
+                if not isinstance(row, dict):
+                    continue
+                title = str(row.get("title") or "")
+                summary = str(row.get("summary") or "")
+                if not title and not summary:
+                    continue
+
+                try:
+                    rank = float(row.get("rank") or 0.0)
+                except (TypeError, ValueError):
+                    rank = 0.0
+                if not math.isfinite(rank):
+                    rank = 0.0
+
+                try:
+                    level = int(row.get("level") or 0)
+                except (TypeError, ValueError):
+                    level = 0
+
+                reports.append(CommunityReportDocument(
+                    video_id      = lec.video_id,
+                    title_terms   = _community_report_terms(title),
+                    summary_terms = _community_report_terms(summary),
+                    rank          = rank,
+                    level         = level,
+                ))
+
+            if reports:
+                self.reports_by_video_id[lec.video_id] = reports
+                report_count += len(reports)
+
+        print(
+            f"[Community] metadata 기반 {len(self.reports_by_video_id)}개 강의, "
+            f"{report_count}개 report 로드\n"
+        )
+
+    @staticmethod
+    def _coverage(query_terms: Counter, report_terms: Counter) -> float:
+        if not query_terms or not report_terms:
+            return 0.0
+        denom = sum(max(weight, 0.0) for weight in query_terms.values()) or 1.0
+        hit = sum(
+            max(weight, 0.0)
+            for term, weight in query_terms.items()
+            if report_terms.get(term, 0.0) > 0
+        )
+        return min(hit / denom, 1.0)
+
+    def score(self, video_id: str, query_terms: Counter) -> float:
+        reports = self.reports_by_video_id.get(video_id)
+        if not reports or not query_terms:
+            return 0.0
+
+        best = 0.0
+        for report in reports:
+            title_overlap = self._coverage(query_terms, report.title_terms)
+            summary_overlap = self._coverage(query_terms, report.summary_terms)
+            base = 0.60 * title_overlap + 0.40 * summary_overlap
+            rank_norm = min(max(report.rank / 10.0, 0.0), 1.0)
+            rank_weight = 0.85 + 0.15 * rank_norm
+            best = max(best, base * rank_weight)
+
+        return round(min(best, 1.0), 4)
 
 
 def _fast_list_by_domain_analysis(
@@ -1164,6 +1266,7 @@ class Recommender:
             if (lec := self.collection.get(video_id)) is not None
         ]
         self._lexical_stats = _build_lexical_stats(indexed_lectures)
+        self._community_index = CommunityIndex(indexed_lectures)
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
@@ -1568,6 +1671,10 @@ class Recommender:
             core_weight=self.cfg.GRAPH_CORE_WEIGHT,
             intro_weight=self.cfg.GRAPH_INTRO_WEIGHT,
         )
+        community_score = self._community_index.score(
+            lec.video_id,
+            self._query_lexical_terms(ctx),
+        )
 
         # ── 가중합 구조 점수 ──────────────────────────────────
         MAX_BOOST = (
@@ -1588,6 +1695,7 @@ class Recommender:
         total = max(
             self.cfg.W_CONTENT * content_score * duration_score
             + self.cfg.W_GRAPH * graph_score
+            + self.cfg.W_COMMUNITY * community_score
             + self.cfg.W_BOOST * boost_signal
             - self.cfg.FRAG_PENALTY_WEIGHT * frag,
             0.0
@@ -1637,6 +1745,7 @@ class Recommender:
             "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
             "difficulty_match":     round(difficulty_match, 4),
             "graph_score":          round(graph_score, 4),
+            "community_score":      round(community_score, 4),
             "depth_score":          round(depth_score, 4),
             "contrast_signal":      round(contrast_signal, 4),
             "contrast_bonus":       round(contrast_bonus, 4),
@@ -1668,7 +1777,7 @@ class Recommender:
 
     def _print_candidate_scores(self, candidates: list[tuple[LectureMetadata, dict]]) -> None:
         print(f"  {'video_id':<10} {'제목':<24} {'sim_t':>5} {'sim_k':>5} {'sim_k*':>6} {'sim_s':>5} "
-              f"{'vec':>5} {'dm':>5} {'graph':>5} {'boost':>6} {'ctr':>5} {'dur':>5} {'→score':>7}")
+              f"{'vec':>5} {'dm':>5} {'graph':>5} {'comm':>5} {'boost':>6} {'ctr':>5} {'dur':>5} {'→score':>7}")
         for lec, d in candidates:
             flags = ""
             if d.get("domain_mismatch"):          flags += " !dom"
@@ -1678,7 +1787,8 @@ class Recommender:
                   f"{d['sim_title']:>5.3f} {d['sim_keyword']:>5.3f} "
                   f"{d['sim_keyword_filtered']:>6.3f} {d['sim_summary']:>5.3f} "
                   f"{d['vec_score']:>5.3f} {d['dm_score']:>5.3f} "
-                  f"{d['graph_score']:>5.3f} {d['boost_signal']:>6.3f} {d['contrast_signal']:>5.3f} "
+                  f"{d['graph_score']:>5.3f} {d['community_score']:>5.3f} "
+                  f"{d['boost_signal']:>6.3f} {d['contrast_signal']:>5.3f} "
                   f"{d['duration_score']:>5.3f} {d['score']:>7.3f}{flags}")
 
     def _classify_tiers(
