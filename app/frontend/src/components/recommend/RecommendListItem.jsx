@@ -7,7 +7,7 @@ import { useState } from 'react'
 export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const [isExpanded, setIsExpanded] = useState(false)
   const detail        = lecture.score_detail || {}
-  const overallScore  = lecture.display_score ?? Math.round((lecture.score || 0) * 100)
+  const overallScore  = lecture.display_score ?? null
   const durationLabel = formatDuration(lecture.duration_sec)
 
   // tier 판단: API 필드 우선, 없으면 reason 텍스트로 fallback
@@ -15,6 +15,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const isRelated = lecture.tier === 'related'
     || (typeof lecture.reason === 'string' && lecture.reason.includes('직접 일치하지 않지만'))
   const hasSupportTier = isRelated || isBackground
+  const showScore = overallScore != null
 
   // keywords 배열 우선 — reason 텍스트가 태그로 뽑히는 버그 방지
   const relatedTags = deriveRelatedTags(lecture, queryText, 4)
@@ -60,7 +61,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
 
         {/* 점수 + 티어 배지 + 토글 */}
         <div className="rec-col rec-col-score">
-          {lecture.score != null && (
+          {showScore && (
             <div className={`rec-overall-score${hasSupportTier ? ' rec-overall-score--related' : ''}${isBackground ? ' rec-overall-score--background' : ''}`}>
               {overallScore}점
             </div>
