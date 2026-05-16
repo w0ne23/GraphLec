@@ -33,7 +33,7 @@ import re
 from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter, defaultdict
-from typing import Optional
+from typing import Iterable, Optional
 
 import numpy as np
 import lancedb
@@ -61,6 +61,103 @@ _REPO_ROOT     = _resolve_repo_root()
 DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
 DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
 _TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
+_DOMAIN_ALIASES = {
+    "컴퓨터공학": "eng/cs",
+    "컴공": "eng/cs",
+    "computer science": "eng/cs",
+    "cs": "eng/cs",
+    "경제학": "soc/econ",
+    "경제": "soc/econ",
+    "경영": "soc/business",
+    "비즈니스": "soc/business",
+    "마케팅": "soc/business",
+    "수학": "math",
+    "의학": "med",
+    "의료": "med",
+    "생물학": "sci/bio",
+    "생명과학": "sci/bio",
+    "화학": "sci/chem",
+    "물리학": "sci/phy",
+    "물리": "sci/phy",
+    "환경": "sci/env",
+    "기후": "sci/env",
+    "철학": "hum/phil",
+    "역사": "hum/hist",
+    "세계사": "hum/hist",
+    "한국사": "hum/hist",
+    "언어학": "hum/ling",
+    "교육": "soc/edu",
+    "교육학": "soc/edu",
+    "사회학": "soc",
+    "사회": "soc",
+    "디자인": "art/design",
+}
+_DOMAIN_LABELS = {
+    "art/design": "디자인",
+    "eng/cs": "컴퓨터공학",
+    "hum": "인문학",
+    "hum/hist": "역사",
+    "hum/ling": "언어학",
+    "hum/phil": "철학",
+    "math": "수학",
+    "med": "의학",
+    "sci/bio": "생물학",
+    "sci/chem": "화학",
+    "sci/env": "환경과학",
+    "sci/phy": "물리학",
+    "soc": "사회과학",
+    "soc/business": "경영",
+    "soc/econ": "경제학",
+    "soc/edu": "교육학",
+}
+_TOPIC_EXPANSIONS = {
+    "웹": [
+        "리액트",
+        "컴포넌트",
+        "자바스크립트",
+        "비동기",
+        "Promise",
+        "async/await",
+        "fetch",
+        "JSX",
+        "가상 DOM",
+    ],
+    "웹서비스": [
+        "리액트",
+        "컴포넌트",
+        "자바스크립트",
+        "비동기",
+        "Promise",
+        "async/await",
+        "fetch",
+        "JSX",
+        "가상 DOM",
+    ],
+    "프론트엔드": [
+        "리액트",
+        "컴포넌트",
+        "자바스크립트",
+        "JSX",
+        "가상 DOM",
+        "렌더링",
+    ],
+    "데이터베이스": [
+        "SQL",
+        "JOIN",
+        "트랜잭션",
+        "인덱스",
+        "정규화",
+        "스키마",
+    ],
+    "DB": [
+        "데이터베이스",
+        "SQL",
+        "JOIN",
+        "트랜잭션",
+        "인덱스",
+        "정규화",
+    ],
+}
 
 
 # ============================================================================
@@ -125,6 +222,7 @@ class RecommenderConfig:
     TF_IRF_IDF_FLOOR:    float = 0.05
     USE_METADATA_PREFILTER: bool = True
     METADATA_DURATION_GRACE_SEC: int = 300
+    LIST_QUERY_TOP_K:    int = 50
 
 
 # ============================================================================
@@ -284,6 +382,55 @@ def _tokenize_text(text: str) -> list[str]:
     ]
 
 
+def _expanded_topic_terms(terms: Iterable[str]) -> list[str]:
+    """
+    LLM이 일반 표현을 세부 강의 키워드로 확장하지 못한 경우를 위한
+    작은 도메인 사전. 예: 웹 → 리액트/자바스크립트/비동기.
+    """
+    expanded: list[str] = []
+    seen: set[str] = set()
+
+    def add(term: str) -> None:
+        normalized = _normalize_term(term)
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        expanded.append(term)
+
+    for term in terms:
+        add(term)
+        normalized = _normalize_term(term)
+        for alias, aliases in _TOPIC_EXPANSIONS.items():
+            normalized_alias = _normalize_term(alias)
+            if normalized == normalized_alias or normalized_alias in normalized or normalized in normalized_alias:
+                for expanded_term in aliases:
+                    add(expanded_term)
+
+    return expanded
+
+
+def _append_topic_expansions(
+    query_keywords: list[str],
+    inferred_keywords: list[str],
+    seed_terms: Optional[list[str]] = None,
+) -> list[str]:
+    existing = {_normalize_term(term) for term in query_keywords + inferred_keywords}
+    seed_only = {
+        _normalize_term(term)
+        for term in (seed_terms or [])
+        if _normalize_term(term)
+    }
+    expanded = list(inferred_keywords)
+    for term in _expanded_topic_terms(query_keywords + inferred_keywords + (seed_terms or [])):
+        normalized = _normalize_term(term)
+        if normalized in seed_only:
+            continue
+        if normalized and normalized not in existing:
+            existing.add(normalized)
+            expanded.append(term)
+    return expanded
+
+
 def _keyword_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
     terms = []
     for item in lec.keywords or []:
@@ -386,6 +533,37 @@ def _build_vector_search_index(index_rows: list[dict]) -> VectorSearchIndex:
     )
 
 
+def _fast_list_by_domain_analysis(
+    query: str,
+    available_domains: list[str],
+) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]]:
+    normalized = _normalize_term(query)
+    has_list_signal = any(
+        signal in normalized
+        for signal in (
+            "뭐 있어",
+            "뭐있어",
+            "목록",
+            "리스트",
+            "전체 강의",
+            "모든 강의",
+            "강의 보여",
+            "강의 알려",
+        )
+    )
+    if not has_list_signal:
+        return None
+
+    if "전체 강의" in normalized or "모든 강의" in normalized:
+        return "list_by_domain", query, [], [], None, None, None, None
+
+    for alias, domain in _DOMAIN_ALIASES.items():
+        if alias in normalized and domain in available_domains:
+            return "list_by_domain", query, [], [], domain, None, None, None
+
+    return None
+
+
 def _direct_match_score(
     query_keywords:    list[str],
     inferred_keywords: list[str],
@@ -400,8 +578,8 @@ def _direct_match_score(
 
     keyword 매칭: 완전 일치 또는 토큰이 keyword의 prefix인 경우만 허용
     """
-    q_tokens = set(query_keywords)
-    i_tokens = set(inferred_keywords)
+    q_tokens = set(_expanded_topic_terms(query_keywords))
+    i_tokens = set(_expanded_topic_terms(inferred_keywords))
     all_tokens = q_tokens | i_tokens
     if not all_tokens:
         return {"title": 0.0, "keyword": 0.0, "summary": 0.0}
@@ -448,7 +626,7 @@ def _direct_match_score(
         "title":        title_match,
         "keyword":      kw_match,
         "summary":      sum_match,
-        "q_kw_matched": q_kw > 0,  # 원본 query_keyword 매칭 여부
+        "q_kw_matched": (not q_tokens) or q_kw > 0,  # 원본 query_keyword 매칭 여부
     }
 
 
@@ -471,8 +649,8 @@ def _direct_match_score_tfirf(
         inferred_weight=inferred_weight,
     )
 
-    q_tokens = {_normalize_term(t) for t in query_keywords if _normalize_term(t)}
-    i_tokens = {_normalize_term(t) for t in inferred_keywords if _normalize_term(t)}
+    q_tokens = {_normalize_term(t) for t in _expanded_topic_terms(query_keywords) if _normalize_term(t)}
+    i_tokens = {_normalize_term(t) for t in _expanded_topic_terms(inferred_keywords) if _normalize_term(t)}
     if not (q_tokens or i_tokens):
         base["keyword_legacy"] = base["keyword"]
         return base
@@ -510,7 +688,7 @@ def _direct_match_score_tfirf(
 
     base["keyword_legacy"] = base["keyword"]
     base["keyword"] = tfirf_keyword
-    base["q_kw_matched"] = q_kw > 0
+    base["q_kw_matched"] = (not q_tokens) or q_kw > 0
     return base
 
 
@@ -756,11 +934,12 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
-) -> tuple[str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
+) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
     """
-    질의 → search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
+    질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
 
     반환:
+      intent             : "recommend" | "list_by_domain" | "list_by_topic"
       search_text        : 벡터 임베딩용 전체 텍스트 (query + inferred 합산)
       query_keywords     : 원본 질의에서 직접 추출한 핵심 용어 (dm 100% 반영)
       inferred_keywords  : Gemini가 의미 확장한 연관 용어 (dm 50% 반영)
@@ -780,11 +959,20 @@ def analyze_query(
 {{
   "query_keywords": ["원본 질의 핵심 용어1", ...],
   "inferred_keywords": ["확장 연관 용어1", ...],
+  "intent": "recommend 또는 list_by_domain 또는 list_by_topic",
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
   "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null
 }}
+
+[intent]: 질의 목적 분류
+  - "recommend": 특정 강의를 추천받고 싶은 일반 질의
+    예) "가상 메모리 자세히 설명하는 강의 추천해줘"
+  - "list_by_domain": 분야/도메인 강의 목록을 묻는 질의
+    예) "컴퓨터공학 강의 뭐 있어?", "경제학 강의 목록 보여줘", "전체 강의 뭐 있어?"
+  - "list_by_topic": 특정 주제와 관련된 강의를 넓게/모두 보고 싶은 질의
+    예) "딥러닝 관련 강의 모두 알려줘", "운영체제 관련 강의 다 보여줘"
 
 [query_keywords]: 원본 질의에서 직접 등장하는 핵심 학술·기술 용어
 - "찾아줘", "알려줘", "강의", "어떻게" 같은 메타·구어체 표현 제외
@@ -830,6 +1018,7 @@ def analyze_query(
     text   = response.text.strip().replace("```json", "").replace("```", "").strip()
     parsed = json.loads(text)
 
+    intent            = parsed.get("intent") or "recommend"
     query_keywords    = parsed.get("query_keywords", [])
     inferred_keywords = parsed.get("inferred_keywords", [])
     domain            = parsed.get("domain") or None
@@ -852,8 +1041,10 @@ def analyze_query(
             duration_max_sec = None
     if difficulty_hint not in ("beginner", "intermediate", "advanced"):
         difficulty_hint = None
+    if intent not in ("recommend", "list_by_domain", "list_by_topic"):
+        intent = "recommend"
 
-    return search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint
+    return intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint
 
 
 # ============================================================================
@@ -867,7 +1058,7 @@ class RecommendResult:
     domain:       str
     instructor:   str
     score:        float
-    display_score: int
+    display_score: Optional[int]
     duration_sec: float
     score_detail: dict
     reason:       str
@@ -878,6 +1069,7 @@ class RecommendResult:
 @dataclass
 class QueryContext:
     query:             str
+    intent:            str
     search_text:       str
     query_keywords:    list[str]
     inferred_keywords: list[str]
@@ -983,11 +1175,22 @@ class Recommender:
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
-        search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
-            query, self._available_domains, self._available_keywords
+        fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains)
+        if fast_analysis:
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = fast_analysis
+        else:
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
+                query, self._available_domains, self._available_keywords
+            )
+        inferred_keywords = _append_topic_expansions(
+            query_keywords,
+            inferred_keywords,
+            seed_terms=[query],
         )
+        search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
 
+        print(f"[질의 의도]   {intent}")
         print(f"[원본 키워드] {query_keywords}")
         print(f"[확장 키워드] {inferred_keywords}")
         print(f"[추론 도메인] {domain or '미확정'}")
@@ -1000,6 +1203,7 @@ class Recommender:
 
         return QueryContext(
             query             = query,
+            intent            = intent,
             search_text       = search_text,
             query_keywords    = query_keywords,
             inferred_keywords = inferred_keywords,
@@ -1012,6 +1216,48 @@ class Recommender:
 
     def _all_candidate_ids(self) -> list[str]:
         return [row["video_id"] for row in self._index_rows]
+
+    def _list_by_domain_results(self, ctx: QueryContext, top_k: int) -> list[RecommendResult]:
+        difficulty_order = {
+            "beginner": 0,
+            "intermediate": 1,
+            "advanced": 2,
+            "unknown": 3,
+        }
+        lectures = []
+        for video_id in self._row_by_video_id:
+            lec = self.collection.get(video_id)
+            if lec is None:
+                continue
+            if ctx.domain and lec.domain != ctx.domain:
+                continue
+            lectures.append(lec)
+
+        lectures.sort(
+            key=lambda lec: (
+                difficulty_order.get(lec.difficulty, 3),
+                lec.title or lec.video_id,
+            )
+        )
+
+        scope = _DOMAIN_LABELS.get(ctx.domain, ctx.domain) if ctx.domain else "전체"
+        reason = "전체 강의 목록입니다." if not ctx.domain else f"{scope} 분야 강의 목록입니다."
+        results = []
+        for lec in lectures[:top_k]:
+            results.append(RecommendResult(
+                video_id      = lec.video_id,
+                title         = lec.title,
+                domain        = lec.domain,
+                instructor    = lec.instructor_id,
+                score         = 0.0,
+                display_score = None,
+                duration_sec  = lec.duration_sec,
+                score_detail  = {},
+                reason        = reason,
+                summary       = lec.summary,
+                tier          = "list",
+            ))
+        return results
 
     def _rrf_fuse(
         self,
@@ -1492,7 +1738,7 @@ class Recommender:
             elif score >= related_threshold and dm_kw >= self.cfg.DM_KW_FLOOR_RELATED:
                 # graph_score == 0: 구조적으로 쿼리 개념과 이웃 겹침이 없는 강의
                 # focus_concept 없을 때만 적용 (있을 때는 depth_bonus로 graph가 0일 수 있음)
-                if graph_sc == 0.0 and not ctx.focus_concept:
+                if graph_sc == 0.0 and not ctx.focus_concept and ctx.intent != "list_by_topic":
                     continue  # related에서도 제외
                 tier = "related"
             elif score >= background_threshold and background_signal:
@@ -1547,17 +1793,47 @@ class Recommender:
         """
         ctx = self._prepare_query_context(query)
 
+        if ctx.intent == "list_by_domain":
+            return self._list_by_domain_results(ctx, max(top_k, self.cfg.LIST_QUERY_TOP_K))
+
+        restored_cfg = None
+        effective_top_k = top_k
+        if ctx.intent == "list_by_topic":
+            effective_top_k = max(top_k, self.cfg.LIST_QUERY_TOP_K)
+            restored_cfg = {
+                "ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE,
+                "Q_KW_MISMATCH_PENALTY": self.cfg.Q_KW_MISMATCH_PENALTY,
+                "RELATED_RATIO": self.cfg.RELATED_RATIO,
+                "BACKGROUND_RATIO": self.cfg.BACKGROUND_RATIO,
+                "DM_KW_FLOOR_RELATED": self.cfg.DM_KW_FLOOR_RELATED,
+                "HYBRID_CANDIDATE_TOP_N": self.cfg.HYBRID_CANDIDATE_TOP_N,
+            }
+            self.cfg.ABS_MIN_SCORE = 0.05
+            self.cfg.Q_KW_MISMATCH_PENALTY = 1.0
+            self.cfg.RELATED_RATIO = 0.35
+            self.cfg.BACKGROUND_RATIO = 0.15
+            self.cfg.DM_KW_FLOOR_RELATED = 0.0
+            self.cfg.HYBRID_CANDIDATE_TOP_N = max(
+                self.cfg.HYBRID_CANDIDATE_TOP_N,
+                self.cfg.LIST_QUERY_TOP_K,
+            )
+
         if min_score is not None:
             self.cfg.ABS_MIN_SCORE = min_score
 
-        # ── 질의 벡터화 ───────────────────────────────────────────────
-        query_vec = _embed(ctx.search_text)
-        candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
-        candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
+        try:
+            # ── 질의 벡터화 ───────────────────────────────────────────────
+            query_vec = _embed(ctx.search_text)
+            candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
+            candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
 
-        # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
-        self._print_candidate_scores(candidates)
-        return self._classify_tiers(candidates, ctx, top_k)
+            # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
+            self._print_candidate_scores(candidates)
+            return self._classify_tiers(candidates, ctx, effective_top_k)
+        finally:
+            if restored_cfg:
+                for key, value in restored_cfg.items():
+                    setattr(self.cfg, key, value)
 
     def print_results(self, results: list[RecommendResult], title: str = "추천 결과", top_k: int = 3):
         top = results[:top_k]
