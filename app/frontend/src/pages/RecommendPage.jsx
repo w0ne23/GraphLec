@@ -1,4 +1,5 @@
 import { useState, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { recommendLectures } from '../lib/api'
 
 import RecommendListItem from '../components/recommend/RecommendListItem'
@@ -12,7 +13,8 @@ const SUGGESTIONS = [
   '딥러닝 CNN 실습 위주 강의',
 ]
 
-export default function RecommendPage({ onNavigate }) {
+export default function RecommendPage() {
+  const navigate = useNavigate()
   const [query,       setQuery]       = useState('')
   const [submitted,   setSubmitted]   = useState(false)
   const [loading,     setLoading]     = useState(false)

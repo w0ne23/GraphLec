@@ -22,7 +22,7 @@ const THUMB_ICON = {
   '소프트웨어 공학': '⚙️', '수학': '📐',
 }
 
-export default function UploadPage({ onNavigate }) {
+export default function UploadPage() {
   const [lectures,    setLectures]    = useState([])
   const [title,       setTitle]       = useState('')
   const [category,    setCategory]    = useState('컴퓨터 과학')
@@ -287,7 +287,7 @@ export default function UploadPage({ onNavigate }) {
 
             return (
               <div key={lec.id}>
-                <div className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`} onClick={() => lec.status === 'done' && onNavigate?.({ page: 'lecture', lectureId: lec.id })}>
+                <div className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`} onClick={() => lec.status === 'done' && navigate(`/lectures/${lec.id}`)}>
                   <div className="upload-row-thumb" style={{ background: thumbBg }}><span className="upload-row-thumb-icon">{thumbIcon}</span></div>
                   <div className="upload-row-main">
                     <div className="upload-row-title">{lec.title}</div>
@@ -296,7 +296,7 @@ export default function UploadPage({ onNavigate }) {
                   <div className="upload-row-date">{new Date(lec.created_at).toLocaleDateString('ko-KR')}</div>
                   <div className="upload-row-status"><span className={`upload-status-badge ${st.cls}`}>{st.label}</span></div>
                   <div className="upload-row-actions">
-                    {lec.status === 'done' && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); onNavigate?.({ page: 'verifier', lectureId: lec.id }) }}>Verifier</button>}
+                    {lec.status === 'done' && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); navigate(`/lectures/${lec.id}/verifier`) }}>Verifier</button>}
                     {lec.status === 'error' && <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, e)}>재시도</button>}
                     {lec.status !== 'done' && <button className="upload-btn-delete" onClick={e => handleDelete(lec.id, e)}>삭제</button>}
                     {lec.status === 'done' && <span className="upload-row-arrow">→</span>}
