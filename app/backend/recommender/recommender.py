@@ -178,7 +178,13 @@ class RecommenderConfig:
     W_CONTENT:           float = 0.60
     W_GRAPH:             float = 0.20
     W_COMMUNITY:         float = 0.10
-    W_BOOST:             float = 0.10
+    W_VISUAL:            float = 0.03
+    W_BOOST:             float = 0.07
+    W_CONTENT_VISUAL_QUERY:   float = 0.52
+    W_GRAPH_VISUAL_QUERY:     float = 0.18
+    W_COMMUNITY_VISUAL_QUERY: float = 0.10
+    W_VISUAL_QUERY:           float = 0.15
+    W_BOOST_VISUAL_QUERY:     float = 0.05
     # graph_score role 가중치
     GRAPH_CORE_WEIGHT:   float = 1.00
     GRAPH_INTRO_WEIGHT:  float = 0.35
@@ -243,6 +249,8 @@ class LectureMetadata:
     concept_roles:     list[dict]
     concept_relations: list[dict]
     communities:       list[dict]
+    pedagogy:          dict
+    visual_concept_terms: list[str]
 
 
 @dataclass
@@ -314,6 +322,11 @@ class MetadataCollection:
                     concept_roles     = item.get("concept_roles", []),
                     concept_relations = item.get("concept_relations", []),
                     communities       = item.get("communities", []),
+                    pedagogy          = item.get("pedagogy", {}),
+                    visual_concept_terms = (
+                        item.get("visual_concept_terms")
+                        or item.get("pedagogy", {}).get("visual_concept_terms", [])
+                    ),
                 )
                 self.lectures[lec.video_id] = lec
         print(f"[로드] {len(self.lectures)}개 강의 메타데이터 로드 완료\n")
@@ -977,6 +990,13 @@ _COMPARISON_SIGNALS = frozenset({
     "구분", "다른점", "차이를", "비교해", "비교한",
 })
 
+# ── 시각 자료 선호 감지 신호 ───────────────────────────────────────
+_VISUAL_SIGNALS = frozenset({
+    "그림", "그림으로", "그림 위주", "도식", "도식으로", "도표",
+    "다이어그램", "시각적", "시각적으로", "시각화", "이미지",
+    "표로", "표 형태", "표 위주", "차트", "그래프",
+})
+
 
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
     """
@@ -1002,6 +1022,16 @@ def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
     return (
         any(sig in q for sig in _COMPARISON_SIGNALS) or
         any(kw in _COMPARISON_SIGNALS for kw in (query_keywords or []))
+    )
+
+
+def _detect_visual_preference(query_keywords: list[str], query: str) -> bool:
+    """질의에 그림/도식/표 기반 설명 선호가 있는지 감지"""
+    q = query.lower()
+    keywords = {str(kw).lower() for kw in (query_keywords or [])}
+    return (
+        any(sig in q for sig in _VISUAL_SIGNALS) or
+        any(kw in _VISUAL_SIGNALS for kw in keywords)
     )
 
 
@@ -1180,6 +1210,7 @@ class QueryContext:
     duration_max_sec:  Optional[int]
     difficulty_hint:   Optional[str]
     comparison_intent: bool
+    visual_preference: bool
 
 
 def _build_reason(detail: dict, tier: str = "direct") -> str:
@@ -1292,6 +1323,7 @@ class Recommender:
         )
         search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
+        visual_preference = _detect_visual_preference(query_keywords, query)
 
         print(f"[질의 의도]   {intent}")
         print(f"[원본 키워드] {query_keywords}")
@@ -1300,6 +1332,7 @@ class Recommender:
         print(f"[깊이 개념]   {focus_concept or '없음'}")
         print(f"[난이도 힌트] {difficulty_hint or '없음'}")
         print(f"[비교 의도]   {'있음' if comparison_intent else '없음'}")
+        print(f"[시각 선호]   {'있음' if visual_preference else '없음'}")
         if duration_max_sec:
             print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 소프트 패널티 적용")
         print()
@@ -1315,6 +1348,7 @@ class Recommender:
             duration_max_sec  = duration_max_sec,
             difficulty_hint   = difficulty_hint,
             comparison_intent = comparison_intent,
+            visual_preference = visual_preference,
         )
 
     def _all_candidate_ids(self) -> list[str]:
@@ -1505,6 +1539,77 @@ class Recommender:
 
         return terms
 
+    def _resolve_rerank_weights(self, ctx: QueryContext) -> dict[str, float]:
+        if ctx.visual_preference:
+            return {
+                "content": self.cfg.W_CONTENT_VISUAL_QUERY,
+                "graph": self.cfg.W_GRAPH_VISUAL_QUERY,
+                "community": self.cfg.W_COMMUNITY_VISUAL_QUERY,
+                "visual": self.cfg.W_VISUAL_QUERY,
+                "boost": self.cfg.W_BOOST_VISUAL_QUERY,
+            }
+        return {
+            "content": self.cfg.W_CONTENT,
+            "graph": self.cfg.W_GRAPH,
+            "community": self.cfg.W_COMMUNITY,
+            "visual": self.cfg.W_VISUAL,
+            "boost": self.cfg.W_BOOST,
+        }
+
+    @staticmethod
+    def _visual_density_score(lec: LectureMetadata) -> float:
+        pedagogy = lec.pedagogy or {}
+
+        def as_float(value) -> float:
+            try:
+                parsed = float(value)
+                return parsed if math.isfinite(parsed) else 0.0
+            except (TypeError, ValueError):
+                return 0.0
+
+        visual_ratio = as_float(pedagogy.get("visual_ratio"))
+        structure_ratio = as_float(pedagogy.get("structure_ratio"))
+        return round(min(max(0.5 * visual_ratio + 0.5 * structure_ratio, 0.0), 1.0), 4)
+
+    @staticmethod
+    def _visual_concept_score(lec: LectureMetadata, query_terms: Counter) -> float:
+        if not query_terms:
+            return 0.0
+        visual_terms = set()
+        for term in lec.visual_concept_terms or []:
+            normalized = _normalize_term(term)
+            if not normalized:
+                continue
+            visual_terms.add(normalized)
+            visual_terms.update(_tokenize_text(normalized))
+        if not visual_terms:
+            return 0.0
+
+        denom = sum(max(weight, 0.0) for weight in query_terms.values()) or 1.0
+        hit = 0.0
+        for term, weight in query_terms.items():
+            if term in visual_terms:
+                hit += max(weight, 0.0)
+        return round(min(hit / denom, 1.0), 4)
+
+    def _compute_visual_score(
+        self,
+        lec: LectureMetadata,
+        ctx: QueryContext,
+        query_terms: Counter,
+    ) -> tuple[float, float, float]:
+        density_score = self._visual_density_score(lec)
+        concept_score = self._visual_concept_score(lec, query_terms)
+        if ctx.visual_preference:
+            visual_score = 0.4 * density_score + 0.6 * concept_score
+        else:
+            visual_score = 0.5 * density_score
+        return (
+            round(min(max(visual_score, 0.0), 1.0), 4),
+            density_score,
+            concept_score,
+        )
+
     def _bm25_tf(self, doc: LectureLexicalDocument, term: str) -> float:
         return (
             self.cfg.BM25_TITLE_WEIGHT   * doc.field_tf["title"].get(term, 0.0) +
@@ -1603,6 +1708,8 @@ class Recommender:
         ctx: QueryContext,
         query_vec: list[float],
         query_concepts: set[str],
+        query_terms: Counter,
+        weights: dict[str, float],
     ) -> dict:
         # ── 길이 소프트 패널티 ────────────────────────────────────
         # 기준 ±5분(300초) 이내 → 1.0
@@ -1673,7 +1780,12 @@ class Recommender:
         )
         community_score = self._community_index.score(
             lec.video_id,
-            self._query_lexical_terms(ctx),
+            query_terms,
+        )
+        visual_score, visual_density_score, visual_concept_score = self._compute_visual_score(
+            lec,
+            ctx,
+            query_terms,
         )
 
         # ── 가중합 구조 점수 ──────────────────────────────────
@@ -1693,10 +1805,11 @@ class Recommender:
         frag = _compute_fragmentation_penalty(lec.concept_roles)
 
         total = max(
-            self.cfg.W_CONTENT * content_score * duration_score
-            + self.cfg.W_GRAPH * graph_score
-            + self.cfg.W_COMMUNITY * community_score
-            + self.cfg.W_BOOST * boost_signal
+            weights["content"] * content_score * duration_score
+            + weights["graph"] * graph_score
+            + weights["community"] * community_score
+            + weights["visual"] * visual_score
+            + weights["boost"] * boost_signal
             - self.cfg.FRAG_PENALTY_WEIGHT * frag,
             0.0
         )
@@ -1746,6 +1859,15 @@ class Recommender:
             "difficulty_match":     round(difficulty_match, 4),
             "graph_score":          round(graph_score, 4),
             "community_score":      round(community_score, 4),
+            "visual_score":         round(visual_score, 4),
+            "visual_density_score": round(visual_density_score, 4),
+            "visual_concept_score": round(visual_concept_score, 4),
+            "visual_preference":    ctx.visual_preference,
+            "weight_content":       round(weights["content"], 4),
+            "weight_graph":         round(weights["graph"], 4),
+            "weight_community":     round(weights["community"], 4),
+            "weight_visual":        round(weights["visual"], 4),
+            "weight_boost":         round(weights["boost"], 4),
             "depth_score":          round(depth_score, 4),
             "contrast_signal":      round(contrast_signal, 4),
             "contrast_bonus":       round(contrast_bonus, 4),
@@ -1763,13 +1885,29 @@ class Recommender:
         query_vec: list[float],
     ) -> list[tuple[LectureMetadata, dict]]:
         query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
+        query_terms = self._query_lexical_terms(ctx)
+        weights = self._resolve_rerank_weights(ctx)
+        print(
+            "[Rerank weights] "
+            f"content={weights['content']:.2f} graph={weights['graph']:.2f} "
+            f"community={weights['community']:.2f} visual={weights['visual']:.2f} "
+            f"boost={weights['boost']:.2f}"
+        )
         candidates = []
         for video_id in candidate_ids:
             row = self._row_by_video_id.get(video_id)
             lec = self.collection.get(video_id)
             if row is None or lec is None:
                 continue
-            detail = self._score_candidate(row, lec, ctx, query_vec, query_concepts)
+            detail = self._score_candidate(
+                row,
+                lec,
+                ctx,
+                query_vec,
+                query_concepts,
+                query_terms,
+                weights,
+            )
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -1777,7 +1915,7 @@ class Recommender:
 
     def _print_candidate_scores(self, candidates: list[tuple[LectureMetadata, dict]]) -> None:
         print(f"  {'video_id':<10} {'제목':<24} {'sim_t':>5} {'sim_k':>5} {'sim_k*':>6} {'sim_s':>5} "
-              f"{'vec':>5} {'dm':>5} {'graph':>5} {'comm':>5} {'boost':>6} {'ctr':>5} {'dur':>5} {'→score':>7}")
+              f"{'vec':>5} {'dm':>5} {'graph':>5} {'comm':>5} {'vis':>5} {'boost':>6} {'ctr':>5} {'dur':>5} {'→score':>7}")
         for lec, d in candidates:
             flags = ""
             if d.get("domain_mismatch"):          flags += " !dom"
@@ -1788,6 +1926,7 @@ class Recommender:
                   f"{d['sim_keyword_filtered']:>6.3f} {d['sim_summary']:>5.3f} "
                   f"{d['vec_score']:>5.3f} {d['dm_score']:>5.3f} "
                   f"{d['graph_score']:>5.3f} {d['community_score']:>5.3f} "
+                  f"{d['visual_score']:>5.3f} "
                   f"{d['boost_signal']:>6.3f} {d['contrast_signal']:>5.3f} "
                   f"{d['duration_score']:>5.3f} {d['score']:>7.3f}{flags}")
 
