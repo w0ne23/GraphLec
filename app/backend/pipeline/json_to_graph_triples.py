@@ -329,6 +329,19 @@ class Preprocessor:
     def _content_score(slide: Dict) -> int:
         return len(str(slide.get('slide_text') or '')) + len(str(slide.get('title') or ''))
 
+    @staticmethod
+    def _emphasis_keywords_text(slide: Dict) -> str:
+        keywords = []
+        for entry in slide.get('slide_node_emphasized_keywords', slide.get('emphasized_keywords', [])) or []:
+            if isinstance(entry, dict):
+                keyword = entry.get('keyword') or entry.get('text') or entry.get('name')
+            else:
+                keyword = entry
+            keyword = str(keyword or '').strip()
+            if keyword and keyword not in keywords:
+                keywords.append(keyword)
+        return ' '.join(keywords)
+
     def _build(self):
         seg_idx = 0
         ann_idx = 0
@@ -353,6 +366,7 @@ class Preprocessor:
                 'slide_number':   slide.get('slide_number'),
                 'role':           slide.get('role'),
                 'emphasis_total': (slide.get('emphasis_score') or {}).get('total', 0.0),
+                'emphasis_score':  slide.get('emphasis_score', {}),
             }
 
             for ctx in slide.get('contexts', []):
@@ -378,6 +392,8 @@ class Preprocessor:
                     'end':           ctx.get('end'),
                     'stressed':      ctx.get('stressed', False),
                     'text':          ctx.get('text', ''),
+                    'audio_emphasis': ctx.get('audio_emphasis', {}),
+                    'emphasis_score': ctx.get('emphasis_score', {}),
                 }
 
             for ann in slide.get('annotations_summary', []):
@@ -445,6 +461,15 @@ class StructureLayerBuilder:
                 'slide_number': slide.get('slide_number'),
                 'title':        slide.get('title', ''),
                 'slide_text':   slide.get('slide_text', ''),
+                'emphasis_score': slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})),
+                'emphasis_total': (
+                    slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})) or {}
+                ).get('total', 0.0),
+                'emphasis_keywords_text': Preprocessor._emphasis_keywords_text(slide),
+                'emphasized_keywords': slide.get(
+                    'slide_node_emphasized_keywords',
+                    slide.get('emphasized_keywords', []),
+                ),
             })
 
     def _build_scenes(self):
@@ -461,6 +486,7 @@ class StructureLayerBuilder:
                 'end_sec':         data['end'],
                 'role':            data.get('role'),
                 'emphasis_total':  data.get('emphasis_total', 0.0),
+                'emphasis_score':  data.get('emphasis_score', {}),
             })
         """Context 노드 생성 (발화 문맥 묶음, Scene 내부)"""
         for context_id, data in self.pre.context_data.items():
@@ -473,6 +499,8 @@ class StructureLayerBuilder:
                 'end':           data['end'],
                 'stressed':      data['stressed'],
                 'text':          data['text'],
+                'audio_emphasis': data.get('audio_emphasis', {}),
+                'emphasis_score': data.get('emphasis_score', {}),
             })
 
     def _build_segments(self):
@@ -686,6 +714,71 @@ class GraphPipeline:
     def __init__(self, config: Config = None):
         self.config = config or Config()
 
+    @staticmethod
+    def _slide_level_keywords(slide: Dict) -> list[Dict]:
+        def as_float(value) -> float:
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        keywords: list[Dict] = []
+        for entry in slide.get('emphasized_keywords', []) or []:
+            if not isinstance(entry, dict):
+                continue
+            sources = [s for s in entry.get('sources', []) if s == 'visual']
+            visual_score = as_float(entry.get('visual_score'))
+            slide_text_score = as_float(entry.get('slide_text_score'))
+            if not sources and visual_score == 0.0 and slide_text_score == 0.0:
+                continue
+            keywords.append({
+                'keyword': entry.get('keyword') or entry.get('text') or entry.get('name'),
+                'sources': sources,
+                'visual_score': visual_score,
+                'slide_text_score': slide_text_score,
+            })
+        return [kw for kw in keywords if kw.get('keyword')]
+
+    @staticmethod
+    def _merge_slide_level_fields(fused: Dict) -> list[Dict]:
+        if not fused.get('scenes') and fused.get('slides'):
+            slides = []
+            for slide in fused.get('slides') or []:
+                merged = dict(slide)
+                merged['slide_node_emphasis_score'] = slide.get('emphasis_score', {})
+                merged['slide_node_emphasized_keywords'] = GraphPipeline._slide_level_keywords(slide)
+                slides.append(merged)
+            return slides
+        slide_by_id = {
+            str(slide.get('slide_id') or '').strip(): slide
+            for slide in fused.get('slides', []) or []
+            if str(slide.get('slide_id') or '').strip()
+        }
+        slide_level_fields = (
+            'emphasized_keywords',
+            'annotation_highlights_summary',
+            'annotations_summary',
+            'slide_topic_keywords',
+            'slide_topic_keyword_scores',
+            'slide_topic_keyword_score',
+        )
+        merged_scenes = []
+        for scene in fused.get('scenes', []) or []:
+            merged = dict(scene)
+            slide = slide_by_id.get(str(scene.get('slide_id') or '').strip())
+            if slide:
+                if slide.get('emphasis_score'):
+                    merged['slide_node_emphasis_score'] = slide.get('emphasis_score')
+                if slide.get('emphasized_keywords'):
+                    merged['slide_node_emphasized_keywords'] = GraphPipeline._slide_level_keywords(slide)
+                for field in slide_level_fields:
+                    if not merged.get(field) and slide.get(field):
+                        merged[field] = slide.get(field)
+                if not merged.get('emphasis_score') and slide.get('emphasis_score'):
+                    merged['emphasis_score'] = slide.get('emphasis_score')
+            merged_scenes.append(merged)
+        return merged_scenes
+
     def run(self):
         start = time.time()
         cfg = self.config
@@ -700,7 +793,7 @@ class GraphPipeline:
         print('\n[Step 1] 데이터 로드')
         with open(cfg.fused_path, encoding='utf-8') as f:
             fused = json.load(f)
-        slides = fused['scenes']
+        slides = self._merge_slide_level_fields(fused)
         logical_slide_count = len({
             slide.get('slide_number')
             for slide in slides
