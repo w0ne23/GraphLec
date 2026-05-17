@@ -27,6 +27,15 @@ SCORE_FIELDS = (
     "slide_text_score",
 )
 
+SLIDE_LEVEL_FIELDS = (
+    "emphasized_keywords",
+    "annotation_highlights_summary",
+    "annotations_summary",
+    "slide_topic_keywords",
+    "slide_topic_keyword_scores",
+    "slide_topic_keyword_score",
+)
+
 
 def _clean_text(value: Any) -> str:
     text = "" if value is None else str(value)
@@ -62,6 +71,33 @@ def _keyword_score(entry: dict[str, Any]) -> float:
     if "score" in entry:
         return _as_float(entry.get("score"))
     return sum(_as_float(entry.get(field)) for field in SCORE_FIELDS if field != "score")
+
+
+def _index_slides_by_id(fused: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for slide in fused.get("slides") or []:
+        slide_id = _clean_inline(slide.get("slide_id"))
+        if slide_id:
+            indexed[slide_id] = slide
+    return indexed
+
+
+def _with_slide_level_fields(
+    scene: dict[str, Any],
+    slide_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    slide_id = _clean_inline(scene.get("slide_id"))
+    slide = slide_by_id.get(slide_id)
+    if not slide:
+        return scene
+
+    merged = dict(scene)
+    for field in SLIDE_LEVEL_FIELDS:
+        if not merged.get(field) and slide.get(field):
+            merged[field] = slide.get(field)
+    if not merged.get("emphasis_score") and slide.get("emphasis_score"):
+        merged["emphasis_score"] = slide.get("emphasis_score")
+    return merged
 
 
 def _iter_context_texts(slide: dict[str, Any]) -> Iterable[str]:
@@ -224,7 +260,7 @@ def fused_to_graphrag_text(
     keyword_min_score: float = 0.0,
     include_keyword_scores: bool = True,
 ) -> str:
-    slides = fused.get("scenes") or []
+    slides = fused.get("scenes") or fused.get("slides") or []
     metadata = fused.get("metadata") or {}
     lecture_name = stem or _clean_inline(metadata.get("stem")) or "lecture"
 
@@ -236,9 +272,10 @@ def fused_to_graphrag_text(
         ),
     ]
 
+    slide_by_id = _index_slides_by_id(fused)
     for slide in slides:
         block = slide_to_block(
-            slide,
+            _with_slide_level_fields(slide, slide_by_id),
             include_slide_text=include_slide_text,
             include_metadata=include_metadata,
             keyword_min_score=keyword_min_score,
