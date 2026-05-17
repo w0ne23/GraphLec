@@ -1,10 +1,11 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import LandingPage   from './pages/LandingPage'
-import UploadPage    from './pages/UploadPage'
+import DevUploadPage from './pages/dev/DevUploadPage'
 import RecommendPage from './pages/RecommendPage'
 import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
+import DevVerifierPage from './pages/dev/DevVerifierPage'
 import MainLayout    from './components/layout/MainLayout'
 
 export default function App() {
@@ -16,12 +17,13 @@ export default function App() {
             {/* 헤더/탭바 X */}
             <Route path="/"                      element={<LandingPage />} />
             <Route path="/lectures/:id"          element={<LecturePage />} />
-            <Route path="/lectures/:id/verifier" element={<VerifierPage />} />
+            <Route path="/dev/lectures/:id/verifier" element={<DevVerifierPage />} />
 
             {/* 헤더/탭바 O */}
             <Route element={<MainLayout />}>
               <Route path="/lectures"   element={<LectureListPage />} />
-              <Route path="/upload"     element={<UploadPage />} />
+              <Route path="/verify" element={<VerifierPage />} />
+              <Route path="/dev/upload" element={<DevUploadPage />} />
               <Route path="/recommend"  element={<RecommendPage />} />
             </Route>
 
