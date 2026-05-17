@@ -26,7 +26,7 @@ export default function LandingPage() {
           
           <button 
             className="ld-card"
-            onClick={() => navigate('/upload')}
+            onClick={() => navigate('/verify')}
           >
             <div className="ld-card-icon">✅</div>
             <h3 className="ld-card-title">Verify</h3>
