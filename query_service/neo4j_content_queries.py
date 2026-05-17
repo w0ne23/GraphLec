@@ -60,7 +60,13 @@ def run_content_queries(
 
     q_slide_text = f"""
     MATCH (slide:Slide {{stem: $stem}})
-    WITH slide, toLower(coalesce(slide.title,'') + ' ' + coalesce(slide.slide_text,'')) AS haystack
+    WITH slide, toLower(
+        coalesce(slide.title,'') + ' ' +
+        coalesce(slide.slide_text,'') + ' ' +
+        coalesce(slide.emphasis_keywords_text,'') + ' ' +
+        (CASE WHEN coalesce(slide.emphasis_total, 0) > 0 OR coalesce(slide.emphasis_keywords_text, '') <> ''
+              THEN '강조 emphasized highlight 핵심 중요' ELSE '' END)
+    ) AS haystack
     WITH slide, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
     OPTIONAL MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide)
@@ -74,7 +80,18 @@ def run_content_queries(
     MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide:Slide {{stem: $stem}})
     MATCH (scene)-[:HAS_CONTEXT]->(ctx:Context {{stem: $stem}})-[:HAS_SEGMENT]->(seg:Segment {{stem: $stem}})
     WITH slide, scene, ctx, seg,
-         toLower(coalesce(slide.title,'') + ' ' + coalesce(ctx.text,'') + ' ' + coalesce(seg.text,'')) AS haystack
+         toLower(
+            coalesce(slide.title,'') + ' ' +
+            coalesce(slide.emphasis_keywords_text,'') + ' ' +
+            (CASE WHEN coalesce(slide.emphasis_total, 0) > 0 OR coalesce(slide.emphasis_keywords_text, '') <> ''
+                  THEN '강조 emphasized highlight 핵심 중요' ELSE '' END) + ' ' +
+            coalesce(ctx.audio_emphasis, '') + ' ' +
+            coalesce(ctx.emphasis_score, '') + ' ' +
+            (CASE WHEN coalesce(scene.emphasis_total, 0) > 0
+                  THEN '강조 emphasized highlight 핵심 중요' ELSE '' END) + ' ' +
+            coalesce(ctx.text,'') + ' ' +
+            coalesce(seg.text,'')
+         ) AS haystack
     WITH slide, scene, ctx, seg, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
     RETURN coalesce(seg.text,'') AS segment_text, seg.start AS start, seg.end AS end,
@@ -90,7 +107,12 @@ def run_content_queries(
     WITH ge, toLower(
         coalesce(ge.title, '') + ' ' +
         coalesce(ge.description, '') + ' ' +
-        coalesce(ge.type, '')
+        coalesce(ge.type, '') + ' ' +
+        reduce(s = '', x IN coalesce(ge.emphasis_matched_keywords, []) | s + ' ' + x) + ' ' +
+        reduce(s = '', x IN coalesce(ge.emphasis_visual_keywords, []) | s + ' ' + x) + ' ' +
+        reduce(s = '', x IN coalesce(ge.emphasis_sources, []) | s + ' ' + x) + ' ' +
+        (CASE WHEN coalesce(ge.emphasis_boost_local, 0) > 0
+              THEN '강조 emphasized highlight 핵심 중요' ELSE '' END)
     ) AS haystack
     WITH ge, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
@@ -102,6 +124,11 @@ def run_content_queries(
            ge.description AS graphrag_description,
            ge.degree AS degree,
            ge.frequency AS frequency,
+           ge.emphasis_boost_local AS emphasis_boost_local,
+           ge.final_weight AS final_weight,
+           ge.emphasis_sources AS emphasis_sources,
+           ge.emphasis_matched_keywords AS emphasis_matched_keywords,
+           ge.emphasis_visual_keywords AS emphasis_visual_keywords,
            [] AS concept_ids,
            [] AS concept_names,
            collect(DISTINCT slide.slide_number) AS slide_numbers,
@@ -110,7 +137,7 @@ def run_content_queries(
            collect(DISTINCT scene.start_sec) AS scene_start_secs,
            collect(DISTINCT scene.end_sec) AS scene_end_secs,
            size(hits) AS relevance
-    ORDER BY relevance DESC, coalesce(ge.degree, 0) DESC, coalesce(ge.frequency, 0) DESC
+    ORDER BY relevance DESC, coalesce(ge.final_weight, ge.degree, 0) DESC, coalesce(ge.frequency, 0) DESC
     LIMIT {GR_ENTITY_LIM}
     """
     q_graphrag_rel = f"""
@@ -118,7 +145,13 @@ def run_content_queries(
     WITH src, r, tgt, toLower(
         coalesce(src.title, '') + ' ' +
         coalesce(tgt.title, '') + ' ' +
-        coalesce(r.description, '')
+        coalesce(r.description, '') + ' ' +
+        reduce(s = '', x IN coalesce(src.emphasis_matched_keywords, []) | s + ' ' + x) + ' ' +
+        reduce(s = '', x IN coalesce(tgt.emphasis_matched_keywords, []) | s + ' ' + x) + ' ' +
+        reduce(s = '', x IN coalesce(src.emphasis_visual_keywords, []) | s + ' ' + x) + ' ' +
+        reduce(s = '', x IN coalesce(tgt.emphasis_visual_keywords, []) | s + ' ' + x) + ' ' +
+        (CASE WHEN coalesce(r.emphasis_edge_weight, 0) > coalesce(r.weight, 0)
+              THEN '강조 emphasized highlight 핵심 중요' ELSE '' END)
     ) AS haystack
     WITH src, r, tgt, haystack, [k IN $keywords WHERE haystack CONTAINS toLower(k)] AS hits
     WHERE haystack CONTAINS toLower($kw)
@@ -128,11 +161,12 @@ def run_content_queries(
            tgt.title AS tgt_title,
            r.description AS rel_description,
            r.weight AS weight,
+           r.emphasis_edge_weight AS emphasis_edge_weight,
            r.combined_degree AS combined_degree,
            [] AS src_concept_ids,
            [] AS tgt_concept_ids,
            size(hits) AS relevance
-    ORDER BY relevance DESC, coalesce(r.weight, 0) DESC, coalesce(r.combined_degree, 0) DESC
+    ORDER BY relevance DESC, coalesce(r.emphasis_edge_weight, r.weight, 0) DESC, coalesce(r.combined_degree, 0) DESC
     LIMIT {GR_REL_LIM}
     """
 

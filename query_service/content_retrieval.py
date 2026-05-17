@@ -219,6 +219,24 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         meta = []
         if gtype:
             meta.append(f"유형: {gtype}")
+        boost = _to_float(r.get("emphasis_boost_local"))
+        final_weight = _to_float(r.get("final_weight"))
+        emphasis_sources = [str(x) for x in (r.get("emphasis_sources") or []) if x]
+        emphasis_keywords = []
+        for key in ("emphasis_matched_keywords", "emphasis_visual_keywords"):
+            for keyword in r.get(key) or []:
+                keyword = str(keyword).strip()
+                if keyword and keyword not in emphasis_keywords:
+                    emphasis_keywords.append(keyword)
+        if boost and boost > 0:
+            desc_parts = [f"boost {boost:.2f}"]
+            if final_weight is not None:
+                desc_parts.append(f"final_weight {final_weight:.2f}")
+            if emphasis_sources:
+                desc_parts.append("sources: " + ", ".join(emphasis_sources[:4]))
+            meta.append("강조 신호: " + " / ".join(desc_parts))
+        if emphasis_keywords:
+            meta.append("강조 키워드: " + ", ".join(emphasis_keywords[:8]))
         if concepts:
             meta.append("기존 개념 연결: " + ", ".join(str(x) for x in concepts[:4]))
         if slides:
@@ -249,6 +267,9 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         text = f"{src} —(GraphRAG 관계)→ {tgt}"
         if desc:
             text += f"\n{desc}"
+        edge_weight = _to_float(r.get("emphasis_edge_weight"))
+        if edge_weight and edge_weight > _to_float(r.get("weight") or 0):
+            text += f"\n강조 반영 관계 가중치: {edge_weight:.2f}"
         items.append(
             EvidenceItem(
                 uid=uid,
