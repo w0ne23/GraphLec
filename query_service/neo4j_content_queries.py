@@ -55,6 +55,7 @@ def run_content_queries(
     raw_all: list[dict[str, Any]] = []
     seen_segs: set[tuple[Any, Any]] = set()
     seen_slides: set[Any] = set()
+    seen_visual_assets: set[Any] = set()
     seen_gr_entities: set[Any] = set()
     seen_gr_rels: set[tuple[Any, Any, Any]] = set()
 
@@ -65,7 +66,12 @@ def run_content_queries(
          toLower(
         coalesce(slide.title,'') + ' ' +
         coalesce(slide.slide_text,'') + ' ' +
+        coalesce(slide.t1_structure,'') + ' ' +
+        coalesce(slide.visual_asset_text,'') + ' ' +
+        coalesce(slide.slide_type,'') + ' ' +
         coalesce(slide.emphasis_keywords_text,'') + ' ' +
+        (CASE WHEN coalesce(slide.t1_structure, '') <> '' OR coalesce(slide.visual_asset_text, '') <> ''
+              THEN '시각자료 그림 이미지 도표 표 비교표 다이어그램 구조도 figure visual table diagram' ELSE '' END) + ' ' +
         (CASE WHEN coalesce(slide.emphasis_total, 0) > 0 OR coalesce(slide.emphasis_keywords_text, '') <> ''
               THEN '강조 emphasized highlight 핵심 중요' ELSE '' END)
     ) AS haystack
@@ -85,11 +91,46 @@ def run_content_queries(
     OPTIONAL MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide)
     RETURN slide.slide_number AS slide_number, coalesce(slide.id,'') AS slide_id,
            slide.title AS title, slide.slide_text AS slide_text,
+           slide.t1_structure AS t1_structure,
+           slide.visual_asset_text AS visual_asset_text,
+           slide.slide_type AS slide_type,
            min(scene.start_sec) AS start_sec, max(scene.end_sec) AS end_sec,
            coalesce(slide.emphasis_total, 0) AS emphasis_total,
            size(hits) AS relevance,
            size(title_hits) AS title_relevance
     ORDER BY title_relevance DESC, relevance DESC, emphasis_total DESC, slide.slide_number LIMIT {SLIDE_LIM}
+    """
+    q_visual_asset = f"""
+    MATCH (slide:Slide {{stem: $stem}})-[:HAS_VISUAL_ASSET]->(asset:VisualAsset {{stem: $stem}})
+    WITH slide, asset, toLower(
+        coalesce(slide.title,'') + ' ' +
+        coalesce(slide.slide_text,'') + ' ' +
+        coalesce(asset.title,'') + ' ' +
+        coalesce(asset.asset_type,'') + ' ' +
+        coalesce(asset.description,'') + ' ' +
+        coalesce(asset.raw_text,'') + ' ' +
+        '시각자료 그림 이미지 도표 표 비교표 다이어그램 구조도 figure visual table diagram'
+    ) AS haystack
+    WITH slide, asset, haystack, replace(haystack, ' ', '') AS compact_haystack
+    WITH slide, asset, haystack,
+         [k IN $keywords
+          WHERE haystack CONTAINS toLower(k)
+             OR compact_haystack CONTAINS replace(toLower(k), ' ', '')] AS hits,
+         compact_haystack
+    WHERE haystack CONTAINS toLower($kw)
+       OR compact_haystack CONTAINS replace(toLower($kw), ' ', '')
+    OPTIONAL MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide)
+    RETURN coalesce(asset.id, '') AS visual_asset_id,
+           asset.asset_type AS asset_type,
+           asset.description AS description,
+           asset.raw_text AS raw_text,
+           asset.title AS title,
+           slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id,
+           min(scene.start_sec) AS start_sec,
+           max(scene.end_sec) AS end_sec,
+           size(hits) AS relevance
+    ORDER BY relevance DESC, slide.slide_number LIMIT {SLIDE_LIM}
     """
     q_seg_text = f"""
     MATCH (scene:Scene {{stem: $stem}})-[:USES_SLIDE]->(slide:Slide {{stem: $stem}})
@@ -206,6 +247,7 @@ def run_content_queries(
     for kw in keywords:
         for key, q, needs_rel in (
             ("slides", q_slide_text, False),
+            ("visual_assets", q_visual_asset, False),
             ("segments", q_seg_text, False),
             ("graphrag_entities", q_graphrag_entity, False),
             ("graphrag_relationships", q_graphrag_rel, False),
@@ -223,6 +265,11 @@ def run_content_queries(
                     if sn not in seen_slides:
                         seen_slides.add(sn)
                         results["slides"].append(row)
+                elif key == "visual_assets":
+                    aid = row.get("visual_asset_id")
+                    if aid and aid not in seen_visual_assets:
+                        seen_visual_assets.add(aid)
+                        results["visual_assets"].append(row)
                 elif key == "graphrag_entities":
                     eid = row.get("graphrag_entity_id")
                     if eid and eid not in seen_gr_entities:
@@ -250,7 +297,24 @@ def run_content_queries(
                 int(r.get("title_relevance") or 0),
                 int(r.get("relevance") or 0),
                 float(r.get("emphasis_total") or 0.0),
-                _relevance_score(str(r.get("slide_text", "")) + str(r.get("title", "")), keywords),
+                _relevance_score(
+                    str(r.get("slide_text", ""))
+                    + str(r.get("title", ""))
+                    + str(r.get("t1_structure", ""))
+                    + str(r.get("visual_asset_text", "")),
+                    keywords,
+                ),
+            ),
+            reverse=True,
+        )
+    if results.get("visual_assets"):
+        results["visual_assets"].sort(
+            key=lambda r: (
+                int(r.get("relevance") or 0),
+                _relevance_score(
+                    str(r.get("description", "")) + str(r.get("raw_text", "")) + str(r.get("title", "")),
+                    keywords,
+                ),
             ),
             reverse=True,
         )

@@ -55,7 +55,8 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 GRAPH_SCHEMA = """
 노드 타입과 주요 프로퍼티:
 - Video          : id, stem, title
-- Slide          : id, stem, slide_number, title, slide_text, emphasis_total, emphasis_score, emphasis_keywords_text
+- Slide          : id, stem, slide_number, title, slide_text, t1_structure, visual_asset_text, slide_type, emphasis_total, emphasis_score, emphasis_keywords_text
+- VisualAsset    : id, stem, asset_type, description, raw_text, slide_number, scene_number, title, image_path
 - Domain         : id, stem, name, subdomain
 - Scene          : id, stem, source_slide_id, scene_number, slide_number, start_sec, end_sec, role, emphasis_total
 - Context        : id, stem, slide_id, scene_id, context_index, start, end, stressed, text
@@ -69,6 +70,7 @@ GRAPH_SCHEMA = """
 - (Video)-[:HAS_SCENE]->(Scene)
 - (Video)-[:HAS_DOMAIN]->(Domain)
 - (Video)-[:HAS_SLIDE]->(Slide)
+- (Slide)-[:HAS_VISUAL_ASSET]->(VisualAsset)
 - (Scene)-[:USES_SLIDE]->(Slide)
 - (Scene)-[:HAS_CONTEXT]->(Context)
 - (Context)-[:HAS_SEGMENT]->(Segment)
@@ -102,7 +104,7 @@ CYPHER_SYSTEM_PROMPT = f"""
 3. 파라미터는 $stem 만 외부에서 넣는다. 사용자 입력 문자열을 쿼리 문자열에 직접 이어붙이지 않는다. 검색은 $needle 등 추가 파라미터를 쓸 수 있다.
 4. Cypher만 출력한다. 코드 블록(```cypher ... ```) 안에 작성한다.
 5. RETURN에 필요한 필드만 명시한다. LIMIT는 30 이하로 둔다.
-6. 타임스탬프가 필요하면 Segment.start/end 또는 Scene.start_sec/end_sec을 활용한다. Slide에는 시간 정보가 없다.
+6. 타임스탬프가 필요하면 Segment.start/end 또는 Scene.start_sec/end_sec을 활용한다. Slide에는 시간 정보가 없습니다.
 """
 
 ANSWER_SYSTEM_PROMPT = """
@@ -116,7 +118,7 @@ ANSWER_SYSTEM_PROMPT = """
 
 [복합 질문]
 - 질문이 정의와 예시·사례 등을 동시에 요구하면, 근거에서 가능한 범위로 각 요구를 모두 다룬다.
-- 특정 요구에 해당하는 근거가 없으면 그 한 가지만 짧게 밝힌다.
+- 특정 요구에 해당하는 근거가 없으면 그 한 가지만 정중하게 짧게 밝힌다.
 
 [답변 스타일]
 1. 질문에 직접 필요한 내용만 답한다. 근거가 많아도 전부 나열하지 말고 핵심만 추린다.
@@ -125,7 +127,7 @@ ANSWER_SYSTEM_PROMPT = """
 4. 초 단위 시간·구간·슬라이드 번호는 UI의 출처 버튼으로 따로 제공된다. 답변 본문에는 같은 시간 범위를 여러 줄로 나열하지 말고, "해당 내용은 관련 영상 구간에서 확인할 수 있다"처럼 요약한다.
 5. 사용자가 "정확히 몇 초", "전체 구간을 모두", "시작/끝 시간을 표로"처럼 명시적으로 시간 목록을 요구한 경우에만 시간 범위를 본문에 나열한다.
 6. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
-7. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 없다고 말한다.
+7. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 "제공된 근거만으로는 사례를 확인하기 어렵습니다."라고 말한다.
 8. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
 9. 한국어로 답한다.
 """
@@ -134,6 +136,8 @@ ANSWER_SYSTEM_PROMPT = """
 class InternalQueryRequest(BaseModel):
     stem: str = Field(..., min_length=1)
     question: str = Field(..., min_length=1)
+    current_scene_number: Optional[int] = None
+    current_slide_number: Optional[int] = None
 
 
 class InternalGraphQueryRequest(BaseModel):
@@ -253,6 +257,9 @@ STOPWORDS = {
     "가지",
     "슬라이드",
     "뭐야",
+    "거야",
+    "어디있지",
+    "설명해줘",
     "소개하",
     "알려줘",
 }
@@ -308,10 +315,14 @@ def extract_keywords_from_question(question: str) -> list[str]:
             tok = "중요"
         elif tok in {"핵심적인", "핵심적"}:
             tok = "핵심"
+        elif tok.startswith("비교"):
+            tok = "비교"
         elif tok.startswith("강조"):
             tok = "강조"
-        if len(tok) >= 2 and tok not in STOPWORDS and tok not in keywords:
+        if (len(tok) >= 2 or tok in {"표", "그림"}) and tok not in STOPWORDS and tok not in keywords:
             keywords.append(tok)
+            if tok == "응용프로그램" and "응용소프트웨어" not in keywords:
+                keywords.append("응용소프트웨어")
 
     seen: set[str] = set()
     out: list[str] = []
@@ -666,6 +677,7 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
                 "Scene": "#A29BFE",
                 "Context": "#81ECEC",
                 "Segment": "#45B7D1",
+                "VisualAsset": "#F59E0B",
             }
             nodes[nid] = {
                 "id": nid,
@@ -704,6 +716,21 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
                 "Slide",
                 str(r.get("slide_text", ""))[:200],
             )
+
+    for r in structured.get("visual_assets", []):
+        aid = str(r.get("visual_asset_id", ""))
+        slid = str(r.get("slide_id", ""))
+        if slid:
+            add_node(slid, f"S{r.get('slide_number')}", "Slide")
+        if aid:
+            add_node(
+                aid,
+                str(r.get("asset_type", "visual")),
+                "VisualAsset",
+                (str(r.get("description", "")) + "\n" + str(r.get("raw_text", ""))).strip()[:300],
+            )
+        if slid and aid:
+            edges.append({"from": slid, "to": aid, "label": "HAS_VISUAL_ASSET"})
 
     for r in structured.get("graphrag_entities", []):
         eid = str(r.get("graphrag_entity_id", ""))
@@ -1071,6 +1098,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
                     question,
                     extract_keywords_from_question,
                     _call_gemini_raw,
+                    current_slide_number=req.current_slide_number,
                 )
                 if not graph_context.strip():
                     return _empty_query_response()

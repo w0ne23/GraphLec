@@ -563,7 +563,13 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     }
 
 
-async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict[str, Any]:
+async def ask_question(
+    db: AsyncSession,
+    lecture_id: str,
+    question: str,
+    current_scene_number: Any = None,
+    current_slide_number: Any = None,
+) -> Dict[str, Any]:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
@@ -579,7 +585,12 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
         async with httpx.AsyncClient(timeout=60.0) as client:
             resp = await client.post(
                 f"{query_url}/internal/query",
-                json={"stem": stem, "question": question},
+                json={
+                    "stem": stem,
+                    "question": question,
+                    "current_scene_number": current_scene_number,
+                    "current_slide_number": current_slide_number,
+                },
             )
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")

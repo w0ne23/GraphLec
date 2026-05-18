@@ -50,7 +50,13 @@ async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Dep
     question = body.get("question")
     if not question:
         raise HTTPException(status_code=400, detail="Question is required")
-    return await lecture_service.ask_question(db, lecture_id, question)
+    return await lecture_service.ask_question(
+        db,
+        lecture_id,
+        question,
+        current_scene_number=body.get("current_scene_number"),
+        current_slide_number=body.get("current_slide_number"),
+    )
 
 
 @router.post("/{lecture_id}/graph/enter")
