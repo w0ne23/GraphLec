@@ -18,7 +18,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from google import genai
 from dotenv import load_dotenv
@@ -327,7 +327,86 @@ class Preprocessor:
 
     @staticmethod
     def _content_score(slide: Dict) -> int:
-        return len(str(slide.get('slide_text') or '')) + len(str(slide.get('title') or ''))
+        visual_text = ' '.join(
+            f"{asset.get('title', '')} {asset.get('description', '')} {asset.get('raw_text', '')}"
+            for asset in (slide.get('visual_assets') or [])
+            if isinstance(asset, dict)
+        )
+        return (
+            len(str(slide.get('slide_text') or ''))
+            + len(str(slide.get('t1_structure') or ''))
+            + len(visual_text)
+            + len(str(slide.get('title') or ''))
+        )
+
+    @staticmethod
+    def _visual_type(slide: Dict, asset: Optional[Dict] = None) -> str:
+        if isinstance(asset, dict):
+            asset_type = str(asset.get('asset_type') or asset.get('type') or '').strip().lower()
+            if asset_type in {'table', 'diagram', 'figure', 'list', 'chart', 'image', 'other'}:
+                return asset_type
+        slide_type = str(slide.get('slide_type') or '').lower()
+        structure = ' '.join(
+            [
+                str(slide.get('t1_structure') or ''),
+                str((asset or {}).get('description') or ''),
+                str((asset or {}).get('raw_text') or ''),
+            ]
+        ).lower()
+        if any(k in structure for k in ('표 형태', '표로 구성', '비교표', 'table')):
+            return 'table'
+        if any(k in structure for k in ('다이어그램', 'diagram', '구조도')):
+            return 'diagram'
+        if any(k in structure for k in ('list', '목록', '불릿', '리스트')):
+            return 'list'
+        if '계층' in structure:
+            return 'diagram'
+        if slide_type in {'mixed', 'image_only'}:
+            return 'figure'
+        return slide_type or 'visual'
+
+    @staticmethod
+    def _asset_text(asset: Dict) -> str:
+        parts = [
+            str(asset.get('title') or '').strip(),
+            str(asset.get('description') or '').strip(),
+            str(asset.get('raw_text') or '').strip(),
+        ]
+        return '\n'.join(part for part in parts if part)
+
+    def _visual_assets(self, slide: Dict) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for idx, asset in enumerate(slide.get('visual_assets') or [], start=1):
+            if isinstance(asset, str):
+                asset = {'description': asset}
+            if not isinstance(asset, dict):
+                continue
+            text = self._asset_text(asset)
+            if not text:
+                continue
+            normalized.append({
+                'asset_index': int(asset.get('asset_index') or idx),
+                'asset_type': self._visual_type(slide, asset),
+                'title': str(asset.get('title') or '').strip(),
+                'description': str(asset.get('description') or text).strip(),
+                'raw_text': str(asset.get('raw_text') or '').strip(),
+                'bbox': asset.get('bbox') if isinstance(asset.get('bbox'), dict) else None,
+            })
+
+        if normalized:
+            return normalized
+
+        structure_text = str(slide.get('t1_structure') or '').strip()
+        if not structure_text:
+            return []
+        return [{
+            'asset_index': 1,
+            'asset_type': self._visual_type(slide),
+            'title': str(slide.get('title') or '').strip(),
+            'description': structure_text,
+            'raw_text': '',
+            'bbox': None,
+        }]
 
     @staticmethod
     def _emphasis_keywords_text(slide: Dict) -> str:
@@ -456,11 +535,18 @@ class StructureLayerBuilder:
     def _build_slides(self):
         for slide in self.pre.unique_slides.values():
             sid = slide['slide_id']
+            visual_assets = self.pre._visual_assets(slide)
+            visual_asset_text = '\n\n'.join(
+                self.pre._asset_text(asset) for asset in visual_assets if self.pre._asset_text(asset)
+            )
             self.c.add(self.vid, 'HAS_SLIDE', sid)
             self.c.add(sid, 'type', 'Slide', {
                 'slide_number': slide.get('slide_number'),
                 'title':        slide.get('title', ''),
                 'slide_text':   slide.get('slide_text', ''),
+                't1_structure': slide.get('t1_structure', ''),
+                'visual_asset_text': visual_asset_text,
+                'slide_type': slide.get('slide_type', ''),
                 'emphasis_score': slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})),
                 'emphasis_total': (
                     slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})) or {}
@@ -471,6 +557,21 @@ class StructureLayerBuilder:
                     slide.get('emphasized_keywords', []),
                 ),
             })
+            for idx, asset in enumerate(visual_assets, start=1):
+                visual_id = f"{sid}/visual/{idx:02d}"
+                self.c.add(sid, 'HAS_VISUAL_ASSET', visual_id)
+                self.c.add(visual_id, 'type', 'VisualAsset', {
+                    'asset_index': asset.get('asset_index', idx),
+                    'asset_type': asset.get('asset_type') or self.pre._visual_type(slide, asset),
+                    'description': asset.get('description', ''),
+                    'raw_text': asset.get('raw_text', ''),
+                    'bbox': asset.get('bbox'),
+                    'slide_id': sid,
+                    'slide_number': slide.get('slide_number'),
+                    'scene_number': slide.get('representative_scene_number', slide.get('scene_number')),
+                    'title': asset.get('title') or slide.get('title', ''),
+                    'image_path': slide.get('image_path', ''),
+                })
 
     def _build_scenes(self):
         """Scene 노드 생성 (슬라이드 등장 구간, 1 per scene occurrence)."""
