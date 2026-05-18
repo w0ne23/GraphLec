@@ -193,6 +193,7 @@ export default function LecturePage() {
           <ChatPanel
             context={chatContext}
             lecture={lecture}
+            currentSceneIndex={currentScene}
             onJumpToScene={handleJumpToScene}
             onClose={toggleChat}
             mode="sidebar"

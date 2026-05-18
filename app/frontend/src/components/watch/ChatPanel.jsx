@@ -11,6 +11,7 @@ import { askQa } from '../../lib/api'
 
 export default function ChatPanel({ 
   lecture, 
+  currentSceneIndex = 0,
   onJumpToScene, 
   onClose,
   messages,
@@ -195,7 +196,11 @@ export default function ChatPanel({
     setLoading(true)
     
     try {
-      const res = await askQa(lecture.id, question)
+      const currentScene = lecture?.scenes?.[currentSceneIndex] || null
+      const res = await askQa(lecture.id, question, {
+        current_scene_number: currentScene?.scene_number ?? null,
+        current_slide_number: currentScene?.slide_number ?? null,
+      })
 
       setMessages(prev => [...prev, {
         role: 'assistant',

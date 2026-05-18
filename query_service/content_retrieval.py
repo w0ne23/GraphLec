@@ -163,6 +163,7 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
     for r in structured.get("slides", []):
         sn = r.get("slide_number")
         body = str(r.get("slide_text", "") or "")
+        structure = str(r.get("t1_structure") or r.get("visual_asset_text") or "")
         tit = str(r.get("title", "") or "")
         cid = str(r.get("concept_id", "") or "")
         emphasis_total = _row_float(r, "emphasis_total")
@@ -177,7 +178,8 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             if uid in seen:
                 continue
             seen.add(uid)
-            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}".strip()
+            visual = f"\n시각자료 설명:\n{structure}" if structure.strip() else ""
+            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}{visual}".strip()
             if text:
                 items.append(
                     EvidenceItem(
@@ -196,7 +198,8 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             if uid in seen:
                 continue
             seen.add(uid)
-            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}".strip()
+            visual = f"\n시각자료 설명:\n{structure}" if structure.strip() else ""
+            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}{visual}".strip()
             if text:
                 items.append(
                     EvidenceItem(
@@ -210,6 +213,32 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
                         end_sec=_to_float(r.get("end_sec")),
                     )
                 )
+
+    for r in structured.get("visual_assets", []):
+        aid = str(r.get("visual_asset_id", ""))
+        sn = r.get("slide_number")
+        asset_type = str(r.get("asset_type", "") or "visual")
+        title = str(r.get("title", "") or "")
+        desc = str(r.get("description", "") or "")
+        raw_text = str(r.get("raw_text", "") or "")
+        uid = f"vis:{aid or sn}:{asset_type}"
+        if uid in seen or not (desc or raw_text):
+            continue
+        seen.add(uid)
+        body = "\n".join(part for part in [desc, raw_text] if part)
+        text = f"시각자료({asset_type}) - 슬라이드 {sn} {title}\n{body}".strip()
+        items.append(
+            EvidenceItem(
+                uid=uid,
+                kind="visual_asset",
+                text=text,
+                row=r,
+                chunk_type="slide",
+                slide_number=_to_int(sn),
+                start_sec=_to_float(r.get("start_sec")),
+                end_sec=_to_float(r.get("end_sec")),
+            )
+        )
 
     for r in structured.get("graphrag_entities", []):
         eid = str(r.get("graphrag_entity_id", ""))
@@ -292,9 +321,9 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
 
 def _collect_ids(structured: dict[str, list[dict[str, Any]]]) -> set[str]:
     ids: set[str] = set()
-    for key in ("sub_concepts", "segments", "slides"):
+    for key in ("sub_concepts", "segments", "slides", "visual_assets"):
         for r in structured.get(key, []):
-            for fld in ("sub_id", "concept_id", "slide_id", "segment_id"):
+            for fld in ("sub_id", "concept_id", "slide_id", "segment_id", "visual_asset_id"):
                 v = r.get(fld)
                 if v:
                     ids.add(str(v).strip())
@@ -337,6 +366,10 @@ def _kw_score(text: str, keywords: list[str]) -> float:
 
 def _is_slide_importance_query(question: str) -> bool:
     return "슬라이드" in question and any(k in question for k in ("중요", "핵심", "강조", "비중", "순위", "랭킹"))
+
+
+def _is_visual_query(question: str) -> bool:
+    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도"))
 
 
 def _is_emphasis_overview_query(question: str) -> bool:
@@ -410,7 +443,7 @@ def _mmr(
 
 
 def _is_media_evidence(it: EvidenceItem) -> bool:
-    return it.kind in {"segment", "slide_text", "slide_concept"} or it.start_sec is not None
+    return it.kind in {"segment", "slide_text", "slide_concept", "visual_asset"} or it.start_sec is not None
 
 
 def _distance_to_score(dist: Optional[float]) -> float:
@@ -502,6 +535,7 @@ def build_sectioned_context(
         buckets.setdefault(it.kind, []).append(it)
 
     order = [
+        "visual_asset",
         "graphrag_entity",
         "graphrag_relationship",
         "sub_concept",
@@ -517,6 +551,7 @@ def build_sectioned_context(
                 "sub_concept": "개념 관계",
                 "graphrag_entity": "GraphRAG 개념",
                 "graphrag_relationship": "GraphRAG 개념 관계",
+                "visual_asset": "시각자료",
                 "slide_text": "슬라이드 본문",
                 "slide_concept": "슬라이드-개념",
                 "segment": "음성 구간",
@@ -535,7 +570,7 @@ def build_sectioned_context(
             lines.append("")
     lines.append(
         "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
-        "특정 유형에 근거가 없으면 그 점을 짧게 밝힌다."
+        "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
     )
     return "\n".join(lines).strip()
 
@@ -546,6 +581,7 @@ def run_enhanced_content_pipeline(
     question: str,
     extract_keywords_fn: Callable[[str], list[str]],
     call_gemini_raw: Callable[[str, str], str],
+    current_slide_number: int | None = None,
 ) -> tuple[str, dict[str, float], set[str], dict[str, list[dict[str, Any]]], list[EvidenceItem]]:
     """
     Returns:
@@ -620,6 +656,7 @@ def run_enhanced_content_pipeline(
     iw = float(score_cfg.get("intent_weight", 0.33))
     kw_w = float(score_cfg.get("keyword_weight", 0.15))
     slide_importance_query = _is_slide_importance_query(question)
+    visual_query = _is_visual_query(question)
     emphasis_overview_query = _is_emphasis_overview_query(question)
     core_keyword_query = _is_core_keyword_query(question)
     max_slide_emphasis = max(
@@ -648,6 +685,13 @@ def run_enhanced_content_pipeline(
         combined[i] = sw * sim_to_q[i] + iw * ip + kw_w * kw
         if slide_importance_query and it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
             combined[i] += 0.45 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+        if visual_query:
+            if it.kind == "visual_asset":
+                combined[i] += 0.55
+            elif it.kind in {"slide_text", "slide_concept"} and (it.row or {}).get("t1_structure"):
+                combined[i] += 0.25
+            if current_slide_number is not None and it.slide_number == current_slide_number:
+                combined[i] += 0.60
         if emphasis_overview_query:
             if it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
                 combined[i] += 0.30 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
