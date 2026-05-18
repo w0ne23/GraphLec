@@ -55,7 +55,7 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 GRAPH_SCHEMA = """
 노드 타입과 주요 프로퍼티:
 - Video          : id, stem, title
-- Slide          : id, stem, slide_number, title, slide_text
+- Slide          : id, stem, slide_number, title, slide_text, emphasis_total, emphasis_score, emphasis_keywords_text
 - Domain         : id, stem, name, subdomain
 - Scene          : id, stem, source_slide_id, scene_number, slide_number, start_sec, end_sec, role, emphasis_total
 - Context        : id, stem, slide_id, scene_id, context_index, start, end, stressed, text
@@ -110,7 +110,7 @@ ANSWER_SYSTEM_PROMPT = """
 
 [근거 규칙]
 - 답변의 사실·관계·용어는 반드시 제공된 "근거" 안에 있을 때만 쓴다.
-- 근거에 없으면 추측하지 말고 짧게 "근거에 없어 답할 수 없다"고 한다.
+- 근거에 없으면 추측하지 말고 짧게 "제공된 근거만으로는 답변하기 어렵습니다."라고 한다.
 - 근거에 "[질문 의도(모델 추론)]"가 있으면 참고만 하되, 답의 내용은 반드시 그 아래 실제 인용 근거에만 기대어라.
 - 의미 검색(보조)로 표시된 텍스트은 그래프 근거와 모순 없을 때만 보강에 사용한다.
 
@@ -122,11 +122,12 @@ ANSWER_SYSTEM_PROMPT = """
 1. 질문에 직접 필요한 내용만 답한다. 근거가 많아도 전부 나열하지 말고 핵심만 추린다.
 2. 기본 답변은 1문장 요약 + 최대 4개 항목으로 작성한다. 각 항목은 한 문장으로 짧게 쓴다.
 3. 사용자가 "자세히", "구체적으로", "전부", "비교표"처럼 확장을 요청한 경우에만 더 길게 답한다.
-4. 출처는 답변 끝에 한 번만 짧게 묶어 쓴다. 예: 출처: 슬라이드 34, 약 120초.
-5. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
-6. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 없다고 말한다.
-7. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
-8. 한국어로 답한다.
+4. 초 단위 시간·구간·슬라이드 번호는 UI의 출처 버튼으로 따로 제공된다. 답변 본문에는 같은 시간 범위를 여러 줄로 나열하지 말고, "해당 내용은 관련 영상 구간에서 확인할 수 있다"처럼 요약한다.
+5. 사용자가 "정확히 몇 초", "전체 구간을 모두", "시작/끝 시간을 표로"처럼 명시적으로 시간 목록을 요구한 경우에만 시간 범위를 본문에 나열한다.
+6. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
+7. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 없다고 말한다.
+8. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
+9. 한국어로 답한다.
 """
 
 
@@ -158,6 +159,7 @@ class QueryResponse(BaseModel):
     timestamps: list[dict]
     graph: dict
     retrieved_chunks: list[RetrievedChunk]
+    related_slides: list[dict] = Field(default_factory=list)
 
 
 class GraphEvidence(BaseModel):
@@ -242,6 +244,17 @@ STOPWORDS = {
     "또는",
     "하지만",
     "그러나",
+    "교수",
+    "내용",
+    "지금",
+    "강의",
+    "강의에서",
+    "가장",
+    "가지",
+    "슬라이드",
+    "뭐야",
+    "소개하",
+    "알려줘",
 }
 
 _CYPHER_FORBIDDEN = re.compile(
@@ -250,7 +263,21 @@ _CYPHER_FORBIDDEN = re.compile(
 )
 
 
+def _is_emphasis_content_question(question: str) -> bool:
+    return "강조" in question and any(
+        k in question
+        for k in ("내용", "뭐", "무엇", "어떤", "핵심", "중요", "키워드", "개념", "정리", "요약")
+    )
+
+
 def classify_question(question: str) -> str:
+    if _is_emphasis_content_question(question):
+        return "content"
+    if "슬라이드" in question and any(
+        k in question
+        for k in ("뭐", "무엇", "어떤", "어느", "찾", "알려", "소개", "관련", "다루", "중요", "핵심", "강조", "비중", "순위", "랭킹")
+    ):
+        return "content"
     for kw in STRUCTURAL_KEYWORDS:
         if kw in question:
             return "structural"
@@ -277,6 +304,12 @@ def extract_keywords_from_question(question: str) -> list[str]:
             tok,
         )
         tok = tok.strip()
+        if tok in {"중요한", "중요하게", "중요도"}:
+            tok = "중요"
+        elif tok in {"핵심적인", "핵심적"}:
+            tok = "핵심"
+        elif tok.startswith("강조"):
+            tok = "강조"
         if len(tok) >= 2 and tok not in STOPWORDS and tok not in keywords:
             keywords.append(tok)
 
@@ -389,13 +422,30 @@ def _first_sentence(text: str, max_chars: int = 95) -> str:
 
 
 def _source_labels_from_chunks(chunks: list[RetrievedChunk]) -> list[str]:
+    def sort_key(c: RetrievedChunk) -> tuple[float, float]:
+        score = c.score if c.score is not None else float("-inf")
+        start = c.start_sec if c.start_sec is not None else float("inf")
+        return (-score, start)
+
     labels: list[str] = []
-    for c in chunks:
+    seen: set[str] = set()
+    for c in sorted(chunks, key=sort_key):
+        if c.start_sec is not None:
+            key = f"t:{round(c.start_sec)}"
+        elif c.slide_number is not None:
+            key = f"s:{c.slide_number}"
+        else:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
         if c.slide_number is not None:
             labels.append(f"슬라이드 {c.slide_number}")
         if c.start_sec is not None:
             labels.append(f"약 {c.start_sec:.0f}초")
-    return _dedupe_preserve_order(labels)
+        if len(seen) >= 3:
+            break
+    return labels
 
 
 def _format_time_label(seconds: float) -> str:
@@ -423,6 +473,17 @@ def _format_source_block(sources: list[str]) -> str:
     return "\n".join(lines) if len(lines) > 1 else ""
 
 
+def _is_refusal_answer(text: str) -> bool:
+    cleaned = _clean_answer_text(text or "")
+    refusal_patterns = (
+        "제공된 근거만으로는 답변하기 어렵습니다",
+        "제공된 그래프 근거만으로는 답변하기 어렵습니다",
+        "근거가 없어 답변할 수 없습니다",
+        "답할 수 없습니다",
+    )
+    return any(p in cleaned for p in refusal_patterns)
+
+
 def _concise_bullet_body(title: str, body: str) -> str:
     t = title.replace(" ", "")
     if "프로세스" in t or "스레드" in t:
@@ -448,9 +509,6 @@ def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedC
     if not raw:
         return raw
 
-    sources = _source_labels_from_chunks(chunks or [])
-    if not sources:
-        sources = _dedupe_preserve_order(re.findall(r"슬라이드\s*\d+|약\s*\d+(?:\.\d+)?초", raw))
     cleaned = _clean_answer_text(raw)
     cleaned = cleaned.replace("**", "")
 
@@ -459,9 +517,9 @@ def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedC
     cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
     cleaned = re.sub(r"\n*\s*출처\s*\n(?:\s*[-*].*(?:\n|$))+\s*$", "", cleaned).strip()
 
-    source_block = _format_source_block(sources)
-    if source_block:
-        cleaned += f"\n\n{source_block}"
+    if _is_refusal_answer(cleaned):
+        return cleaned
+
     return cleaned.strip()
 
 
@@ -799,6 +857,51 @@ def _chunks_to_timestamps(chunks: list[RetrievedChunk]) -> list[dict]:
     return ts[:20]
 
 
+def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[RetrievedChunk], max_items: int = 6) -> list[dict]:
+    scored: list[dict] = []
+    for it in items:
+        score = it.retrieval_score if it.retrieval_score is not None else it.lance_score
+        if it.slide_number is not None:
+            scored.append(
+                {
+                    "slide_number": it.slide_number,
+                    "start_sec": it.start_sec,
+                    "score": score,
+                    "label": f"슬라이드 {it.slide_number}",
+                }
+            )
+
+    for c in chunks:
+        if c.slide_number is not None and c.chunk_type == "slide":
+            scored.append(
+                {
+                    "slide_number": c.slide_number,
+                    "start_sec": c.start_sec,
+                    "score": c.score,
+                    "label": f"슬라이드 {c.slide_number}",
+                }
+            )
+
+    scored.sort(
+        key=lambda r: (
+            -(float(r.get("score")) if r.get("score") is not None else float("-inf")),
+            float(r.get("start_sec")) if r.get("start_sec") is not None else float("inf"),
+            int(r.get("slide_number") or 10**9),
+        )
+    )
+    out: list[dict] = []
+    seen: set[int] = set()
+    for row in scored:
+        slide_number = int(row["slide_number"])
+        if slide_number in seen:
+            continue
+        seen.add(slide_number)
+        out.append(row)
+        if len(out) >= max_items:
+            break
+    return out
+
+
 def _extract_keywords(question: str) -> list[str]:
     parts = re.split(r"[^0-9A-Za-z가-힣_]+", (question or "").lower())
     out: list[str] = []
@@ -935,10 +1038,11 @@ async def internal_query_graph_evidence(req: InternalGraphQueryRequest) -> Graph
 
 def _empty_query_response() -> QueryResponse:
     return QueryResponse(
-        answer="그래프 근거가 없어 답변할 수 없습니다. 질문을 더 구체화하거나 강의 그래프 생성/적재 상태를 확인해주세요.",
+        answer="제공된 그래프 근거만으로는 답변하기 어렵습니다. 질문을 더 구체화하거나 강의 그래프 생성/적재 상태를 확인해주세요.",
         timestamps=[],
         graph={"nodes": [], "edges": []},
         retrieved_chunks=[],
+        related_slides=[],
     )
 
 
@@ -1033,10 +1137,16 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
     answer = _compact_answer(answer, question, retrieved_chunks)
+    if _is_refusal_answer(answer):
+        retrieved_chunks = []
+        timestamps = []
+        graph = {"nodes": [], "edges": []}
+    related_slides = _related_slides_from_evidence(selected_items, retrieved_chunks)
 
     return QueryResponse(
         answer=answer,
         timestamps=_chunks_to_timestamps(retrieved_chunks) or timestamps,
         graph=graph,
         retrieved_chunks=retrieved_chunks,
+        related_slides=related_slides,
     )

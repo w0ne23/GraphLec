@@ -139,18 +139,22 @@ export default function VideoPlayer({
   }, [isDragging, calculateProgress, duration, updatePlayerState])
 
   // 공통 시점 이동 로직
-  const jumpToTime = useCallback((targetSec, autoPlay = false) => {
+  const jumpToTime = useCallback((targetSec, autoPlay = null) => {
     if (!videoRef.current) return
     videoRef.current.currentTime = targetSec
     updatePlayerState(targetSec)
-    if (autoPlay) videoRef.current.play()
+    if (autoPlay === true) {
+      videoRef.current.play()
+    } else if (autoPlay === false) {
+      videoRef.current.pause()
+    }
   }, [updatePlayerState])
 
   // 외부(목록 클릭 등)에서 명시적인 점프 요청이 왔을 때 영상 이동
   useEffect(() => {
     if (!seekTo || !scenes[seekTo.index]) return
-    const targetSec = tsToSec(scenes[seekTo.index].timestamp)
-    jumpToTime(targetSec, true)
+    const targetSec = tsToSec(scenes[seekTo.index].timestamp) + Number(seekTo.offsetSec || 0)
+    jumpToTime(targetSec, seekTo.autoPlay ?? true)
   }, [seekTo, scenes, jumpToTime])
 
   useEffect(() => {

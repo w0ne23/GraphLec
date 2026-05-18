@@ -91,10 +91,12 @@ export default function LecturePage() {
   const scenes = lecture?.scenes ?? []
   const chatContext = { type: 'watch', lecture_id: id }
 
-  function handleJumpToScene(idx, seconds = null) {
+  function handleJumpToScene(idx, seconds = null, options = {}) {
+    const autoPlay = options.autoPlay ?? true
+    const offsetSec = Number.isFinite(Number(options.offsetSec)) ? Number(options.offsetSec) : 0
     if (Number.isInteger(idx) && idx >= 0) {
       setCurrentScene(idx)
-      setSeekTo({ index: idx, time: Date.now() })
+      setSeekTo({ index: idx, time: Date.now(), autoPlay, offsetSec })
     }
     if (seconds !== null && Number.isFinite(Number(seconds))) {
       setSeekToSeconds({ seconds: Number(seconds), time: Date.now() })
