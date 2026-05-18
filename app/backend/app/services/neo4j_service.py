@@ -1,3 +1,4 @@
+import asyncio
 import os
 import logging
 from contextlib import contextmanager
@@ -40,6 +41,30 @@ _RUNTIME_GRAPH_LABELS = {
 
 # ── Neo4j ────────────────────────────────────────────────────────────────────
 _neo4j_driver = None
+_stem_load_locks: Dict[str, asyncio.Lock] = {}
+_stem_load_locks_mutex: Optional[asyncio.Lock] = None
+_stem_load_locks_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _get_stem_load_locks_mutex() -> asyncio.Lock:
+    """async 컨텍스트에서만 호출할 것. (asyncio.get_running_loop() 사용)"""
+    global _stem_load_locks_mutex, _stem_load_locks_loop
+
+    loop = asyncio.get_running_loop()
+    if _stem_load_locks_mutex is None or _stem_load_locks_loop is not loop:
+        _stem_load_locks.clear()
+        _stem_load_locks_mutex = asyncio.Lock()
+        _stem_load_locks_loop = loop
+    return _stem_load_locks_mutex
+
+
+async def get_stem_load_lock(stem: str) -> asyncio.Lock:
+    """동일 stem의 Neo4j 적재/해제 작업을 직렬화하는 lock을 반환한다."""
+    async with _get_stem_load_locks_mutex():
+        if stem not in _stem_load_locks:
+            _stem_load_locks[stem] = asyncio.Lock()
+        return _stem_load_locks[stem]
+
 
 def get_neo4j_driver():
     """Neo4j driver를 singleton으로 반환한다.

@@ -19,6 +19,7 @@ from fastapi import HTTPException
 from app.models import Lecture, ProcessingJob, GraphSession
 from app.services.neo4j_service import (
     neo4j_session,
+    get_stem_load_lock,
     _is_stem_loaded,
     _unload_stem_from_neo4j,
     _ensure_stem_loaded,
@@ -461,9 +462,15 @@ async def graph_enter(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
         now=now,
     )
 
-    loop = asyncio.get_event_loop()
-    load_info = await loop.run_in_executor(None, _ensure_stem_loaded, stem, output_dir)
+    stem_lock = await get_stem_load_lock(stem)
+    loop = asyncio.get_running_loop()
+    async with stem_lock:
+        load_info = await loop.run_in_executor(None, _ensure_stem_loaded, stem, output_dir)
     active_count = await _active_session_count(db, lecture_id_uuid)
+    if load_info.get("loaded_now"):
+        logger.info("Neo4j graph loaded on enter stem=%s session_id=%s", stem, session_id)
+    else:
+        logger.info("Neo4j graph already loaded on enter stem=%s session_id=%s", stem, session_id)
     return {
         "lecture_id": stem,
         "stem": stem,
@@ -517,14 +524,16 @@ async def graph_leave(db: AsyncSession, lecture_id: str, session_id: str) -> Dic
             row.ended_at = now
         await db.commit()
 
-    active_count = await _active_session_count(db, lecture_id_uuid)
-    loop = asyncio.get_event_loop()
+    stem_lock = await get_stem_load_lock(stem)
+    loop = asyncio.get_running_loop()
     unloaded_now = False
-    if active_count == 0 and await loop.run_in_executor(None, _is_stem_loaded, stem):
-        await loop.run_in_executor(None, _unload_stem_from_neo4j, stem)
-        unloaded_now = True
+    async with stem_lock:
+        active_count = await _active_session_count(db, lecture_id_uuid)
+        if active_count == 0 and await loop.run_in_executor(None, _is_stem_loaded, stem):
+            await loop.run_in_executor(None, _unload_stem_from_neo4j, stem)
+            unloaded_now = True
 
-    loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
+        loaded = await loop.run_in_executor(None, _is_stem_loaded, stem)
     return {
         "lecture_id": stem,
         "stem": stem,
@@ -561,8 +570,10 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
 
     stem = str(lecture.id)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
+    stem_lock = await get_stem_load_lock(stem)
+    loop = asyncio.get_running_loop()
+    async with stem_lock:
+        await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
