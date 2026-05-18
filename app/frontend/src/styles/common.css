@@ -84,7 +84,7 @@
   background: var(--panel);
   border-bottom: 1px solid var(--b1);
 }
-.app-header-logo { font-size: 15px; font-weight: 700; color: var(--t1); text-decoration: none; }
+.app-header-logo { font-size: 17px; font-weight: 700; color: var(--t1); text-decoration: none; }
 .app-header-logo span { color: var(--blue); }
 
 .app-header-nav { display: flex; align-items: center; }
@@ -116,8 +116,7 @@
     text-decoration: none; color: var(--t3);
     transition: color .15s;
   }
-  .app-tabbar-tab i { font-size: 20px; }
-  .app-tabbar-tab span { font-size: 10px; font-weight: 500; }
+  .app-tabbar-tab span { font-size: 12px; font-weight: 600; }
   .app-tabbar-tab--active { color: var(--blue); }
 }
 

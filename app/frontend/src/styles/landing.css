@@ -15,7 +15,7 @@
 /* 중앙 콘텐츠 레이아웃 */
 .ld-content {
   display: flex; flex-direction: column; align-items: center;
-  gap: 4rem; /* 설명 영역과 카드 영역 사이 간격 */
+  gap: 96px;
   width: 100%;
 }
 
@@ -26,14 +26,17 @@
 }
 
 .ld-logo {
-  font-size: 38px; font-weight: 800; color: var(--t1);
-  letter-spacing: -1px; margin-bottom: 20px;
+  font-size: 48px; font-weight: 800; color: var(--t1);
+  letter-spacing: -1px;
 }
 .ld-logo span { color: var(--blue); }
 
-.ld-desc {
-  font-size: 14px; line-height: 1.7; color: var(--t2);
-  max-width: 640px; margin-bottom: 0; word-break: keep-all;
+.ld-subtitle {
+  margin-top: 1rem;
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--t3);
+  letter-spacing: .2px;
 }
 
 /* ── 카드 영역 ── */
@@ -47,7 +50,7 @@
 }
 
 .ld-card {
-  height: 20rem;
+  height: clamp(260px, 34vh, 360px);
   background: var(--panel); border: 1px solid var(--b1);
   border-radius: var(--rl); padding: 32px 20px;
   display: flex;
