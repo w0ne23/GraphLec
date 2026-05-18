@@ -114,10 +114,3 @@ export function normalizePipelineStages(stages = []) {
 
   return Array.from(byStage, ([stage, status]) => ({ stage, status }))
 }
-
-export function formatAnalysisTime(seconds) {
-  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0
-  const m = Math.floor(safe / 60)
-  const s = Math.floor(safe % 60)
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
-}
