@@ -589,6 +589,7 @@ async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict
                 "timestamps": qr.get("timestamps", []),
                 "graph": qr.get("graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
+                "related_slides": qr.get("related_slides", []),
             }
     except httpx.HTTPError:
         raise HTTPException(status_code=503, detail="Query service unreachable")

@@ -165,12 +165,19 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         body = str(r.get("slide_text", "") or "")
         tit = str(r.get("title", "") or "")
         cid = str(r.get("concept_id", "") or "")
+        emphasis_total = _row_float(r, "emphasis_total")
+        title_relevance = int(r.get("title_relevance") or 0)
+        relevance = int(r.get("relevance") or 0)
+        meta = (
+            f"슬라이드 강조 점수(emphasis_total): {emphasis_total:.3f}. "
+            f"제목 일치: {title_relevance}, 검색 일치: {relevance}."
+        )
         if cid:
             uid = f"slc:{r.get('slide_id')}:{cid}"
             if uid in seen:
                 continue
             seen.add(uid)
-            text = f"슬라이드 {sn} {tit}\n{body}".strip()
+            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}".strip()
             if text:
                 items.append(
                     EvidenceItem(
@@ -189,7 +196,7 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
             if uid in seen:
                 continue
             seen.add(uid)
-            text = f"슬라이드 {sn} {tit}\n{body}".strip()
+            text = f"슬라이드 {sn} {tit}\n{meta}\n{body}".strip()
             if text:
                 items.append(
                     EvidenceItem(
@@ -326,6 +333,40 @@ def _kw_score(text: str, keywords: list[str]) -> float:
     t = text.lower()
     hits = sum(1 for k in keywords if k.lower() in t)
     return min(1.0, hits / max(3, len(keywords) * 0.5))
+
+
+def _is_slide_importance_query(question: str) -> bool:
+    return "슬라이드" in question and any(k in question for k in ("중요", "핵심", "강조", "비중", "순위", "랭킹"))
+
+
+def _is_emphasis_overview_query(question: str) -> bool:
+    return "강조" in question and any(k in question for k in ("내용", "뭐", "무엇", "어떤", "핵심", "중요", "키워드", "개념"))
+
+
+def _is_core_keyword_query(question: str) -> bool:
+    return any(k in question for k in ("핵심 키워드", "중요 키워드", "주요 키워드", "핵심 개념", "주요 개념")) or (
+        any(k in question for k in ("핵심", "중요", "주요"))
+        and any(k in question for k in ("키워드", "개념", "용어"))
+    )
+
+
+def _row_float(row: dict[str, Any] | None, key: str, default: float = 0.0) -> float:
+    if not row:
+        return default
+    try:
+        return float(row.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _entity_core_score(row: dict[str, Any] | None) -> float:
+    """GraphRAG 개념 노드의 강의 중심성 + 강조 신호를 하나의 비교 점수로 묶는다."""
+    return (
+        _row_float(row, "final_weight")
+        + 0.75 * _row_float(row, "emphasis_boost_local")
+        + 0.20 * _row_float(row, "frequency")
+        + 0.10 * _row_float(row, "degree")
+    )
 
 
 def _cosine_mat(vectors: list[np.ndarray]) -> np.ndarray:
@@ -578,6 +619,21 @@ def run_enhanced_content_pipeline(
     sw = float(score_cfg.get("semantic_weight", 0.52))
     iw = float(score_cfg.get("intent_weight", 0.33))
     kw_w = float(score_cfg.get("keyword_weight", 0.15))
+    slide_importance_query = _is_slide_importance_query(question)
+    emphasis_overview_query = _is_emphasis_overview_query(question)
+    core_keyword_query = _is_core_keyword_query(question)
+    max_slide_emphasis = max(
+        [_row_float(it.row, "emphasis_total") for it in all_items if it.kind in {"slide_text", "slide_concept"}] or [0.0]
+    )
+    max_entity_weight = max(
+        [_row_float(it.row, "final_weight") for it in all_items if it.kind == "graphrag_entity"] or [0.0]
+    )
+    max_rel_weight = max(
+        [_row_float(it.row, "emphasis_edge_weight") for it in all_items if it.kind == "graphrag_relationship"] or [0.0]
+    )
+    max_entity_core = max(
+        [_entity_core_score(it.row) for it in all_items if it.kind == "graphrag_entity"] or [0.0]
+    )
 
     combined = np.zeros(len(all_items))
     for i, it in enumerate(all_items):
@@ -590,6 +646,22 @@ def run_enhanced_content_pipeline(
             ip *= 0.72
         kw = _kw_score(all_items[i].text, keywords)
         combined[i] = sw * sim_to_q[i] + iw * ip + kw_w * kw
+        if slide_importance_query and it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
+            combined[i] += 0.45 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+        if emphasis_overview_query:
+            if it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
+                combined[i] += 0.30 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+            elif it.kind == "graphrag_entity" and max_entity_weight > 0:
+                combined[i] += 0.35 * (_row_float(it.row, "final_weight") / max_entity_weight)
+            elif it.kind == "graphrag_relationship" and max_rel_weight > 0:
+                combined[i] += 0.25 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+        if core_keyword_query:
+            if it.kind == "graphrag_entity" and max_entity_core > 0:
+                combined[i] += 0.55 * (_entity_core_score(it.row) / max_entity_core)
+            elif it.kind == "graphrag_relationship" and max_rel_weight > 0:
+                combined[i] += 0.20 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+            elif it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
+                combined[i] += 0.15 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
         it.retrieval_score = float(combined[i])
 
     order = list(np.argsort(-combined))

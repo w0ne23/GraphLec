@@ -53,6 +53,7 @@ export default function ChatPanel({
 
   function sourceLabel(text) {
     const compact = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!compact || compact.startsWith('{') || compact.startsWith('[')) return '구간 근거'
     return compact.length > 42 ? `${compact.slice(0, 42)}...` : compact
   }
 
@@ -65,10 +66,11 @@ export default function ChatPanel({
   function refsFromResponse(res) {
     const chunks = Array.isArray(res.retrieved_chunks) ? res.retrieved_chunks : []
     const rawRefs = chunks.length > 0
-      ? chunks.map(chunk => ({
+      ? chunks
+        .filter(chunk => chunk.start_sec != null && chunk.chunk_type !== 'slide')
+        .map(chunk => ({
           timestamp: formatTime(chunk.start_sec),
           startSec: chunk.start_sec,
-          slideNumber: chunk.slide_number,
           score: Number.isFinite(Number(chunk.score)) ? Number(chunk.score) : null,
           label: sourceLabel(chunk.text || chunk.chunk_type),
           text: chunk.text || '',
@@ -104,6 +106,46 @@ export default function ChatPanel({
       .slice(0, 8)
   }
 
+  function scenesFromSlideResponse(res) {
+    const slides = Array.isArray(res.related_slides) ? res.related_slides : []
+    const fallbackChunks = Array.isArray(res.retrieved_chunks) ? res.retrieved_chunks : []
+    const rawSlides = slides.length > 0
+      ? slides
+      : fallbackChunks
+        .filter(chunk => chunk.chunk_type === 'slide' && chunk.slide_number != null)
+        .map(chunk => ({
+          slide_number: chunk.slide_number,
+          start_sec: chunk.start_sec,
+          score: Number.isFinite(Number(chunk.score)) ? Number(chunk.score) : null,
+        }))
+
+    const bestBySlide = new Map()
+    rawSlides.forEach(item => {
+      const slideNumber = item.slide_number ?? item.slideNumber
+      if (slideNumber == null) return
+      const key = Number(slideNumber)
+      const prev = bestBySlide.get(key)
+      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : -Infinity
+      const prevScore = prev?.score ?? -Infinity
+      if (!prev || score > prevScore) {
+        bestBySlide.set(key, {
+          slideNumber: key,
+          startSec: item.start_sec ?? item.startSec ?? null,
+          score,
+          label: item.label || `슬라이드 ${key}`,
+        })
+      }
+    })
+
+    return Array.from(bestBySlide.values())
+      .sort((a, b) => {
+        const scoreGap = (b.score ?? -Infinity) - (a.score ?? -Infinity)
+        if (Number.isFinite(scoreGap) && Math.abs(scoreGap) > 1e-9) return scoreGap
+        return a.slideNumber - b.slideNumber
+      })
+      .slice(0, 4)
+  }
+
   function findRefSceneIndex(ref) {
     const scenes = lecture?.scenes || []
     if (!scenes.length) return -1
@@ -136,6 +178,14 @@ export default function ChatPanel({
     return idx >= 0 || Number.isFinite(Number(ref.startSec))
   }
 
+  function sceneLabel(ref) {
+    const idx = findRefSceneIndex(ref)
+    if (idx < 0) return null
+    const scene = idx >= 0 ? lecture?.scenes?.[idx] : null
+    const n = scene?.scene_number ?? idx + 1
+    return `Scene${n}`
+  }
+
   async function send() {
     const question = input.trim()
     if (!question || loading || !lecture?.id) return
@@ -151,6 +201,7 @@ export default function ChatPanel({
         role: 'assistant',
         content: res.answer || '답변을 생성하지 못했습니다.',
         refs: refsFromResponse(res),
+        scenes: scenesFromSlideResponse(res),
       }])
     } catch (e) {
       setMessages(prev => [...prev, {
@@ -183,7 +234,7 @@ export default function ChatPanel({
                 <div className="chat-answer-text">{msg.content}</div>
                 {msg.refs?.length > 0 && (
                   <div className="chat-refs-container">
-                    <div className="chat-refs-header">출처</div>
+                    <div className="chat-refs-header">영상 구간</div>
                     
                     {/* 첫 번째 출처 (단독 행) */}
                     <div className="chat-refs-first-row">
@@ -233,6 +284,26 @@ export default function ChatPanel({
                         </button>
                       </div>
                     )}
+                  </div>
+                )}
+                {msg.scenes?.length > 0 && (
+                  <div className="chat-refs-container">
+                    <div className="chat-refs-header">관련 장면</div>
+                    <div className="chat-refs-list">
+                      {msg.scenes.map((scene, i) => {
+                        const idx = findRefSceneIndex(scene)
+                        const label = sceneLabel(scene)
+                        if (!label) return null
+                        return (
+                          <button key={i} className="chat-scene-btn"
+                            title={`슬라이드 ${scene.slideNumber} 관련 장면`}
+                            onClick={() => onJumpToScene?.(idx, null, { autoPlay: false, offsetSec: 0.4 })}
+                          >
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
                   </div>
                 )}
               </div>
