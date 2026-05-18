@@ -62,7 +62,7 @@ class Config:
 
     # 강조 가중치
     W_AUDIO:    float = 0.8
-    W_VISUAL:   float = 1.5
+    W_VISUAL:   float = 0.5
     W_ANNOT:    float = 1.0   # annotation 점수는 자체 배율이 크므로 1.0
     BOTH_BONUS: float = 1.3   # 오디오 + annotation 동시 감지 보너스
     AUDIO_SIGNAL_MAX: float = 10.0      # volume_score(5) + pitch_score(5)
@@ -78,6 +78,7 @@ class Config:
     MIN_KEYWORD_LEN: int = 2
     MIN_SLIDE_TEXT_LINE_LEN: int = 4  # 슬라이드 본문 라인 최소 길이 (불릿·번호 제외)
     SLIDE_TEXT_SCORE: float = 0.3     # 슬라이드 본문 등장 1회당 점수
+    SLIDE_TEXT_REPEAT_MIN_COUNT: int = 2  # slide 강조 점수에는 2회 이상 반복된 본문 키워드만 반영
     STOPWORDS: frozenset = frozenset({
         # 조사·접속사
         "이", "그", "저", "은", "는", "가", "을", "를", "의", "에", "도",
@@ -159,6 +160,17 @@ def score_slide_emphasis(slide_emphasis_items: list[dict]) -> float:
                 continue
             seen.add(t)
             total += SLIDE_EMPHASIS_WEIGHTS.get(t, SLIDE_EMPHASIS_WEIGHTS["other"])
+    return round(total, 3)
+
+
+def score_slide_text_repeat(emphasized_keywords: list[dict], cfg: Config) -> float:
+    """슬라이드 본문에서 반복 등장한 키워드 점수만 slide-level 강조로 합산한다."""
+    threshold = cfg.SLIDE_TEXT_SCORE * max(1, cfg.SLIDE_TEXT_REPEAT_MIN_COUNT)
+    total = 0.0
+    for item in emphasized_keywords:
+        score = float(item.get("slide_text_score", 0.0) or 0.0)
+        if score >= threshold:
+            total += score
     return round(total, 3)
 
 
@@ -290,8 +302,8 @@ def _merge_keyword_entries(existing: list[dict], incoming: list[dict]) -> list[d
             }
         entry = merged[kw]
         entry["sources"] = sorted(set(entry["sources"]) | set(sources))
-        entry["visual_score"] = round(entry["visual_score"] + visual_score, 3)
-        entry["slide_text_score"] = round(entry["slide_text_score"] + slide_text_score, 3)
+        entry["visual_score"] = round(max(entry["visual_score"], visual_score), 3)
+        entry["slide_text_score"] = round(max(entry["slide_text_score"], slide_text_score), 3)
     result = list(merged.values())
     result.sort(key=lambda x: (-len(x["sources"]), x["keyword"]))
     return result
@@ -806,8 +818,12 @@ def run_fusion(cfg: Config) -> dict:
         )
         slide_emphasis_score = {
             "visual":     round(cfg.W_VISUAL * visual_score, 3),
+            "text_repeat": 0.0,
         }
-        slide_emphasis_score["total"] = slide_emphasis_score["visual"]
+        slide_emphasis_score["total"] = round(
+            slide_emphasis_score["visual"] + slide_emphasis_score["text_repeat"],
+            3,
+        )
         context_emphasis_total = round(
             sum((ctx.get("emphasis_score") or {}).get("total", 0.0) for ctx in fused_contexts),
             3,
@@ -839,6 +855,7 @@ def run_fusion(cfg: Config) -> dict:
                 "scene_indexes": [],
                 "emphasis_score": {
                     "visual": 0.0,
+                    "text_repeat": 0.0,
                     "total": 0.0,
                 },
                 "emphasized_keywords": [],
@@ -848,14 +865,20 @@ def run_fusion(cfg: Config) -> dict:
         _append_unique(slide_record["scene_ids"], scene_id)
         _append_unique(slide_record["scene_numbers"], scene_num)
         _append_unique(slide_record["scene_indexes"], scene_index)
-        if slide_emphasis_score["total"] >= slide_record["emphasis_score"].get("total", 0.0):
-            slide_record["emphasis_score"] = {
-                **slide_emphasis_score,
-            }
         slide_record["emphasized_keywords"] = _merge_keyword_entries(
             slide_record["emphasized_keywords"],
             emphasized_keywords,
         )
+        slide_visual_score = max(
+            float((slide_record.get("emphasis_score") or {}).get("visual", 0.0) or 0.0),
+            slide_emphasis_score["visual"],
+        )
+        slide_text_repeat_score = score_slide_text_repeat(slide_record["emphasized_keywords"], cfg)
+        slide_record["emphasis_score"] = {
+            "visual": round(slide_visual_score, 3),
+            "text_repeat": slide_text_repeat_score,
+            "total": round(slide_visual_score + slide_text_repeat_score, 3),
+        }
 
         # ── scene 통합 ───────────────────────────────────────────────────────
         fused_scene = {
