@@ -22,6 +22,30 @@ CHUNKS_TABLE = "chunks"
 BATCH_SIZE = 16
 
 
+def _format_visual_assets(slide: Dict[str, Any]) -> str:
+    items: List[str] = []
+    for idx, asset in enumerate(slide.get("visual_assets") or [], start=1):
+        if isinstance(asset, str):
+            asset = {"description": asset}
+        if not isinstance(asset, dict):
+            continue
+        asset_type = str(asset.get("asset_type") or asset.get("type") or "visual").strip()
+        title = str(asset.get("title") or "").strip()
+        desc = str(asset.get("description") or "").strip()
+        raw_text = str(asset.get("raw_text") or asset.get("text") or "").strip()
+        body = "\n".join(part for part in [desc, raw_text] if part)
+        if not (title or body):
+            continue
+        label = f"{idx}. {asset_type}"
+        if title:
+            label += f" - {title}"
+        items.append(f"{label}\n{body}".strip())
+
+    if items:
+        return "\n\n".join(items)
+    return str(slide.get("t1_structure") or "").strip()
+
+
 def default_lance_root() -> Path:
     env = os.getenv("GRAPHLEC_LANCE_ROOT")
     if env:
@@ -43,7 +67,13 @@ def build_chunks_from_fused(fused: Dict[str, Any], stem: str) -> List[Dict[str, 
         sn = slide.get("slide_number")
         title = (slide.get("title") or "").strip()
         stext = (slide.get("slide_text") or "").strip()
-        body = f"[{sid}] {title}\n{stext}".strip()
+        structure = _format_visual_assets(slide)
+        body_parts = [f"[{sid}] {title}".strip()]
+        if stext:
+            body_parts.append("슬라이드 원문:\n" + stext)
+        if structure:
+            body_parts.append("시각자료 설명:\n" + structure)
+        body = "\n".join(part for part in body_parts if part).strip()
         if body:
             chunks.append(
                 {

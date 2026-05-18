@@ -34,6 +34,7 @@ SLIDE_LEVEL_FIELDS = (
     "slide_topic_keywords",
     "slide_topic_keyword_scores",
     "slide_topic_keyword_score",
+    "visual_assets",
 )
 
 
@@ -47,6 +48,30 @@ def _clean_text(value: Any) -> str:
 
 def _clean_inline(value: Any) -> str:
     return re.sub(r"\s+", " ", _clean_text(value)).strip()
+
+
+def _format_visual_assets(slide: dict[str, Any]) -> str:
+    items: list[str] = []
+    for idx, asset in enumerate(slide.get("visual_assets") or [], start=1):
+        if isinstance(asset, str):
+            asset = {"description": asset}
+        if not isinstance(asset, dict):
+            continue
+        asset_type = _clean_inline(asset.get("asset_type") or asset.get("type") or "visual")
+        title = _clean_inline(asset.get("title"))
+        desc = _clean_text(asset.get("description"))
+        raw_text = _clean_text(asset.get("raw_text") or asset.get("text"))
+        body = "\n".join(part for part in [desc, raw_text] if part)
+        if not (title or body):
+            continue
+        label = f"{idx}. {asset_type or 'visual'}"
+        if title:
+            label += f" - {title}"
+        items.append(f"{label}\n{body}".strip())
+
+    if items:
+        return "\n\n".join(items)
+    return _clean_text(slide.get("t1_structure"))
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -230,6 +255,9 @@ def slide_to_block(
         slide_text = _clean_text(slide.get("slide_text"))
         if slide_text:
             lines.append("슬라이드 원문:\n" + slide_text)
+        structure_text = _format_visual_assets(slide)
+        if structure_text:
+            lines.append("시각자료 설명:\n" + structure_text)
 
     context_texts = list(_iter_context_texts(slide))
     if context_texts:
