@@ -34,7 +34,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from PIL import Image
 
@@ -94,6 +94,15 @@ T1_EXTRACTION_PROMPT = """
   "title": "슬라이드 제목 (없으면 빈 문자열)",
   "raw_text": "슬라이드에 보이는 모든 텍스트 (위→아래, 좌→우 순서, 줄바꿈은 \\n)",
   "structure": "다이어그램/표/화살표 관계를 텍스트로 기술",
+  "visual_assets": [
+    {
+      "asset_type": "table" | "diagram" | "figure" | "list" | "chart" | "image" | "other",
+      "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
+      "description": "이 시각자료 하나가 전달하는 내용",
+      "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+    }
+  ],
   "slide_emphasis": [
     {
       "text": "강조된 텍스트 원문",
@@ -117,6 +126,11 @@ slide_type 판별 기준:
 - structure 필드: 다이어그램이 없으면 빈 문자열
   예시) "사용자 → 응용소프트웨어 → 운영체제 → 컴퓨터 하드웨어 (위에서 아래 계층 구조)"
   예시) "운영체제 vs 응용소프트웨어 비교표: 목적(자원관리 vs 사용자목적), 개발언어(C/C++ vs 다양)"
+- visual_assets 필드: 슬라이드 안의 표/다이어그램/그림/차트/목록 등 독립적인 시각자료를 배열로 분리
+  - 한 슬라이드에 표와 다이어그램이 함께 있으면 항목 2개로 분리
+  - 텍스트 불릿만 있는 일반 슬라이드는 목록 구조가 의미 전달의 핵심일 때만 "list"로 포함
+  - 시각자료가 없으면 빈 배열 []
+  - description은 각 시각자료의 의미를 요약하고, raw_text는 내부에 보이는 텍스트를 원문에 가깝게 기재
 
 image_only / mixed 슬라이드 처리:
 - raw_text: 이미지 내에 인쇄된 캡션/레이블 텍스트만 기재 (없으면 빈 문자열)
@@ -166,6 +180,15 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
   "title": "슬라이드 제목 (없으면 빈 문자열)",
   "raw_text": "슬라이드에 보이는 모든 텍스트 (위→아래, 좌→우 순서, 줄바꿈은 \\n)",
   "structure": "다이어그램/표/화살표 관계를 텍스트로 기술",
+  "visual_assets": [
+    {
+      "asset_type": "table" | "diagram" | "figure" | "list" | "chart" | "image" | "other",
+      "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
+      "description": "이 시각자료 하나가 전달하는 내용",
+      "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+    }
+  ],
   "slide_emphasis": [
     {
       "text": "강조된 텍스트 원문",
@@ -181,6 +204,10 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
   - Image 2 (LAST_ANNOT) 기준으로 추출
   - PPT 애니메이션으로 나중에 나타난 텍스트까지 모두 포함
   - 교수가 직접 쓴 손글씨/필기는 무시하고 인쇄된 원본 텍스트만 추출
+  - visual_assets는 Image 2 (LAST_ANNOT)의 완전 전개 상태를 기준으로 추출하되,
+    교수 필기/손글씨/강의 중 추가된 선과 도형은 포함하지 말 것.
+  - 한 슬라이드에 표/다이어그램/그림/차트/목록이 여러 개 있으면 visual_assets 배열에 각각 분리할 것.
+  - 시각자료가 없으면 빈 배열 [].
 
 [slide_emphasis]
   - 반드시 Image 1 (BASE) 만을 기준으로 판단할 것.
@@ -503,6 +530,8 @@ class SlideLoader:
 class T1Extractor:
     """슬라이드 base 이미지 → t1 (원본 텍스트) + t1_structure 추출"""
 
+    _ASSET_TYPES = {"table", "diagram", "figure", "list", "chart", "image", "other"}
+
     def __init__(self, config: Config):
         self.config = config
         from .config import gemini_client
@@ -566,6 +595,44 @@ class T1Extractor:
 
         return filtered
 
+    @classmethod
+    def _normalize_visual_assets(cls, assets: Any) -> List[Dict]:
+        if not isinstance(assets, list):
+            return []
+
+        normalized: List[Dict] = []
+        for idx, item in enumerate(assets, start=1):
+            if isinstance(item, str):
+                item = {"description": item}
+            if not isinstance(item, dict):
+                continue
+
+            asset_type = str(item.get("asset_type") or item.get("type") or "other").strip().lower()
+            if asset_type not in cls._ASSET_TYPES:
+                asset_type = "other"
+
+            title = str(item.get("title") or item.get("caption") or "").strip()
+            description = str(item.get("description") or item.get("summary") or "").strip()
+            raw_text = str(item.get("raw_text") or item.get("text") or "").strip()
+            if not (title or description or raw_text):
+                continue
+
+            bbox = item.get("bbox")
+            if not isinstance(bbox, dict):
+                bbox = None
+
+            normalized.append(
+                {
+                    "asset_index": idx,
+                    "asset_type": asset_type,
+                    "title": title,
+                    "description": description,
+                    "raw_text": raw_text,
+                    "bbox": bbox,
+                }
+            )
+        return normalized
+
     def _call_gemini(self, image: Image.Image, base_image: Image.Image = None) -> str:
         """재시도 로직 포함 Gemini Vision 호출.
 
@@ -622,6 +689,7 @@ class T1Extractor:
         slide.setdefault("title", f"Slide {slide['slide_number']}")
         slide.setdefault("t1", "")
         slide.setdefault("t1_structure", "")
+        slide.setdefault("visual_assets", [])
         slide.setdefault("slide_emphasis", [])
 
         # build/clean_final을 쓰는 슬라이드는 교수 필기가 없으므로 1장 프롬프트 사용.
@@ -660,6 +728,9 @@ class T1Extractor:
             slide["t1"]             = result.get("raw_text", "")
             slide["t1_structure"]   = result.get("structure", "")
             slide["slide_type"]     = result.get("slide_type", "text")
+            slide["visual_assets"]  = self._normalize_visual_assets(
+                result.get("visual_assets", [])
+            )
             slide["slide_emphasis"] = self._filter_emphasis(
                 result.get("slide_emphasis", [])
             )
@@ -687,6 +758,7 @@ class T1Extractor:
                 slide["t1"] = cached["t1"]
                 slide["t1_structure"] = cached["t1_structure"]
                 slide["slide_type"] = cached["slide_type"]
+                slide["visual_assets"] = list(cached.get("visual_assets", []))
                 slide["slide_emphasis"] = list(cached["slide_emphasis"])
                 logger.info(
                     f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
@@ -700,6 +772,7 @@ class T1Extractor:
                 "t1": slide["t1"],
                 "t1_structure": slide["t1_structure"],
                 "slide_type": slide.get("slide_type", "text"),
+                "visual_assets": list(slide.get("visual_assets", [])),
                 "slide_emphasis": list(slide.get("slide_emphasis", [])),
                 "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
             }
@@ -709,6 +782,7 @@ class T1Extractor:
                 f"[{slide.get('text_source', 'base')}]: "
                 f"t1={len(slide['t1'])} chars, "
                 f"structure={len(slide['t1_structure'])} chars, "
+                f"visual_assets={len(slide.get('visual_assets', []))}개, "
                 f"slide_emphasis={len(slide.get('slide_emphasis', []))}개"
             )
 
@@ -823,6 +897,7 @@ class TextualizationPipeline:
                     "t1":                  s["t1"],
                     "t1_structure":        s["t1_structure"],
                     "slide_type":          s.get("slide_type", "text"),
+                    "visual_assets":       s.get("visual_assets", []),
                     "slide_emphasis":      s.get("slide_emphasis", []),
                     "slide_topic_keywords": s.get("slide_topic_keywords", []),
                     "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),
