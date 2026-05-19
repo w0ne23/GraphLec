@@ -286,6 +286,12 @@
 .chat-graph-edge-info span { flex-shrink: 0; padding: 1px 6px; border-radius: 999px; background: var(--blue-bg); color: var(--blue); font-weight: 700; }
 
 .chat-loading { align-self: flex-start; font-size: 13px; color: var(--t3); }
+.chat-loading-slow { color: var(--t3); opacity: .7; }
+
+.chat-error-notice { display: flex; flex-direction: column; gap: 8px; }
+.chat-error-text { font-size: 13px; color: var(--blue); line-height: 1.5; }
+.chat-retry-btn { align-self: flex-start; background: var(--blue-bg); border: 1px solid var(--blue-br); border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: 600; color: var(--blue); cursor: pointer; transition: all .14s; }
+.chat-retry-btn:hover { background: var(--blue); color: #fff; }
 
 .chat-input-row { padding: 10px 12px; border-top: 1px solid var(--b1); display: flex; gap: 8px; flex-shrink: 0; background: var(--panel); }
 .chat-input { flex: 1; background: var(--card); border: 1px solid var(--b1); border-radius: 8px; padding: 8px 12px; font-size: 13px; color: var(--t1); outline: none; transition: border-color .15s; resize: none; }
