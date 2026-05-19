@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 /**
  * 추천 강의 목록 아이템
- * 레이아웃: [썸네일] [태그·제목·강의자] [추천 점수 + 간접관련배지 / 자세히▼]
+ * 레이아웃: [썸네일] [태그·제목] [추천 점수 + 간접관련배지 / 자세히▼]
  */
 export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const [isExpanded, setIsExpanded] = useState(false)
@@ -50,10 +50,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             <span className="rec-title">{lecture.title}</span>
             {durationLabel && <span className="rec-duration-inline">· {durationLabel}</span>}
           </div>
-          <div className="rec-sub">
-            {lecture.instructor || '강사 미상'}
-            {lecture.video_id && ` | ${lecture.video_id}`}
-          </div>
+          {lecture.video_id && <div className="rec-sub">{lecture.video_id}</div>}
           {durationMismatch && durationMin && (
             <span className="rec-duration-warn">⚠ {durationMin}분 · 시간 범위 초과</span>
           )}

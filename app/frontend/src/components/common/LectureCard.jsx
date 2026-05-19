@@ -41,14 +41,11 @@ export default function LectureCard({ lecture, showStatus = false, onSelect }) {
       <div className="lecture-card-info">
         <div className="lecture-card-category">{lecture.category}</div>
         <div className="lecture-card-title">{lecture.title}</div>
-        <div className="lecture-card-meta">
-          {lecture.instructor_name}
-          {showStatus && (
-            <span className="date">
-              {' · '}{new Date(lecture.created_at).toLocaleDateString('ko-KR')}
-            </span>
-          )}
-        </div>
+        {showStatus && (
+          <div className="lecture-card-meta">
+            <span className="date">{new Date(lecture.created_at).toLocaleDateString('ko-KR')}</span>
+          </div>
+        )}
         {lecture.tags?.length > 0 && (
           <div className="lecture-card-tags">
             {lecture.tags.map(tag => (
