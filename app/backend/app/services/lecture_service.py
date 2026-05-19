@@ -599,6 +599,7 @@ async def ask_question(
                 "answer": qr.get("answer"),
                 "timestamps": qr.get("timestamps", []),
                 "graph": qr.get("graph", {"nodes": [], "edges": []}),
+                "core_graph": qr.get("core_graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
                 "related_slides": qr.get("related_slides", []),
                 "source_mode": qr.get("source_mode", "default"),

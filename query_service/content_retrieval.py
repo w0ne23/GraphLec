@@ -194,6 +194,7 @@ class EvidenceItem:
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     retrieval_score: Optional[float] = None
+    score_breakdown: Optional[dict[str, float]] = None
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -957,31 +958,64 @@ def run_enhanced_content_pipeline(
         if it.kind == "lance_soft":
             ip *= 0.72
         kw = _kw_score(all_items[i].text, keywords)
-        combined[i] = sw * sim_to_q[i] + iw * ip + kw_w * kw
+        semantic_component = sw * float(sim_to_q[i])
+        intent_component = iw * ip
+        keyword_component = kw_w * kw
+        bonus_total = 0.0
+        breakdown = {
+            "semantic": semantic_component,
+            "intent_prior": intent_component,
+            "keyword": keyword_component,
+            "bonus": 0.0,
+        }
+        combined[i] = semantic_component + intent_component + keyword_component
         if slide_importance_query and it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
-            combined[i] += 0.45 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+            bonus = 0.45 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+            combined[i] += bonus
+            bonus_total += bonus
         if visual_query:
             if it.kind == "visual_asset":
                 combined[i] += 0.55
+                bonus_total += 0.55
             elif it.kind in {"slide_text", "slide_concept"} and (it.row or {}).get("t1_structure"):
                 combined[i] += 0.25
+                bonus_total += 0.25
             if current_visual_query and current_slide_number is not None and it.slide_number == current_slide_number:
                 combined[i] += 0.60
+                bonus_total += 0.60
         if emphasis_overview_query:
             if it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
-                combined[i] += 0.30 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+                bonus = 0.30 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+                combined[i] += bonus
+                bonus_total += bonus
             elif it.kind == "graphrag_entity" and max_entity_weight > 0:
-                combined[i] += 0.35 * (_row_float(it.row, "final_weight") / max_entity_weight)
+                bonus = 0.35 * (_row_float(it.row, "final_weight") / max_entity_weight)
+                combined[i] += bonus
+                bonus_total += bonus
             elif it.kind == "graphrag_relationship" and max_rel_weight > 0:
-                combined[i] += 0.25 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+                bonus = 0.25 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+                combined[i] += bonus
+                bonus_total += bonus
         if core_keyword_query:
             if it.kind == "graphrag_entity" and max_entity_core > 0:
-                combined[i] += 0.55 * (_entity_core_score(it.row) / max_entity_core)
+                bonus = 0.55 * (_entity_core_score(it.row) / max_entity_core)
+                combined[i] += bonus
+                bonus_total += bonus
             elif it.kind == "graphrag_relationship" and max_rel_weight > 0:
-                combined[i] += 0.20 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+                bonus = 0.20 * (_row_float(it.row, "emphasis_edge_weight") / max_rel_weight)
+                combined[i] += bonus
+                bonus_total += bonus
             elif it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
-                combined[i] += 0.15 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+                bonus = 0.15 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
+                combined[i] += bonus
+                bonus_total += bonus
+        breakdown["bonus"] = bonus_total
+        breakdown["total"] = float(combined[i])
+        breakdown["raw_semantic"] = float(sim_to_q[i])
+        breakdown["raw_intent_prior"] = float(ip)
+        breakdown["raw_keyword"] = float(kw)
         it.retrieval_score = float(combined[i])
+        it.score_breakdown = breakdown
 
     order = list(np.argsort(-combined))
     mmr_k = int(lim.get("mmr_pick_k", 18))
