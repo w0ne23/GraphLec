@@ -48,6 +48,22 @@ def _relevance_score(text: str, keywords: list[str]) -> int:
     return sum(1 for kw in keywords if kw.lower() in t)
 
 
+def _requested_visual_types(keywords: list[str]) -> set[str]:
+    joined = " ".join(str(k or "").lower() for k in keywords)
+    types: set[str] = set()
+    if any(k in joined for k in ("비교표", "도표", "표", "table")):
+        types.add("table")
+    if any(k in joined for k in ("다이어그램", "구조도", "diagram")):
+        types.add("diagram")
+    if any(k in joined for k in ("차트", "그래프", "chart", "graph")):
+        types.add("chart")
+    if any(k in joined for k in ("그림", "이미지", "figure", "image")):
+        types.update({"figure", "image"})
+    if any(k in joined for k in ("목록", "리스트", "list")):
+        types.add("list")
+    return types
+
+
 def run_content_queries(
     session, stem: str, keywords: list[str]
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
@@ -58,11 +74,31 @@ def run_content_queries(
     seen_visual_assets: set[Any] = set()
     seen_gr_entities: set[Any] = set()
     seen_gr_rels: set[tuple[Any, Any, Any]] = set()
+    requested_visual_types = _requested_visual_types(keywords)
 
     q_slide_text = f"""
     MATCH (slide:Slide {{stem: $stem}})
     WITH slide,
          toLower(coalesce(slide.title,'')) AS title_text,
+         toLower(coalesce(slide.t1_structure,'') + ' ' + coalesce(slide.visual_asset_text,'') + ' ' + coalesce(slide.slide_type,'')) AS visual_text
+    WITH slide, title_text, visual_text,
+         CASE
+           WHEN visual_text CONTAINS '표' OR visual_text CONTAINS '비교표' OR visual_text CONTAINS 'table' THEN ' 표 도표 비교표 table'
+           ELSE ''
+         END +
+         CASE
+           WHEN visual_text CONTAINS '다이어그램' OR visual_text CONTAINS '구조도' OR visual_text CONTAINS 'diagram' THEN ' 다이어그램 구조도 diagram'
+           ELSE ''
+         END +
+         CASE
+           WHEN visual_text CONTAINS '차트' OR visual_text CONTAINS '그래프' OR visual_text CONTAINS 'chart' THEN ' 차트 그래프 chart graph'
+           ELSE ''
+         END +
+         CASE
+           WHEN visual_text <> '' THEN ' 시각자료 visual'
+           ELSE ''
+         END AS visual_alias
+    WITH slide, title_text,
          toLower(
         coalesce(slide.title,'') + ' ' +
         coalesce(slide.slide_text,'') + ' ' +
@@ -70,8 +106,7 @@ def run_content_queries(
         coalesce(slide.visual_asset_text,'') + ' ' +
         coalesce(slide.slide_type,'') + ' ' +
         coalesce(slide.emphasis_keywords_text,'') + ' ' +
-        (CASE WHEN coalesce(slide.t1_structure, '') <> '' OR coalesce(slide.visual_asset_text, '') <> ''
-              THEN '시각자료 그림 이미지 도표 표 비교표 다이어그램 구조도 figure visual table diagram' ELSE '' END) + ' ' +
+        visual_alias + ' ' +
         (CASE WHEN coalesce(slide.emphasis_total, 0) > 0 OR coalesce(slide.emphasis_keywords_text, '') <> ''
               THEN '강조 emphasized highlight 핵심 중요' ELSE '' END)
     ) AS haystack
@@ -102,6 +137,15 @@ def run_content_queries(
     """
     q_visual_asset = f"""
     MATCH (slide:Slide {{stem: $stem}})-[:HAS_VISUAL_ASSET]->(asset:VisualAsset {{stem: $stem}})
+    WITH slide, asset,
+         CASE
+           WHEN coalesce(asset.asset_type, '') = 'table' THEN ' 표 도표 비교표 table'
+           WHEN coalesce(asset.asset_type, '') = 'diagram' THEN ' 다이어그램 구조도 diagram'
+           WHEN coalesce(asset.asset_type, '') = 'chart' THEN ' 차트 그래프 chart graph'
+           WHEN coalesce(asset.asset_type, '') IN ['figure', 'image'] THEN ' 그림 이미지 figure image'
+           WHEN coalesce(asset.asset_type, '') = 'list' THEN ' 목록 리스트 list'
+           ELSE ''
+         END AS type_alias
     WITH slide, asset, toLower(
         coalesce(slide.title,'') + ' ' +
         coalesce(slide.slide_text,'') + ' ' +
@@ -109,7 +153,8 @@ def run_content_queries(
         coalesce(asset.asset_type,'') + ' ' +
         coalesce(asset.description,'') + ' ' +
         coalesce(asset.raw_text,'') + ' ' +
-        '시각자료 그림 이미지 도표 표 비교표 다이어그램 구조도 figure visual table diagram'
+        type_alias + ' ' +
+        '시각자료 visual'
     ) AS haystack
     WITH slide, asset, haystack, replace(haystack, ' ', '') AS compact_haystack
     WITH slide, asset, haystack,
@@ -308,6 +353,13 @@ def run_content_queries(
             reverse=True,
         )
     if results.get("visual_assets"):
+        if requested_visual_types:
+            filtered_assets = [
+                r for r in results["visual_assets"]
+                if str(r.get("asset_type") or "").lower() in requested_visual_types
+            ]
+            if filtered_assets:
+                results["visual_assets"] = filtered_assets
         results["visual_assets"].sort(
             key=lambda r: (
                 int(r.get("relevance") or 0),

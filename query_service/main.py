@@ -884,9 +884,63 @@ def _chunks_to_timestamps(chunks: list[RetrievedChunk]) -> list[dict]:
     return ts[:20]
 
 
+def _is_visual_question(question: str) -> bool:
+    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도"))
+
+
+def _visual_asset_slide_numbers(items: list[EvidenceItem]) -> set[int]:
+    visual_items = [
+        it for it in items
+        if it.kind == "visual_asset" and it.slide_number is not None
+    ]
+    if not visual_items:
+        return set()
+
+    def score_of(it: EvidenceItem) -> float:
+        score = it.retrieval_score if it.retrieval_score is not None else it.lance_score
+        try:
+            return float(score) if score is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    best_score = max(score_of(it) for it in visual_items)
+    slides: set[int] = set()
+    for it in visual_items:
+        if score_of(it) < best_score - 1e-9:
+            continue
+        try:
+            slides.add(int(it.slide_number))
+        except (TypeError, ValueError):
+            continue
+    return slides
+
+
+def _filter_visual_question_chunks(
+    question: str,
+    items: list[EvidenceItem],
+    chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    visual_slides = _visual_asset_slide_numbers(items)
+    if not visual_slides or not _is_visual_question(question):
+        return chunks
+
+    filtered: list[RetrievedChunk] = []
+    for c in chunks:
+        try:
+            slide_number = int(c.slide_number) if c.slide_number is not None else None
+        except (TypeError, ValueError):
+            slide_number = None
+        if slide_number in visual_slides:
+            filtered.append(c)
+    return filtered
+
+
 def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[RetrievedChunk], max_items: int = 6) -> list[dict]:
     scored: list[dict] = []
+    visual_slides = _visual_asset_slide_numbers(items)
     for it in items:
+        if visual_slides and it.kind != "visual_asset" and it.slide_number not in visual_slides:
+            continue
         score = it.retrieval_score if it.retrieval_score is not None else it.lance_score
         if it.slide_number is not None:
             scored.append(
@@ -899,6 +953,12 @@ def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[Retrie
             )
 
     for c in chunks:
+        try:
+            chunk_slide_number = int(c.slide_number) if c.slide_number is not None else None
+        except (TypeError, ValueError):
+            chunk_slide_number = None
+        if visual_slides and chunk_slide_number not in visual_slides:
+            continue
         if c.slide_number is not None and c.chunk_type == "slide":
             scored.append(
                 {
@@ -1132,6 +1192,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     if q_type == "content":
         try:
             retrieved_chunks = _evidence_to_retrieved_chunks(stem, selected_items)
+            retrieved_chunks = _filter_visual_question_chunks(question, selected_items, retrieved_chunks)
         except Exception:
             retrieved_chunks = []
     else:
