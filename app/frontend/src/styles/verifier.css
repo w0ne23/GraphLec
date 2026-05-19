@@ -122,6 +122,107 @@
 .vf-metric--review.vf-metric--active { border-color: rgba(217, 119, 6, .45); box-shadow: inset 0 0 0 1px rgba(217, 119, 6, .14); }
 .vf-metric--typo.vf-metric--active { border-color: var(--blue); box-shadow: inset 0 0 0 1px var(--blue-br); }
 
+.vf-detector-stats {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--b1);
+  border-radius: var(--r);
+  background: var(--panel);
+}
+
+.vf-detector-stats-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.vf-detector-stats-head strong {
+  color: var(--t1);
+  font-size: 13px;
+}
+
+.vf-detector-stats-head span {
+  color: var(--t2);
+}
+
+.vf-detector-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.vf-detector-model,
+.vf-detector-vote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--card);
+  font-size: 12px;
+}
+
+.vf-detector-model span,
+.vf-detector-vote span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--t2);
+}
+
+.vf-detector-model strong,
+.vf-detector-vote strong {
+  color: var(--t1);
+}
+
+.vf-detector-model em {
+  font-style: normal;
+  color: var(--t3);
+}
+
+.vf-detector-pairwise,
+.vf-detector-vote-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.vf-detector-pairwise span {
+  padding: 4px 7px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--t2);
+  font-size: 12px;
+}
+
+.vf-detector-vote {
+  flex: 1 1 240px;
+  align-items: flex-start;
+}
+
+.vf-detector-vote p {
+  flex: 2 1 220px;
+  margin: 0;
+  color: var(--t1);
+  line-height: 1.4;
+}
+
+.vf-chip--detector {
+  border-color: var(--blue-br);
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+
 .vf-section {
   margin-top: 14px;
 }
@@ -323,6 +424,14 @@
   overflow-wrap: anywhere;
 }
 
+.vf-claim-subtitle {
+  margin-top: 5px;
+  font-size: 12px;
+  color: var(--t2);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .vf-chip-row {
   margin-top: 7px;
   display: flex;
@@ -473,24 +582,29 @@
 
 .vf-verdict-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 6px;
+  grid-template-columns: 1fr;
+  gap: 8px;
 }
 
 .vf-verdict {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  display: grid;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 9px 10px;
   border: 1px solid var(--b1);
   border-radius: 4px;
   background: var(--panel);
   font-size: 12px;
 }
 
-.vf-verdict span {
-  flex: 1 1 120px;
+.vf-verdict-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.vf-verdict-head span {
+  flex: 1 1 160px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -498,14 +612,40 @@
   color: var(--t2);
 }
 
-.vf-verdict strong {
+.vf-verdict-head strong {
   font-size: 12px;
   color: var(--t1);
 }
 
-.vf-verdict em {
+.vf-verdict-head em {
   font-style: normal;
   color: var(--t3);
+}
+
+.vf-model-evidence-list {
+  display: grid;
+  gap: 5px;
+}
+
+.vf-model-evidence-row {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.vf-model-evidence-row span {
+  color: var(--t3);
+  font-weight: 700;
+}
+
+.vf-model-evidence-row p {
+  margin: 0;
+  color: var(--t1);
+  line-height: 1.48;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
 }
 
 .vf-source-list {
@@ -525,6 +665,47 @@
   background: var(--blue-bg);
   color: var(--blue);
   font-size: 12px;
+}
+
+.vf-source-issue-list {
+  display: grid;
+  gap: 6px;
+}
+
+.vf-source-issue {
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.vf-source-issue strong {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t1);
+}
+
+.vf-source-issue span {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--t2);
+}
+
+.vf-context-text {
+  max-height: 320px;
+  margin: 0;
+  padding: 10px 11px;
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--t2);
+  font-size: 11px;
+  line-height: 1.55;
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 .vf-claim-actions {

@@ -35,9 +35,19 @@ def _build_grounding_prompt(
     slide_ctx: dict | None = None,
     slides: list[dict] | None = None,
 ) -> str:
-    claim = issue.get("claim_text", issue.get("problematic_content", ""))
-    correct_info = issue.get("correct_info", "")
-    issue_desc = issue.get("issue", "")
+    claim = (
+        issue.get("source_text")
+        or issue.get("claim_context_text")
+        or issue.get("claim_text")
+        or ""
+    )
+    issue_desc = (
+        issue.get("context_issue_summary")
+        or issue.get("issue")
+        or issue.get("claim_text")
+        or ""
+    )
+    correction_hint = issue.get("correction_hint", "")
     domain_label = hint.get("label", "일반")
     lecture_context = _build_grounding_context(issue, slide_ctx, slides)
 
@@ -52,7 +62,7 @@ Google Search 결과를 근거로, 이 지적을 뒷받침하거나 반박하는
 
 발화 원문: {claim}
 지적 내용: {issue_desc}
-제안된 정확한 정보: {correct_info}
+수정 방향: {correction_hint}
 
 판단 기준:
 1. 먼저 강의 문맥에서 학생이 실제로 이해할 명제를 판단하세요.
@@ -193,13 +203,18 @@ def ground_verify_all_issues(
     def process(i, issue):
         issue = issue.copy()
         cv.normalize_issue_metadata(issue)
-        claim_preview = str(issue.get("claim_text", issue.get("problematic_content", "")))[:50]
+        claim_preview = str(
+            issue.get("source_text")
+            or issue.get("claim_context_text")
+            or issue.get("claim_text")
+            or ""
+        )[:50]
         if not cv.is_fact_grounded_issue(issue):
             print(f"    grounding [{i+1}/{len(issues)}] {claim_preview}... 문맥 피드백 유지")
             kept = issue
             kept["grounding_verified"] = True
             kept["grounding_skipped"] = True
-            kept["grounding_reason"] = "혼동 가능 설명은 외부 검색 대신 crosscheck 문맥 검증 결과를 유지합니다."
+            kept["grounding_reason"] = "factual_error가 아닌 이슈는 외부 검색 대신 crosscheck 문맥 검증 결과를 유지합니다."
             kept["grounding_api_failed"] = False
             return kept, cv._empty_token_usage()
         print(f"    grounding [{i+1}/{len(issues)}] {claim_preview}...")

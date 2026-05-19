@@ -50,6 +50,40 @@ function compactText(value, fallback = '-') {
   return text || fallback
 }
 
+function normalizeComparableText(value) {
+  return String(value ?? '')
+    .replace(/`/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function uniqueTextParts(...values) {
+  const parts = []
+  for (const value of values.flat()) {
+    const text = String(value ?? '').trim()
+    if (!text) continue
+    const normalized = normalizeComparableText(text)
+    if (!normalized) continue
+    const duplicate = parts.some((existing) => {
+      const current = normalizeComparableText(existing)
+      return current === normalized || current.includes(normalized) || normalized.includes(current)
+    })
+    if (!duplicate) parts.push(text)
+  }
+  return parts
+}
+
+function joinTextParts(...values) {
+  return uniqueTextParts(...values).join(' / ')
+}
+
+function labeledText(label, value) {
+  const text = String(value ?? '').trim()
+  return text ? `${label}: ${text}` : ''
+}
+
 function labelForIssueType(type) {
   const labels = {
     factual_error: '발언 자체 오류',
@@ -145,6 +179,70 @@ function formatIssueTypeScores(scores) {
     .join(' / ')
 }
 
+function formatTypeJudgments(judgments) {
+  if (!judgments || typeof judgments !== 'object') return ''
+  return ISSUE_FILTERS
+    .filter((item) => item.key !== 'all')
+    .map((item) => {
+      const row = judgments[item.code] || judgments[item.key] || judgments[item.code?.toLowerCase?.()]
+      if (!row || typeof row !== 'object') return ''
+      const score = Number(row.score)
+      const reason = compactText(row.reason, '')
+      if (!Number.isFinite(score) && !reason) return ''
+      const scoreText = Number.isFinite(score) ? `${Math.round(score * 100)}%` : ''
+      return `${item.code}.${item.label} ${scoreText}${reason ? ` - ${reason}` : ''}`.trim()
+    })
+    .filter(Boolean)
+    .join('\n')
+}
+
+function ModelEvidenceRow({ label, value }) {
+  if (value === undefined || value === null || value === '') return null
+  return (
+    <div className="vf-model-evidence-row">
+      <span>{label}</span>
+      <p>{value}</p>
+    </div>
+  )
+}
+
+function buildModelIssueBasis(verdict) {
+  return joinTextParts(
+    verdict?.reason,
+  )
+}
+
+function buildModelContextBasis(verdict) {
+  return joinTextParts(
+    verdict?.context_resolution,
+    verdict?.context_resolution_reason,
+  )
+}
+
+function buildModelCorrection(verdict) {
+  return joinTextParts(
+    verdict?.correction_hint,
+  )
+}
+
+function buildClaimCoreIssue(claim) {
+  return joinTextParts(
+    claim.issue,
+  )
+}
+
+function buildClaimBasis(claim) {
+  return joinTextParts(
+    claim.context_resolution_reason,
+  )
+}
+
+function buildClaimCorrection(claim) {
+  return joinTextParts(
+    claim.correction_hint,
+  )
+}
+
 function groupTyposBySlide(items) {
   const groups = new Map()
   asArray(items).forEach((typo, idx) => {
@@ -215,7 +313,6 @@ function getFeedbackUtteranceIds(item, sourceClaim = {}) {
     item.utterance_id,
     sourceClaim.utterance_id,
     ...sourceIssues.map((issue) => issue?.utterance_id),
-    ...extractUtteranceIds(evidence.evidence_in_context),
     ...extractUtteranceIds(item.confirmation_reason || evidence.confirmation_reason),
   ])
 }
@@ -308,6 +405,156 @@ function scoreLabel(score) {
   return score !== undefined ? formatPercent(score) : ''
 }
 
+function sourceIssueUtterance(issue) {
+  return (
+    issue?.display_text ||
+    issue?.display_source_text ||
+    issue?.source_text ||
+    issue?.claim_context_text ||
+    issue?.claim_text ||
+    issue?.raw_claim_text ||
+    ''
+  )
+}
+
+function splitUtteranceText(text, fallbackUid = '') {
+  const raw = String(text || '').trim()
+  const match = raw.match(/^([A-Z]\d+(?:-C\d+)?):\s*(.*)$/)
+  if (match) {
+    return { uid: match[1], body: match[2], raw }
+  }
+  return { uid: fallbackUid, body: raw, raw }
+}
+
+function normalizeSourceText(text) {
+  const { body } = splitUtteranceText(text)
+  return body
+    .replace(/`/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+function sourceTextTokens(text) {
+  return normalizeSourceText(text)
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 2)
+}
+
+function sourceTextSimilarity(left, right) {
+  const leftTokens = new Set(sourceTextTokens(left))
+  const rightTokens = new Set(sourceTextTokens(right))
+  if (!leftTokens.size || !rightTokens.size) return 0
+  let intersection = 0
+  for (const token of leftTokens) {
+    if (rightTokens.has(token)) intersection += 1
+  }
+  return intersection / Math.min(leftTokens.size, rightTokens.size)
+}
+
+function areSimilarSourceIssues(left, right) {
+  const leftText = sourceIssueUtterance(left)
+  const rightText = sourceIssueUtterance(right)
+  if (!leftText || !rightText) return false
+  const leftNorm = normalizeSourceText(leftText)
+  const rightNorm = normalizeSourceText(rightText)
+  if (!leftNorm || !rightNorm) return false
+  if (leftNorm === rightNorm) return true
+  if (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)) return true
+  return sourceTextSimilarity(leftText, rightText) >= 0.78
+}
+
+function mergeSourceIssueDisplay(group) {
+  const first = group[0] || {}
+  const firstText = sourceIssueUtterance(first)
+  const firstSplit = splitUtteranceText(firstText, first?.utterance_id)
+  const ids = Array.from(
+    new Set(
+      group
+        .map((issue) => issue?.utterance_id || splitUtteranceText(sourceIssueUtterance(issue)).uid)
+        .map((uid) => String(uid || '').trim())
+        .filter(Boolean),
+    ),
+  )
+  const mergedUid = ids.join(', ') || firstSplit.uid
+  return {
+    ...first,
+    utterance_id: mergedUid,
+    merged_utterance_ids: ids,
+    display_text: mergedUid ? `${mergedUid}: ${firstSplit.body || firstText}` : firstText,
+  }
+}
+
+function dedupeSourceIssues(issues) {
+  const groups = []
+  for (const issue of asArray(issues)) {
+    const existing = groups.find((group) => areSimilarSourceIssues(group[0], issue))
+    if (existing) {
+      existing.push(issue)
+    } else {
+      groups.push([issue])
+    }
+  }
+  return groups.map(mergeSourceIssueDisplay)
+}
+
+function sourceIssueTitle(issue, index) {
+  const text = sourceIssueUtterance(issue)
+  if (text) return compactText(text, '', 180)
+  const uid = issue?.utterance_id || `근거 ${index + 1}`
+  return uid
+}
+
+function buildSourceUtteranceTitle(sourceIssues, fallback = '') {
+  const utterances = dedupeSourceIssues(sourceIssues)
+    .map(sourceIssueUtterance)
+    .map((text) => String(text || '').trim())
+    .filter(Boolean)
+
+  if (utterances.length === 1) return utterances[0]
+  if (utterances.length > 1) return utterances.join(' / ')
+  return fallback
+}
+
+function buildMergeExplanation(evidence) {
+  const sourceIssues = asArray(evidence?.source_issues)
+  if (sourceIssues.length <= 1) return ''
+  return evidence?.merge_rationale || ''
+}
+
+function firstModelField(crosscheck, field) {
+  const rows = asArray(crosscheck?.model_results)
+    .map((row) => {
+      const value = String(row?.[field] || '').trim()
+      const verdict = String(row?.verdict || '').toLowerCase()
+      const status = String(row?.status || '').toLowerCase()
+      const confidence = Number(row?.confidence ?? row?.vote_score ?? 0)
+      const isRejectedSummary =
+        field === 'context_issue_summary' &&
+        value === '제공 문맥상 독립적으로 남는 잘못된 명제 없음'
+      const rank = isRejectedSummary
+        ? -1
+        : verdict === 'agree' || status === 'kept'
+          ? 2
+          : verdict === 'inconclusive'
+            ? 1
+            : 0
+      return { row, value, rank, confidence: Number.isFinite(confidence) ? confidence : 0 }
+    })
+    .filter((item) => item.value && item.rank >= 0)
+    .sort((a, b) => b.rank - a.rank || b.confidence - a.confidence)
+
+  return rows[0]?.value || ''
+}
+
+function buildContextTitle(sourceIssues, fallback = '') {
+  const rows = dedupeSourceIssues(sourceIssues)
+  if (rows.length > 1) return buildSourceUtteranceTitle(rows, fallback)
+  return buildSourceUtteranceTitle(sourceIssues, fallback)
+}
+
 function feedbackItemToClaim(item, claimById) {
   const sourceClaim = claimById.get(item.source_claim_id) || {}
   const problem = item.problem || {}
@@ -326,13 +573,20 @@ function feedbackItemToClaim(item, claimById) {
   const location = getItemLocation(item, sourceClaim)
   const utteranceIds = getFeedbackUtteranceIds(item, sourceClaim)
   const status = displayStageFromScore(crosscheckScore, item.status)
+  const sourceIssues = asArray(evidence.source_issues)
+  const canonicalWrongProposition = evidence.canonical_wrong_proposition || item.canonical_wrong_proposition || ''
+  const mergeExplanation = buildMergeExplanation(evidence)
+  const sourceUtteranceTitle = buildContextTitle(
+    sourceIssues,
+    problem.source_text ||
+      evidence.source_text ||
+      item.source_text ||
+      item.claim_text ||
+      sourceClaim.claim_text ||
+      '',
+  )
   const title =
-    problem.problematic_content ||
-    item.claim_text ||
-    sourceClaim.claim_text ||
-    item.resolved_claim ||
-    sourceClaim.resolved_claim ||
-    problem.summary ||
+    sourceUtteranceTitle ||
     '-'
 
   return {
@@ -343,39 +597,46 @@ function feedbackItemToClaim(item, claimById) {
     start_time: getItemStartTime(item, sourceClaim),
     slide_number: location.slide_number ?? evidence.slide_number,
     claim_text: title,
-    resolved_claim: item.resolved_claim || sourceClaim.resolved_claim,
+    raw_claim_text: item.claim_text || sourceClaim.claim_text,
+    source_text: sourceUtteranceTitle || problem.source_text || evidence.source_text || item.source_text,
     issue: problem.summary || feedback.summary,
-    correct_info: problem.correct_info,
     issue_type: item.feedback_type || item.issue_type || item.type,
     issue_type_code: item.issue_type_code,
     issue_type_code_label: item.issue_type_code_label,
     issue_type_scores: item.issue_type_scores || crosscheck.scoring?.issue_type_scores,
+    issue_classification_scores: item.issue_classification_scores,
+    issue_classification_by_model: item.issue_classification_by_model,
+    issue_classification_primary_code: item.issue_classification_primary_code,
+    issue_classification_primary_type: item.issue_classification_primary_type,
+    issue_classification_rationale: item.issue_classification_rationale,
     primary_issue_type: item.primary_issue_type || crosscheck.scoring?.primary_issue_type,
     secondary_issue_types: item.secondary_issue_types || crosscheck.scoring?.secondary_issue_types,
-    issue_type_rationale: item.issue_type_rationale,
+    issue_type_rationale: item.issue_type_rationale || item.issue_classification_rationale,
     issue_category_label: item.feedback_label || item.issue_category_label,
-    student_misunderstanding: feedback.student_misunderstanding,
-    why_it_matters: feedback.why_it_matters,
-    suggested_rephrase: feedback.suggested_rephrase,
-    teaching_note: feedback.teaching_note,
-    why_wrong: problem.why_wrong || feedback.why_wrong,
-    issue_basis: problem.issue_basis || feedback.issue_basis,
-    student_error: problem.student_error || feedback.student_error,
-    counterexample_or_condition:
-      problem.counterexample_or_condition ||
-      evidence.counterexample_or_condition ||
-      feedback.counterexample_or_condition,
+    context_issue_summary:
+      problem.context_issue_summary ||
+      item.context_issue_summary ||
+      firstModelField(crosscheck, 'context_issue_summary'),
     context_resolution: problem.context_resolution || evidence.context_resolution || feedback.context_resolution,
-    recommendation: problem.recommendation || feedback.teaching_note,
-    evidence_in_context: evidence.evidence_in_context || feedback.evidence_in_context,
+    context_resolution_reason:
+      problem.context_resolution_reason ||
+      evidence.context_resolution_reason ||
+      feedback.context_resolution_reason,
+    correction_hint: problem.correction_hint || feedback.correction_hint,
     crosscheck_score: crosscheckScore,
     crosscheck_score_percent: crosscheckScorePercent,
     crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
     crosscheck_weighted_status: crosscheckWeightedStatus,
     model_verdicts: getModelVerdicts(item),
+    issue_detection: buildIssueDetection(item),
     confirmation_reason: status === 'confirmed' ? getConfirmationReason(item) : '',
     rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
     evidence_sources: evidence.evidence_sources || item.evidence_sources,
+    canonical_wrong_proposition: canonicalWrongProposition,
+    merge_rationale: evidence.merge_rationale,
+    merge_explanation: mergeExplanation,
+    source_issues: sourceIssues,
+    crosscheck_context_text: evidence.crosscheck_context_text || item.crosscheck_context_text,
   }
 }
 
@@ -466,25 +727,161 @@ function DetailRow({ label, value }) {
   )
 }
 
+function SourceIssueBreakdown({ issues }) {
+  const rows = dedupeSourceIssues(issues)
+  if (!rows.length) return null
+  return (
+    <div className="vf-evidence-block">
+      <div className="vf-evidence-title">해당 문맥</div>
+      <div className="vf-source-issue-list">
+        {rows.map((issue, idx) => (
+          <div className="vf-source-issue" key={`${issue?.utterance_id || 'issue'}-${idx}`}>
+            <strong>{sourceIssueTitle(issue, idx)}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ContextTextBlock({ text }) {
+  const value = String(text || '').trim()
+  if (!value) return null
+  return (
+    <div className="vf-evidence-block">
+      <div className="vf-evidence-title">검증에 사용한 문맥</div>
+      <pre className="vf-context-text">{value}</pre>
+    </div>
+  )
+}
+
 function ModelVerdicts({ verdicts }) {
   const entries = Object.entries(verdicts || {})
   if (!entries.length) return null
   return (
     <div className="vf-evidence-block">
-      <div className="vf-evidence-title">모델 판정</div>
+      <div className="vf-evidence-title">모델별 판정 근거</div>
       <div className="vf-verdict-grid">
-        {entries.map(([model, verdict]) => (
-          <div className="vf-verdict" key={model}>
+        {entries.map(([model, verdict]) => {
+          return (
+            <div className="vf-verdict" key={model}>
+              <div className="vf-verdict-head">
+                <span>{model}</span>
+                <strong>점수 {formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
+                {(verdict?.decision || verdict?.verdict || verdict?.status) && (
+                  <em>{compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</em>
+                )}
+                {verdict?.model_weight !== undefined && <em>가중치 {Number(verdict.model_weight).toFixed(2)}</em>}
+                {verdict?.weighted_score !== undefined && <em>반영점수 {Number(verdict.weighted_score).toFixed(2)}</em>}
+              </div>
+              <div className="vf-model-evidence-list">
+                <ModelEvidenceRow label="판정 근거" value={buildModelIssueBasis(verdict)} />
+                <ModelEvidenceRow label="유형 점수" value={formatIssueTypeScores(verdict?.issue_type_scores)} />
+                <ModelEvidenceRow label="유형별 독립 판단" value={formatTypeJudgments(verdict?.type_judgments)} />
+                <ModelEvidenceRow label="유형 근거" value={verdict?.issue_type_rationale} />
+                <ModelEvidenceRow label="문맥 판단" value={buildModelContextBasis(verdict)} />
+                <ModelEvidenceRow label="수정 방향" value={buildModelCorrection(verdict)} />
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function formatDetectorAgreementLabel(label) {
+  if (label === 'all_models') return '전체 공통'
+  if (label === 'partial_overlap') return '부분 공통'
+  if (label === 'single_model') return '단독 탐지'
+  return label || ''
+}
+
+function buildIssueDetection(item) {
+  const issueDetection = item.checks?.issue_detection || {}
+  const detected = asArray(issueDetection.detected_by_models || item.detected_by_models)
+    .map((model) => String(model || '').trim())
+    .filter(Boolean)
+  return {
+    detected_by_models: detected,
+    model_count: issueDetection.model_count ?? item.detector_model_count ?? detected.length,
+    model_total: issueDetection.model_total ?? item.detector_model_total,
+    agreement_ratio: issueDetection.agreement_ratio ?? item.detector_model_agreement_ratio,
+    agreement_label: issueDetection.agreement_label ?? item.detector_agreement_label,
+    model_votes: asArray(issueDetection.model_votes || item.detector_model_votes),
+  }
+}
+
+function formatDetectorModels(issueDetection) {
+  const detected = asArray(issueDetection?.detected_by_models).filter(Boolean)
+  if (!detected.length) return ''
+  const count = issueDetection?.model_count ?? detected.length
+  const total = issueDetection?.model_total
+  const suffix = total ? ` (${count}/${total})` : ''
+  const label = formatDetectorAgreementLabel(issueDetection?.agreement_label)
+  return `${detected.join(', ')}${suffix}${label ? ` · ${label}` : ''}`
+}
+
+function DetectorVotes({ issueDetection }) {
+  const rows = asArray(issueDetection?.model_votes)
+  const detected = asArray(issueDetection?.detected_by_models)
+  if (!rows.length && !detected.length) return null
+  return (
+    <div className="vf-evidence-block">
+      <div className="vf-evidence-title">1차 탐지 모델</div>
+      <div className="vf-detector-vote-list">
+        {rows.length > 0
+          ? rows.map((row, idx) => (
+            <div className="vf-detector-vote" key={`${row?.model || 'model'}-${idx}`}>
+              <span>{row?.model || '-'}</span>
+              {row?.confidence !== undefined && <strong>{formatPercent(row.confidence)}</strong>}
+              <p>{compactText(row?.claim_text || row?.source_text, '', 180)}</p>
+            </div>
+          ))
+          : detected.map((model) => (
+            <div className="vf-detector-vote" key={model}>
+              <span>{model}</span>
+            </div>
+          ))}
+      </div>
+    </div>
+  )
+}
+
+function IssueDetectionStats({ stats }) {
+  if (!stats || !Object.keys(stats).length) return null
+  const rawPerModel = stats.raw_detections_per_model || {}
+  const unionPerModel = stats.union_detections_per_model || {}
+  const models = asArray(stats.models).filter(Boolean)
+  const pairwise = asArray(stats.pairwise_overlap)
+  return (
+    <div className="vf-detector-stats">
+      <div className="vf-detector-stats-head">
+        <strong>Issue detection union</strong>
+        <span>
+          합집합 {stats.union_issue_count ?? 0}건 · 전체 공통 {stats.common_all_model_count ?? 0}건 ·
+          부분 공통 {stats.partial_overlap_count ?? 0}건 · 단독 {stats.single_model_count ?? 0}건
+        </span>
+      </div>
+      <div className="vf-detector-model-grid">
+        {models.map((model) => (
+          <div className="vf-detector-model" key={model}>
             <span>{model}</span>
-            <strong>점수 {formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
-            {(verdict?.decision || verdict?.verdict || verdict?.status) && (
-              <em>{compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</em>
-            )}
-            {verdict?.model_weight !== undefined && <em>가중치 {Number(verdict.model_weight).toFixed(2)}</em>}
-            {verdict?.weighted_score !== undefined && <em>반영점수 {Number(verdict.weighted_score).toFixed(2)}</em>}
+            <strong>{rawPerModel[model] ?? 0}건</strong>
+            <em>union {unionPerModel[model] ?? 0}건</em>
           </div>
         ))}
       </div>
+      {pairwise.length > 0 && (
+        <div className="vf-detector-pairwise">
+          {pairwise.map((row, idx) => (
+            <span key={`${asArray(row?.models).join('-') || 'pair'}-${idx}`}>
+              {asArray(row?.models).join('↔')} {row?.overlap_count ?? 0}/{row?.either_count ?? 0}
+              {row?.jaccard !== undefined ? ` (${Math.round(Number(row.jaccard) * 100)}%)` : ''}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -512,7 +909,8 @@ function EvidenceSources({ sources }) {
 }
 
 function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
-  const title = claim.claim_text || claim.resolved_claim || claim.problematic_content || '-'
+  const title = claim.claim_text || claim.source_text || '-'
+  const subtitle = []
   const startTime = Number(claim.start_time)
   const canWatch = Number.isFinite(startTime)
   const grounding = claim.grounding || {}
@@ -523,12 +921,16 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
     : asArray(claim.evidence_sources)
   const hasCrosscheckScore = claim.crosscheck_score !== undefined && claim.crosscheck_score !== null
   const crosscheckStatus = claim.crosscheck_weighted_status || claim.crosscheck_score_verdict
+  const detectorLabel = formatDetectorModels(claim.issue_detection)
 
   return (
     <article className={`vf-claim-card ${expanded ? 'vf-claim-card--expanded' : ''}`}>
       <button className="vf-claim-main" onClick={onToggle}>
         <div className="vf-claim-copy">
           <div className="vf-claim-title">{title}</div>
+          {subtitle.map((line) => (
+            <div className="vf-claim-subtitle" key={line}>{line}</div>
+          ))}
           <div className="vf-chip-row">
             {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
             {hasCrosscheckScore && (
@@ -536,6 +938,7 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
                 점수 {scoreLabel(claim.crosscheck_score)}
               </span>
             )}
+            {detectorLabel && <span className="vf-chip vf-chip--detector">1차 {detectorLabel}</span>}
           </div>
         </div>
         <div className="vf-claim-meta">
@@ -558,28 +961,28 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
                   : ''
               }
             />
-            <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
+            <DetailRow label="검증 대상 문맥" value={claim.source_text || claim.claim_text} />
+            <DetailRow label="원문 발화" value={claim.source_text || claim.raw_claim_text} />
+            <DetailRow label="묶은 이유" value={claim.merge_explanation} />
             <DetailRow label="문제 유형" value={displayIssueLabel} />
             <DetailRow label="유형 코드" value={claim.issue_type_code || codeForIssueType(displayIssueKey)} />
-            <DetailRow label="유형 점수" value={formatIssueTypeScores(claim.issue_type_scores)} />
+            <DetailRow label="유형 confidence" value={formatIssueTypeScores(claim.issue_classification_scores || claim.issue_type_scores)} />
             <DetailRow label="유형 근거" value={claim.issue_type_rationale} />
-            <DetailRow label="문제점" value={claim.issue} />
-            <DetailRow label="문제 근거" value={claim.issue_basis} />
-            <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
-            <DetailRow label="왜 문제인가" value={claim.why_wrong} />
-            <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
+            <DetailRow label="1차 탐지 모델" value={detectorLabel} />
+            <DetailRow label="문맥 내 오류" value={claim.context_issue_summary} />
+            <DetailRow label="핵심 문제" value={buildClaimCoreIssue(claim)} />
+            <DetailRow label="판단 근거" value={buildClaimBasis(claim)} />
             <DetailRow label="문맥 해소 여부" value={claim.context_resolution} />
-            <DetailRow label="학생 오해 가능성" value={claim.student_misunderstanding} />
-            <DetailRow label="올바른 정보/보충 조건" value={claim.correct_info} />
-            <DetailRow label="왜 중요한가" value={claim.why_it_matters} />
-            <DetailRow label="권장 수정" value={claim.recommendation || claim.teaching_note} />
-            <DetailRow label="대체 표현" value={claim.suggested_rephrase} />
-            <DetailRow label="문맥 근거" value={claim.evidence_in_context} />
+            <DetailRow label="문맥 해소 판단" value={claim.context_resolution_reason} />
+            <DetailRow label="수정 방향" value={buildClaimCorrection(claim)} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
             <DetailRow label="분류" value={[claim.claim_type, claim.issue_category_label].filter(Boolean).join(' / ')} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
+          <SourceIssueBreakdown issues={claim.source_issues} />
+          <DetectorVotes issueDetection={claim.issue_detection} />
+          <ContextTextBlock text={claim.crosscheck_context_text} />
           <ModelVerdicts verdicts={claim.model_verdicts} />
           <EvidenceSources sources={sources} />
         </div>
@@ -856,10 +1259,10 @@ export default function VerifierPage() {
       const filteredReview = sortClaims(filterIssueClaims(sections.needsReview))
       return (
         <Section
-          title="교수 확인이 필요한 내용 이슈"
+          title="강의자 확인이 필요한 내용 이슈"
           count={sections.needsReview.length}
           tone="review"
-          empty="교수 확인이 필요한 내용 이슈가 없습니다."
+          empty="강의자 확인이 필요한 내용 이슈가 없습니다."
         >
           <IssueTypeBreakdown
             items={sections.needsReview}
@@ -871,7 +1274,7 @@ export default function VerifierPage() {
           <SortControls value={sortMode} onChange={setSortMode} />
           {filteredReview.length > 0
             ? renderClaimList(filteredReview, 'needs_review')
-            : <div className="vf-empty">선택한 유형의 교수 확인 이슈가 없습니다.</div>}
+            : <div className="vf-empty">선택한 유형의 강의자 확인 이슈가 없습니다.</div>}
         </Section>
       )
     }
@@ -1007,7 +1410,7 @@ export default function VerifierPage() {
         <section className="vf-list-pane">
           <div className="vf-summary-card">
             <SummaryMetric
-              label="교수 확인"
+              label="강의자 확인"
               value={reviewCount}
               tone="review"
               active={activeTab === 'review'}
@@ -1027,6 +1430,7 @@ export default function VerifierPage() {
               onClick={() => selectTab('filtered')}
             />
           </div>
+          <IssueDetectionStats stats={verifier?.summary?.issue_detection_stats} />
 
           {renderActivePanel()}
         </section>

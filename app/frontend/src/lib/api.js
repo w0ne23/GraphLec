@@ -134,7 +134,7 @@ export async function getLectureGraph(lectureId) {
 }
 
 export async function getLectureVerifier(lectureId) {
-  const res = await fetch(`${API_BASE}/results/${lectureId}/verifier`);
+  const res = await fetch(`${API_BASE}/results/${lectureId}/verifier`, { cache: 'no-store' });
   if (!res.ok) {
     if (res.status === 404) return null;
     throw new Error('Verifier fetch failed');

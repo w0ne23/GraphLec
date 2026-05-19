@@ -1,10 +1,11 @@
 """
 교차 검증 (Cross-Model Verification)
 
-1단계 claim 추출 → raw claim inventory 추출 (필요 시 반복 합의)
-2단계 claim 판정 → GPT/Claude 다중 모델 후보 합집합
-3단계 텍스트+문맥 교차검증 → 각 모델이 합집합 이슈를 재판정
-4단계 grounding → 통과한 이슈만 primary 모델로 재검증
+1단계 claim_extraction → raw claim inventory 추출 (필요 시 반복 합의)
+2단계 Issue_detection → 다중 모델이 crosscheck 후보만 선별
+3단계 Issue_classification → A/B/C/D 검증 유형 분류
+4단계 Multi_LLM_Verification → 유형별 prompt로 다중 모델 문맥 검증
+5단계 Final_Verification → factual grounding 및 슬라이드 오타 검수
 
 사용법:
     python -m analyzer.cross_pipeline <merged_clean.json>
@@ -25,6 +26,7 @@ from pathlib import Path
 from . import claim_common as cv
 from .cross_merge import (
     _issue_match_key,
+    build_issue_detection_stats,
     canonicalize_issues_with_llm,
     rebuild_claim_batches,
     union_claims,
@@ -40,7 +42,7 @@ from .cross_utils import (
     _merge_token_usage,
     _write_claims_jsonl,
 )
-from .claim_crosscheck import _CRITERIA_WEIGHTS as CROSSCHECK_CRITERIA_WEIGHTS
+from .issue_classifier import classify_issue_candidates
 from .cross_workers import (
     cross_recheck_worker,
     extract_worker,
@@ -55,25 +57,140 @@ from .cross_workers import (
 
 
 _CROSSCHECK_FEEDBACK_FIELDS = (
-    "issue",
-    "correct_info",
-    "why_wrong",
-    "counterexample",
-    "issue_basis",
-    "student_error",
-    "counterexample_or_condition",
+    "context_issue_summary",
     "context_resolution",
-    "evidence_in_context",
-    "student_misunderstanding",
-    "why_it_matters",
-    "suggested_rephrase",
-    "teaching_note",
-    "recommendation",
+    "context_resolution_reason",
+    "correction_hint",
     "issue_type_rationale",
 )
 
 
+def _issue_preview(issue: dict, limit: int = 100) -> str:
+    """Stable one-line preview for logs."""
+    uid = str(
+        issue.get("utterance_id")
+        or issue.get("context_id")
+        or ""
+    ).strip()
+    text = str(
+        issue.get("claim_text")
+        or issue.get("source_text")
+        or issue.get("claim_context_text")
+        or issue.get("issue")
+        or ""
+    )
+    text = " ".join(text.split())
+    if uid and not text.startswith(f"{uid}:"):
+        text = f"{uid}: {text}"
+    return text[:limit]
+
+
+def _consensus_merged_into_key(details: list[dict], total_weight: float | None = None) -> str:
+    weights: dict[str, float] = {}
+    counts: dict[str, int] = {}
+    observed_weight = 0.0
+    for row in details or []:
+        if not isinstance(row, dict):
+            continue
+        if row.get("model_failed") or row.get("excluded_from_score"):
+            continue
+        weight = float(row.get("model_weight", 0.0) or 0.0)
+        observed_weight += weight
+        target = str(row.get("merged_into_issue_key", "") or "").strip()
+        if not target:
+            continue
+        weights[target] = weights.get(target, 0.0) + weight
+        counts[target] = counts.get(target, 0) + 1
+    if not weights:
+        return ""
+    target, target_weight = sorted(weights.items(), key=lambda pair: (-pair[1], pair[0]))[0]
+    required = max(0.5, (observed_weight or float(total_weight or 0.0)) * 0.5)
+    if target_weight >= required and counts.get(target, 0) >= 2:
+        return target
+    return ""
+
+
+def _source_trace_from_issue(issue: dict) -> dict:
+    return {
+        key: issue.get(key)
+        for key in (
+            "utterance_id",
+            "slide_number",
+            "start_time",
+            "end_time",
+            "claim_type",
+            "claim_text",
+            "anchor_utterance_ids",
+            "source_span_ids",
+            "source_text",
+            "source_block_id",
+            "claim_context_ids",
+            "claim_context_text",
+            "claim_context_block_id",
+        )
+        if issue.get(key) not in (None, "", [])
+    }
+
+
+def _source_traces(issue: dict) -> list[dict]:
+    rows = [row for row in issue.get("source_issues", []) or [] if isinstance(row, dict)]
+    return rows or [_source_trace_from_issue(issue)]
+
+
+def _merge_context_duplicate_sources(scored_issues: list[dict]) -> None:
+    issue_by_key = {_issue_match_key(issue): issue for issue in scored_issues}
+    for issue in scored_issues:
+        target_key = str(issue.get("merged_into_issue_key", "") or "").strip()
+        if not target_key or target_key == _issue_match_key(issue):
+            continue
+        target = issue_by_key.get(target_key)
+        if not target:
+            continue
+
+        target_sources = target.setdefault("source_issues", [])
+        if not target_sources:
+            target_sources.extend(_source_traces(target))
+
+        seen = {
+            (
+                str(row.get("utterance_id", "") or ""),
+                str(row.get("source_text") or row.get("claim_context_text") or row.get("claim_text") or ""),
+            )
+            for row in target_sources
+            if isinstance(row, dict)
+        }
+        for source in _source_traces(issue):
+            marker = (
+                str(source.get("utterance_id", "") or ""),
+                str(source.get("source_text") or source.get("claim_context_text") or source.get("claim_text") or ""),
+            )
+            if marker in seen:
+                continue
+            target_sources.append(source)
+            seen.add(marker)
+
+        related_ids = list(target.get("canonical_member_utterance_ids") or [])
+        for source in target_sources:
+            uid = str(source.get("utterance_id", "") or "").strip()
+            if uid and uid not in related_ids:
+                related_ids.append(uid)
+        if related_ids:
+            target["canonical_member_utterance_ids"] = related_ids
+        target["canonical_issue_count"] = max(
+            int(target.get("canonical_issue_count", 1) or 1),
+            len(target_sources),
+        )
+        target["canonical_issue_id"] = target.get("canonical_issue_id") or f"context::{target_key}"
+        target["canonical_merge_rationale"] = (
+            target.get("canonical_merge_rationale")
+            or "crosscheck에서 같은 문맥의 같은 실제 이슈로 판단된 issue 후보들을 묶었습니다."
+        )
+
+
 def _claim_consensus_key(claim: dict) -> str:
+    explicit = str(claim.get("claim_fingerprint") or claim.get("claim_id") or "").strip()
+    if explicit:
+        return explicit
     uid = str(claim.get("utterance_id", "") or "")
     text = cv._compact_text(claim.get("claim_text", ""))
     return f"{uid}::{text}"
@@ -172,10 +289,23 @@ def _default_crosscheck_source_models(judge_models: list[str]) -> list[str]:
     return configured or judge_models
 
 
+def _filter_supported_provider_models(models: list[str], label: str) -> list[str]:
+    supported = []
+    skipped = []
+    for model in models:
+        if cv._is_deepseek_model(model):
+            skipped.append(model)
+            continue
+        supported.append(model)
+    if skipped:
+        print(f"  {label} 모델 제외: {', '.join(skipped)} (DeepSeek 비활성화)")
+    return supported
+
+
 def _is_strong_feedback_model(model: str) -> bool:
     lowered = str(model or "").lower()
     return (
-        lowered.startswith(("gpt", "o1", "o3", "grok", "deepseek"))
+        lowered.startswith(("gpt", "o1", "o3", "grok"))
         or "claude" in lowered
         or "sonnet" in lowered
         or "opus" in lowered
@@ -207,6 +337,14 @@ def _env_float(name: str, default: float, *, minimum: float | None = None, maxim
     return value
 
 
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
 def _crosscheck_confirm_threshold() -> float:
     return _env_float("CROSS_VERIFY_SCORE_CONFIRM_THRESHOLD", _DEFAULT_CONFIRM_THRESHOLD, minimum=0.0, maximum=1.0)
 
@@ -232,12 +370,6 @@ def _default_crosscheck_weight(model: str) -> float:
         return 0.95
     if lowered.startswith("grok"):
         return 0.85
-    if lowered.startswith("deepseek-v4-pro") or lowered.startswith("deepseek-reasoner"):
-        return 0.75
-    if lowered.startswith("deepseek-v4-flash") or lowered.startswith("deepseek-chat"):
-        return 0.6
-    if lowered.startswith("deepseek"):
-        return 0.55
     if "haiku" in lowered:
         return 0.55
     if "gemini" in lowered and "pro" in lowered:
@@ -623,13 +755,22 @@ def _build_crosscheck_score_report(scored_issues: list[dict], weight_map: dict[s
         })
 
     return {
-        "algorithm": "weighted_issue_score_with_independent_issue_type_scores",
-        "confidence_definition": "이 이슈를 교수에게 보여줄 만큼 문제가 실제로 남아 있는 정도",
-        "criteria_weights": {k: round(v, 4) for k, v in CROSSCHECK_CRITERIA_WEIGHTS.items()},
+        "algorithm": "weighted_issue_score_with_pre_routed_type_specific_gates",
+        "confidence_definition": "이 이슈를 강의자에게 보여줄 만큼 문제가 실제로 남아 있는 정도",
+        "score_definition": (
+            "Issue_classification이 정한 A-D 유형별 checker가 해당 유형 gate를 적용한 뒤 issue_score를 직접 출력하고, "
+            "서버는 model_weight * issue_score를 가중 평균합니다."
+        ),
         "issue_type_score_definition": (
             "A-D 유형은 합이 1인 확률 분포가 아니라 각 유형에 독립적으로 해당하는 정도이며, "
             "최종 유형 점수는 model_weight * issue_score를 유효 가중치로 사용해 결합합니다."
         ),
+        "type_specific_policy": {
+            "A_factual_error": "명확한 원문 오류는 적극 유지합니다.",
+            "B_temporal_error": "시점 의존 정보는 자동 확정보다 후속 확인 후보로 둡니다.",
+            "C_scope_overclaim": "실제 배제 명제와 강의 수준 반례가 없으면 낮게 둡니다.",
+            "D_confusing_explanation": "구체적 학생 오개념 문장이 없으면 낮게 둡니다.",
+        },
         "thresholds": {
             "confirmed": _crosscheck_confirm_threshold(),
             "professor_check": _crosscheck_professor_check_threshold(),
@@ -708,38 +849,29 @@ def _apply_crosscheck_feedback_fields(issue: dict, details: list[dict], *, profe
                 issue[field] = value
                 break
 
-    if not issue.get("why_wrong"):
-        combined_reason = _combined_crosscheck_reasons(details, include_disagree=professor_check)
-        if combined_reason:
-            issue["why_wrong"] = combined_reason
-    if not issue.get("evidence_in_context"):
-        combined_evidence = " / ".join(
-            f"[{row.get('model')}] {row.get('evidence_in_context')}"
-            for row in details
-            if row.get("verdict") in {"agree", "inconclusive"} and row.get("evidence_in_context")
-        )
-        if combined_evidence:
-            issue["evidence_in_context"] = combined_evidence
-        elif issue.get("why_wrong"):
-            issue["evidence_in_context"] = issue["why_wrong"]
+    if not issue.get("issue"):
+        for source in sources:
+            value = str(source.get("reason", "") or "").strip()
+            if value:
+                issue["issue"] = value
+                break
     if not issue.get("context_resolution") and all(row.get("verdict") == "agree" for row in details):
         issue["context_resolution"] = "해소 안 됨"
+    if not issue.get("context_resolution_reason"):
+        for row in sources:
+            value = str(row.get("context_resolution_reason", "") or "").strip()
+            if value:
+                issue["context_resolution_reason"] = value
+                break
 
     if professor_check:
-        reason_parts = [
-            f"[{row.get('model')}] {row.get('verdict')}: {row.get('reason', '')}"
-            for row in details
-        ]
-        issue["issue_basis"] = "교수 확인 필요"
         issue["context_resolution"] = "모델 간 판단 불일치"
-        issue["why_wrong"] = (
-            "확정 오류로 단정하지 않았습니다. "
-            + " / ".join(reason_parts)
-        )
+        if not issue.get("context_resolution_reason"):
+            issue["context_resolution_reason"] = "모델들이 같은 문맥을 보고도 해소 여부를 다르게 판단했습니다."
         if not issue.get("issue"):
-            issue["issue"] = "모델 간 판단이 갈린 교수 확인 후보입니다."
-        if not issue.get("recommendation"):
-            issue["recommendation"] = "교수자가 실제 의도와 강의 문맥을 확인해 표시 여부를 결정하세요."
+            issue["issue"] = "모델 간 판단이 갈린 강의자 확인 후보입니다."
+        if not issue.get("correction_hint"):
+            issue["correction_hint"] = "강의자가 실제 의도와 강의 문맥을 확인해 표시 여부를 결정하세요."
 
 
 def cross_verify(
@@ -755,12 +887,28 @@ def cross_verify(
     claim_runs: int = 1,
     claim_min_rate: float = 0.5,
     judge_context_mode: str | None = None,
+    claim_max_workers: int | None = None,
+    judge_max_workers: int | None = None,
 ) -> dict:
     root = str(_ROOT)
     judge_context_mode = cv.normalize_judge_context_mode(judge_context_mode)
-    models = list(models or [])
+    models = _filter_supported_provider_models(list(models or []), "verifier judge")
     env_vars = dict(env_vars or {})
     env_vars["VERIFIER_JUDGE_CONTEXT_MODE"] = judge_context_mode
+    effective_claim_max_workers = (
+        _env_int("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", 4)
+        if claim_max_workers is None
+        else max(1, int(claim_max_workers or 1))
+    )
+    effective_judge_max_workers = (
+        _env_int("VERIFIER_JUDGE_BATCH_MAX_WORKERS", 2)
+        if judge_max_workers is None
+        else max(1, int(judge_max_workers or 1))
+    )
+    from .claim_pipeline import prepare_verification
+
+    verification_ctx = prepare_verification(merged_path)
+    hint = verification_ctx.get("hint", {})
 
     # ── Phase 1: claim 추출 (단일 모델) ──
     print(f"\n{'='*60}")
@@ -769,11 +917,8 @@ def cross_verify(
     print(f"{'='*60}")
 
     if claims_jsonl:
-        from .claim_pipeline import prepare_verification
-
         loaded_claims = _load_claims_jsonl(claims_jsonl)
-        ctx = prepare_verification(merged_path)
-        unique_utts = ctx["utterances"]
+        unique_utts = verification_ctx["utterances"]
         extract_result = {
             "model": f"claims_jsonl:{claims_jsonl}",
             "claims_by_batch": [{"batch": unique_utts, "claims": loaded_claims}],
@@ -784,7 +929,14 @@ def cross_verify(
         extract_claim_count = len(loaded_claims)
         print(f"  기존 claim 파일 사용: {claims_jsonl}")
     else:
-        extract_args = (merged_path, CLAIM_EXTRACT_MODEL, batch_size, root, env_vars)
+        extract_args = (
+            merged_path,
+            CLAIM_EXTRACT_MODEL,
+            batch_size,
+            root,
+            env_vars,
+            effective_claim_max_workers,
+        )
         claim_runs = max(1, int(claim_runs or 1))
         extract_results = []
 
@@ -828,18 +980,41 @@ def cross_verify(
 
     print(f"\n  ── claim 입력 결과 ──")
     print(f"    [{extract_result['model']}]: {extract_claim_count}개")
-    print(f"    판정 입력 claim 수: {len(merged_claims)}개")
+    print(f"    Issue_detection 입력 claim 수: {len(merged_claims)}개")
     print(f"    verifier judge 문맥 모드: {judge_context_mode}")
 
-    merged_batches = rebuild_claim_batches(merged_claims, unique_utts, judge_batch_size or batch_size)
+    effective_judge_batch_size = max(1, int(judge_batch_size or batch_size or 1))
+    issue_detector_overlap = _env_int("VERIFIER_ISSUE_DETECTOR_CONTEXT_OVERLAP", 0, minimum=0)
+    merged_batches = rebuild_claim_batches(
+        merged_claims,
+        unique_utts,
+        effective_judge_batch_size,
+        context_overlap=issue_detector_overlap,
+    )
+    print(
+        f"    Issue_detection 배치: core context {effective_judge_batch_size}개 단위, "
+        f"overlap {issue_detector_overlap}개, "
+        f"총 {len(merged_batches)}개 batch",
+        flush=True,
+    )
 
-    # ── Phase 2: claim 판정 (병렬) ──
+    # ── Phase 2: Issue detection (병렬) ──
     print(f"\n{'='*60}")
-    print(f"  Phase 2: claim 판정 (병렬) — 합집합 {len(merged_claims)}개")
+    print(f"  Phase 2: Issue_detection (이전 verifier) — claim {len(merged_claims)}개")
     print(f"{'='*60}")
 
     judge_args = [
-        (merged_path, model, merged_batches, num_runs, min_rate, root, env_vars, judge_context_mode)
+        (
+            merged_path,
+            model,
+            merged_batches,
+            num_runs,
+            min_rate,
+            root,
+            env_vars,
+            judge_context_mode,
+            effective_judge_max_workers,
+        )
         for model in models
     ]
 
@@ -862,15 +1037,17 @@ def cross_verify(
     # 합집합 + 공통/단독 탐지 분류
     judge_list = [{"model": m, "issues": r["issues"]} for m, r in judge_results.items()]
     raw_unioned, raw_intersected, raw_exclusive = union_issues(judge_list)
+    raw_issue_detection_stats = build_issue_detection_stats(judge_results, raw_unioned, models)
     unioned, intersected, exclusive, issue_cluster_token_usage = canonicalize_issues_with_llm(
         raw_unioned,
         models,
     )
+    issue_detection_stats = build_issue_detection_stats(judge_results, unioned, models)
 
     total_union = len(unioned)
     total_exclusive = sum(len(v) for v in exclusive.values())
 
-    print(f"\n  ── 이슈 분류 (합집합 {total_union}건) ──")
+    print(f"\n  ── 이슈 후보 감지/병합 (합집합 {total_union}건) ──")
     for model, result in judge_results.items():
         print(f"    [{model}]: {len(result['issues'])}건 탐지")
     if len(raw_unioned) != len(unioned) or len(raw_intersected) != len(intersected):
@@ -881,17 +1058,60 @@ def cross_verify(
 
     agreement_label = "양쪽 모두 탐지" if len(models) == 2 else "모든 모델 1차 탐지"
     print(f"    {agreement_label}: {len(intersected)}건 → 공통 탐지 후보")
+    if issue_detection_stats:
+        print(
+            "    탐지 분포: "
+            f"전체공통 {issue_detection_stats.get('common_all_model_count', 0)}건, "
+            f"부분공통 {issue_detection_stats.get('partial_overlap_count', 0)}건, "
+            f"단독 {issue_detection_stats.get('single_model_count', 0)}건"
+        )
     for model, issues in exclusive.items():
         if issues:
             print(f"    [{model}] 단독 {len(issues)}건")
             for issue in issues:
-                print(f"      • {issue.get('claim_text','')[:80]}")
+                print(f"      • {_issue_preview(issue, 100)}")
 
-    # ── Phase 3: 합집합 전체 → 각 모델이 독립 crosscheck ──
+    # ── Phase 3: Issue classification ──
+    issue_classification_token_usage = _empty_token_usage()
+    explicit_classifier_models = [
+        item
+        for item in re.split(
+            r"[\s,]+",
+            str(os.getenv("VERIFIER_ISSUE_CLASSIFIER_MODELS", "") or "").strip(),
+        )
+        if item
+    ]
+    explicit_classifier_model = str(os.getenv("VERIFIER_ISSUE_CLASSIFIER_MODEL", "") or "").strip()
+    issue_classification_models = (
+        explicit_classifier_models
+        or ([explicit_classifier_model] if explicit_classifier_model else [])
+        or list(models or [])
+        or [cv._resolve_stage_model("issue_classification")]
+    )
+    issue_classification_models = list(dict.fromkeys(str(model).strip() for model in issue_classification_models if str(model).strip()))
+    if unioned:
+        print(f"\n{'='*60}")
+        print(
+            "  Phase 3: Issue_classification — A/B/C/D 유형 분류 "
+            f"[{', '.join(issue_classification_models)}]"
+        )
+        print(f"{'='*60}")
+        unioned, issue_classification_token_usage = classify_issue_candidates(
+            unioned,
+            hint,
+            models=issue_classification_models,
+        )
+        print(f"  유형 분류 완료: {len(unioned)}건")
+
+    # ── Phase 4: 합집합 전체 → 각 모델이 독립 crosscheck ──
     cross_recheck_verified = []
     cross_recheck_rejected = []
     cross_recheck_inconclusive = []
-    crosscheck_source_models = list(dict.fromkeys(crosscheck_models or _default_crosscheck_source_models(models)))
+    cross_recheck_merged = []
+    crosscheck_source_models = _filter_supported_provider_models(
+        list(dict.fromkeys(crosscheck_models or _default_crosscheck_source_models(models))),
+        "crosscheck",
+    )
     cross_recheck_usage_per_model = {m: _empty_token_usage() for m in crosscheck_source_models}
     crosscheck_mode = "weighted_model_score"
     crosscheck_model_map = {model: _crosscheck_model_for(model) for model in crosscheck_source_models}
@@ -900,7 +1120,7 @@ def cross_verify(
     crosscheck_score_report = _build_crosscheck_score_report([], crosscheck_weights)
     if total_union > 0 and crosscheck_source_models:
         print(f"\n{'='*60}")
-        print(f"  Phase 3: 텍스트+문맥 교차검증 — 모델별 독립 판정 + 가중 점수")
+        print(f"  Phase 4: Multi_LLM_Verification — 유형별 문맥 검증 + 가중 점수")
         print(f"{'='*60}")
         print("  crosscheck 가중치:")
         for model, weight in crosscheck_weights.items():
@@ -984,6 +1204,15 @@ def cross_verify(
                     inconclusive_models.append(resolved_model)
 
             scoring = _score_details(details, crosscheck_weights)
+            merged_into_issue_key = _consensus_merged_into_key(details, scoring.get("total_weight"))
+            if merged_into_issue_key:
+                capped_score = min(float(scoring.get("score", 0.5) or 0.5), 0.39)
+                scoring["score"] = round(capped_score, 4)
+                scoring["score_percent"] = round(capped_score * 100, 1)
+                scoring["score_verdict"] = _score_verdict(capped_score)
+                scoring["status"] = _score_status(capped_score)
+                scoring["merged_into_issue_key"] = merged_into_issue_key
+                issue["merged_into_issue_key"] = merged_into_issue_key
             score = float(scoring["score"])
             score_percent = float(scoring["score_percent"])
             weighted_status = str(scoring["status"])
@@ -1042,25 +1271,28 @@ def cross_verify(
             else:
                 combined_reason = score_reason
 
-            if weighted_status == "confirmed":
-                if cv.should_route_issue_to_professor_check(issue):
-                    _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
-                    issue["cross_recheck"] = None
-                    issue["rejection_stage"] = "텍스트+문맥 교차검증"
-                    issue["rejection_reason"] = f"{cv.metadata_review_reason(issue)} / {combined_reason}"
-                    issue["professor_check_reason"] = issue["rejection_reason"]
-                    cross_recheck_inconclusive.append(issue)
-                else:
-                    _apply_crosscheck_feedback_fields(issue, details)
-                    issue["cross_recheck"] = True
-                    issue["cross_recheck_reason"] = combined_reason
-                    cross_recheck_verified.append(issue)
+            if merged_into_issue_key:
+                issue["cross_recheck"] = False
+                issue["crosscheck_weighted_status"] = "merged"
+                issue["rejection_stage"] = "텍스트+문맥 교차검증"
+                issue["rejection_reason"] = (
+                    f"같은 문맥의 대표 이슈로 병합되었습니다. "
+                    f"대표 issue key={merged_into_issue_key}"
+                    f" / {combined_reason}"
+                )
+                issue["merged_reason"] = issue["rejection_reason"]
+                cross_recheck_merged.append(issue)
+            elif weighted_status == "confirmed":
+                _apply_crosscheck_feedback_fields(issue, details)
+                issue["cross_recheck"] = True
+                issue["cross_recheck_reason"] = combined_reason
+                cross_recheck_verified.append(issue)
             elif weighted_status == "professor_check":
                 _apply_crosscheck_feedback_fields(issue, details, professor_check=True)
                 issue["cross_recheck"] = None
                 issue["rejection_stage"] = "텍스트+문맥 교차검증"
                 issue["rejection_reason"] = (
-                    f"가중 점수가 교수 확인 구간입니다. "
+                    f"가중 점수가 강의자 확인 구간입니다. "
                     f"동의={', '.join(agree_models)}; "
                     f"비동의={', '.join(disagree_models) or '없음'}; "
                     f"불확실={', '.join(inconclusive_models) or '없음'}"
@@ -1080,6 +1312,7 @@ def cross_verify(
                 cross_recheck_rejected.append(issue)
             scored_issues.append(issue)
 
+        _merge_context_duplicate_sources(scored_issues)
         crosscheck_score_report = _build_crosscheck_score_report(scored_issues, crosscheck_weights)
 
         if cross_recheck_verified:
@@ -1088,14 +1321,16 @@ def cross_verify(
             print(f"    ❌ 텍스트+문맥 교차검증 거부: {len(cross_recheck_rejected)}건")
         if cross_recheck_inconclusive:
             print(f"    ⚠️ 텍스트+문맥 교차검증 불확실: {len(cross_recheck_inconclusive)}건")
+        if cross_recheck_merged:
+            print(f"    🔗 텍스트+문맥 교차검증 병합: {len(cross_recheck_merged)}건")
 
     all_confirmed = cross_recheck_verified
 
-    # ── Phase 4: primary 모델 grounding ──
+    # ── Phase 5: Final verification ──
     primary = models[0]
     if all_confirmed:
         print(f"\n{'='*60}")
-        print(f"  Phase 4: grounding — [{primary}]")
+        print(f"  Phase 5: Final_Verification grounding — [{primary}]")
         print(f"{'='*60}")
 
         with ProcessPoolExecutor(max_workers=1) as executor:
@@ -1145,13 +1380,14 @@ def cross_verify(
     total_token_usage = _merge_token_usage(
         extract_token_usage,
         issue_cluster_token_usage,
+        issue_classification_token_usage,
         *(token_usage_per_model.values()),
     )
     result = {
         "mode": "cross_verification",
         "crosscheck_mode": crosscheck_mode,
         "judge_context_mode": judge_context_mode,
-        "crosscheck_context_mode": os.getenv("VERIFIER_CROSSCHECK_CONTEXT_MODE", "expanded") or "expanded",
+        "crosscheck_context_mode": os.getenv("VERIFIER_CROSSCHECK_CONTEXT_MODE", "focused") or "focused",
         "crosscheck_focus_window": os.getenv("VERIFIER_CROSSCHECK_FOCUS_WINDOW", "5") or "5",
         "models": models,
         "crosscheck_models": resolved_crosscheck_models,
@@ -1161,6 +1397,7 @@ def cross_verify(
         "crosscheck_score_report": crosscheck_score_report,
         "primary_model": primary,
         "claim_extract_model": CLAIM_EXTRACT_MODEL,
+        "issue_classification_models": issue_classification_models,
         "claim_extract_runs": extract_result.get("claim_run_counts", []),
         "claim_extract_min_rate": claim_min_rate,
         "claims_source_path": claims_jsonl or "",
@@ -1169,6 +1406,8 @@ def cross_verify(
         "merged_claims": merged_claims,
         "issues_per_model": {m: len(r["issues"]) for m, r in judge_results.items()},
         "issue_detection_total": sum(len(r["issues"]) for r in judge_results.values()),
+        "issue_detection_stats": issue_detection_stats,
+        "issue_detection_raw_stats": raw_issue_detection_stats,
         "issue_union_count": total_union,
         "issue_union_raw_count": len(raw_unioned),
         "issue_clustered_count": total_union,
@@ -1178,15 +1417,18 @@ def cross_verify(
         "intersected_raw_count": len(raw_intersected),
         "cross_recheck_verified_count": len(cross_recheck_verified),
         "cross_recheck_inconclusive_count": len(cross_recheck_inconclusive),
+        "cross_recheck_merged_count": len(cross_recheck_merged),
         "confirmed_count": len(all_confirmed),
         "issues": final["issues"],
         "slide_typos": slide_typo_result.get("slide_typos", []),
         "crosscheck_rejected_issues": cross_recheck_rejected,
         "crosscheck_inconclusive_issues": cross_recheck_inconclusive,
+        "crosscheck_merged_issues": cross_recheck_merged,
         "grounding_rejected_issues": final["grounding_rejected"],
         "rejected_issues": all_rejected,
         "claim_extract_token_usage": extract_token_usage,
         "issue_cluster_token_usage": issue_cluster_token_usage,
+        "issue_classification_token_usage": issue_classification_token_usage,
         "token_usage_per_model": token_usage_per_model,
         "token_usage": total_token_usage,
         "overall_assessment": {
@@ -1346,14 +1588,11 @@ def print_cross_result(result: dict):
             src = "양쪽" if issue.get("cross_model_agreement", 0) >= 2 else f"교차검증({issue.get('cross_recheck_model','?')} 동의)"
             score = float(issue.get("crosscheck_score", issue.get("confidence", 0)) or 0)
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']} score={score:.3f} ({src})")
-            print(f"        {issue.get('claim_text','')[:100]}")
+            print(f"        {_issue_preview(issue, 100)}")
             print(f"        → {issue.get('issue','')[:100]}")
-            confirmation_reason = str(issue.get("cross_recheck_reason", "") or issue.get("why_wrong", "") or "").strip()
+            confirmation_reason = str(issue.get("cross_recheck_reason", "") or issue.get("context_resolution_reason", "") or "").strip()
             if confirmation_reason:
                 print(f"        확정 사유: {confirmation_reason[:260]}")
-            evidence_in_context = str(issue.get("evidence_in_context", "") or "").strip()
-            if evidence_in_context:
-                print(f"        문맥 근거: {evidence_in_context[:260]}")
     else:
         print(f"  최종 이슈: 0건")
 
@@ -1366,7 +1605,7 @@ def print_cross_result(result: dict):
         for i, issue in enumerate(crosscheck_rejected):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 유지되지 않음")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
-            print(f"        claim: {issue.get('claim_text','')[:100]}")
+            print(f"        claim: {_issue_preview(issue, 100)}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
 
@@ -1375,7 +1614,7 @@ def print_cross_result(result: dict):
         for i, issue in enumerate(crosscheck_inconclusive):
             reason = issue.get("rejection_reason", "텍스트+문맥 교차검증에서 확정 판단 실패")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
-            print(f"        claim: {issue.get('claim_text','')[:100]}")
+            print(f"        claim: {_issue_preview(issue, 100)}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             print(f"        사유: {reason[:120]}")
 
@@ -1384,7 +1623,7 @@ def print_cross_result(result: dict):
         for i, issue in enumerate(grounding_rejected):
             reason = issue.get("grounding_reason", "")
             print(f"    [{i+1}] {issue['type']} sev={issue['severity']}")
-            print(f"        claim: {issue.get('claim_text','')[:100]}")
+            print(f"        claim: {_issue_preview(issue, 100)}")
             print(f"        issue: {issue.get('issue','')[:100]}")
             if reason:
                 print(f"        사유: {reason[:120]}")
@@ -1415,7 +1654,25 @@ def main():
     parser.add_argument("--min-rate", type=float, default=0.5)
     parser.add_argument("--claim-runs", type=int, default=1, help="claim 추출 반복 횟수 (기본 1)")
     parser.add_argument("--claim-min-rate", type=float, default=0.5, help="claim 반복 추출 시 유지할 최소 탐지 비율")
-    parser.add_argument("--batch-size", type=int, default=20)
+    parser.add_argument(
+        "--claim-max-workers",
+        type=int,
+        default=None,
+        help="claim 추출 배치 병렬 worker 수 (기본: VERIFIER_CLAIM_EXTRACT_MAX_WORKERS 또는 4)",
+    )
+    parser.add_argument(
+        "--judge-max-workers",
+        type=int,
+        default=None,
+        help="모델별 claim 판정 배치 병렬 worker 수 (기본: VERIFIER_JUDGE_BATCH_MAX_WORKERS 또는 2)",
+    )
+    parser.add_argument("--batch-size", type=int, default=10)
+    parser.add_argument(
+        "--judge-batch-size",
+        type=int,
+        default=int(os.getenv("VERIFIER_ISSUE_DETECTOR_BATCH_SIZE", "4") or "4"),
+        help="2단계 Issue_detection core 문맥 배치 크기. 기본 4",
+    )
     parser.add_argument("--claims-jsonl", default=None, help="이미 추출된 claims_extracted.jsonl 경로. 지정하면 claim 추출을 건너뜀")
     parser.add_argument(
         "--judge-context-mode",
@@ -1445,11 +1702,14 @@ def main():
         result = cross_verify(
             args.merged_path, models, args.num_runs,
             args.min_rate, args.batch_size, env_vars,
+            judge_batch_size=args.judge_batch_size,
             claims_jsonl=args.claims_jsonl,
             crosscheck_models=args.crosscheck_models,
             claim_runs=args.claim_runs,
             claim_min_rate=args.claim_min_rate,
             judge_context_mode=args.judge_context_mode,
+            claim_max_workers=args.claim_max_workers,
+            judge_max_workers=args.judge_max_workers,
         )
         print_cross_result(result)
     else:

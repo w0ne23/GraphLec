@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -31,17 +32,10 @@ _ENV_KEYS = [
     "ANTHROPIC_API_KEY",
     "XAI_API_KEY",
     "XAI_BASE_URL",
-    "DEEPSEEK_API_KEY",
-    "DEEPSEEK_BASE_URL",
-    "DEEPSEEK_THINKING",
-    "DEEPSEEK_REASONING_EFFORT",
-    "DEEPSEEK_TIMEOUT_SEC",
-    "VERIFIER_DEEPSEEK_THINKING",
-    "VERIFIER_DEEPSEEK_REASONING_EFFORT",
-    "VERIFIER_DEEPSEEK_TIMEOUT_SEC",
-    "VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS",
-    "VERIFIER_DEEPSEEK_API_MAX_RETRIES",
-    "VERIFIER_DEEPSEEK_API_INITIAL_WAIT",
+    "XAI_DEFAULT_MODEL",
+    "XAI_TIMEOUT_SEC",
+    "VERIFIER_XAI_DEFAULT_MODEL",
+    "VERIFIER_XAI_TIMEOUT_SEC",
     "GROQ_API_KEY",
     "CROSS_VERIFY_MODELS",
     "CROSS_VERIFY_MODEL",
@@ -53,6 +47,10 @@ _ENV_KEYS = [
     "VERIFIER_CLAIM_EXTRACT_MODEL",
     "VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE",
     "VERIFIER_CLAIM_JUDGE_MODEL",
+    "VERIFIER_ISSUE_CLASSIFIER_MODEL",
+    "VERIFIER_ISSUE_CLASSIFIER_MODELS",
+    "VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE",
+    "VERIFIER_ISSUE_CLASSIFIER_MAX_WORKERS",
     "VERIFIER_CROSS_RECHECK_MODEL",
     "VERIFIER_CROSSCHECK_GEMINI_MODEL",
     "VERIFIER_SLIDE_TYPO_MODEL",
@@ -140,8 +138,41 @@ def _load_claims_jsonl(path: str | Path) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
-            claims.append(payload)
+            claims.append(_normalize_loaded_claim(payload))
     return claims
+
+
+def _dedupe_ids(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
+
+
+def _normalize_loaded_claim(claim: dict) -> dict:
+    """Keep antecedent utterances from reused claim files.
+
+    Older claims may only mention antecedents in context_note. Preserve those IDs
+    so verifier/crosscheck see the same local context used by claim extraction.
+    """
+    claim = dict(claim)
+    note_ids = re.findall(r"\b(?:U\d{3,5}|S\d{3}(?:-C\d{3})?)\b", str(claim.get("context_note", "") or ""))
+    antecedent_ids = claim.get("antecedent_context_ids")
+    if isinstance(antecedent_ids, list):
+        antecedent_ids = _dedupe_ids(antecedent_ids + note_ids)
+    else:
+        antecedent_ids = _dedupe_ids(note_ids)
+    if antecedent_ids:
+        claim["antecedent_context_ids"] = antecedent_ids
+    utterance_ids = claim.get("utterance_ids")
+    if isinstance(utterance_ids, list):
+        claim["utterance_ids"] = _dedupe_ids(utterance_ids)
+    else:
+        uid = str(claim.get("utterance_id") or "").strip()
+        claim["utterance_ids"] = _dedupe_ids([uid] if uid else [])
+    if antecedent_ids and not claim.get("anchor_utterance_ids"):
+        claim["anchor_utterance_ids"] = _dedupe_ids(antecedent_ids + claim["utterance_ids"])
+    context_ids = claim.get("context_ids")
+    if isinstance(context_ids, list):
+        claim["context_ids"] = _dedupe_ids(context_ids)
+    return claim
 
 
 def _setup_worker(root: str, env_vars: dict, model: str):

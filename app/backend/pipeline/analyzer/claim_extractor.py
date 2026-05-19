@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 _CANONICAL_CLAIM_TYPES = {
@@ -14,14 +16,184 @@ _CANONICAL_CLAIM_TYPES = {
     "currentness",
 }
 
+def _stable_claim_id(claim: dict) -> str:
+    base_id = str(claim.get("context_id") or claim.get("utterance_id") or "claim").strip() or "claim"
+    # The stable identity must be anchored to the extracted source span, not a
+    # model-rewritten restatement.
+    text = str(claim.get("claim_text") or claim.get("source_text") or "").strip()
+    digest = hashlib.sha1(f"{base_id}\n{text}".encode("utf-8")).hexdigest()[:12]
+    return f"{base_id}::{digest}"
 
-def _claim_extract_context_mode() -> str:
-    mode = str(os.getenv("VERIFIER_CLAIM_EXTRACT_CONTEXT_MODE", "cards") or "cards").strip().lower()
-    if mode in {"compact", "batch", "transcript"}:
-        return "compact"
-    if mode in {"card_lite", "card-lite", "lite", "cards_lite", "cards-lite"}:
-        return "card_lite"
-    return "cards"
+
+def _normalize_prompt_ref(value) -> str:
+    raw = str(value or "").strip()
+    match = re.match(r"^((?:U\d{3,5}|S\d{3}(?:-C\d{3})?))(?:#seg\d+)?$", raw)
+    return match.group(1) if match else raw
+
+
+def _dedupe_ids(values: list[str]) -> list[str]:
+    return list(dict.fromkeys(
+        ref for ref in (_normalize_prompt_ref(value) for value in values) if ref
+    ))
+
+
+def _ids_from_context_note(note: str) -> list[str]:
+    return re.findall(r"\b(?:U\d{3,5}|S\d{3}(?:-C\d{3})?)\b", str(note or ""))
+
+
+def _has_model_added_parenthetical(claim_text: str, source_text: str) -> bool:
+    claim_text = str(claim_text or "")
+    source_text = str(source_text or "")
+    bracket_chars = ("(", ")", "（", "）")
+    if not any(ch in claim_text for ch in bracket_chars):
+        return False
+    return not any(ch in source_text for ch in bracket_chars)
+
+
+def _remove_parenthetical_text(text: str) -> str:
+    output: list[str] = []
+    depth = 0
+    for ch in str(text or ""):
+        if ch in {"(", "（"}:
+            depth += 1
+            continue
+        if ch in {")", "）"}:
+            if depth > 0:
+                depth -= 1
+                continue
+        if depth == 0:
+            output.append(ch)
+    return " ".join("".join(output).split()).strip()
+
+
+def _source_sentence_units(source_text: str) -> list[str]:
+    units: list[str] = []
+    current: list[str] = []
+    for ch in str(source_text or ""):
+        current.append(ch)
+        if ch in {".", "?", "!", "。", "？", "！"}:
+            unit = " ".join("".join(current).split()).strip()
+            if unit:
+                units.append(unit)
+            current = []
+    tail = " ".join("".join(current).split()).strip()
+    if tail:
+        units.append(tail)
+    return units
+
+
+def _tokenize_for_overlap(text: str) -> set[str]:
+    tokens: set[str] = set()
+    current: list[str] = []
+    for ch in str(text or "").lower():
+        if ch.isalnum() or "\uac00" <= ch <= "\ud7a3" or ch in {"#", "+", "."}:
+            current.append(ch)
+            continue
+        if current:
+            token = "".join(current).strip(".")
+            if len(token) >= 2:
+                tokens.add(token)
+            current = []
+    if current:
+        token = "".join(current).strip(".")
+        if len(token) >= 2:
+            tokens.add(token)
+    return tokens
+
+
+def _restore_parenthetical_claim_to_source(claim_text: str, source_text: str) -> str:
+    if not _has_model_added_parenthetical(claim_text, source_text):
+        return " ".join(str(claim_text or "").split()).strip()
+
+    target_tokens = _tokenize_for_overlap(_remove_parenthetical_text(claim_text))
+    units = _source_sentence_units(source_text)
+    if not target_tokens or not units:
+        return ""
+
+    best_text = ""
+    best_score = 0.0
+    best_span_len = 0
+    max_span = min(3, len(units))
+    for start in range(len(units)):
+        for end in range(start, min(len(units), start + max_span)):
+            candidate = " ".join(units[start : end + 1]).strip()
+            candidate_tokens = _tokenize_for_overlap(candidate)
+            if not candidate_tokens:
+                continue
+            overlap = len(target_tokens & candidate_tokens)
+            recall = overlap / max(1, len(target_tokens))
+            precision = overlap / max(1, len(candidate_tokens))
+            score = (recall * 0.7) + (precision * 0.3)
+            span_len = end - start + 1
+            if (
+                score > best_score
+                or (score == best_score and span_len < best_span_len)
+                or (score == best_score and span_len == best_span_len and len(candidate) < len(best_text))
+            ):
+                best_text = candidate
+                best_score = score
+                best_span_len = span_len
+
+    if best_score < 0.35:
+        return ""
+    return best_text
+
+
+def _normalize_source_slice(value, claim_text: str, source_text: str) -> str:
+    """Keep a compact claim-local quote for downstream scoring."""
+    source_text = " ".join(str(source_text or "").split()).strip()
+    claim_text = " ".join(str(claim_text or "").split()).strip()
+    candidate = " ".join(str(value or "").split()).strip()
+    if not candidate:
+        candidate = claim_text
+    if not candidate:
+        return ""
+
+    if source_text:
+        compact_source = re.sub(r"\s+", "", source_text)
+        compact_candidate = re.sub(r"\s+", "", candidate)
+        if compact_candidate and compact_candidate in compact_source:
+            return candidate
+
+        compact_claim = re.sub(r"\s+", "", claim_text)
+        if compact_claim and compact_claim in compact_source:
+            return claim_text
+
+    return candidate
+
+
+def _claim_extract_batch_mode() -> str:
+    mode = str(os.getenv("VERIFIER_CLAIM_EXTRACT_BATCH_MODE", "context") or "context").strip().lower()
+    if mode in {"context", "contexts", "context_unit", "context-unit"}:
+        return "context"
+    if mode in {"slide", "slides", "scene", "scenes"}:
+        return "slide"
+    return "utterance"
+
+
+def _claim_extract_context_window() -> tuple[int, int]:
+    def _safe_int(name: str, default: int) -> int:
+        try:
+            return max(0, int(os.getenv(name, str(default)) or default))
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        _safe_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 2),
+        _safe_int("VERIFIER_CLAIM_EXTRACT_CONTEXT_NEXT", 1),
+    )
+
+
+def _claim_extract_context_group_size() -> int:
+    try:
+        return max(1, int(os.getenv("VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE", "4") or "4"))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _force_context_unit_batching() -> bool:
+    raw = str(os.getenv("VERIFIER_CLAIM_EXTRACT_FORCE_CONTEXT_UNITS", "1") or "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
 
 
 def _claim_extract_prompt_profile() -> str:
@@ -41,6 +213,19 @@ def _claim_extract_prompt_profile() -> str:
     return "default"
 
 
+def _claim_extract_max_workers(value: int | None = None) -> int:
+    if value is not None:
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 1
+    try:
+        configured = int(os.getenv("VERIFIER_CLAIM_EXTRACT_MAX_WORKERS", "4") or "4")
+    except ValueError:
+        configured = 4
+    return max(1, configured)
+
+
 def _model_specific_extract_rules() -> str:
     if _claim_extract_prompt_profile() != "gpt_strict":
         return ""
@@ -52,7 +237,7 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 1. 출력 기준
 - claim은 학생이 그대로 외웠을 때 참/거짓을 검증할 수 있는 **완성 명제**여야 합니다.
 - 단순히 강의자가 설명을 시작함, 예시를 들겠다고 함, 다음 내용을 예고함, 질문을 던짐, 강의 운영을 안내함은 claim이 아닙니다.
-- "정의한다면", "원가라는 것은", "재화나 용역을", "얻기 위해서 희생한"처럼 술어가 끝나지 않은 조각은 단독 claim으로 출력하지 마세요.
+- 술어가 끝나지 않은 문장 조각은 단독 claim으로 출력하지 마세요.
 
 2. 전수 확인의 의미
 - 검사 대상 발화마다 claim 후보가 있는지 확인하라는 뜻이지, 모든 검사 대상 발화를 claim으로 만들라는 뜻이 아닙니다.
@@ -60,41 +245,71 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 - 강의 일정, 연락 방법, 수업 준비물, 공지 확인처럼 강의 운영에 관한 발언은 수치나 정책 자체가 핵심 검증 대상일 때만 추출하세요.
 
 3. 문맥 결합
-- 문맥은 문장 조각을 완성하거나 지시어를 보수적으로 해소하기 위한 보조 정보입니다.
+- 문맥은 문장 조각을 완성하거나 지시어 의존 여부를 표시하기 위한 보조 정보입니다.
 - 문맥을 이용해 현재 발화가 실제로 말하지 않은 주체, 조건, 인과, 일반 법칙을 새로 만들지 마세요.
 - 여러 발화가 하나의 문장을 이룰 때는 하나의 claim으로 합치고, utterance_ids에 포함하세요.
 
-4. resolved_claim 작성
-- resolved_claim은 원문보다 넓어지면 안 됩니다.
+4. claim_text 작성
+- claim_text는 원문에서 직접 가져온 검증 대상 span이어야 합니다.
 - 하나의 원문에 서로 다른 명제가 있으면 하나로 요약하지 말고 분리하세요.
 - 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 마세요. 예: "A와 직접 관련 없다"와 "B를 제공한다"는 별도 claim입니다.
 """
 
 
+def _format_seconds(value) -> str:
+    try:
+        return f"{float(value):.1f}s"
+    except (TypeError, ValueError):
+        return "?s"
+
+
+def _segment_text(seg: dict) -> str:
+    return str(
+        seg.get("text_corrected")
+        or seg.get("text")
+        or ""
+    ).strip()
+
+
+def _format_source_segments_for_prompt(u: dict) -> str:
+    source_segments = u.get("source_segments") or []
+    if not source_segments:
+        return ""
+
+    uid = str(u.get("utterance_id") or u.get("context_id") or "?")
+    lines = ["  발화:"]
+    for idx, seg in enumerate(source_segments, 1):
+        text = _segment_text(seg)
+        if not text:
+            continue
+        start = _format_seconds(seg.get("start", seg.get("start_time")))
+        lines.append(f"    - {uid}#seg{idx:02d} [{start}] {text}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
 def _format_utterance_for_prompt(u: dict) -> str:
     uid = u["utterance_id"]
-    ts = f"{u['start_time']:.1f}s"
+    ts = _format_seconds(u.get("start_time"))
     corr = str(u.get("text_corrected", "") or "").strip()
-    orig = str(u.get("text_original", "") or "").strip()
+    source_block = _format_source_segments_for_prompt(u)
 
-    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
-        return f"{uid} | {ts} | {orig or u.get('text', '')}"
+    if source_block:
+        return f"{uid} | {ts} | context\n{source_block}"
 
-    if corr and orig and corr != orig:
-        return f"{uid} | {ts} | 교정: {corr} | 원문: {orig}"
+    if corr:
+        return f"{uid} | {ts} | {corr}"
 
     return f"{uid} | {ts} | {u['text']}"
 
 
 def _build_slide_references(slide_numbers: list[int], slide_ctx: dict) -> str:
     refs = []
-    mode = _claim_extract_context_mode()
     for sn in slide_numbers:
         ctx = slide_ctx.get(sn, {})
         title = ctx.get("title", f"슬라이드 {sn}")
         time_range = ctx.get("time_range", "")
         slide_text = str(ctx.get("slide_text", "") or "")
-        limit = 900 if mode in {"compact", "card_lite"} else 1200
+        limit = 1200
         if len(slide_text) > limit:
             slide_text = slide_text[:limit] + "\n... (이하 생략)"
         refs.append(
@@ -110,87 +325,34 @@ def _build_slide_and_utterance_context(
     target_utterance_ids: set[str] | None = None,
 ) -> tuple[str, str]:
     """슬라이드 참조와 발화 문맥을 한 번의 순회로 생성."""
-    total = len(utterances)
     seen_slides = OrderedDict()
-    cards = []
-    mode = _claim_extract_context_mode()
-
-    if mode == "compact":
-        transcript_lines = []
-        for u in utterances:
-            current_sn = int(u.get("slide_number", 0) or 0)
-            if current_sn not in seen_slides:
-                seen_slides[current_sn] = True
-            transcript_lines.append(f"  {_format_utterance_for_prompt(u)}")
-        context = (
-            "[배치 발화 전체]\n"
-            + "\n".join(transcript_lines)
-            + "\n\n[문맥 사용 규칙]\n"
-            + "- 각 claim은 반드시 위 발화의 utterance_id에 귀속하세요.\n"
-            + "- 앞뒤 문맥은 위 발화 순서 안에서 참고하세요.\n"
-            + "- 지시어 선행사가 이 배치 밖에 있어 확정되지 않으면 원문 claim을 유지하고 needs_context=true로 표시하세요."
-        )
-        return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
-
-    if mode == "card_lite":
-        target_ids = target_utterance_ids or {str(u.get("utterance_id") or "") for u in utterances}
-        transcript_lines = []
-        target_lines = []
-        for u in utterances:
-            current_sn = int(u.get("slide_number", 0) or 0)
-            if current_sn not in seen_slides:
-                seen_slides[current_sn] = True
-            uid = str(u.get("utterance_id") or "")
-            marker = "*" if uid in target_ids else " "
-            line = f"{marker} {_format_utterance_for_prompt(u)}"
-            transcript_lines.append(line)
-            if uid in target_ids:
-                target_lines.append(f"- {uid} (슬라이드 {current_sn})")
-        context = (
-            "[배치 전체 전사]\n"
-            + "\n".join(transcript_lines)
-            + "\n\n[검사 대상 발화]\n"
-            + "\n".join(target_lines)
-            + "\n\n[card-lite 추출 규칙]\n"
-            + "- '*' 표시된 검사 대상 발화는 각각 독립적으로 검토하세요.\n"
-            + "- claim이 있는 검사 대상 발화는 빠뜨리지 말고 claims 배열에 출력하세요.\n"
-            + "- claim이 없는 검사 대상 발화는 출력하지 않아도 됩니다.\n"
-            + "- '*'가 없는 발화는 앞뒤 문맥, 지시어 해소, 조각 문장 완결에만 사용하세요.\n"
-            + "- '*'가 없는 발화를 대표 utterance_id로 새 claim을 만들지 마세요.\n"
-            + "- 검사 대상 발화의 claim이 문맥 발화와 결합되어야 완성되면 대표 utterance_id는 검사 대상 발화로 두고, 결합된 발화들은 utterance_ids에 포함하세요.\n"
-            + "- 긴 배치 전체에서 중요한 것만 선별하지 말고, 검사 대상 발화마다 검증 가능한 정의/수치/인과/관계/현재성 주장이 있는지 전수 확인하세요."
-        )
-        return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
-
-    for i, u in enumerate(utterances):
+    target_ids = target_utterance_ids or {str(u.get("utterance_id") or "") for u in utterances}
+    transcript_lines = []
+    target_lines = []
+    for u in utterances:
         current_sn = int(u.get("slide_number", 0) or 0)
         if current_sn not in seen_slides:
             seen_slides[current_sn] = True
+        uid = str(u.get("utterance_id") or "")
+        marker = ">>" if uid in target_ids else "  "
+        transcript_lines.append(f"{marker} {_format_utterance_for_prompt(u)}")
+        if uid in target_ids:
+            target_lines.append(f"- {uid} (슬라이드 {current_sn})")
 
-        prev_context = utterances[max(0, i - 3):i]
-        next_context = utterances[i + 1:min(total, i + 4)]
-        same_slide_prev = [x for x in utterances[max(0, i - 6):i] if int(x.get("slide_number", 0) or 0) == current_sn]
-        same_slide_next = [x for x in utterances[i + 1:min(total, i + 7)] if int(x.get("slide_number", 0) or 0) == current_sn]
-
-        parts = [
-            f"### 대상 발화 {u.get('utterance_id', '?')} (슬라이드 {current_sn})",
-            f"[현재 발화]\n{_format_utterance_for_prompt(u)}",
-        ]
-        if prev_context:
-            parts.append("[직전 문맥]")
-            parts.extend(f"  {_format_utterance_for_prompt(x)}" for x in prev_context)
-        if next_context:
-            parts.append("[직후 문맥]")
-            parts.extend(f"  {_format_utterance_for_prompt(x)}" for x in next_context)
-        if same_slide_prev or same_slide_next:
-            parts.append("[같은 슬라이드 추가 문맥]")
-            for x in same_slide_prev[-3:]:
-                parts.append(f"  {_format_utterance_for_prompt(x)}")
-            for x in same_slide_next[:3]:
-                parts.append(f"  {_format_utterance_for_prompt(x)}")
-        cards.append("\n".join(parts))
-
-    return _build_slide_references(list(seen_slides.keys()), slide_ctx), "\n\n".join(cards)
+    context = (
+        "[배치 전체 전사]\n"
+        + "\n".join(transcript_lines)
+        + "\n\n[검사 대상 context/발화]\n"
+        + "\n".join(target_lines)
+        + "\n\n[추출 규칙]\n"
+        + "- '>>' 표시된 검사 대상만 claim 출력 대상으로 삼으세요.\n"
+        + "- 표시 없는 항목은 앞뒤 문맥, 지시어 해소, 조각 문장 완결에만 사용하세요.\n"
+        + "- 표시 없는 항목을 대표 utterance_id로 새 claim을 만들지 마세요.\n"
+        + "- 검사 대상이 context인 경우 context는 원문 발화를 보존한 묶음입니다. context 대표 요약이 아니라 내부 원문 발화의 원자 명제를 추출하세요.\n"
+        + "- 같은 context 안에 서로 다른 정의/수치/인과/관계/현재성 주장이 있으면 각각 별도 claim으로 출력하세요.\n"
+        + "- 전사 분할 때문에 한 문장이 여러 원문 발화로 끊긴 경우만 결합하고, 서로 다른 명제를 하나의 claim_text로 합치지 마세요."
+    )
+    return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
 
 
 def _build_extract_prompt(
@@ -200,7 +362,7 @@ def _build_extract_prompt(
     slide_ctx: dict,
     target_utterance_ids: set[str] | None = None,
 ) -> str:
-    slide_references, utterance_cards = _build_slide_and_utterance_context(
+    slide_references, utterance_context = _build_slide_and_utterance_context(
         utterances,
         slide_ctx,
         target_utterance_ids=target_utterance_ids,
@@ -217,7 +379,7 @@ def _build_extract_prompt(
 {slide_references}
 
 [발화 문맥]
-{utterance_cards}
+{utterance_context}
 
 ### 추출 대상
 - definition: 정의, 의미, 용어, 기호, 개념 설명
@@ -232,25 +394,31 @@ def _build_extract_prompt(
 - "약/대략/정도" 붙은 수치는 근사 claim(is_approximate=true)으로 표시
 
 ### 핵심 원칙: 1단계는 raw claim inventory입니다
-- 이 단계에서는 오류 여부, 오해 가능성, 교수 피드백, 반례를 판단하지 마세요.
-- 반드시 **현재 발화 자체가 명시한 주장**만 claim으로 추출하세요.
-- claim_text는 현재 발화에서 직접 가져온 가장 짧은 원문 조각으로 쓰세요.
-- resolved_claim은 원문 claim의 범위를 보존한 짧은 정리문입니다.
-- resolved_claim에서 새로운 주체, 조건, 원인, 반례, 일반 법칙을 만들지 마세요.
-- 주변 문맥과 슬라이드는 현재 발화가 claim인지, 예시인지, 지시어가 명확한지만 판단하는 보조 정보입니다.
-- 주변 문맥에 있는 더 강한 일반 명제를 현재 발화에 덧씌우지 마세요.
-- 현재 발화가 예시/가정/비유/수사적 요약이면, resolved_claim에도 그 예시/가정/비유/요약 범위를 유지하세요.
+- 이 단계에서는 오류 여부, 오해 가능성, 강의자 피드백, 반례를 판단하지 마세요.
+- 입력 ID가 `S001-C001`처럼 context 단위이면, output의 `utterance_id`와 `context_id`도 같은 context ID를 그대로 쓰세요.
+- `#seg01` 표시는 원문 위치 참고용입니다. 출력 ID에는 `#seg`를 붙이지 마세요.
+- claim은 context 요약이 아니라 context 안 원문 발화가 말한 원자 명제 단위로 추출하세요.
+- claim_text는 원문에서 직접 가져온 가장 짧은 검증 대상 span입니다.
+- claim_text를 자연스럽게 고치거나, 표준 용어로 바꾸거나, 괄호로 주어/대상을 보충하지 마세요.
+- source_slice는 detector가 이 claim을 우선 판단할 때 볼 최소 원문 조각입니다.
+- source_slice에는 claim_text를 만든 가장 직접적인 원문 구간만 넣고, 같은 context의 다른 문제나 앞선 예시를 불필요하게 포함하지 마세요.
+- 한 context 안에 여러 관계/분류/작동 방식 claim이 있으면 각 claim의 source_slice도 서로 독립적으로 좁게 잡으세요.
+- source_slice는 원문 표현을 그대로 인용하되, 전사 분할로 끊긴 조각을 이어야 할 때만 필요한 조각을 결합하세요.
+- 서로 다른 정의, 수치, 원인, 기능, 분류, 예시는 각각 별도 claim으로 출력하세요.
+- 전사 분할 때문에 하나의 문장이 여러 발화로 끊긴 경우에만 원문 조각을 결합하세요.
+- 바로 뒤 문장이 앞 표현을 이어 완성하는 경우에는 가장 짧은 원문 구간으로 하나의 claim만 추출하세요.
+- 한 발화가 검증 대상의 이름/예시/대상 목록만 제시하고, 바로 뒤 발화가 그 대상의 분류명, 명칭, 포함 관계, 기능, 목적을 말하면 두 원문 조각을 결합해 하나의 claim으로 추출하세요.
+- 이 경우 claim_text와 source_slice에는 결합된 원문 구간만 쓰세요.
+- 바로 뒤 문장이 앞 표현을 정정/보완/해소하는지 판단해서 claim을 버리지 마세요. 그런 판단은 Issue_detection과 crosscheck 단계에서 합니다.
+- 문맥과 슬라이드는 claim인지 아닌지, 예시 범위가 있는지, 지시어가 문맥 의존적인지 판단하는 보조 정보입니다. 문맥의 더 강한 일반 명제를 claim_text에 덧씌우지 마세요.
 
-### 지시어 처리
-- "이것", "여기", "해당 항목", "얘", "이거", "그거" 같은 지시어는 단일 선행사가 확실할 때만 최소한으로 풀어 쓰세요.
-- 둘 이상의 합리적 해석이 가능하면 특정 대상으로 확정하지 말고 원문 지시어를 유지하세요.
-- 지시어 선행사가 제공된 문맥보다 앞에 있을 수 있어도, 현재 발화에 검증 가능한 술어/정의/수치/관계가 있으면
-  claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두고,
-  needs_context=true, resolution_status="unresolved"로 표시하세요.
-- 슬라이드나 앞뒤 발화가 보이더라도, 현재 발화가 실제로 말하지 않은 관계를 resolved_claim에 추가하지 마세요.
-- 불완전한 조각 문장은 직전 발화와 결합해야 검증 가능한 값/정의/관계가 될 때만 추출하세요.
-- 복원 결과가 애매하다는 이유만으로 "이것은 X이다", "얘는 Y로 처리된다" 같은 원문 claim을 버리지 마세요.
-- 단, 현재 발화에 검증 가능한 술어가 없고 지시어만 남은 경우는 추출하지 마세요.
+### 지시어/생략 처리
+- "이것", "여기", "해당 항목", "얘", "걔", "이거", "그거", "이것들" 같은 지시어는 claim_text 안에서 풀어 쓰지 마세요.
+- 지시어의 선행사가 명확해 보여도 claim_text에는 원문 지시어를 그대로 남기세요.
+- 지시어를 괄호로 보충하지 마세요. 예: `얘네들(컴퓨터 하드웨어)`처럼 쓰지 마세요.
+- 모든 claim은 후속 단계에서 문맥과 함께 검증됩니다. needs_context=true, resolution_status="unresolved"로 표시하세요.
+- 선행사 판단에 참고한 context가 있으면 antecedent_context_ids에 ID만 넣고, claim_text는 바꾸지 마세요.
+- 지시어만 있고 검증 가능한 술어/정의/수치/관계가 없으면 추출하지 마세요.
 
 ### 복수 claim 추출
 하나의 발화에 여러 주장이 섞여 있으면 반드시 각각 별도 claim으로 추출하세요.
@@ -260,15 +428,15 @@ def _build_extract_prompt(
 
 ### 인접 조각 발화 병합
 - 전사 분할 때문에 하나의 문장이 여러 utterance로 나뉜 경우, 조각을 각각 claim으로 만들지 마세요.
-- 예: "원가라는 것은" / "재화라든가 용역을" / "얻기 위해서 희생한" / "경제적 자원을 화폐 단위로" / "측정한 거다"
-  → 하나의 definition claim으로 합쳐 추출하세요.
+- 전후 조각을 합쳐야 하나의 검증 가능한 정의/관계/수치/인과 명제가 되는 경우에만 하나의 claim으로 합쳐 추출하세요.
+- 대상명/예시 목록만 있는 조각과, 바로 뒤의 분류명/명칭/포함 관계 술어 조각은 결합해야 검증 가능한 claim이 됩니다.
 - 이때 utterance_id는 claim의 시작 발화로 두고, 가능하면 utterance_ids에 포함된 발화 ID 배열을 넣으세요.
-- "X는", "X라는 것은", "A를", "B하기 위해서", "희생한"처럼 술어가 끝나지 않은 조각은 단독 claim으로 출력하지 마세요.
+- 술어가 끝나지 않은 조각, 연결어로 끝난 조각, 목적어만 남은 조각은 단독 claim으로 출력하지 마세요.
 
 주의: 말실수나 용어 착각으로 보이더라도, 학생이 그대로 믿으면 틀린 지식이 되는 경우는 추출 대상입니다.
 주의: 강의자가 예시 상황 안에서 기준값이나 정량적 조건을 말하면, 그 예시 범위 안의 검증 가능한 claim으로 추출하세요.
 주의: 문장이 질문형으로 시작하더라도, 뒤에서 강의자가 특정 값이나 기준을 제시하면 그 제시된 값/기준은 claim으로 추출하세요.
-주의: 다만 예시 속 기준값을 일반 상식/보편 법칙으로 확대 해석하지 마세요. 예시의 범위가 드러나면 resolved_claim에도 그 예시 범위를 남기세요.
+주의: 다만 예시 속 기준값을 일반 상식/보편 법칙으로 확대 해석하지 마세요. 예시의 범위가 드러나면 claim_text에도 그 예시 범위를 남기세요.
 
 {_model_specific_extract_rules()}
 
@@ -277,14 +445,17 @@ def _build_extract_prompt(
 {{
   "claims": [
     {{
-      "utterance_id": "U0001",
+      "utterance_id": "S001-C001",
+      "context_id": "S001-C001",
       "claim_type": "definition",
       "claim_text": "현재 발화에서 직접 가져온 claim 원문",
-      "resolved_claim": "원문 범위를 보존한 최소 정리문",
-      "utterance_ids": ["U0001"],
+      "source_slice": "이 claim을 직접 만든 최소 원문 조각",
+      "utterance_ids": ["S001-C001"],
+      "context_ids": ["S001-C001"],
+      "antecedent_context_ids": [],
       "is_approximate": false,
-      "needs_context": false,
-      "resolution_status": "resolved",
+      "needs_context": true,
+      "resolution_status": "unresolved",
       "context_note": ""
     }}
   ]
@@ -296,8 +467,7 @@ def _build_extract_prompt(
 - 하나의 발화에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
 - resolution_status는 `resolved` 또는 `unresolved`만 사용하세요.
-- verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
-- resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
+- 입력 ID가 `S001-C001`이면 출력 ID도 `S001-C001` 형식으로 쓰세요. 입력 ID가 `U0001`이면 `U0001` 형식으로 그대로 쓰세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
 - JSON 외 텍스트를 출력하지 마세요.
 """
@@ -348,113 +518,94 @@ def _utterance_number(uid: str) -> int | None:
         return None
 
 
-def _is_fragment_like_claim(claim: dict) -> bool:
-    text = str(claim.get("claim_text") or claim.get("resolved_claim") or "").strip()
-    compact = re.sub(r"\s+", "", text)
-    if not compact:
-        return False
-    if len(compact) <= 18:
-        return True
-    fragment_endings = (
-        "것은",
-        "것이",
-        "것을",
-        "용역을",
-        "재화를",
-        "자원을",
-        "위해서",
-        "희생한",
-        "통해서",
-        "가운데서",
-        "경우는",
-        "한다면",
-        "그리고",
-        "또는",
-        "라든가",
+def _utterance_index(utterances: list[dict]) -> dict[str, tuple[int, dict]]:
+    return {
+        str(utterance.get("utterance_id") or "").strip(): (idx, utterance)
+        for idx, utterance in enumerate(utterances)
+        if str(utterance.get("utterance_id") or "").strip()
+    }
+
+
+def _continuous_source_span_ids(
+    ids: list[str],
+    utterances: list[dict],
+    max_gap: int = 12,
+) -> list[str]:
+    indexed = _utterance_index(utterances)
+    present = [(indexed[uid][0], uid, indexed[uid][1]) for uid in _dedupe_ids(ids) if uid in indexed]
+    if not present:
+        return _dedupe_ids(ids)
+    present.sort(key=lambda item: item[0])
+    start_idx = present[0][0]
+    end_idx = present[-1][0]
+    if end_idx < start_idx or end_idx - start_idx > max_gap:
+        return _dedupe_ids([uid for _, uid, _ in present])
+
+    slides = {
+        int(utterance.get("slide_number", 0) or 0)
+        for idx in range(start_idx, end_idx + 1)
+        for utterance in [utterances[idx]]
+        if int(utterance.get("slide_number", 0) or 0)
+    }
+    if len(slides) > 1:
+        return _dedupe_ids([uid for _, uid, _ in present])
+
+    return _dedupe_ids(
+        str(utterance.get("utterance_id") or "").strip()
+        for utterance in utterances[start_idx : end_idx + 1]
     )
-    return compact.endswith(fragment_endings)
 
 
-def _cut_complete_sentence(text: str) -> tuple[str, bool]:
-    stripped = " ".join(str(text or "").split()).strip()
-    if not stripped:
-        return "", False
-
-    punctuation_positions = [pos for pos in (stripped.find("."), stripped.find("?"), stripped.find("!")) if pos >= 0]
-    if punctuation_positions:
-        end = min(punctuation_positions) + 1
-        return stripped[:end].strip(), True
-
-    sentence_endings = ("입니다", "됩니다", "합니다", "합니다", "이다", "된다", "한다", "했다", "했다", "거다", "겁니다", "겠죠", "이죠", "죠")
-    for ending in sentence_endings:
-        if stripped.endswith(ending):
-            return stripped, True
-    return stripped, False
+def _source_text_for_ids(ids: list[str], utterances: list[dict]) -> str:
+    indexed = _utterance_index(utterances)
+    rows = [(indexed[uid][0], indexed[uid][1]) for uid in _dedupe_ids(ids) if uid in indexed]
+    rows.sort(key=lambda item: item[0])
+    pieces = [
+        " ".join(str(utterance.get("text") or "").split()).strip()
+        for _, utterance in rows
+    ]
+    return " ".join(piece for piece in pieces if piece).strip()
 
 
-def _expand_fragment_claim(claim: dict, utterances: list[dict]) -> tuple[str, list[str], bool]:
-    uid = str(claim.get("utterance_id") or "")
-    start_idx = None
-    for idx, utterance in enumerate(utterances):
-        if str(utterance.get("utterance_id") or "") == uid:
-            start_idx = idx
-            break
-    if start_idx is None:
-        return str(claim.get("claim_text") or "").strip(), [uid] if uid else [], False
+def _attach_source_span_fields(claim: dict, utterances: list[dict]) -> dict:
+    updated = dict(claim)
+    uid = str(updated.get("utterance_id") or "").strip()
+    antecedent_ids = _dedupe_ids([
+        str(value).strip()
+        for value in updated.get("antecedent_context_ids", []) or []
+        if str(value).strip()
+    ])
+    raw_utterance_ids = updated.get("utterance_ids")
+    if isinstance(raw_utterance_ids, list) and raw_utterance_ids:
+        direct_ids = _dedupe_ids([str(value).strip() for value in raw_utterance_ids if str(value).strip()])
+    else:
+        direct_ids = [uid] if uid else []
 
-    pieces = []
-    ids = []
-    start_slide = int(utterances[start_idx].get("slide_number", 0) or 0)
-    for utterance in utterances[start_idx:min(len(utterances), start_idx + 8)]:
-        current_slide = int(utterance.get("slide_number", 0) or 0)
-        if ids and start_slide and current_slide and current_slide != start_slide:
-            break
-        ids.append(str(utterance.get("utterance_id") or ""))
-        pieces.append(str(utterance.get("text") or "").strip())
-        joined, complete = _cut_complete_sentence(" ".join(pieces))
-        if complete:
-            return joined, [x for x in ids if x], True
-        if len(joined) >= 220:
-            return joined, [x for x in ids if x], False
-    joined, complete = _cut_complete_sentence(" ".join(pieces))
-    return joined, [x for x in ids if x], complete
+    anchor_ids = _dedupe_ids(updated.get("anchor_utterance_ids", []) or [])
+    if not anchor_ids:
+        anchor_ids = _dedupe_ids(antecedent_ids + direct_ids + ([uid] if uid else []))
+    source_span_ids = _dedupe_ids(updated.get("source_span_ids", []) or [])
+    if not source_span_ids:
+        source_span_ids = _continuous_source_span_ids(anchor_ids or direct_ids or ([uid] if uid else []), utterances)
+    source_text = _source_text_for_ids(source_span_ids, utterances)
 
+    updated["anchor_utterance_ids"] = anchor_ids
+    updated["source_span_ids"] = source_span_ids
+    # Keep source text only as a temporary post-processing aid. Persisting the
+    # full context on every claim duplicates the batch context used downstream.
+    updated["_source_text_for_restore"] = source_text
 
-def _merge_fragment_claims(claims: list[dict], utterances: list[dict]) -> list[dict]:
-    if _claim_extract_context_mode() != "compact":
-        return claims
+    # Backward compatibility: existing downstream stages read utterance_ids as
+    # the related source range. The precise claim anchors remain in
+    # anchor_utterance_ids.
+    if source_span_ids:
+        updated["utterance_ids"] = source_span_ids
+    if source_span_ids and str(updated.get("context_id") or "").startswith("S"):
+        updated["context_ids"] = source_span_ids
 
-    covered_fragment_uids: set[str] = set()
-    merged: list[dict] = []
-    for claim in claims:
-        uid = str(claim.get("utterance_id") or "")
-        is_fragment = _is_fragment_like_claim(claim)
-        if uid in covered_fragment_uids:
-            continue
-        if not is_fragment:
-            merged.append(claim)
-            continue
-
-        expanded_text, utterance_ids, complete = _expand_fragment_claim(claim, utterances)
-        if len(utterance_ids) <= 1 or not expanded_text:
-            merged.append(claim)
-            continue
-
-        updated = dict(claim)
-        updated["claim_text"] = expanded_text
-        updated["resolved_claim"] = expanded_text
-        updated["utterance_ids"] = utterance_ids
-        updated["needs_context"] = not complete
-        updated["resolution_status"] = "resolved" if complete else "unresolved"
-        note = "인접 조각 발화를 원본 전사 순서로 자동 병합"
-        if updated.get("context_note"):
-            updated["context_note"] = f"{updated['context_note']}; {note}"
-        else:
-            updated["context_note"] = note
-        covered_fragment_uids.update(utterance_ids[1:])
-        merged.append(updated)
-
-    return merged
+    claim_text = " ".join(str(updated.get("claim_text") or "").split()).strip()
+    updated["claim_text"] = claim_text
+    return updated
 
 
 def _claim_utterance_id_set(claim: dict) -> set[str]:
@@ -549,31 +700,91 @@ def _extract_claims(
             for c in claims:
                 if not isinstance(c, dict) or not c.get("utterance_id"):
                     continue
+                c["utterance_id"] = _normalize_prompt_ref(c.get("utterance_id"))
                 claim_text = str(c.get("claim_text") or "").strip()
                 if not claim_text:
                     continue
-                resolved_claim = str(c.get("resolved_claim") or "").strip() or claim_text
                 normalized = _normalize_claim_type(c.get("claim_type"))
                 if normalized is None:
                     continue
-                resolution_status = str(c.get("resolution_status") or "").strip().lower()
-                if resolution_status not in {"resolved", "unresolved"}:
-                    resolution_status = "unresolved" if c.get("needs_context") else "resolved"
                 c["claim_type"] = normalized
                 c["claim_text"] = claim_text
-                c["resolved_claim"] = resolved_claim
                 utterance_ids = c.get("utterance_ids")
                 if isinstance(utterance_ids, list):
-                    c["utterance_ids"] = [str(x) for x in utterance_ids if str(x).strip()]
+                    c["utterance_ids"] = _dedupe_ids(utterance_ids)
                 else:
                     c["utterance_ids"] = [str(c.get("utterance_id") or "")]
-                c["needs_context"] = bool(c.get("needs_context") or resolution_status == "unresolved")
-                c["resolution_status"] = resolution_status
-                c["context_note"] = str(c.get("context_note") or "").strip()
-                c.pop("verification_question", None)
-                c.pop("verificationQuestion", None)
+                context_note = str(c.get("context_note") or "").strip()
+                antecedent_ids = c.get("antecedent_context_ids")
+                if isinstance(antecedent_ids, list):
+                    antecedent_ids = _dedupe_ids(antecedent_ids)
+                else:
+                    antecedent_ids = []
+                antecedent_ids = _dedupe_ids(antecedent_ids + _ids_from_context_note(context_note))
+                if antecedent_ids:
+                    c["antecedent_context_ids"] = antecedent_ids
+                c["anchor_utterance_ids"] = _dedupe_ids(antecedent_ids + c["utterance_ids"])
+                context_id = _normalize_prompt_ref(c.get("context_id"))
+                if not context_id and str(c.get("utterance_id") or "").startswith("S"):
+                    context_id = str(c.get("utterance_id") or "").strip()
+                if context_id:
+                    c["context_id"] = context_id
+                    context_ids = c.get("context_ids")
+                    if isinstance(context_ids, list):
+                        c["context_ids"] = _dedupe_ids(context_ids)
+                    else:
+                        c["context_ids"] = [context_id]
+                    if antecedent_ids:
+                        c["context_ids"] = _dedupe_ids(antecedent_ids + c["context_ids"])
+                c = _attach_source_span_fields(c, utterances)
+                source_text_for_restore = str(c.get("_source_text_for_restore", "") or "")
+                if _has_model_added_parenthetical(c.get("claim_text", ""), source_text_for_restore):
+                    restored_claim_text = _restore_parenthetical_claim_to_source(
+                        c.get("claim_text", ""),
+                        source_text_for_restore,
+                    )
+                    if not restored_claim_text:
+                        continue
+                    c["claim_text"] = restored_claim_text
+                c["source_slice"] = _normalize_source_slice(
+                    c.get("source_slice"),
+                    c.get("claim_text", ""),
+                    source_text_for_restore,
+                )
+                c.pop("_source_text_for_restore", None)
+                c.pop("source_text", None)
+                c.pop("claim_context_text", None)
+                c.pop("source_block_id", None)
+                c.pop("claim_context_block_id", None)
+                c.pop("claim_context_ids", None)
+                c["claim_id"] = str(c.get("claim_id") or "").strip() or _stable_claim_id(c)
+                c["claim_fingerprint"] = (
+                    str(c.get("claim_fingerprint") or "").strip()
+                    or c["claim_id"]
+                )
+                c["needs_context"] = True
+                c["resolution_status"] = "unresolved"
+                c["context_note"] = ""
+                allowed_claim_keys = {
+                    "utterance_id",
+                    "context_id",
+                    "claim_type",
+                    "claim_text",
+                    "source_slice",
+                    "utterance_ids",
+                    "context_ids",
+                    "antecedent_context_ids",
+                    "anchor_utterance_ids",
+                    "source_span_ids",
+                    "is_approximate",
+                    "needs_context",
+                    "resolution_status",
+                    "context_note",
+                    "claim_id",
+                    "claim_fingerprint",
+                }
+                c = {k: v for k, v in c.items() if k in allowed_claim_keys}
                 cleaned.append(c)
-            cleaned = _merge_fragment_claims(cleaned, utterances)
             cleaned = _dedupe_overlapping_claims(cleaned)
             return cleaned, False, api_calls, token_usage
         except (json.JSONDecodeError, AttributeError):
@@ -625,6 +836,7 @@ def extract_claims_only(
     hint: dict,
     slide_ctx: dict,
     batch_size: int | None = None,
+    max_workers: int | None = None,
 ) -> tuple[list[tuple], int, dict]:
     """1단계만 실행: claim 추출. (batch_list, total_claims) 반환."""
     from . import claim_common as cv
@@ -636,22 +848,51 @@ def extract_claims_only(
     total_api = 0
     total_token_usage = cv._empty_token_usage()
     total = len(utterances)
-    core_ranges = [(i, min(total, i + batch_size)) for i in range(0, total, batch_size)]
-    context_mode = _claim_extract_context_mode()
-    shared_context_mode = context_mode in {"compact", "card_lite"}
+    has_context_units = any(u.get("context_id") for u in utterances)
+    batch_mode = (
+        "context"
+        if has_context_units and _force_context_unit_batching()
+        else (_claim_extract_batch_mode() if has_context_units else "utterance")
+    )
+    context_prev, context_next = _claim_extract_context_window()
 
+    if has_context_units and batch_mode == "context":
+        context_group_size = _claim_extract_context_group_size()
+        core_ranges = [
+            (i, min(total, i + context_group_size))
+            for i in range(0, total, context_group_size)
+        ]
+    elif has_context_units and batch_mode == "slide":
+        core_ranges = []
+        start = 0
+        while start < total:
+            slide_no = int(utterances[start].get("slide_number", 0) or 0)
+            end = start + 1
+            while end < total and int(utterances[end].get("slide_number", 0) or 0) == slide_no:
+                end += 1
+            core_ranges.append((start, end))
+            start = end
+    else:
+        core_ranges = [(i, min(total, i + batch_size)) for i in range(0, total, batch_size)]
+    worker_count = min(_claim_extract_max_workers(max_workers), max(1, len(core_ranges)))
+
+    jobs = []
     for i, (start, end) in enumerate(core_ranges):
         core_batch = utterances[start:end]
         if not core_batch:
             continue
-        if shared_context_mode:
-            context_batch = utterances[max(0, start - 3):min(total, end + 5)]
+        if has_context_units and batch_mode in {"context", "slide"}:
+            context_batch = utterances[max(0, start - context_prev):min(total, end + context_next)]
             core_uids = {str(u.get("utterance_id") or "") for u in core_batch}
         else:
             context_batch = core_batch
             core_uids = None
 
         ids = f"{core_batch[0]['utterance_id']}..{core_batch[-1]['utterance_id']}"
+        jobs.append((i, context_batch, core_uids, ids))
+
+    def _run_job(job):
+        i, context_batch, core_uids, ids = job
         print(f"    추출 [{i+1}/{len(core_ranges)}] {ids}")
         claims, parse_failed, api_calls, token_usage, ok = recover_claim_extraction(
             context_batch,
@@ -659,10 +900,28 @@ def extract_claims_only(
             hint,
             slide_ctx,
             f"배치 {i+1} {ids}",
-            target_utterance_ids=core_uids if context_mode == "card_lite" else None,
+            target_utterance_ids=core_uids if has_context_units else None,
         )
         if core_uids is not None:
             claims = [c for c in claims if str(c.get("utterance_id") or "") in core_uids]
+        return i, context_batch, claims, api_calls, token_usage
+
+    if worker_count > 1 and len(jobs) > 1:
+        print(f"  claim 추출 병렬 처리: max_workers={worker_count}", flush=True)
+        results = {}
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {executor.submit(_run_job, job): job[0] for job in jobs}
+            for future in as_completed(futures):
+                job_idx = futures[future]
+                try:
+                    results[job_idx] = future.result()
+                except Exception as e:
+                    raise RuntimeError(f"claim extraction batch {job_idx + 1} failed: {e}") from e
+        ordered_results = [results[job[0]] for job in jobs]
+    else:
+        ordered_results = [_run_job(job) for job in jobs]
+
+    for _i, context_batch, claims, api_calls, token_usage in ordered_results:
         all_claims_by_batch.append((context_batch, claims))
         total_api += api_calls
         total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)

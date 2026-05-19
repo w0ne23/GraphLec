@@ -355,7 +355,7 @@ def stage3b_audio(
     duration: float,
     output_dir: Path,
     transcript_raw_path: Optional[str] = None,
-    on_segments_ready: Optional[Callable[[str], None]] = None,
+    on_contexts_ready: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     from .text_processor import correct_segments_two_pass
     from .segment_grouper import (
@@ -386,11 +386,13 @@ def stage3b_audio(
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
+            has_contexts = False
             for scene in payload.get("scenes", []):
                 for ctx in scene.get("contexts", []):
+                    has_contexts = True
                     if "audio_emphasis" not in ctx:
                         return False
-            return True
+            return has_contexts
         except Exception:
             return False
 
@@ -431,11 +433,16 @@ def stage3b_audio(
             pass
 
         slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-        if on_segments_ready and Path(segments_path).is_file():
+        if on_contexts_ready and Path(segments_path).is_file() and scenes_structure:
             try:
-                on_segments_ready(str(segments_path))
+                on_contexts_ready({
+                    "segments_path": str(segments_path),
+                    "slides_structure": scenes_structure,
+                    "slide_ranges": slide_ranges,
+                    "duration": duration,
+                })
             except Exception as exc:
-                log.warning(f"analyzer 조기 시작 실패(기존 segments 사용): {exc}")
+                log.warning(f"analyzer 조기 시작 실패(기존 context 사용): {exc}")
 
         return {
             "segments_path": str(segments_path),
@@ -511,11 +518,6 @@ def stage3b_audio(
         "segments": segments_clean,
     })
     print(f"    ✓ 교정 완료  ({time.time()-t0:.1f}초)")
-    if on_segments_ready:
-        try:
-            on_segments_ready(str(segments_path))
-        except Exception as exc:
-            log.warning(f"analyzer 조기 시작 실패: {exc}")
 
     # [3B-3] 침묵 구간 저장 (transcriber가 ffmpeg silencedetect로 사전 감지)
     print("  [3B-3] 침묵 구간 저장...")
@@ -561,6 +563,17 @@ def stage3b_audio(
         else:
             groups = group_segments_by_context(segments_clean)
             scenes_structure = None
+
+        if on_contexts_ready and scenes_structure:
+            try:
+                on_contexts_ready({
+                    "segments_path": str(segments_path),
+                    "slides_structure": scenes_structure,
+                    "slide_ranges": slide_ranges,
+                    "duration": duration,
+                })
+            except Exception as exc:
+                log.warning(f"analyzer 조기 시작 실패(context 사용): {exc}")
 
         topic_kw_set = get_topic_keywords_filtered_v2(
             groups, min_freq=5, max_keywords=20, max_segment_ratio=1.0,
@@ -853,15 +866,53 @@ def stage9_build_analyzer_merged_clean(
     segments_path: str,
     output_dir: Path,
     duration: float,
+    slides_structure: Optional[list[dict]] = None,
 ) -> dict:
     from .segment_grouper import load_slide_ranges
     from .text_processor import classify_lecture_domain
 
     stem = Path(args.input).stem
-    merged_clean_path = output_dir / f"{stem}_merged_clean.json"
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+    analyzer_dir.mkdir(parents=True, exist_ok=True)
+    merged_clean_path = analyzer_dir / f"{stem}_merged_clean.json"
+    by_scene_path = output_dir / f"{stem}_by_scene.json"
+    legacy_by_slide_path = output_dir / f"{stem}_by_slide.json"
 
-    if _is_done(merged_clean_path, "Stage 9A analyzer 입력 생성", args.force):
-        return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
+    if slides_structure is None:
+        context_structure_path = (
+            by_scene_path
+            if by_scene_path.exists() and by_scene_path.stat().st_size > 0
+            else legacy_by_slide_path
+        )
+        try:
+            with open(context_structure_path, "r", encoding="utf-8") as f:
+                by_scene_payload = json.load(f)
+            loaded_scenes = by_scene_payload.get("scenes") or by_scene_payload.get("slides") or []
+            if any(scene.get("contexts") for scene in loaded_scenes if isinstance(scene, dict)):
+                slides_structure = loaded_scenes
+                print(f"  ✓ Stage 9A context 입력: 기존 context 구조 사용 ({context_structure_path.name})")
+        except Exception as exc:
+            log.warning(f"Stage 9A 기존 context 구조 로드 실패, fallback 사용: {exc}")
+
+    if not args.force and merged_clean_path.exists() and merged_clean_path.stat().st_size > 0:
+        can_skip = True
+        try:
+            with open(merged_clean_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+            can_skip = (
+                existing.get("analyzer_transcript_policy")
+                in {"locked_context_text_from_stage9", "locked_context_text_from_input"}
+                and any(slide.get("contexts") for slide in existing.get("slides", []))
+            )
+        except Exception:
+            can_skip = False
+        if can_skip:
+            print(f"\n  ⏭  Stage 9A analyzer 입력 생성 — 출력 파일 존재, 스킵")
+            print(f"     {merged_clean_path}")
+            print("─" * 70)
+            return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
+        print("\n  ⚠️  기존 analyzer 입력이 context-lock 형식이 아니어서 Stage 9A를 재생성합니다.")
+        print("─" * 70)
 
     _banner("Stage 9A  —  analyzer 입력용 merged_clean 생성")
     t0 = time.time()
@@ -871,6 +922,67 @@ def stage9_build_analyzer_merged_clean(
     with open(segments_path, "r", encoding="utf-8") as f:
         segment_payload = json.load(f)
     segments = segment_payload.get("segments", [])
+    segments_by_index = {idx: seg for idx, seg in enumerate(segments)}
+
+    def _analyzer_segment_text(seg: dict) -> str:
+        # analyzer 입력은 최종 확정 전사 `text`를 기준으로 잠근다.
+        # text_corrected_candidate 같은 후보 텍스트는 이 단계 이후로 넘기지 않는다.
+        return str(
+            seg.get("text")
+            or seg.get("text_corrected")
+            or seg.get("text_original")
+            or ""
+        ).strip()
+
+    def _clean_analyzer_segment(seg: dict, source_index: int | None = None) -> dict | None:
+        text = _analyzer_segment_text(seg)
+        if not text:
+            return None
+        start = float(seg.get("start", seg.get("start_time", 0.0)) or 0.0)
+        end = float(seg.get("end", seg.get("end_time", start)) or start)
+        cleaned = {
+            "start": start,
+            "end": end,
+            "text": text,
+            "text_corrected": text,
+            "correction_status": str(seg.get("correction_status") or "locked_input"),
+        }
+        for key in ("correction_risk", "correction_reason"):
+            value = seg.get(key)
+            if value not in (None, "", []):
+                cleaned[key] = value
+        if source_index is not None:
+            cleaned["_source_segment_index"] = int(source_index)
+        return cleaned
+
+    def _public_segment(seg: dict) -> dict:
+        public = dict(seg)
+        public.pop("_source_segment_index", None)
+        return public
+
+    clean_segments_by_index = {
+        idx: cleaned
+        for idx, seg in enumerate(segments)
+        if (cleaned := _clean_analyzer_segment(seg, idx)) is not None
+    }
+
+    def _context_text_for_analyzer(raw_ctx: dict, fallback: str) -> str:
+        indices = list(
+            raw_ctx.get("source_segment_indices")
+            or raw_ctx.get("segment_indices")
+            or []
+        )
+        pieces = []
+        for idx in indices:
+            try:
+                seg = segments_by_index[int(idx)]
+            except (TypeError, ValueError, KeyError, IndexError):
+                continue
+            text = _analyzer_segment_text(seg)
+            if text:
+                pieces.append(text)
+        return " ".join(pieces).strip() or fallback
+
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
     metadata = []
     if meta_path and Path(meta_path).is_file():
@@ -923,15 +1035,89 @@ def stage9_build_analyzer_merged_clean(
                 slide_meta_by_no[slide_no] = candidate_meta
 
     segs_by_logical_slide: dict[int, list[dict]] = {}
-    for seg in segments:
+    for source_idx, seg in enumerate(segments):
         slide_no = seg.get("slide_number")
         if isinstance(slide_no, int):
-            seg_copy = {
-                "start": float(seg.get("start", 0.0) or 0.0),
-                "end": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
-                "text": str(seg.get("text", "") or "").strip(),
-            }
+            seg_copy = _clean_analyzer_segment(seg, source_idx)
+            if not seg_copy:
+                continue
             segs_by_logical_slide.setdefault(slide_no, []).append(seg_copy)
+
+    contexts_by_slide: dict[int, list[dict]] = {}
+    context_count = 0
+    for slide_ctx in slides_structure or []:
+        scene_idx = slide_ctx.get("scene_index", slide_ctx.get("slide_index"))
+        scene_info = scene_meta_by_index.get(scene_idx if isinstance(scene_idx, int) else -1, {})
+        slide_no = scene_info.get("slide_number", slide_ctx.get("slide_number", slide_ctx.get("slide_index", scene_idx)))
+        if not isinstance(slide_no, int):
+            continue
+        visit_order = int(scene_info.get("slide_visit_order", slide_ctx.get("slide_visit_order", 1)) or 1)
+        for raw_ctx in slide_ctx.get("contexts", []) or []:
+            fallback_text = str(raw_ctx.get("text", "") or "").strip()
+            text = _context_text_for_analyzer(raw_ctx, fallback_text)
+            if not text:
+                continue
+            context_index = int(raw_ctx.get("context_index", 0) or 0)
+            source_segment_indices = list(
+                raw_ctx.get("source_segment_indices")
+                or raw_ctx.get("segment_indices")
+                or []
+            )
+            source_segments = []
+            normalized_source_indices = []
+            for idx in source_segment_indices:
+                try:
+                    source_idx = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                if source_idx not in clean_segments_by_index:
+                    continue
+                normalized_source_indices.append(source_idx)
+                source_segments.append(_public_segment(clean_segments_by_index[source_idx]))
+            context_count += 1
+            scene_token = int(scene_idx) if isinstance(scene_idx, int) else context_count
+            context_payload = {
+                "context_id": f"S{slide_no:03d}-SC{scene_token:04d}-C{context_index + 1:03d}",
+                "slide_number": slide_no,
+                "scene_index": scene_idx,
+                "visit_order": visit_order,
+                "context_index": context_index,
+                "start_time": float(raw_ctx.get("start", raw_ctx.get("start_time", 0.0)) or 0.0),
+                "end_time": float(
+                    raw_ctx.get("end", raw_ctx.get("end_time", raw_ctx.get("start", 0.0))) or 0.0
+                ),
+                "text": text,
+                "text_source": "locked_context_text",
+                "analyzer_text_locked": True,
+                "source_segment_indices": normalized_source_indices,
+                "source_segments": source_segments,
+            }
+            contexts_by_slide.setdefault(slide_no, []).append(context_payload)
+
+    if not contexts_by_slide:
+        log.warning("Stage 9A context 입력이 비어 있어 segment를 context 단위로 폴백합니다.")
+        for slide_no, slide_segments in segs_by_logical_slide.items():
+            for idx, seg in enumerate(sorted(slide_segments, key=lambda item: item.get("start", 0.0))):
+                text = str(seg.get("text", "") or "").strip()
+                if not text:
+                    continue
+                source_idx = seg.get("_source_segment_index")
+                source_segment_indices = [int(source_idx)] if source_idx is not None else []
+                context_count += 1
+                contexts_by_slide.setdefault(slide_no, []).append({
+                    "context_id": f"S{slide_no:03d}-V01-C{idx + 1:03d}",
+                    "slide_number": slide_no,
+                    "scene_index": None,
+                    "visit_order": 1,
+                    "context_index": idx,
+                    "start_time": float(seg.get("start", 0.0) or 0.0),
+                    "end_time": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
+                    "text": text,
+                    "text_source": "locked_context_text",
+                    "analyzer_text_locked": True,
+                    "source_segment_indices": source_segment_indices,
+                    "source_segments": [_public_segment(seg)],
+                })
 
     slide_titles = [slide_meta_by_no.get(slide_no, {}).get("title", "") for slide_no in sorted(slide_meta_by_no)]
     transcript_sample = " ".join(str(seg.get("text", "") or "") for seg in segments[:30])
@@ -956,11 +1142,19 @@ def stage9_build_analyzer_merged_clean(
             "visit_order": int(scene_info.get("slide_visit_order", 1) or 1),
         })
 
-    all_slide_numbers = sorted(set(slide_meta_by_no) | set(segs_by_logical_slide) | set(occurrences_by_logical_slide))
+    all_slide_numbers = sorted(
+        set(slide_meta_by_no)
+        | set(segs_by_logical_slide)
+        | set(occurrences_by_logical_slide)
+        | set(contexts_by_slide)
+    )
     slides = []
     for slide_no in all_slide_numbers:
         slide_meta = slide_meta_by_no.get(slide_no, {})
-        transcript_segments = sorted(segs_by_logical_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
+        transcript_segments = [
+            _public_segment(seg)
+            for seg in sorted(segs_by_logical_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
+        ]
         occurrences = sorted(
             occurrences_by_logical_slide.get(slide_no, []),
             key=lambda item: (item["start_sec"], item["scene_index"]),
@@ -988,6 +1182,8 @@ def stage9_build_analyzer_merged_clean(
             "transcript_segments": transcript_segments,
             "transcript": " ".join(str(seg.get("text", "") or "") for seg in transcript_segments).strip(),
             "segment_count": len(transcript_segments),
+            "contexts": sorted(contexts_by_slide.get(slide_no, []), key=lambda item: item.get("start_time", 0.0)),
+            "context_count": len(contexts_by_slide.get(slide_no, [])),
         }
         for key in (
             "slide_id",
@@ -1012,10 +1208,12 @@ def stage9_build_analyzer_merged_clean(
 
     result = {
         "description": "슬라이드+전사 통합 JSON (교정 완료, 검증용)",
+        "analyzer_transcript_policy": "locked_context_text_from_stage9",
         "domain": domain_info.get("domain", ""),
         "subdomain": domain_info.get("subdomain", ""),
         "total_slides": len(slides),
         "total_transcript_segments": len(segments),
+        "total_contexts": context_count,
         "total_duration_formatted": _fmt_ts(total_duration),
         "slides": slides,
     }
@@ -1034,7 +1232,11 @@ def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dic
     claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
     claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
 
-    if not args.force and _claim_output_is_cross_verification(claim_output_path):
+    if (
+        not args.force
+        and _claim_output_is_cross_verification(claim_output_path)
+        and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
+    ):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
@@ -1074,7 +1276,11 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
     analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
 
-    if not args.force and _claim_output_is_cross_verification(claim_output_path):
+    if (
+        not args.force
+        and _claim_output_is_cross_verification(claim_output_path)
+        and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
+    ):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
@@ -1540,7 +1746,7 @@ def run_pipeline(args, progress_callback=None):
             str(output_dir / f"{stem}_transcript_raw.json"),
         )
 
-        def _start_analyzer_early(segments_path: str) -> None:
+        def _start_analyzer_early(audio_payload: dict) -> None:
             with analyzer_lock:
                 if analyzer_started["done"]:
                     return
@@ -1548,9 +1754,10 @@ def run_pipeline(args, progress_callback=None):
                     args,
                     meta_path=meta_path,
                     textualized_path=textualized_path,
-                    segments_path=segments_path,
+                    segments_path=audio_payload.get("segments_path", str(paths["segments"])),
                     output_dir=output_dir,
-                    duration=duration,
+                    duration=audio_payload.get("duration", duration),
+                    slides_structure=audio_payload.get("slides_structure"),
                 )
                 timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
                 r9.update(local_r9)
@@ -1585,7 +1792,7 @@ def run_pipeline(args, progress_callback=None):
                 else:
                     audio_result = future.result()
                     if not analyzer_started["done"]:
-                        _start_analyzer_early(audio_result.get("segments_path", str(paths["segments"])))
+                        _start_analyzer_early(audio_result)
 
         timings["Stage 3 병렬 총"] = time.time() - t_parallel
 
@@ -1708,7 +1915,7 @@ def run_pipeline(args, progress_callback=None):
             r7b.get("relationships_parquet", ""),
             r8.get("metadata_path", ""),
             str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
-            r9.get("merged_clean_path", str(output_dir / f"{stem}_merged_clean.json")),
+            r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
             r10.get("log_path", ""),
         ]
         for analyzer_path in (

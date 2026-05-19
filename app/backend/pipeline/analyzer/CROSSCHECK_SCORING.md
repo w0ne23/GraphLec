@@ -1,289 +1,153 @@
 # Crosscheck Scoring Design
 
-이 문서는 analyzer의 현재 crosscheck 점수화 방식을 정리한다.
+이 문서는 현재 analyzer의 검증 점수 계산 방식을 정리한다.
 
-## 목적
+## Pipeline
 
-crosscheck의 목표는 모델에게 단순히 `맞다/아니다`를 고르게 하는 것이 아니라,
-하나의 issue가 교수에게 보여줄 만큼 실제로 문제가 남아 있는지를 0~1 운영 점수로 만드는 것이다.
+```mermaid
+flowchart LR
+    A["Claim Extraction"] --> B["Issue Detection"]
+    B --> C["Issue Classification"]
+    C --> D["Multi LLM Verification"]
+    D --> E["Final Verification"]
+```
 
-이 점수는 LLM이 직접 예측한 "오류 확률"이 아니다.
-LLM이 같은 기준의 세부 항목을 채점하면, 코드가 그 항목을 가중합해서 만든 구조화된 점수다.
+## Stage Roles
 
-따라서 `final_score`의 의미는 다음과 같다.
+| Stage | 역할 | 주요 출력 |
+| --- | --- | --- |
+| Claim Extraction | 원문 문맥에서 검증 가능한 raw claim span 추출 | `claim_id`, `claim_text`, `source_span_ids` |
+| Issue Detection | claim과 배치 문맥을 보고 crosscheck 후보 선별 | `claim_id`, `candidate_confidence` |
+| Issue Classification | 후보를 A-D 검증 유형으로 사전 분류 | `candidate_type_scores`, `candidate_primary_type_code`, `candidate_primary_type_reason` |
+| Multi LLM Verification | 유형별 prompt로 넓은 문맥 검증 | 모델별 `issue_score`, `status`, `reason` |
+| Final Verification | factual grounding, slide typo 등 후처리 | 최종 `status`, 공개 feedback payload |
+
+## Stable Field Contract
+
+`claim_text`는 extractor가 원문에서 뽑은 검증 대상 span이다.
+후속 단계는 `claim_text`를 다시 쓰거나 보정하지 않는다.
+
+`source_text`와 `claim_context_text`는 claim이 나온 원문 문맥을 가리킨다.
+후속 단계에서 새로 요약한 문장은 별도 설명 필드에만 저장한다.
+
+다음 필드는 production contract에서 제거했다.
+
+- `resolved_claim`
+- `verification_question`
+- `problematic_content`
+- `criteria_scores`
+- `criteria_evidence`
+- `score_breakdown`
+- `verification_basis`
+- `evidence_need`
+- `claim_scope`
+- `review_priority`
+
+## Issue Types
+
+Issue type은 네 개만 사용한다.
+분류 단계는 네 점수를 독립적으로 산출하며, 합을 1로 맞추지 않는다.
+
+| Code | Type | 표시명 | 핵심 기준 |
+| --- | --- | --- | --- |
+| B | `temporal_error` | 시간적 오류 | 현재성, 최신성, 지원 여부, 버전, 통계처럼 강의 제공 시점 또는 오늘 기준 확인이 필요한 경우 |
+| C | `scope_overclaim` | 범위 과잉 단정 | 조건, 예외, 전체/일부, 가능/불가능, 일시/영구, 직접/간접의 범위가 닫혀 전달되는 경우 |
+| A | `factual_error` | 발언 자체 오류 | 정의, 분류, 포함 관계, 수치, 순서, 주체, 과정, 인과, 작동 방식, 귀속 관계 자체가 틀린 경우 |
+| D | `confusing_explanation` | 혼동 가능 설명 | 사실 오류로 바로 단정하기보다 생략/압축/흐름 때문에 학생이 구체적 오개념을 만들 가능성이 큰 경우 |
+
+분류 우선순위는 `B -> C -> A -> D`다.
+이는 특수성이 높은 현재성/범위 문제를 먼저 분리하고, 남은 후보에서 직접 사실 오류와 설명 혼동을 구분하기 위한 순서다.
+
+## Type Classification
+
+Issue `i`에 대해 classifier는 다음 벡터를 만든다.
 
 ```text
-제공된 강의 문맥에서 해당 issue를 교수에게 올릴 근거가 얼마나 남아 있는가
+type_scores_i = [B_i, C_i, A_i, D_i]
 ```
 
-## 공통 Issue Type
+각 값은 0~1 범위의 독립 confidence다.
 
-Verifier와 crosscheck는 같은 4개 issue type을 사용한다.
+대표 유형은 다음처럼 정한다.
 
-| Code | type | 표시명 | 기준 |
-| --- | --- | --- | --- |
-| A | `factual_error` | 발언 자체 오류 | 발화 자체의 객관 사실, 정의, 분류, 수치, 순서, 원인-결과, 작동 방식이 강의 문맥을 함께 봐도 틀린 경우 |
-| B | `temporal_error` | 시간적 오류 | 현재성, 최신성, 지원 여부, 사용 여부, 시점 의존 수치나 상태가 기준 시점에서 틀리거나 확인이 필요한 경우 |
-| C | `scope_overclaim` | 범위 과잉 단정 | 특정 조건에서는 맞지만 모든 경우에 맞는 것처럼 범위, 조건, 예외, 다른 가능성을 닫아 말한 경우 |
-| D | `confusing_explanation` | 혼동 가능 설명 | 명백한 사실 오류라고 단정되지는 않더라도 학생이 핵심 개념, 주체, 과정, 원인, 조건을 잘못 연결해 외울 가능성이 큰 경우 |
-
-A-D 유형 점수는 합이 1인 확률 분포가 아니다.
-각 유형에 독립적으로 해당하는 정도를 0~1로 채점한다.
-
-예를 들어 한 issue가 다음처럼 동시에 여러 성격을 가질 수 있다.
-
-```json
-{
-  "issue_type_scores": {
-    "factual_error": 0.85,
-    "temporal_error": 0.0,
-    "scope_overclaim": 0.7,
-    "confusing_explanation": 0.6
-  }
-}
+```text
+primary_type_i = argmax(type_scores_i)
 ```
 
-대표 유형은 가장 높은 점수의 유형이고, 기준값 이상인 나머지는 보조 유형으로 남긴다.
+동점이면 `B -> C -> A -> D` 순서를 따른다.
 
-## 입력 단위
+## Multi LLM Verification
 
-기본 실행 경로는 `judge_claim_batch()`다.
+Crosscheck는 후보의 대표 유형에 맞는 type-specific prompt만 사용한다.
+후보가 두 유형 사이에 가깝게 걸린 경우에는 보조 유형 prompt를 추가로 실행할 수 있다.
 
-같은 슬라이드에 걸린 issue들을 하나의 batch로 묶어 crosscheck 모델에 보낸다.
-각 issue는 `i0001`, `i0002` 같은 `issue_id`로 분리된다.
-
-프롬프트에 들어가는 공통 문맥은 다음과 같다.
-
-- 강의 도메인
-- 대상 슬라이드 제목과 시간 범위
-- 이전 슬라이드 제목과 시간 범위
-- 이전 슬라이드와 현재 슬라이드의 슬라이드 텍스트
-- 이전 슬라이드와 현재 슬라이드에서 발화된 전체 utterance
-- 각 대상 발화 전후 +/-5개 utterance를 병합한 문맥
-- issue 목록
-
-## 모델 출력
-
-모델은 `verdict`나 `confidence`를 직접 출력하지 않는다.
-모델은 issue마다 다음 구조를 출력한다.
+각 모델 `m`은 issue `i`에 대해 다음을 출력한다.
 
 ```json
 {
   "issue_id": "i0001",
-  "issue_type": "scope_overclaim",
-  "issue_type_code": "C",
-  "issue_type_scores": {
-    "A": 0.25,
-    "B": 0.0,
-    "C": 0.9,
-    "D": 0.6
-  },
-  "issue_type_rationale": "닫힌 표현과 문맥 후에도 남는 반례 가능성이 가장 강하므로 C로 분류함",
-  "criteria_scores": {
-    "issue_presence": 1.0,
-    "context_unresolved": 0.75,
-    "evidence_strength": 0.75
-  },
-  "criteria_evidence": {
-    "issue_presence": "학생이 잘못 외울 명제가 남음",
-    "context_unresolved": "제공된 문맥이 조건을 충분히 보완하지 못함",
-    "evidence_strength": "강의 수준에서 설명 가능한 반례나 조건 차이가 있음"
-  },
-  "reason": "전체 판단 이유"
+  "status": "kept | rejected | merged",
+  "issue_score": 0.0,
+  "type_gate_passed": true,
+  "reason": "문맥 기준 판단 이유",
+  "context_resolution": "문맥에서 해소됨 | 일부 해소됨 | 해소 안 됨",
+  "context_resolution_reason": "문맥 해소 여부 이유",
+  "context_issue_summary": "문맥 안에서 실제로 남는 문제 흐름",
+  "correction_hint": "필요할 때만 수정 방향"
 }
 ```
 
-## Criteria
+`issue_score`는 모델이 해당 유형의 강의자 검토 대상으로 남길 가치가 얼마나 된다고 보는지 나타내는 최종 점수다.
+이 값은 서버가 다시 criteria 가중합으로 계산하지 않는다.
 
-현재 criteria와 가중치는 다음과 같다.
+점수 구간은 다음과 같다.
 
-| Field | Weight | 의미 |
-| --- | ---: | --- |
-| `issue_presence` | 0.40 | 원문 발화와 강의 흐름 기준으로 실제 문제가 남는가 |
-| `context_unresolved` | 0.35 | 주변 발화와 슬라이드 문맥을 함께 봐도 문제가 해소되지 않는가 |
-| `evidence_strength` | 0.25 | 반례, 정의 차이, 수치 오류, 현행성 오류, 직접 충돌, 조건/범위 차이 같은 구체 근거가 있는가 |
+| Range | 의미 |
+| --- | --- |
+| 0.00-0.39 | 기각. 문맥상 해소되었거나 검토 가치가 낮음 |
+| 0.40-0.79 | 강의자 확인. 실제 문제가 남을 수 있으나 자동 확정은 어려움 |
+| 0.80-1.00 | 확정 후보. 원문 오류가 명확하고 문맥에서도 해소되지 않음 |
 
-가중치 합은 1.0이다.
+유형별 상한 원칙:
 
-기존의 `local_context_unresolved`와 `slide_context_unresolved`는 `context_unresolved`로 합쳤다.
-crosscheck 입력에서 발화 문맥과 슬라이드 문맥은 함께 제공되므로, 둘을 분리하면 같은 근거를 두 번 점수화할 위험이 크다.
+- A형은 명확한 원문 오류가 남으면 0.80 이상 가능
+- B형은 시점/외부 기준 확인이 필요하므로 보통 0.40-0.79
+- C형은 실제 배제/일반화/조건 차이가 남을 때 0.40 이상, 자동 확정처럼 0.80 이상은 제한
+- D형은 구체적 오개념 문장이 남을 때 0.40 이상, 자동 확정처럼 0.80 이상은 제한
 
-기존의 `teaching_priority`는 검증 점수에서 제거했다.
-이 값은 "문제가 실제로 남는가"보다 "얼마나 우선적으로 보여줄 것인가"에 가까워 주관성이 크다.
-필요하면 추후 severity 또는 정렬 보조값으로만 다룬다.
+## Model Aggregation
 
-## 단일 모델 점수 계산
-
-issue를 `i`, crosscheck 모델을 `m`이라고 두면, 모델 `m`은 issue `i`에 대해 세 개의 criteria 점수를 낸다.
-
-```text
-c_m,i =
-[
-  issue_presence_m,i,
-  context_unresolved_m,i,
-  evidence_strength_m,i
-]
-```
-
-criteria 가중치는 다음 벡터로 고정한다.
+모델 `m`의 가중치를 `w_m`, 모델 점수를 `s_m,i`라고 하면 최종 점수는 다음과 같다.
 
 ```text
-a = [0.40, 0.35, 0.25]
+final_score_i = sum_m(s_m,i * w_m) / sum_m(w_m)
 ```
 
-모델 `m`의 gate 적용 전 원점수는 다음과 같다.
+현재 실험 기본 가중치 예시는 다음과 같다.
 
 ```text
-raw_score_m,i =
-  issue_presence     * 0.40
-+ context_unresolved * 0.35
-+ evidence_strength  * 0.25
+gpt-5.4 = 0.4
+claude-sonnet-4.5 = 0.4
+grok-4.3 = 0.2
 ```
 
-벡터로 쓰면 다음과 같다.
+최종 상태는 `final_score_i`로 결정한다.
 
 ```text
-raw_score_m,i = a · c_m,i
+confirmed       if final_score_i >= 0.80
+professor_check if final_score_i >= 0.40
+rejected        otherwise
 ```
 
-## Gate
+## Merge
 
-단순 가중합만 쓰면 핵심 조건이 부족한데도 중간 이상의 점수가 나올 수 있다.
-이를 막기 위해 세 가지 상한 gate를 둔다.
+같은 문맥에서 같은 잘못된 명제를 가리키는 후보는 하나의 context-level issue로 병합한다.
+단순히 같은 슬라이드에 있다는 이유만으로 병합하지 않는다.
 
-- `issue_presence < 0.5`이면 최종 모델 점수는 최대 0.39
-- `context_unresolved < 0.5`이면 최종 모델 점수는 최대 0.39
-- `evidence_strength < 0.5`이면 최종 모델 점수는 최대 0.79
+병합 기준은 다음에 가깝다.
 
-의미는 다음과 같다.
+- 학생이 잘못 외울 명제가 같은가
+- 같은 원문 문맥 흐름에서 발생했는가
+- 같은 수정 방향으로 해결되는가
 
-- issue 자체가 실제 문제라는 점이 확인되지 않으면 낮은 점수 구간으로 제한한다.
-- 제공된 문맥이 문제를 해소하면 낮은 점수 구간으로 제한한다.
-- 구체 근거가 약하면 확정 구간까지 올라가지 못하게 제한한다.
-
-수식은 다음과 같다.
-
-```text
-cap_m,i = 1.00
-
-if issue_presence_m,i < 0.5:
-  cap_m,i = min(cap_m,i, 0.39)
-
-if context_unresolved_m,i < 0.5:
-  cap_m,i = min(cap_m,i, 0.39)
-
-if evidence_strength_m,i < 0.5:
-  cap_m,i = min(cap_m,i, 0.79)
-
-model_score_m,i = min(raw_score_m,i, cap_m,i)
-```
-
-## 여러 모델의 Issue 점수 결합
-
-각 모델이 낸 `model_score_m,i`는 모델별 weight를 곱해 최종 점수로 합친다.
-
-모델 weight를 `w_m`이라고 할 때, issue `i`의 최종 점수는 다음과 같다.
-
-```text
-final_score_i =
-sum_m(model_score_m,i * w_m) / sum_m(w_m)
-```
-
-전체 흐름을 한 줄로 쓰면 다음과 같다.
-
-```text
-final_score_i =
-sum_m( min(a · c_m,i, cap_m,i) * w_m ) / sum_m(w_m)
-```
-
-## 여러 모델의 A-D 유형 점수 결합
-
-유형 점수는 issue 점수와 분리한다.
-
-모델 `m`이 낸 유형 `t`의 점수를 다음처럼 둔다.
-
-```text
-type_score_m,i,t
-```
-
-이때 `t`는 A/B/C/D 중 하나다.
-
-유형 점수를 결합할 때는 모델 weight만 쓰지 않는다.
-해당 모델이 issue 자체를 얼마나 강하게 유지했는지도 반영한다.
-
-```text
-effective_weight_m,i = w_m * model_score_m,i
-```
-
-최종 유형 점수는 다음과 같다.
-
-```text
-final_type_score_i,t =
-sum_m(effective_weight_m,i * type_score_m,i,t)
-/ sum_m(effective_weight_m,i)
-```
-
-이 방식의 의미는 다음과 같다.
-
-- 어떤 모델이 "이 issue는 거의 문제가 아니다"라고 낮게 본 경우, 그 모델의 A-D 유형 판단도 최종 유형 결정에 작게 반영된다.
-- A-D는 합이 1이 아니므로, 여러 유형이 동시에 높게 남을 수 있다.
-- 대표 유형은 `max_t(final_type_score_i,t)`로 결정한다.
-- 보조 유형은 기본적으로 `0.45` 이상인 나머지 유형을 남긴다.
-
-## 최종 상태
-
-최종 상태는 `final_score`로만 결정한다.
-
-| final_score | status | 의미 |
-| ---: | --- | --- |
-| `>= 0.80` | `confirmed` | 확정 |
-| `>= 0.40` and `< 0.80` | `professor_check` | 교수 확인 |
-| `< 0.40` | `rejected` | 기각 |
-
-모델은 최종 `status`를 직접 정하지 않는다.
-모델은 criteria 점수와 A-D 유형 점수만 낸다.
-최종 점수, 최종 상태, 대표 유형은 서버 코드가 계산한다.
-
-## 최종 JSON 핵심 필드
-
-```json
-{
-  "crosscheck_score": 0.84,
-  "crosscheck_weighted_status": "confirmed",
-  "issue_type": "factual_error",
-  "issue_type_code": "A",
-  "issue_type_scores": {
-    "factual_error": 0.82,
-    "temporal_error": 0.03,
-    "scope_overclaim": 0.67,
-    "confusing_explanation": 0.58
-  },
-  "primary_issue_type": {
-    "type": "factual_error",
-    "code": "A",
-    "label": "발언 자체 오류",
-    "score": 0.82
-  },
-  "secondary_issue_types": [
-    {
-      "type": "scope_overclaim",
-      "code": "C",
-      "label": "범위 과잉 단정",
-      "score": 0.67
-    },
-    {
-      "type": "confusing_explanation",
-      "code": "D",
-      "label": "혼동 가능 설명",
-      "score": 0.58
-    }
-  ]
-}
-```
-
-## 해석상 주의
-
-- `crosscheck_score`는 오류 확률이 아니라 교수에게 올릴 근거가 남은 정도다.
-- `issue_type_scores`는 합이 1인 확률 분포가 아니다.
-- `issue_type_scores`는 issue의 성격을 나타내고, `crosscheck_score`는 issue를 유지할지 판단한다.
-- 최종 판정은 특정 모델 하나가 아니라 weighted ensemble aggregator가 계산한다.
+대표 issue는 가장 앞선 후보를 사용하고, 나머지는 모델별 결과에서 `status=merged`로 연결한다.

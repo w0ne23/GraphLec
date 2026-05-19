@@ -791,7 +791,8 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
         output_dir / f"{stem}_content_verification.json",
     ]
-    verifier_path = next((path for path in candidate_paths if path.exists()), None)
+    existing_paths = [path for path in candidate_paths if path.exists()]
+    verifier_path = max(existing_paths, key=lambda path: path.stat().st_mtime) if existing_paths else None
     if not verifier_path:
         raise HTTPException(status_code=404, detail="Content verification file not found")
 

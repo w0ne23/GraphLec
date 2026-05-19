@@ -15,12 +15,12 @@ from pathlib import Path
 from . import claim_common as cv
 from .claim_pipeline import (
     BATCH_SIZE as CLAIM_BATCH_SIZE,
-    format_verification_report,
     prepare_verification,
-    verify_lecture_content,
 )
 from .cross_utils import _collect_env_vars, _write_claims_jsonl
 
+
+ISSUE_DETECTOR_BATCH_SIZE = int(os.getenv("VERIFIER_ISSUE_DETECTOR_BATCH_SIZE", "4") or "4")
 
 CLAIM_TYPE_LABELS = {
     "definition": "정의/의미 주장",
@@ -49,7 +49,7 @@ ISSUE_BASIS_SORT_ORDER = {
     "조건/범위 누락": 1,
     "핵심 개념 동일시": 2,
     "주체/과정 혼동": 3,
-    "교수 확인 필요": 4,
+    "강의자 확인 필요": 4,
     "근거 부족": 9,
 }
 SEVERITY_SORT_ORDER = {
@@ -132,6 +132,13 @@ def _include_debug_fields() -> bool:
     return os.getenv("VERIFIER_INCLUDE_DEBUG_FIELDS", "0").strip() == "1"
 
 
+def _include_token_usage_fields() -> bool:
+    return (
+        _include_debug_fields()
+        or os.getenv("VERIFIER_INCLUDE_TOKEN_USAGE", "0").strip() == "1"
+    )
+
+
 def _feedback_sort_key(item: dict, status: str | None = None) -> tuple:
     item_status = status or str(item.get("status", "") or "")
     issue_type = str(item.get("issue_type") or item.get("feedback_type") or item.get("type") or "")
@@ -171,6 +178,19 @@ def _default_cross_models() -> list[str]:
 
 def _default_crosscheck_models() -> list[str]:
     return _split_model_specs(os.getenv("CROSS_CHECK_MODELS"))
+
+
+def _filter_supported_provider_models(models: list[str], label: str) -> list[str]:
+    supported = []
+    skipped = []
+    for model in models:
+        if cv._is_deepseek_model(model):
+            skipped.append(model)
+            continue
+        supported.append(model)
+    if skipped:
+        print(f"  {label} 모델 제외: {', '.join(skipped)} (DeepSeek 비활성화)")
+    return supported
 
 
 def _is_openai_model(model: str) -> bool:
@@ -214,10 +234,6 @@ def _filter_available_crosscheck_models(models: list[str]) -> list[str]:
     if skipped:
         print(f"  crosscheck 모델 제외: {', '.join(skipped)}")
     return available
-
-
-def _load_verifier():
-    return "verifier4", verify_lecture_content, format_verification_report
 
 
 def _claims_jsonl_path(output_json_path: str | Path) -> Path:
@@ -270,8 +286,32 @@ def _load_claims_jsonl(path: str | Path | None) -> list[dict]:
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
-            claims.append(payload)
+            claims.append(_normalize_loaded_claim(payload))
     return claims
+
+
+def _normalize_loaded_claim(claim: dict) -> dict:
+    claim = dict(claim)
+    note_ids = re.findall(r"\b(?:U\d{3,5}|S\d{3}(?:-C\d{3})?)\b", str(claim.get("context_note", "") or ""))
+    antecedent_ids = claim.get("antecedent_context_ids")
+    if isinstance(antecedent_ids, list):
+        antecedent_ids = _sort_utterance_ids([str(x) for x in antecedent_ids] + note_ids)
+    else:
+        antecedent_ids = _sort_utterance_ids(note_ids)
+    if antecedent_ids:
+        claim["antecedent_context_ids"] = antecedent_ids
+    utterance_ids = claim.get("utterance_ids")
+    if isinstance(utterance_ids, list):
+        claim["utterance_ids"] = _sort_utterance_ids([str(x) for x in utterance_ids])
+    else:
+        uid = str(claim.get("utterance_id") or "").strip()
+        claim["utterance_ids"] = _sort_utterance_ids([uid] if uid else [])
+    if antecedent_ids and not claim.get("anchor_utterance_ids"):
+        claim["anchor_utterance_ids"] = _sort_utterance_ids(antecedent_ids + claim["utterance_ids"])
+    context_ids = claim.get("context_ids")
+    if isinstance(context_ids, list):
+        claim["context_ids"] = _sort_utterance_ids([str(x) for x in context_ids])
+    return claim
 
 
 def _claim_raw_key(claim: dict) -> str:
@@ -279,7 +319,6 @@ def _claim_raw_key(claim: dict) -> str:
         str(claim.get("utterance_id", "") or ""),
         str(claim.get("claim_type", "") or ""),
         _normalize_claim_text(claim.get("claim_text", "")),
-        _normalize_claim_text(claim.get("resolved_claim", "")),
     ]
     return "||".join(parts)
 
@@ -289,7 +328,7 @@ def _compact_claim_for_diff(claim: dict) -> dict:
         "utterance_id": str(claim.get("utterance_id", "") or ""),
         "claim_type": str(claim.get("claim_type", "") or ""),
         "claim_text": str(claim.get("claim_text", "") or ""),
-        "resolved_claim": str(claim.get("resolved_claim", "") or ""),
+        "source_span_ids": claim.get("source_span_ids", []),
         "is_approximate": bool(claim.get("is_approximate")),
     }
 
@@ -303,7 +342,6 @@ def _claims_by_utterance(claims: list[dict]) -> dict[str, list[dict]]:
         items.sort(key=lambda item: (
             item.get("claim_type", ""),
             item.get("claim_text", ""),
-            item.get("resolved_claim", ""),
         ))
     return grouped
 
@@ -385,6 +423,9 @@ def _write_claims_raw_diff(previous_path: str | None, current_path: str | None) 
 
 
 def _claim_key(payload: dict) -> str:
+    explicit = str(payload.get("claim_fingerprint") or payload.get("claim_id") or payload.get("source_claim_id") or "").strip()
+    if explicit:
+        return explicit
     uid = str(payload.get("utterance_id", "") or "")
     text = str(payload.get("claim_text", "") or "")[:60]
     return f"{uid}::{text}"
@@ -435,25 +476,8 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
     }
     category, label, rationale = category_map.get(
         issue_type,
-        ("professor_check", cv.issue_type_label(issue_type), "교수 확인이 필요한 설명입니다."),
+        ("professor_check", cv.issue_type_label(issue_type), "강의자 확인이 필요한 설명입니다."),
     )
-
-    feedback = issue.get("professor_feedback")
-    if not isinstance(feedback, dict):
-        feedback = {
-            "summary": issue.get("issue", ""),
-            "student_misunderstanding": issue.get("student_misunderstanding", ""),
-            "why_it_matters": issue.get("why_it_matters", issue.get("explanation", "")),
-            "suggested_rephrase": issue.get("suggested_rephrase", issue.get("recommendation", "")),
-            "teaching_note": issue.get("teaching_note", issue.get("recommendation", "")),
-            "evidence_in_context": issue.get("evidence_in_context", issue.get("problematic_content", "")),
-            "why_wrong": issue.get("why_wrong", ""),
-            "counterexample": issue.get("counterexample", ""),
-            "issue_basis": issue.get("issue_basis", ""),
-            "student_error": issue.get("student_error", ""),
-            "counterexample_or_condition": issue.get("counterexample_or_condition", ""),
-            "context_resolution": issue.get("context_resolution", ""),
-        }
 
     return {
         "issue_type_code": cv.issue_type_code(issue_type),
@@ -465,7 +489,6 @@ def _classify_pedagogical_issue(issue: dict) -> dict:
         "issue_category": category,
         "issue_category_label": label,
         "issue_category_reason": rationale,
-        "professor_feedback": feedback,
     }
 
 
@@ -522,7 +545,12 @@ def _resolve_claim_match(issue: dict, claim_candidates: dict[str, list[dict]]) -
     if len(candidates) == 1:
         return candidates[0]
 
-    issue_text = issue.get("claim_text", "") or issue.get("problematic_content", "")
+    issue_text = (
+        issue.get("source_text")
+        or issue.get("claim_context_text")
+        or issue.get("claim_text")
+        or ""
+    )
     claim_type = str(issue.get("claim_type", "") or "")
     pool = candidates
     if claim_type:
@@ -538,10 +566,10 @@ def _resolve_claim_match(issue: dict, claim_candidates: dict[str, list[dict]]) -
     best_score = -1.0
     for candidate in pool:
         claim_text = candidate.get("claim_text", "")
-        resolved_claim = candidate.get("resolved_claim", "")
+        source_text = candidate.get("source_text") or candidate.get("claim_context_text") or ""
         score = max(
             _token_overlap(issue_text, claim_text),
-            _token_overlap(issue_text, resolved_claim),
+            _token_overlap(issue_text, source_text),
         )
         if score > best_score:
             best = candidate
@@ -560,14 +588,18 @@ def _claim_record_from_claim(claim: dict, utterance_lookup: dict[str, dict], sta
         "end_time": utt.get("end_time"),
         "claim_type": claim.get("claim_type", ""),
         "claim_text": claim.get("claim_text", ""),
-        "resolved_claim": claim.get("resolved_claim", ""),
+        "anchor_utterance_ids": claim.get("anchor_utterance_ids", []),
+        "source_span_ids": claim.get("source_span_ids", []),
+        "source_text": claim.get("source_text", ""),
+        "source_block_id": claim.get("source_block_id", ""),
+        "claim_context_ids": claim.get("claim_context_ids", claim.get("source_span_ids", [])),
+        "claim_context_text": claim.get("claim_context_text", claim.get("source_text", "")),
+        "claim_context_block_id": claim.get("claim_context_block_id", claim.get("source_block_id", "")),
         "is_approximate": bool(claim.get("is_approximate")),
         "source_claim_key": _claim_key(claim),
         "matched_to_extracted_claim": True,
         "stage": stage,
     }
-    if claim.get("verification_question"):
-        record["verification_question"] = claim.get("verification_question", "")
     return record
 
 
@@ -590,8 +622,13 @@ def _claim_record_from_issue(
             "utterance_id": issue.get("utterance_id") or claim.get("utterance_id", ""),
             "claim_type": issue.get("claim_type") or claim.get("claim_type", ""),
             "claim_text": issue.get("claim_text") or claim.get("claim_text", ""),
-            "resolved_claim": issue.get("resolved_claim") or claim.get("resolved_claim", ""),
-            "verification_question": issue.get("verification_question") or claim.get("verification_question", ""),
+            "anchor_utterance_ids": issue.get("anchor_utterance_ids") or claim.get("anchor_utterance_ids", []),
+            "source_span_ids": issue.get("source_span_ids") or claim.get("source_span_ids", []),
+            "source_text": issue.get("source_text") or claim.get("source_text", ""),
+            "source_block_id": issue.get("source_block_id") or claim.get("source_block_id", ""),
+            "claim_context_ids": issue.get("claim_context_ids") or claim.get("claim_context_ids", claim.get("source_span_ids", [])),
+            "claim_context_text": issue.get("claim_context_text") or claim.get("claim_context_text", claim.get("source_text", "")),
+            "claim_context_block_id": issue.get("claim_context_block_id") or claim.get("claim_context_block_id", claim.get("source_block_id", "")),
             "is_approximate": issue.get("is_approximate", claim.get("is_approximate", False)),
         },
         utterance_lookup,
@@ -627,24 +664,19 @@ def _claim_record_from_issue(
             "issue_type_code": issue.get("issue_type_code") or cv.issue_type_code(issue_type),
             "issue_type_code_label": issue.get("issue_type_code_label") or cv.issue_type_code_label(issue_type),
             "issue_type_scores": issue.get("issue_type_scores", {}),
+            "issue_classification_by_model": issue.get("issue_classification_by_model", {}),
+            "issue_classification_scores": issue.get("issue_classification_scores", {}),
+            "issue_classification_primary_code": issue.get("issue_classification_primary_code", ""),
+            "issue_classification_primary_type": issue.get("issue_classification_primary_type", ""),
+            "issue_classification_rationale": issue.get("issue_classification_rationale", ""),
             "primary_issue_type": issue.get("primary_issue_type", {}),
             "secondary_issue_types": issue.get("secondary_issue_types", []),
             "issue_type_rationale": issue.get("issue_type_rationale", ""),
             "issue": issue.get("issue", ""),
-            "correct_info": issue.get("correct_info", ""),
             "explanation": issue.get("explanation", ""),
-            "why_wrong": issue.get("why_wrong", ""),
-            "counterexample": issue.get("counterexample", ""),
-            "issue_basis": issue.get("issue_basis", ""),
-            "student_error": issue.get("student_error", ""),
-            "counterexample_or_condition": issue.get("counterexample_or_condition", ""),
             "context_resolution": issue.get("context_resolution", ""),
-            "recommendation": issue.get("recommendation", ""),
-            "student_misunderstanding": issue.get("student_misunderstanding", ""),
-            "why_it_matters": issue.get("why_it_matters", ""),
-            "suggested_rephrase": issue.get("suggested_rephrase", ""),
-            "teaching_note": issue.get("teaching_note", ""),
-            "evidence_in_context": issue.get("evidence_in_context", ""),
+            "context_resolution_reason": issue.get("context_resolution_reason", ""),
+            "correction_hint": issue.get("correction_hint", ""),
             "crosscheck_context_text": issue.get("crosscheck_context_text", ""),
             "evidence_sources": issue.get("evidence_sources", []),
             "crosscheck_score": issue.get("crosscheck_score"),
@@ -657,10 +689,6 @@ def _claim_record_from_issue(
             "canonical_member_utterance_ids": issue.get("canonical_member_utterance_ids", []),
             "canonical_wrong_proposition": issue.get("canonical_wrong_proposition", ""),
             "canonical_merge_rationale": issue.get("canonical_merge_rationale", ""),
-            "verification_basis": issue.get("verification_basis", ""),
-            "evidence_need": issue.get("evidence_need", ""),
-            "claim_scope": issue.get("claim_scope", ""),
-            "review_priority": issue.get("review_priority", ""),
             "crosscheck_details": issue.get("crosscheck_details", []),
             "grounding_verified": issue.get("grounding_verified"),
             "grounding_skipped": issue.get("grounding_skipped", False),
@@ -710,31 +738,14 @@ def _source_dedupe_record_payload(record: dict, record_id: str) -> dict:
         "issue_type": record.get("issue_type", ""),
         "issue_type_label": record.get("issue_type_label", ""),
         "claim_text": record.get("claim_text", ""),
-        "resolved_claim": record.get("resolved_claim", ""),
-        "problematic_content": record.get("problematic_content") or record.get("claim_text", ""),
+        "source_text": record.get("source_text") or record.get("claim_context_text", ""),
         "issue": record.get("issue", ""),
-        "correct_info": record.get("correct_info", ""),
         "explanation": record.get("explanation", ""),
-        "why_wrong": record.get("why_wrong", ""),
-        "counterexample": record.get("counterexample", ""),
-        "issue_basis": record.get("issue_basis", ""),
-        "student_error": record.get("student_error", ""),
-        "counterexample_or_condition": record.get("counterexample_or_condition", ""),
         "context_resolution": record.get("context_resolution", ""),
-        "recommendation": record.get("recommendation", ""),
-        "student_misunderstanding": record.get("student_misunderstanding", ""),
-        "why_it_matters": record.get("why_it_matters", ""),
-        "suggested_rephrase": record.get("suggested_rephrase", ""),
-        "teaching_note": record.get("teaching_note", ""),
-        "evidence_in_context": record.get("evidence_in_context", ""),
+        "context_resolution_reason": record.get("context_resolution_reason", ""),
+        "correction_hint": record.get("correction_hint", ""),
         "context_text": record.get("context_text", ""),
         "confidence": record.get("confidence", 0),
-        "classification": {
-            "verification_basis": record.get("verification_basis", ""),
-            "evidence_need": record.get("evidence_need", ""),
-            "claim_scope": record.get("claim_scope", ""),
-            "review_priority": record.get("review_priority", ""),
-        },
     }
 
 
@@ -760,8 +771,8 @@ status_bucket: {status}
 
 판단 기준:
 - 서로 issue_type이 달라도 같은 source claim에 대한 중복 피드백이면 하나만 남기세요.
-- 교수에게 가장 유용한 대표 피드백을 고르세요.
-- 학생 오해가 가장 구체적이고, correct_info/suggested_rephrase가 가장 실행 가능한 후보를 우선하세요.
+- 강의자에게 가장 유용한 대표 피드백을 고르세요.
+- 문제 요약, 문맥 해소 판단, 모델별 판정 근거가 가장 구체적인 후보를 우선하세요.
 - 단순히 confidence가 높다는 이유만으로 고르지 마세요.
 - 여러 후보가 서로 보완적이어도 최종 keep_record_id는 반드시 하나만 선택하세요.
 - 새 피드백을 작성하지 말고, 기존 record_id 중 하나만 선택하세요.
@@ -869,13 +880,11 @@ def _count_by(items: list[dict], key: str, *, fallback: str = "unknown") -> dict
 
 def _professor_check_reason(record: dict) -> str:
     if record.get("grounding_api_failed"):
-        return "외부 근거 검증 응답을 파싱하지 못해 확정 대신 교수 확인 대상으로 분류했습니다."
+        return "외부 근거 검증 응답을 파싱하지 못해 확정 대신 강의자 확인 대상으로 분류했습니다."
     check_record = {**record, "type": record.get("issue_type") or record.get("type", "")}
     if record.get("grounding_verified") is None and cv.is_fact_grounded_issue(check_record):
-        return "외부 근거 검증 결과가 없어 확정 대신 교수 확인 대상으로 분류했습니다."
-    if cv.should_route_issue_to_professor_check(check_record):
-        return cv.metadata_review_reason(check_record)
-    return str(record.get("rejection_reason") or "교수 확인이 필요한 후보입니다.")
+        return "외부 근거 검증 결과가 없어 확정 대신 강의자 확인 대상으로 분류했습니다."
+    return str(record.get("rejection_reason") or "강의자 확인이 필요한 후보입니다.")
 
 
 def _should_send_to_professor_check(record: dict) -> bool:
@@ -884,7 +893,7 @@ def _should_send_to_professor_check(record: dict) -> bool:
         return True
     if record.get("grounding_verified") is None and cv.is_fact_grounded_issue(check_record):
         return True
-    return cv.should_route_issue_to_professor_check(check_record)
+    return False
 
 
 def _split_confirmed_and_professor_check(records: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -952,9 +961,8 @@ def _feedback_group_text(item: dict) -> str:
         str(value or "")
         for value in (
             problem.get("summary"),
-            problem.get("correct_info"),
-            professor_feedback.get("student_misunderstanding"),
-            professor_feedback.get("suggested_rephrase"),
+            problem.get("context_resolution_reason"),
+            problem.get("correction_hint"),
         )
     )
 
@@ -1086,7 +1094,6 @@ def _build_feedback_groups(feedback_items: list[dict]) -> list[dict]:
         group["item_count"] = len(items)
         group["slide_numbers"] = slide_numbers
         group["summary"] = representative.get("problem", {}).get("summary", "")
-        group["professor_feedback"] = representative.get("professor_feedback", {})
         if representative.get("canonical_issue_id") or representative_evidence.get("canonical_issue_id"):
             group["canonical_issue_id"] = (
                 representative.get("canonical_issue_id")
@@ -1133,7 +1140,13 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
         "claim_type": claim_type,
         "claim_type_label": _claim_type_label(claim_type),
         "claim_text": claim.get("claim_text", ""),
-        "resolved_claim": claim.get("resolved_claim", ""),
+        "anchor_utterance_ids": claim.get("anchor_utterance_ids", []),
+        "source_span_ids": claim.get("source_span_ids", []),
+        "source_text": claim.get("source_text", ""),
+        "source_block_id": claim.get("source_block_id", ""),
+        "claim_context_ids": claim.get("claim_context_ids", claim.get("source_span_ids", [])),
+        "claim_context_text": claim.get("claim_context_text", claim.get("source_text", "")),
+        "claim_context_block_id": claim.get("claim_context_block_id", claim.get("source_block_id", "")),
         "is_approximate": bool(claim.get("is_approximate")),
         "needs_context": bool(claim.get("needs_context")),
         "resolution_status": claim.get("resolution_status", ""),
@@ -1144,8 +1157,6 @@ def _claim_payload_v2(claim: dict, utterance_lookup: dict[str, dict]) -> dict:
             "slide_number": utt.get("slide_number"),
         },
     }
-    if claim.get("verification_question"):
-        payload["verification_question"] = claim.get("verification_question", "")
     return payload
 
 
@@ -1205,19 +1216,10 @@ def _grounding_payload(record: dict) -> dict:
 
 def _compact_crosscheck_details(details: list[dict]) -> list[dict]:
     visible_fields = (
-        "issue",
-        "correct_info",
-        "why_wrong",
-        "issue_basis",
-        "student_error",
-        "counterexample_or_condition",
+        "context_issue_summary",
         "context_resolution",
-        "evidence_in_context",
-        "student_misunderstanding",
-        "why_it_matters",
-        "suggested_rephrase",
-        "teaching_note",
-        "recommendation",
+        "context_resolution_reason",
+        "correction_hint",
     )
     compact = []
     for row in details:
@@ -1231,11 +1233,10 @@ def _compact_crosscheck_details(details: list[dict]) -> list[dict]:
         for numeric_field in ("vote_score", "model_weight", "weighted_score", "confidence"):
             if row.get(numeric_field) is not None:
                 item[numeric_field] = row.get(numeric_field)
-        for scoring_field in ("criteria_scores", "criteria_evidence", "score_breakdown"):
-            if isinstance(row.get(scoring_field), dict):
-                item[scoring_field] = row.get(scoring_field)
         if isinstance(row.get("issue_type_scores"), dict):
             item["issue_type_scores"] = row.get("issue_type_scores")
+        if isinstance(row.get("type_judgments"), dict):
+            item["type_judgments"] = row.get("type_judgments")
         for field in ("issue_type", "issue_type_code", "issue_type_code_label", "issue_type_rationale"):
             value = str(row.get(field, "") or "").strip()
             if value:
@@ -1246,6 +1247,58 @@ def _compact_crosscheck_details(details: list[dict]) -> list[dict]:
                 item[field] = value
         compact.append(item)
     return compact
+
+
+_REJECTED_CONTEXT_SUMMARIES = {
+    "제공 문맥상 독립적으로 남는 잘못된 명제 없음",
+    "제공 문맥 기준으로 유지할 이슈를 반환하지 않았습니다.",
+}
+
+
+def _is_rejected_context_summary(value: str) -> bool:
+    text = str(value or "").strip()
+    return text in _REJECTED_CONTEXT_SUMMARIES
+
+
+def _crosscheck_detail_rank(row: dict, field: str) -> tuple[int, float]:
+    verdict = str(row.get("verdict", "") or "").strip().lower()
+    status = str(row.get("status", "") or "").strip().lower()
+    positive = verdict == "agree" or status == "kept"
+    neutral = verdict == "inconclusive"
+    try:
+        confidence = float(row.get("confidence", row.get("vote_score", 0)) or 0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    if field == "context_issue_summary" and _is_rejected_context_summary(row.get(field, "")):
+        return (-1, confidence)
+    return (2 if positive else 1 if neutral else 0, confidence)
+
+
+def _best_crosscheck_field(details: list[dict], field: str, final_status: str = "") -> str:
+    rows = []
+    for row in details or []:
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get(field, "") or "").strip()
+        if not value:
+            continue
+        if field == "context_issue_summary" and final_status != "rejected" and _is_rejected_context_summary(value):
+            continue
+        rows.append((row, value))
+    if not rows:
+        return ""
+    rows.sort(key=lambda item: _crosscheck_detail_rank(item[0], field), reverse=True)
+    return rows[0][1]
+
+
+def _first_crosscheck_field(details: list[dict], field: str) -> str:
+    for row in details or []:
+        if not isinstance(row, dict):
+            continue
+        value = str(row.get(field, "") or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _confirmation_reason(record: dict, crosscheck_details: list[dict]) -> str:
@@ -1298,13 +1351,11 @@ def _record_related_utterance_ids(record: dict, crosscheck_details: list[dict]) 
 
     text_fields = (
         "claim_text",
-        "problematic_content",
+        "source_text",
+        "claim_context_text",
         "issue",
-        "why_wrong",
-        "evidence_in_context",
         "cross_recheck_reason",
         "canonical_merge_rationale",
-        "student_error",
     )
     for field in text_fields:
         ids.extend(_extract_utterance_ids_from_text(str(record.get(field, "") or "")))
@@ -1312,10 +1363,7 @@ def _record_related_utterance_ids(record: dict, crosscheck_details: list[dict]) 
     detail_fields = (
         "reason",
         "issue",
-        "why_wrong",
-        "evidence_in_context",
-        "teaching_note",
-        "recommendation",
+        "context_resolution_reason",
     )
     for detail in crosscheck_details:
         if not isinstance(detail, dict):
@@ -1326,8 +1374,161 @@ def _record_related_utterance_ids(record: dict, crosscheck_details: list[dict]) 
     return _sort_utterance_ids(ids)
 
 
+def _with_utterance_prefix(utterance_id: str, text: str) -> str:
+    uid = str(utterance_id or "").strip()
+    value = str(text or "").strip()
+    if uid and value and not value.startswith(f"{uid}:"):
+        return f"{uid}: {value}"
+    return value
+
+
+def _public_source_issues(source_issues: list[dict]) -> list[dict]:
+    """Keep only traceability fields from verifier issue candidates in final output."""
+    public_rows: list[dict] = []
+    allowed_keys = (
+        "utterance_id",
+        "slide_number",
+        "start_time",
+        "end_time",
+        "claim_type",
+        "claim_text",
+        "anchor_utterance_ids",
+        "source_span_ids",
+        "source_text",
+        "source_block_id",
+        "claim_context_ids",
+        "claim_context_text",
+        "claim_context_block_id",
+        "detected_by_models",
+        "detector_model_votes",
+        "detector_model_count",
+        "detector_model_total",
+        "detector_model_agreement_ratio",
+        "detector_agreement_label",
+        "detector_confidence",
+    )
+    for issue in source_issues or []:
+        if not isinstance(issue, dict):
+            continue
+        row = {
+            key: issue.get(key)
+            for key in allowed_keys
+            if issue.get(key) not in (None, "", [])
+        }
+        if row:
+            public_rows.append(row)
+    return public_rows
+
+
+def _public_detector_votes(raw_votes) -> list[dict]:
+    rows: list[dict] = []
+    if isinstance(raw_votes, dict):
+        iterator = raw_votes.items()
+    elif isinstance(raw_votes, list):
+        iterator = []
+        for row in raw_votes:
+            if isinstance(row, dict):
+                iterator.append((row.get("model"), row))
+    else:
+        iterator = []
+
+    seen: set[tuple[str, str, str, str]] = set()
+    for model, value in iterator:
+        model_name = str(model or "").strip()
+        if not model_name:
+            continue
+        values = value if isinstance(value, list) else [value]
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            public_row = {
+                "model": model_name,
+                "confidence": row.get("confidence"),
+                "claim_id": row.get("claim_id", ""),
+                "utterance_id": row.get("utterance_id", ""),
+                "context_id": row.get("context_id", ""),
+                "slide_number": row.get("slide_number"),
+                "start_time": row.get("start_time"),
+                "claim_text": row.get("claim_text", ""),
+                "source_text": row.get("source_text", ""),
+            }
+            key = (
+                model_name,
+                str(public_row.get("claim_id") or ""),
+                str(public_row.get("utterance_id") or public_row.get("context_id") or ""),
+                str(public_row.get("source_text") or public_row.get("claim_text") or "")[:120],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append({k: v for k, v in public_row.items() if v not in (None, "", [])})
+    return rows
+
+
+def _issue_detection_payload(record: dict) -> dict:
+    detected = sorted(
+        set(str(model or "").strip() for model in record.get("detected_by_models", []) if str(model or "").strip())
+    )
+    source_issues = [row for row in record.get("source_issues", []) or [] if isinstance(row, dict)]
+    if not detected and source_issues:
+        detected = sorted(
+            set(
+                str(model or "").strip()
+                for row in source_issues
+                for model in (row.get("detected_by_models", []) or [])
+                if str(model or "").strip()
+            )
+        )
+    model_total = int(record.get("detector_model_total") or len(detected) or 0)
+    model_count = int(record.get("detector_model_count") or len(detected))
+    agreement_ratio = record.get("detector_model_agreement_ratio")
+    if (not model_total or not model_count) and source_issues:
+        source_totals = [
+            int(row.get("detector_model_total") or 0)
+            for row in source_issues
+            if row.get("detector_model_total")
+        ]
+        if source_totals:
+            model_total = max(source_totals)
+        model_count = len(detected)
+    if not model_total and detected:
+        model_total = len(detected)
+    if agreement_ratio is None and model_total:
+        agreement_ratio = model_count / model_total
+    detector_votes = record.get("detector_model_votes", {})
+    if not detector_votes and source_issues:
+        detector_votes = {}
+        for row in source_issues:
+            raw_votes = row.get("detector_model_votes", {}) or {}
+            if not isinstance(raw_votes, dict):
+                continue
+            for model, votes in raw_votes.items():
+                if not model:
+                    continue
+                detector_votes.setdefault(model, [])
+                if isinstance(votes, list):
+                    detector_votes[model].extend(vote for vote in votes if isinstance(vote, dict))
+                elif isinstance(votes, dict):
+                    detector_votes[model].append(votes)
+    agreement_label = record.get("detector_agreement_label", "")
+    if not agreement_label and model_total:
+        if model_count == model_total:
+            agreement_label = "all_models"
+        elif model_count > 1:
+            agreement_label = "partial_overlap"
+        elif model_count == 1:
+            agreement_label = "single_model"
+    return {
+        "detected_by_models": detected,
+        "model_count": model_count,
+        "model_total": model_total,
+        "agreement_ratio": agreement_ratio,
+        "agreement_label": agreement_label,
+        "model_votes": _public_detector_votes(detector_votes),
+    }
+
+
 def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
-    feedback = record.get("professor_feedback") if isinstance(record.get("professor_feedback"), dict) else {}
     include_debug = _include_debug_fields()
     feedback_type = str(record.get("issue_type") or record.get("type") or "")
     feedback_label = (
@@ -1345,19 +1546,48 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
     confirmation_reason = _confirmation_reason(record, crosscheck_details)
     related_utterance_ids = _record_related_utterance_ids(record, crosscheck_details)
     feedback_id = f"fb_{index + 1:04d}"
+    claim_text = str(record.get("claim_text", "") or "")
+    display_claim_text = _with_utterance_prefix(record.get("utterance_id", ""), claim_text)
+    source_context_text = (
+        record.get("source_text")
+        or record.get("claim_context_text")
+        or record.get("claim_text", "")
+    )
+    display_source_text = _with_utterance_prefix(
+        record.get("utterance_id", ""),
+        source_context_text,
+    )
+    issue_detection = _issue_detection_payload(record)
     payload = {
         "feedback_id": feedback_id,
         "source_claim_id": source_claim_id,
         "utterance_id": record.get("utterance_id", ""),
         "utterance_ids": related_utterance_ids,
         "related_utterance_ids": related_utterance_ids,
-        "claim_text": record.get("claim_text", ""),
-        "resolved_claim": record.get("resolved_claim", ""),
+        "claim_text": claim_text,
+        "display_claim_text": display_claim_text,
+        "anchor_utterance_ids": record.get("anchor_utterance_ids", []),
+        "source_span_ids": record.get("source_span_ids", []),
+        "source_text": record.get("source_text", ""),
+        "source_block_id": record.get("source_block_id", ""),
+        "claim_context_ids": record.get("claim_context_ids", record.get("source_span_ids", [])),
+        "claim_context_text": record.get("claim_context_text", record.get("source_text", "")),
+        "claim_context_block_id": record.get("claim_context_block_id", record.get("source_block_id", "")),
         "claim_type": record.get("claim_type", ""),
         "issue_type": feedback_type,
         "issue_type_code": record.get("issue_type_code") or cv.issue_type_code(feedback_type),
         "issue_type_code_label": record.get("issue_type_code_label") or cv.issue_type_code_label(feedback_type),
         "issue_type_scores": record.get("issue_type_scores", {}),
+        "issue_classification_by_model": record.get("issue_classification_by_model", {}),
+        "issue_classification_scores": record.get("issue_classification_scores", {}),
+        "issue_classification_primary_code": record.get("issue_classification_primary_code", ""),
+        "issue_classification_primary_type": record.get("issue_classification_primary_type", ""),
+        "issue_classification_rationale": record.get("issue_classification_rationale", ""),
+        "detected_by_models": issue_detection["detected_by_models"],
+        "detector_model_count": issue_detection["model_count"],
+        "detector_model_total": issue_detection["model_total"],
+        "detector_model_agreement_ratio": issue_detection["agreement_ratio"],
+        "detector_agreement_label": issue_detection["agreement_label"],
         "primary_issue_type": record.get("primary_issue_type", {}),
         "secondary_issue_types": record.get("secondary_issue_types", []),
         "issue_type_rationale": record.get("issue_type_rationale", ""),
@@ -1376,38 +1606,26 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
             "slide_number": record.get("slide_number"),
         },
         "problem": {
-            "problematic_content": record.get("problematic_content") or record.get("claim_text", ""),
-            "summary": record.get("issue", "") or feedback.get("summary", ""),
-            "correct_info": record.get("correct_info", ""),
-            "why_wrong": record.get("why_wrong", ""),
-            "issue_basis": record.get("issue_basis", ""),
-            "student_error": record.get("student_error", ""),
-            "counterexample_or_condition": record.get("counterexample_or_condition", ""),
+            "source_text": display_source_text,
+            "summary": record.get("issue", ""),
+            "context_issue_summary": record.get("context_issue_summary", "")
+            or _best_crosscheck_field(crosscheck_details, "context_issue_summary", status),
             "context_resolution": record.get("context_resolution", ""),
-            "recommendation": record.get("recommendation", ""),
-        },
-        "professor_feedback": {
-            "student_misunderstanding": (
-                record.get("student_misunderstanding")
-                or feedback.get("student_misunderstanding", "")
-            ),
-            "why_it_matters": record.get("why_it_matters") or feedback.get("why_it_matters", ""),
-            "suggested_rephrase": (
-                record.get("suggested_rephrase")
-                or feedback.get("suggested_rephrase", "")
-            ),
-            "teaching_note": record.get("teaching_note") or feedback.get("teaching_note", ""),
+            "context_resolution_reason": record.get("context_resolution_reason", "")
+            or _best_crosscheck_field(crosscheck_details, "context_resolution_reason", status),
+            "correction_hint": record.get("correction_hint", "")
+            or _best_crosscheck_field(crosscheck_details, "correction_hint", status),
         },
         "evidence": {
             "context_text": record.get("context_text", ""),
             "crosscheck_context_text": record.get("crosscheck_context_text", ""),
             "slide_number": record.get("slide_number"),
-            "evidence_in_context": (
-                record.get("evidence_in_context")
-                or feedback.get("evidence_in_context", "")
-            ),
             "evidence_sources": record.get("evidence_sources", []),
             "related_utterance_ids": related_utterance_ids,
+            "source_span_ids": record.get("source_span_ids", []),
+            "source_text": record.get("source_text", ""),
+            "claim_context_ids": record.get("claim_context_ids", record.get("source_span_ids", [])),
+            "claim_context_text": record.get("claim_context_text", record.get("source_text", "")),
         },
     }
     if record.get("issue_unit_id"):
@@ -1418,9 +1636,10 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
     if record.get("source_claim_keys"):
         payload["source_claim_ids"] = record.get("source_claim_keys", [])
     if record.get("source_issues"):
-        payload["evidence"]["source_issues"] = record.get("source_issues", [])
+        payload["evidence"]["source_issues"] = _public_source_issues(record.get("source_issues", []))
     if crosscheck_details:
         payload["checks"] = {
+            "issue_detection": issue_detection,
             "crosscheck": {
                 "verdict": record.get("crosscheck_score_verdict") or _crosscheck_verdict(crosscheck_details, status),
                 "score": crosscheck_score,
@@ -1441,13 +1660,8 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
         payload["claim_type_label"] = _claim_type_label(record.get("claim_type", ""))
         payload["problem"]["explanation"] = record.get("explanation", "")
         payload["problem"]["counterexample"] = record.get("counterexample", "")
-        payload["classification"] = {
-            "verification_basis": record.get("verification_basis", ""),
-            "evidence_need": record.get("evidence_need", ""),
-            "claim_scope": record.get("claim_scope", ""),
-            "review_priority": record.get("review_priority", ""),
-        }
         payload["checks"] = {
+            "issue_detection": issue_detection,
             "crosscheck": {
                 "verdict": record.get("crosscheck_score_verdict") or _crosscheck_verdict(crosscheck_details, status),
                 "score": crosscheck_score,
@@ -1465,8 +1679,6 @@ def _feedback_payload_v2(record: dict, status: str, index: int) -> dict:
             payload["rejection_reason"] = record["rejection_reason"]
     if record.get("professor_check_reason"):
         payload["professor_check_reason"] = record["professor_check_reason"]
-    if include_debug and record.get("verification_question"):
-        payload["verification_question"] = record["verification_question"]
     if include_debug and record.get("deduped_related_feedback"):
         payload["deduped_related_feedback"] = record["deduped_related_feedback"]
     if include_debug and record.get("source_claim_dedupe"):
@@ -1526,24 +1738,17 @@ def _build_v2_output(
     for group in confirmed_groups:
         label = str(group.get("feedback_label") or group.get("feedback_type") or "검토 필요")
         breakdown_by_feedback_group_type[label] = breakdown_by_feedback_group_type.get(label, 0) + 1
-    breakdown_by_verification_basis: dict[str, int] = {}
-    breakdown_by_evidence_need: dict[str, int] = {}
-    for item in feedback_items:
-        classification = item.get("classification") if isinstance(item.get("classification"), dict) else {}
-        basis = str(classification.get("verification_basis") or "unclassified")
-        evidence_need = str(classification.get("evidence_need") or "unclassified")
-        breakdown_by_verification_basis[basis] = breakdown_by_verification_basis.get(basis, 0) + 1
-        breakdown_by_evidence_need[evidence_need] = breakdown_by_evidence_need.get(evidence_need, 0) + 1
-
     return {
         "schema_version": "content_verification.v2",
         "mode": result.get("mode", "cross_verification"),
         "models": {
             "claim_extract": result.get("claim_extract_model", ""),
             "judge": legacy_models,
+            "issue_classification": result.get("issue_classification_models", []),
             "crosscheck": crosscheck_models,
             "grounding": result.get("primary_model", ""),
         },
+        "issue_classification_models": result.get("issue_classification_models", []),
         "pipeline_models": legacy_models,
         "crosscheck_models": crosscheck_models,
         "crosscheck_source_models": crosscheck_source_models,
@@ -1562,6 +1767,8 @@ def _build_v2_output(
             "issue_union_raw_count": result.get("issue_union_raw_count", result.get("issue_union_count", 0)),
             "issue_clustered_count": result.get("issue_clustered_count", result.get("issue_union_count", 0)),
             "issue_cluster_reduced_count": result.get("issue_cluster_reduced_count", 0),
+            "issue_detection_stats": result.get("issue_detection_stats", {}),
+            "issue_detection_raw_stats": result.get("issue_detection_raw_stats", {}),
             "feedback_candidate_count": len(feedback_items),
             "confirmed_feedback_count": len(confirmed_ids),
             "professor_check_feedback_count": len(professor_check_ids),
@@ -1572,8 +1779,6 @@ def _build_v2_output(
             "rejected_feedback_group_count": len(rejected_group_ids),
             "breakdown_by_feedback_type": breakdown_by_feedback_type,
             "breakdown_by_feedback_group_type": breakdown_by_feedback_group_type,
-            "breakdown_by_verification_basis": breakdown_by_verification_basis,
-            "breakdown_by_evidence_need": breakdown_by_evidence_need,
             "breakdown_by_claim_type": _count_by(claims, "claim_type"),
             "crosscheck_score": {
                 "algorithm": (result.get("crosscheck_score_report", {}) or {}).get("algorithm", ""),
@@ -1707,8 +1912,6 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
     }
     category_breakdown: dict[str, int] = {}
     issue_type_breakdown: dict[str, int] = {}
-    verification_basis_breakdown: dict[str, int] = {}
-    evidence_need_breakdown: dict[str, int] = {}
     for record in final_confirmed:
         key = str(record.get("issue_category") or record.get("pedagogical_type") or "uncategorized")
         category_breakdown[key] = category_breakdown.get(key, 0) + 1
@@ -1719,18 +1922,12 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             or "검토 필요"
         )
         issue_type_breakdown[type_label] = issue_type_breakdown.get(type_label, 0) + 1
-        basis = str(record.get("verification_basis") or "unclassified")
-        evidence_need = str(record.get("evidence_need") or "unclassified")
-        verification_basis_breakdown[basis] = verification_basis_breakdown.get(basis, 0) + 1
-        evidence_need_breakdown[evidence_need] = evidence_need_breakdown.get(evidence_need, 0) + 1
 
     result["claim_decision_flow_summary"] = {
         "extracted_claim_count": len(claims),
         "final_confirmed_claim_count": len(final_confirmed),
         "final_confirmed_issue_category_breakdown": category_breakdown,
         "final_confirmed_issue_type_breakdown": issue_type_breakdown,
-        "final_confirmed_verification_basis_breakdown": verification_basis_breakdown,
-        "final_confirmed_evidence_need_breakdown": evidence_need_breakdown,
         "professor_check_claim_count": len(professor_check),
         "crosscheck_rejected_claim_count": len(crosscheck_rejected),
         "crosscheck_inconclusive_claim_count": len(crosscheck_inconclusive),
@@ -1753,7 +1950,7 @@ def _augment_decision_flow(result: dict, merged_path: Path) -> dict:
             "count": len(final_confirmed),
         },
         {
-            "label": "교수 확인 대상 claim",
+            "label": "강의자 확인 대상 claim",
             "key": "professor_check_claims",
             "count": len(professor_check),
         },
@@ -1930,6 +2127,16 @@ def _compact_result_for_output(result: dict) -> dict:
         "views",
         "slide_typos",
     ]
+    if _include_token_usage_fields():
+        compact_keys.extend(
+            [
+                "claim_extract_token_usage",
+                "token_usage_per_model",
+                "cross_recheck_token_usage_per_model",
+                "source_claim_dedupe_token_usage",
+                "token_usage",
+            ]
+        )
     return {key: result[key] for key in compact_keys if key in result}
 
 
@@ -1943,12 +2150,14 @@ def run_all_analyzers(
     claim_runs: int = 1,
     claim_min_rate: float = 0.5,
     claim_batch_size: int = CLAIM_BATCH_SIZE,
+    issue_detector_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     claim_max_workers: int = 4,
+    judge_max_workers: int = 2,
     cross_models: list[str] | None = None,
     crosscheck_models: list[str] | None = None,
     cross_runs: int = 1,
     cross_min_rate: float = 0.5,
-    cross_batch_size: int = 20,
+    cross_batch_size: int = 5,
     judge_context_mode: str | None = None,
     current_date: str | None = None,
 ) -> dict:
@@ -1976,8 +2185,12 @@ def run_all_analyzers(
 
     models = cross_models or _default_cross_models()
     effective_judge_context_mode = cv.normalize_judge_context_mode(judge_context_mode)
-    models = list(models or [])
+    models = _filter_supported_provider_models(list(models or []), "verifier judge")
     effective_crosscheck_models = crosscheck_models or _default_crosscheck_models()
+    effective_crosscheck_models = _filter_supported_provider_models(
+        list(effective_crosscheck_models or []),
+        "crosscheck",
+    )
     if len(models) < 2:
         raise RuntimeError("cross verifier는 최소 2개 모델이 필요합니다. CROSS_VERIFY_MODELS 또는 --cross-models를 확인하세요.")
     missing_judge_keys = [
@@ -1997,6 +2210,7 @@ def run_all_analyzers(
     print(f"  verifier judge 문맥 모드: {effective_judge_context_mode}")
     env_vars = _collect_env_vars()
     env_vars["VERIFIER_JUDGE_CONTEXT_MODE"] = effective_judge_context_mode
+    env_vars["VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH"] = str(max(1, int(cross_batch_size or 1)))
 
     verification_result = cross_verify(
         merged_path=str(merged_file),
@@ -2004,12 +2218,14 @@ def run_all_analyzers(
         num_runs=cross_runs,
         min_rate=cross_min_rate,
         batch_size=claim_batch_size,
-        judge_batch_size=cross_batch_size,
+        judge_batch_size=issue_detector_batch_size,
         claims_jsonl=effective_claims_jsonl,
         crosscheck_models=effective_crosscheck_models or None,
         claim_runs=claim_runs,
         claim_min_rate=claim_min_rate,
         judge_context_mode=effective_judge_context_mode,
+        claim_max_workers=claim_max_workers,
+        judge_max_workers=judge_max_workers,
         env_vars=env_vars,
     )
 
@@ -2074,7 +2290,31 @@ def main():
     parser.add_argument("--claim-runs", type=int, default=1)
     parser.add_argument("--claim-min-rate", type=float, default=0.5)
     parser.add_argument("--claim-batch-size", type=int, default=CLAIM_BATCH_SIZE)
+    parser.add_argument(
+        "--issue-detector-batch-size",
+        type=int,
+        default=ISSUE_DETECTOR_BATCH_SIZE,
+        help="2단계 Issue_detection core 문맥 배치 크기. 기본 4",
+    )
     parser.add_argument("--claim-max-workers", type=int, default=4)
+    parser.add_argument(
+        "--judge-max-workers",
+        type=int,
+        default=int(os.getenv("VERIFIER_JUDGE_BATCH_MAX_WORKERS", "2") or "2"),
+        help="모델별 2단계 claim 판정 배치 병렬 worker 수",
+    )
+    parser.add_argument(
+        "--crosscheck-group-max-workers",
+        type=int,
+        default=None,
+        help="모델별 3단계 crosscheck 문맥 묶음 병렬 worker 수",
+    )
+    parser.add_argument(
+        "--issue-cluster-max-workers",
+        type=int,
+        default=None,
+        help="LLM issue merge 문맥 chunk 병렬 worker 수",
+    )
     parser.add_argument(
         "--cross-models",
         nargs="+",
@@ -2096,7 +2336,7 @@ def main():
         help="1차 judge 반복 횟수 (기본 1). crosscheck 모델 수는 --crosscheck-models 또는 CROSS_CHECK_MODELS로 지정",
     )
     parser.add_argument("--cross-min-rate", type=float, default=0.5)
-    parser.add_argument("--cross-batch-size", type=int, default=20)
+    parser.add_argument("--cross-batch-size", type=int, default=5, help="4단계 crosscheck에서 한 prompt에 넣을 issue 수")
     parser.add_argument(
         "--judge-context-mode",
         choices=["batch"],
@@ -2105,6 +2345,10 @@ def main():
     )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
+    if args.crosscheck_group_max_workers is not None:
+        os.environ["VERIFIER_CROSSCHECK_GROUP_MAX_WORKERS"] = str(max(1, args.crosscheck_group_max_workers))
+    if args.issue_cluster_max_workers is not None:
+        os.environ["VERIFIER_ISSUE_CLUSTER_MAX_WORKERS"] = str(max(1, args.issue_cluster_max_workers))
 
     result = run_all_analyzers(
         args.merged_path,
@@ -2115,7 +2359,9 @@ def main():
         claim_runs=args.claim_runs,
         claim_min_rate=args.claim_min_rate,
         claim_batch_size=args.claim_batch_size,
+        issue_detector_batch_size=args.issue_detector_batch_size,
         claim_max_workers=args.claim_max_workers,
+        judge_max_workers=args.judge_max_workers,
         cross_models=args.cross_models,
         crosscheck_models=args.crosscheck_models,
         cross_runs=args.cross_runs,

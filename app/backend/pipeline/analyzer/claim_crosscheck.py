@@ -3,26 +3,23 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections import Counter
 
 _CROSSCHECK_VERDICTS = {"agree", "disagree", "inconclusive"}
 _CROSSCHECK_PARSE_RETRIES = 1
 _CROSSCHECK_EXTRA_FIELDS = (
-    "issue",
-    "correct_info",
-    "why_wrong",
-    "counterexample",
-    "issue_basis",
-    "student_error",
-    "counterexample_or_condition",
+    "status",
+    "checked_type_code",
+    "type_gate_passed",
+    "context_issue_summary",
     "context_resolution",
-    "evidence_in_context",
-    "student_misunderstanding",
-    "why_it_matters",
-    "suggested_rephrase",
-    "teaching_note",
-    "recommendation",
+    "context_resolution_reason",
+    "correction_hint",
+    "context_issue_id",
+    "merged_into_issue_id",
     "issue_type_rationale",
+    "routing_decision",
+    "classification_confidence",
+    "secondary_issue_type_code",
 )
 
 _API_FAILURE_MARKERS = (
@@ -38,254 +35,230 @@ _API_FAILURE_MARKERS = (
     "429",
     "500",
     "503",
+    "credit balance",
+    "balance is too low",
+    "insufficient_quota",
+    "billing",
     "resource_exhausted",
     "unavailable",
     "overloaded",
 )
 
-_CRITERIA_WEIGHTS = {
-    "issue_presence": 0.40,
-    "context_unresolved": 0.35,
-    "evidence_strength": 0.25,
-}
+def _issue_type_from_code(code: str) -> str:
+    from . import claim_common as cv
 
-_CRITERIA_ALIASES = {
-    "issue_presence": ("claim_issue_strength", "misinformation_risk"),
-    "context_unresolved": (
-        "local_context_unresolved",
-        "nearby_context_unresolved",
-        "slide_context_unresolved",
-    ),
-    "evidence_strength": ("concrete_basis",),
-}
+    return cv.ISSUE_CODE_TO_TYPE.get(str(code or "").strip().upper(), "")
 
 
-def _issue_type_definitions_for_prompt() -> str:
-    return """- A. factual_error (발언 자체 오류): 발화 자체의 객관 사실, 정의, 분류, 수치, 순서, 원인-결과, 작동 방식이 강의 문맥을 함께 봐도 틀린 경우
-  포함: 잘못된 명제, 반례, 정답과의 직접 충돌, 주체/과정/대상의 명확한 혼동
-  제외: 표현이 조금 부정확하지만 학생이 최종적으로 맞는 개념을 가져가는 경우
-- B. temporal_error (시간적 오류): 현재성, 최신성, 지원 여부, 사용 여부, 시점 의존 수치나 상태를 현재 사실처럼 말했지만 기준 시점에서 틀리거나 확인이 필요한 경우
-  포함: 현재/요즘/최근/최신/지원 종료/시장 상태/현행 제도/시점 의존 통계
-  제외: 녹화 시점이나 역사적 관점 설명으로 자연스럽게 해석되는 경우
-- C. scope_overclaim (범위 과잉 단정): 특정 조건에서는 맞지만 모든 경우에 맞는 것처럼 범위, 조건, 예외, 다른 가능성을 닫아 말한 경우
-  포함: 항상/모든/반드시/오직/~만/유일 같은 닫힌 명제가 문맥 후에도 남고, 강의 수준에서 의미 있는 반례나 조건이 있는 경우
-  제외: 역할, 책임, 대표 경로, 일반적 관례를 강조한 표준적 설명일 뿐 다른 가능성을 실제로 배제하지 않는 경우
-- D. confusing_explanation (혼동 가능 설명): 명백한 사실 오류라고 단정되지는 않더라도 학생이 핵심 개념, 주체, 과정, 원인, 조건을 잘못 연결해 외울 가능성이 큰 경우
-  포함: 서로 다른 개념 동일시, 주체/과정 혼동, 순서 혼동, 설명 흐름 때문에 남는 구체적 오답 명제
-  제외: 단순 비유 취향, 더 자세히 설명 가능함, 막연한 오해 가능성, 지시어를 과하게 확정해야만 생기는 문제"""
+def _issue_type_code_from_scores(raw_scores) -> str:
+    from . import claim_common as cv
 
-_TERM_RE = re.compile(r"[가-힣A-Za-z0-9][가-힣A-Za-z0-9_+-]{1,}")
-_KOREAN_SUFFIXES = (
-    "에게서는",
-    "에게는",
-    "에서는",
-    "으로는",
-    "이라는",
-    "라는",
-    "이고",
-    "이며",
-    "에서",
-    "으로",
-    "에게",
-    "부터",
-    "까지",
-    "처럼",
-    "보다",
-    "라고",
-    "이나",
-    "거나",
-    "하고",
-    "은",
-    "는",
-    "이",
-    "가",
-    "을",
-    "를",
-    "의",
-    "도",
-    "만",
-    "로",
-    "과",
-    "와",
-)
-_SEMANTIC_PREFIXES = ("비", "무", "반", "탈")
+    scores = _normalized_issue_type_scores(raw_scores)
+    if not scores:
+        return ""
+    issue_type = max(
+        cv.ISSUE_TYPE_ORDER,
+        key=lambda item: float(scores.get(item, 0.0) or 0.0),
+    )
+    return cv.issue_type_code(issue_type) if scores.get(issue_type, 0.0) > 0 else ""
 
 
-def _strip_korean_suffix(term: str) -> str:
-    text = str(term or "").strip()
-    if len(text) <= 2:
-        return text
-    for suffix in _KOREAN_SUFFIXES:
-        if text.endswith(suffix) and len(text) - len(suffix) >= 2:
-            return text[: -len(suffix)]
-    return text
+def _checked_type_code_for_issue(issue: dict) -> str:
+    from . import claim_common as cv
+
+    raw_code = str(
+        issue.get("candidate_primary_type_code")
+        or issue.get("primary_candidate_type_code")
+        or issue.get("candidate_issue_type_code")
+        or issue.get("issue_type_code")
+        or ""
+    ).strip().upper()
+    if raw_code in cv.ISSUE_CODE_TO_TYPE:
+        return raw_code
+
+    raw_type = str(
+        issue.get("candidate_primary_issue_type")
+        or issue.get("primary_candidate_issue_type")
+        or issue.get("issue_type")
+        or issue.get("type")
+        or ""
+    ).strip()
+    code = cv.issue_type_code(raw_type)
+    if code:
+        return code
+
+    return _issue_type_code_from_scores(
+        issue.get("candidate_type_scores")
+        or issue.get("candidate_issue_type_scores")
+        or issue.get("issue_type_scores")
+        or issue.get("type_scores")
+        or {}
+    ) or "A"
 
 
-def _normalize_term(term: str) -> str:
-    text = _strip_korean_suffix(term)
-    if re.fullmatch(r"[A-Za-z0-9_+-]+", text or ""):
-        return text.lower()
-    return text
+def _env_float(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or str(default))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
 
 
-def _extract_terms(text: str) -> list[str]:
-    terms = []
-    for raw in _TERM_RE.findall(str(text or "")):
-        term = _normalize_term(raw)
-        if len(term) >= 3:
-            terms.append(term)
-    return terms
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int = 4) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or str(default))
+    except ValueError:
+        value = default
+    return max(minimum, min(maximum, value))
 
 
-def _levenshtein_distance(a: str, b: str, *, max_distance: int = 2) -> int:
-    if a == b:
-        return 0
-    if abs(len(a) - len(b)) > max_distance:
-        return max_distance + 1
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        current = [i]
-        row_min = i
-        for j, cb in enumerate(b, 1):
-            cost = 0 if ca == cb else 1
-            value = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
-            current.append(value)
-            row_min = min(row_min, value)
-        if row_min > max_distance:
-            return max_distance + 1
-        previous = current
-    return previous[-1]
+def _candidate_type_scores_by_code(issue: dict) -> dict[str, float]:
+    from . import claim_common as cv
+
+    raw_scores = (
+        issue.get("candidate_type_scores")
+        or issue.get("candidate_issue_type_scores")
+        or issue.get("issue_classification_scores")
+        or issue.get("issue_type_scores")
+        or issue.get("type_scores")
+        or {}
+    )
+    normalized = _normalized_issue_type_scores(raw_scores)
+    return {
+        cv.issue_type_code(issue_type): float(score or 0.0)
+        for issue_type, score in normalized.items()
+        if cv.issue_type_code(issue_type)
+    }
 
 
-def _looks_like_semantic_prefix_pair(a: str, b: str) -> bool:
-    for prefix in _SEMANTIC_PREFIXES:
-        if a == f"{prefix}{b}" or b == f"{prefix}{a}":
-            return True
-    return False
+def _checked_type_codes_for_issue(issue: dict) -> list[str]:
+    from . import claim_common as cv
+
+    primary_code = _checked_type_code_for_issue(issue)
+    scores = _candidate_type_scores_by_code(issue)
+    if not scores:
+        return [primary_code]
+
+    order = {"B": 0, "C": 1, "A": 2, "D": 3}
+    if primary_code not in scores:
+        scores[primary_code] = max(scores.values() or [0.0])
+    top_score = max(scores.get(primary_code, 0.0), max(scores.values() or [0.0]))
+    margin = _env_float("VERIFIER_CROSSCHECK_TYPE_ROUTE_MARGIN", 0.08)
+    min_score = _env_float(
+        "VERIFIER_CROSSCHECK_TYPE_ROUTE_MIN_SCORE",
+        0.55,
+    )
+    max_routes = _env_int("VERIFIER_CROSSCHECK_MAX_TYPE_ROUTES", 2, minimum=1, maximum=4)
+
+    ranked = sorted(
+        (
+            (code, float(scores.get(code, 0.0) or 0.0))
+            for code in cv.ISSUE_CODE_TO_TYPE
+        ),
+        key=lambda item: (-item[1], order.get(item[0], 99)),
+    )
+    selected: list[str] = []
+    for code, score in ranked:
+        if code == primary_code:
+            selected.append(code)
+            continue
+        if len(selected) >= max_routes:
+            continue
+        if score >= min_score and (top_score - score) <= margin:
+            selected.append(code)
+
+    if primary_code not in selected:
+        selected.insert(0, primary_code)
+    return list(dict.fromkeys(selected[:max_routes]))
 
 
-def _terms_are_asr_neighbors(a: str, b: str) -> bool:
-    if not a or not b or a == b:
-        return False
-    if _looks_like_semantic_prefix_pair(a, b):
-        return False
-    max_len = max(len(a), len(b))
-    if max_len < 3:
-        return False
-    distance = _levenshtein_distance(a, b, max_distance=2)
-    if distance <= 1:
-        return True
-    return max_len >= 6 and distance <= 2 and (distance / max_len) <= 0.25
+def _type_specific_prompt_block(checked_type_code: str) -> str:
+    code = str(checked_type_code or "").strip().upper()
+    if code == "A":
+        return """## A형 factual_error 전용 판정
+이 checker는 A형 factual_error만 판단합니다. C형 범위 과잉 단정이나 D형 혼동 가능 설명으로 판단을 확장하지 마세요.
 
+A형은 원문 발화가 정의, 분류, 포함 관계, 주체, 과정, 원인-결과, 작동 방식, 귀속 관계를 직접 잘못 연결한 경우입니다.
 
-def _compact_reason(text: str, limit: int = 90) -> str:
-    value = re.sub(r"\s+", " ", str(text or "")).strip()
-    if len(value) <= limit:
-        return value
-    return value[: limit - 1].rstrip() + "..."
+kept 조건:
+1. 원문 발화에 잘못된 개념 관계가 직접 표현되어 있음
+2. 단순 표현 취향이나 용어 엄밀성 문제가 아님
+3. 강의 수준에서 중요한 개념 관계임
+4. 같은 문맥에서 바로 정정되거나 올바른 뜻으로 좁혀지지 않음
+5. 학생이 잘못 외울 구체 명제가 한 문장으로 명확히 남음
 
+rejected 조건:
+- 더 정확한 용어를 쓸 수 있다는 수준
+- 표현은 거칠지만 핵심 관계가 맞는 경우
+- 바로 뒤 문장이나 슬라이드가 같은 관계를 올바르게 보완한 경우
+- 외부의 엄밀한 taxonomy를 적용해야만 문제가 되는 경우
+- 학생이 잘못 외울 구체 명제가 남지 않는 경우"""
+    if code == "B":
+        return """## B형 temporal_error 전용 판정
+이 checker는 B형 temporal_error만 판단합니다. 정의 오류, 범위 과잉, 혼동 가능 설명으로 판단을 확장하지 마세요.
+
+B형은 현재성, 최신성, 지원 여부, 사용 여부, 버전, 표준, 정책, 통계처럼 시점에 따라 참거짓이 달라질 수 있는 경우입니다.
+B형은 확정 오류라기보다 강의 제공 시점 또는 오늘 날짜 기준 확인 후보로 다루세요.
+
+kept 조건:
+1. 발화가 현재 또는 특정 시점의 상태를 말함
+2. 해당 정보가 강의 제공 시점 또는 오늘 날짜 기준으로 달라질 수 있음
+3. 문맥에서 과거 사례, 역사 설명, 특정 시점 설명으로 제한되지 않음
+4. 학생이 오래된 정보 또는 현재 확인이 필요한 정보를 일반 사실처럼 외울 가능성이 있음
+
+rejected 조건:
+- 과거 사례 소개임이 명확함
+- 역사적 설명임이 명확함
+- 특정 시점 기준 설명임이 문맥에 있음
+- 최신성 문제가 강의 주제와 무관함
+- 확인 필요성이 약하거나 학생 오개념과 연결되지 않음"""
+    if code == "C":
+        return """## C형 scope_overclaim 전용 판정
+이 checker는 C형 scope_overclaim만 판단합니다. A형 factual_error나 D형 confusing_explanation으로 판단을 확장하지 마세요.
+
+C형은 전체/일부, 항상/가끔, 오직/복수, 가능/불가능, 일시/영구, 조건부/필연 같은 범위가 실제로 뒤바뀐 경우입니다.
+단정어는 주의 신호일 뿐 그 자체로 issue 근거가 아닙니다.
+
+kept 조건:
+1. 실제로 무엇이 배제되거나 일반화되었는지 명확함
+2. 그 배제/일반화가 강의 범위 제한, 예시 제한, 대표 설명, 대비, 강조가 아니라 일반 사실처럼 전달됨
+3. 가능성, 일부 상황, 일시적 결과를 필연적 결과, 전체 상황, 영구적 결과처럼 전달함
+4. 강의 수준에서 중요한 반례, 예외, 누락 대상, 조건 차이가 구체적으로 있음
+5. 같은 문맥에서 범위가 좁혀지거나 보완되지 않음
+6. 학생이 잘못 외울 일반 규칙 또는 배제 명제가 한 문장으로 남음
+
+rejected 조건:
+- 단정어만 있고 실제 배제 대상이 불명확함
+- 강의 대비, 대표 설명, 강조 표현임이 문맥에서 명확하고 일반 규칙으로 남지 않음
+- 입문 수준 단순화로 허용 가능한 설명임
+- 더 엄밀하게는 예외가 있다는 수준임
+- 슬라이드나 바로 뒤 설명이 범위를 좁힘
+- 학생이 잘못 외울 배제 명제를 한 문장으로 쓰기 어려움"""
+    return """## D형 confusing_explanation 전용 판정
+이 checker는 D형 confusing_explanation만 판단합니다. 명확한 factual error, temporal error, scope overclaim로 판단을 확장하지 마세요.
+
+D형은 명시적 사실 오류로 단정하기 어렵더라도, 설명 방식 때문에 학생이 구체적 오개념을 외울 가능성이 남는 경우입니다.
+
+kept 조건:
+1. 학생이 잘못 외울 구체 오개념을 한 문장으로 쓸 수 있음
+2. 그 오개념이 단순 표현 어색함이 아니라 개념 관계, 역할, 과정, 원인, 조건 이해에 영향을 줌
+3. 같은 문맥의 재표현, 슬라이드, 예시가 그 오해를 해소하지 않음
+4. 더 친절한 설명이 가능하다는 수준을 넘어 실제 강의 이슈로 남음
+
+rejected 조건:
+- 구체 오개념 문장을 쓸 수 없음
+- 막연히 헷갈릴 수 있다는 수준임
+- 표현이 어색하지만 핵심 의미는 맞음
+- 바로 뒤 문장이나 슬라이드가 의미를 올바르게 좁힘
+- 더 자세히 설명하면 좋겠다는 수준임
+- 강의 수준 밖의 엄밀성 문제에 가까움"""
 
 def _format_utterance_line(u: dict, *, marker: str = "  ") -> str:
     uid = str(u.get("utterance_id", "") or "").strip()
     text = str(u.get("text", "") or "").strip()
     start = float(u.get("start_time", 0) or 0)
     slide_number = u.get("slide_number", "")
-    status = str(u.get("correction_status", "") or "").strip()
-    risk = str(u.get("correction_risk", "") or "").strip()
-    reason = str(u.get("correction_reason", "") or "").strip()
-    suffix = ""
-    if status == "candidate_only":
-        detail = f", risk={risk}" if risk else ""
-        if reason:
-            detail += f", reason={_compact_reason(reason, 60)}"
-        suffix = f" [전사 교정 후보 미적용{detail}]"
-    return f"{marker}{uid} [{start:.1f}s, slide {slide_number}] {text}{suffix}"
-
-
-def _issue_text_for_artifact_check(issue: dict) -> str:
-    parts = [
-        issue.get("claim_text", ""),
-        issue.get("issue", ""),
-        issue.get("why_wrong", ""),
-        issue.get("student_error", ""),
-        issue.get("correct_info", ""),
-    ]
-    for source in issue.get("source_issues") or []:
-        if isinstance(source, dict):
-            parts.extend([
-                source.get("claim_text", ""),
-                source.get("problematic_content", ""),
-                source.get("issue", ""),
-            ])
-    return "\n".join(str(part or "") for part in parts if part)
-
-
-def _find_transcript_artifact_hint(
-    issue: dict,
-    utterances: list[dict],
-    slides: list[dict],
-    target_indices: list[int],
-    slide_number: int,
-    radius: int = 5,
-) -> dict | None:
-    target_indices = [idx for idx in target_indices if 0 <= idx < len(utterances)]
-    if not target_indices:
-        return None
-
-    target_index_set = set(target_indices)
-    window_indices: set[int] = set()
-    for idx in target_indices:
-        window_indices.update(range(max(0, idx - radius), min(len(utterances), idx + radius + 1)))
-
-    target_text = "\n".join(str(utterances[idx].get("text", "") or "") for idx in target_indices)
-    issue_text = _issue_text_for_artifact_check(issue)
-    target_terms = Counter(_extract_terms(f"{target_text}\n{issue.get('claim_text', '')}"))
-    if not target_terms:
-        return None
-
-    context_parts = []
-    for idx in sorted(window_indices - target_index_set):
-        context_parts.append(str(utterances[idx].get("text", "") or ""))
-    for slide in slides:
-        if int(slide.get("slide_number", 0) or 0) == int(slide_number or 0):
-            context_parts.append(str(slide.get("slide_text", "") or ""))
-            break
-    context_terms = Counter(_extract_terms("\n".join(context_parts)))
-    if not context_terms:
-        return None
-
-    best: tuple[str, str, int, int] | None = None
-    for target_term, target_count in target_terms.items():
-        if target_count <= 0 or context_terms.get(target_term, 0) > 0:
-            continue
-        if target_term not in issue_text and target_term not in target_text:
-            continue
-        for context_term, context_count in context_terms.items():
-            if context_count < 3:
-                continue
-            if not _terms_are_asr_neighbors(target_term, context_term):
-                continue
-            candidate = (target_term, context_term, target_count, context_count)
-            if best is None or candidate[3] > best[3]:
-                best = candidate
-
-    if best is None:
-        return None
-
-    bad_term, context_term, bad_count, context_count = best
-    note = (
-        f"전사 오류 가능성: 대상 발화/claim의 '{bad_term}'는 주변 문맥에서는 거의 보이지 않고, "
-        f"슬라이드와 주변 발화에서는 형태가 매우 가까운 '{context_term}'가 {context_count}회 반복됩니다. "
-        f"이 이슈가 '{bad_term}' 한 단어에만 의존하면 강의 내용 오류로 확정하지 마세요."
-    )
-    return {
-        "likely": True,
-        "suspect_term": bad_term,
-        "context_term": context_term,
-        "suspect_count": bad_count,
-        "context_count": context_count,
-        "reason": note,
-    }
+    return f"{marker}{uid} [{start:.1f}s, slide {slide_number}] {text}"
 
 
 def _coerce_confidence(value, default: float | None = None) -> float | None:
@@ -300,28 +273,27 @@ def _coerce_confidence(value, default: float | None = None) -> float | None:
     return max(0.0, min(1.0, number))
 
 
+def _coerce_bool(value, default: bool | None = None) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "kept", "pass", "passed"}:
+        return True
+    if text in {"0", "false", "no", "n", "rejected", "fail", "failed"}:
+        return False
+    return default
+
+
 def _score_from_payload(value: dict, key: str, default: float = 0.0) -> float:
     raw = value.get(key)
     if isinstance(raw, bool):
         return 1.0 if raw else 0.0
-    return _coerce_confidence(raw, default) or default
-
-
-def _normalized_score_map(value, allowed_keys: dict[str, float]) -> dict[str, float]:
-    if not isinstance(value, dict):
-        return {}
-    scores: dict[str, float] = {}
-    for key in allowed_keys:
-        if key in value:
-            scores[key] = _score_from_payload(value, key)
-            continue
-        alias_scores = [
-            _score_from_payload(value, alias)
-            for alias in _CRITERIA_ALIASES.get(key, ())
-            if alias in value
-        ]
-        scores[key] = sum(alias_scores) / len(alias_scores) if alias_scores else 0.0
-    return scores
+    score = _coerce_confidence(raw, default)
+    if score is None:
+        score = default
+    return float(score)
 
 
 def _normalized_issue_type_scores(value) -> dict[str, float]:
@@ -355,6 +327,49 @@ def _normalized_issue_type_scores(value) -> dict[str, float]:
     return normalized
 
 
+def _normalized_type_judgments(value) -> tuple[dict[str, float], dict[str, dict]]:
+    from . import claim_common as cv
+
+    if not isinstance(value, dict):
+        return {}, {}
+
+    scores: dict[str, float] = {}
+    judgments: dict[str, dict] = {}
+    for issue_type in cv.ISSUE_TYPE_ORDER:
+        code = cv.issue_type_code(issue_type)
+        label = cv.issue_type_label(issue_type)
+        candidate_keys = (
+            issue_type,
+            code,
+            code.lower(),
+            f"{code}_{issue_type}",
+            f"{code.lower()}_{issue_type}",
+            f"{code}. {label}",
+            f"{code}.{label}",
+            label,
+        )
+        raw = None
+        for key in candidate_keys:
+            if key in value:
+                raw = value.get(key)
+                break
+        if raw is None:
+            continue
+        reason = ""
+        if isinstance(raw, dict):
+            score = _score_from_payload(raw, "score")
+            reason = str(raw.get("reason", "") or "").strip()
+        else:
+            score = _coerce_confidence(raw, 0.0) or 0.0
+        scores[issue_type] = score
+        judgments[code] = {
+            "score": round(float(score), 4),
+            "reason": reason,
+        }
+
+    return scores, judgments
+
+
 def _primary_issue_type_from_scores(type_scores: dict[str, float]) -> str:
     from . import claim_common as cv
 
@@ -364,42 +379,6 @@ def _primary_issue_type_from_scores(type_scores: dict[str, float]) -> str:
         cv.ISSUE_TYPE_ORDER,
         key=lambda issue_type: float(type_scores.get(issue_type, 0.0) or 0.0),
     )
-
-
-def _confidence_from_criteria(payload: dict) -> tuple[float | None, dict]:
-    criteria = _normalized_score_map(
-        payload.get("criteria_scores") or payload.get("criteria") or {},
-        _CRITERIA_WEIGHTS,
-    )
-    if not criteria:
-        return None, {}
-
-    score = sum(criteria.get(key, 0.0) * weight for key, weight in _CRITERIA_WEIGHTS.items())
-    score = max(0.0, min(1.0, score))
-
-    gates = []
-    if criteria.get("issue_presence", 0.0) < 0.5:
-        score = min(score, 0.39)
-        gates.append("issue_not_verified")
-    if criteria.get("context_unresolved", 0.0) < 0.5:
-        score = min(score, 0.39)
-        gates.append("resolved_by_context")
-    if criteria.get("evidence_strength", 0.0) < 0.5:
-        score = min(score, 0.79)
-        gates.append("weak_evidence_strength")
-
-    breakdown = {
-        "criteria_weights": _CRITERIA_WEIGHTS,
-        "raw_score": round(sum(criteria.get(key, 0.0) * weight for key, weight in _CRITERIA_WEIGHTS.items()), 4),
-        "applied_gates": gates,
-        "computed_confidence": round(score, 4),
-    }
-    evidence = payload.get("criteria_evidence") if isinstance(payload.get("criteria_evidence"), dict) else {}
-    return round(score, 4), {
-        "criteria_scores": criteria,
-        "criteria_evidence": evidence,
-        "score_breakdown": breakdown,
-    }
 
 
 def _confidence_from_verdict(verdict: str) -> float:
@@ -414,11 +393,19 @@ def _confidence_from_verdict(verdict: str) -> float:
 def _verdict_from_confidence(confidence: float | None) -> str:
     if confidence is None:
         return "inconclusive"
-    if confidence >= 0.75:
+    try:
+        confirm_threshold = float(os.getenv("CROSS_VERIFY_CONFIRMED_THRESHOLD", "0.80") or "0.80")
+    except ValueError:
+        confirm_threshold = 0.80
+    try:
+        professor_threshold = float(os.getenv("CROSS_VERIFY_PROFESSOR_CHECK_THRESHOLD", "0.40") or "0.40")
+    except ValueError:
+        professor_threshold = 0.40
+    if confidence >= confirm_threshold:
         return "agree"
-    if confidence < 0.4:
-        return "disagree"
-    return "inconclusive"
+    if confidence >= min(professor_threshold, confirm_threshold):
+        return "inconclusive"
+    return "disagree"
 
 
 def _is_crosscheck_api_failure(error: Exception | None) -> bool:
@@ -426,6 +413,21 @@ def _is_crosscheck_api_failure(error: Exception | None) -> bool:
         return False
     text = f"{type(error).__name__}: {error}".lower()
     return any(marker in text for marker in _API_FAILURE_MARKERS)
+
+
+def _is_permanent_crosscheck_api_failure(error: Exception | None) -> bool:
+    if error is None:
+        return False
+    text = f"{type(error).__name__}: {error}".lower()
+    return any(
+        marker in text
+        for marker in (
+            "credit balance",
+            "balance is too low",
+            "insufficient_quota",
+            "billing",
+        )
+    )
 
 
 def _crosscheck_retry_message(error: Exception) -> str:
@@ -437,34 +439,64 @@ def _crosscheck_retry_message(error: Exception) -> str:
 def _pack_crosscheck_payload(payload: dict) -> dict:
     from . import claim_common as cv
 
+    raw_status = str(payload.get("status", "") or "").lower().strip()
     raw_verdict = str(payload.get("verdict", "") or "").lower().strip()
-    criteria_confidence, criteria_payload = _confidence_from_criteria(payload)
+    checked_type_code = str(payload.get("checked_type_code", "") or "").strip().upper()
+    if checked_type_code not in cv.ISSUE_CODE_TO_TYPE:
+        checked_type_code = str(payload.get("routing_decision", "") or "").strip().upper()
+    if checked_type_code not in cv.ISSUE_CODE_TO_TYPE:
+        checked_type_code = str(payload.get("issue_type_code", "") or "").strip().upper()
+    checked_issue_type = _issue_type_from_code(checked_type_code)
     confidence = _coerce_confidence(
         payload.get("confidence", payload.get("score", payload.get("issue_score"))),
         None,
     )
-    if criteria_confidence is not None:
-        confidence = criteria_confidence
     if confidence is None and raw_verdict in _CROSSCHECK_VERDICTS:
         confidence = _confidence_from_verdict(raw_verdict)
     if confidence is None:
-        confidence = 0.5
+        if raw_status == "kept":
+            confidence = 0.65
+        elif raw_status in {"rejected", "merged"}:
+            confidence = 0.0
+        else:
+            confidence = 0.5
     verdict = raw_verdict if raw_verdict in _CROSSCHECK_VERDICTS else _verdict_from_confidence(confidence)
+    if raw_status == "rejected":
+        confidence = min(confidence, 0.39)
+        verdict = "disagree"
+    elif raw_status == "merged":
+        confidence = min(confidence, 0.39)
+        verdict = "disagree"
     result = {
         "verdict": verdict,
         "confidence": confidence,
         "reason": str(payload.get("reason", "") or "").strip(),
     }
-    type_scores = _normalized_issue_type_scores(
+    if checked_type_code:
+        result["checked_type_code"] = checked_type_code
+    gate_passed = _coerce_bool(payload.get("type_gate_passed"), None)
+    if gate_passed is not None:
+        result["type_gate_passed"] = gate_passed
+        if not gate_passed:
+            result["confidence"] = min(float(result.get("confidence", confidence) or 0.0), 0.39)
+            result["verdict"] = "disagree"
+            confidence = float(result["confidence"])
+    judgment_scores, type_judgments = _normalized_type_judgments(
+        payload.get("type_judgments")
+        or payload.get("type_judgement")
+        or payload.get("issue_type_judgments")
+        or {}
+    )
+    type_scores = judgment_scores or _normalized_issue_type_scores(
         payload.get("issue_type_scores")
         or payload.get("type_scores")
         or payload.get("type_confidence")
         or payload.get("issue_type_confidence")
         or {}
     )
-    issue_type = cv.normalize_issue_type(payload.get("issue_type") or payload.get("type") or "")
+    issue_type = _primary_issue_type_from_scores(type_scores)
     if issue_type not in cv.ALLOWED_ISSUE_TYPES:
-        issue_type = _primary_issue_type_from_scores(type_scores)
+        issue_type = checked_issue_type or cv.normalize_issue_type(payload.get("issue_type") or payload.get("type") or "")
     if issue_type in cv.ALLOWED_ISSUE_TYPES:
         result["issue_type"] = issue_type
         result["issue_type_label"] = cv.issue_type_label(issue_type)
@@ -476,48 +508,53 @@ def _pack_crosscheck_payload(payload: dict) -> dict:
             for issue_type in cv.ISSUE_TYPE_ORDER
             if issue_type in type_scores
         }
-    result.update(criteria_payload)
+    if type_judgments:
+        result["type_judgments"] = type_judgments
+        if not result.get("issue_type_rationale") and issue_type in cv.ALLOWED_ISSUE_TYPES:
+            code = cv.issue_type_code(issue_type)
+            reason = str((type_judgments.get(code) or {}).get("reason", "") or "").strip()
+            if reason:
+                result["issue_type_rationale"] = reason
     for field in _CROSSCHECK_EXTRA_FIELDS:
+        if field in {"checked_type_code", "type_gate_passed"} and field in result:
+            continue
         value = str(payload.get(field, "") or "").strip()
         if value:
             result[field] = value
+    _apply_type_specific_score_gates(result)
+    if not result.get("context_resolution"):
+        result["context_resolution"] = "해소 안 됨" if result.get("verdict") == "agree" else "문맥에서 해소됨"
     return result
 
 
-def _apply_transcript_artifact_cap(payload: dict, hint: dict | None) -> None:
-    if not isinstance(payload, dict) or not isinstance(hint, dict) or not hint.get("likely"):
-        return
-    try:
-        cap = float(os.getenv("VERIFIER_TRANSCRIPT_ARTIFACT_SCORE_CAP", "0.39") or "0.39")
-    except ValueError:
-        cap = 0.39
-    cap = max(0.0, min(1.0, cap))
-    original_confidence = _coerce_confidence(payload.get("confidence"), 0.5)
-    payload["transcript_artifact_likely"] = True
-    payload["transcript_artifact_reason"] = str(hint.get("reason", "") or "").strip()
-    payload["transcript_artifact_terms"] = {
-        "suspect": hint.get("suspect_term", ""),
-        "context": hint.get("context_term", ""),
-        "context_count": hint.get("context_count", 0),
-    }
-    if original_confidence is None or original_confidence <= cap:
-        return
+def _apply_type_specific_score_gates(result: dict) -> dict:
+    from . import claim_common as cv
 
-    payload["confidence_before_transcript_artifact_cap"] = round(original_confidence, 4)
-    payload["confidence"] = round(cap, 4)
-    payload["verdict"] = _verdict_from_confidence(cap)
-    reason = str(payload.get("reason", "") or "").strip()
-    artifact_reason = str(hint.get("reason", "") or "").strip()
-    cap_reason = "강한 전사 오류 가능성이 있어 content issue 점수를 상한 처리했습니다."
-    payload["reason"] = " / ".join(part for part in [artifact_reason, cap_reason, reason] if part)
+    issue_type = cv.normalize_issue_type(result.get("issue_type") or result.get("type") or "")
+    if issue_type not in cv.ALLOWED_ISSUE_TYPES:
+        return result
 
-    breakdown = payload.get("score_breakdown")
-    if isinstance(breakdown, dict):
-        gates = breakdown.setdefault("applied_gates", [])
-        if isinstance(gates, list) and "transcript_artifact_likely" not in gates:
-            gates.append("transcript_artifact_likely")
-        breakdown["computed_confidence_before_transcript_artifact_cap"] = round(original_confidence, 4)
-        breakdown["computed_confidence"] = round(cap, 4)
+    confidence = _coerce_confidence(result.get("confidence"), 0.5)
+    if confidence is None:
+        confidence = 0.5
+
+    gates = []
+
+    if issue_type == "temporal_error":
+        confidence = min(confidence, 0.79)
+        gates.append("temporal_error_requires_followup_check")
+    elif issue_type == "scope_overclaim":
+        confidence = min(confidence, 0.79)
+        gates.append("scope_overclaim_no_auto_confirm")
+    elif issue_type == "confusing_explanation":
+        confidence = min(confidence, 0.79)
+        gates.append("confusing_explanation_no_auto_confirm")
+
+    result["confidence"] = round(float(confidence), 4)
+    result["verdict"] = _verdict_from_confidence(float(confidence))
+    if gates:
+        result["applied_score_gates"] = list(dict.fromkeys(gates))
+    return result
 
 
 def _canonical_issue_id(value: str) -> str:
@@ -542,11 +579,28 @@ def _issue_id_sort_key(issue_id: str) -> tuple[int, str]:
 def _candidate_crosscheck_rows(payload, issue_ids: set[str]) -> list[dict]:
     if isinstance(payload, list):
         return [row for row in payload if isinstance(row, dict)]
+    if isinstance(payload, str):
+        try:
+            return _candidate_crosscheck_rows(json.loads(payload), issue_ids)
+        except json.JSONDecodeError:
+            return []
     if not isinstance(payload, dict):
         return []
 
+    for wrapper_key in ("json", "json_response", "response", "data", "output", "payload"):
+        wrapped = payload.get(wrapper_key)
+        if isinstance(wrapped, (dict, list)):
+            wrapped_rows = _candidate_crosscheck_rows(wrapped, issue_ids)
+            if wrapped_rows:
+                return wrapped_rows
+        if isinstance(wrapped, str):
+            wrapped_rows = _candidate_crosscheck_rows(wrapped, issue_ids)
+            if wrapped_rows:
+                return wrapped_rows
+
     rows = (
         payload.get("results")
+        or payload.get("result")
         or payload.get("verdicts")
         or payload.get("items")
         or payload.get("issues")
@@ -555,11 +609,21 @@ def _candidate_crosscheck_rows(payload, issue_ids: set[str]) -> list[dict]:
     )
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
+    if isinstance(rows, str):
+        return _candidate_crosscheck_rows(rows, issue_ids)
+    if isinstance(rows, dict):
+        nested_rows = []
+        for key, value in rows.items():
+            if not isinstance(value, dict):
+                continue
+            nested_rows.append({**value, "issue_id": value.get("issue_id") or key})
+        if nested_rows:
+            return nested_rows
 
     if len(issue_ids) == 1 and (
-        "criteria_scores" in payload
-        or "criteria" in payload
+        "issue_score" in payload
         or "verdict" in payload
+        or "status" in payload
         or "reason" in payload
     ):
         only_issue_id = next(iter(issue_ids))
@@ -573,6 +637,24 @@ def _candidate_crosscheck_rows(payload, issue_ids: set[str]) -> list[dict]:
         if key in issue_ids or canonical in {_canonical_issue_id(issue_id) for issue_id in issue_ids}:
             keyed_rows.append({**value, "issue_id": value.get("issue_id") or key})
     return keyed_rows
+
+
+def _omitted_crosscheck_payload(issue_id: str) -> dict:
+    return _pack_crosscheck_payload(
+        {
+            "issue_id": issue_id,
+            "status": "rejected",
+            "issue_type_scores": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+            "issue_score": 0.0,
+            "reason": "모델이 이 issue 후보를 유지할 이슈로 반환하지 않았습니다.",
+            "context_issue_summary": "",
+            "context_resolution": "문맥에서 해소됨",
+            "context_resolution_reason": "모델 응답에서 해당 issue 후보가 유지 대상에서 제외되었습니다.",
+            "correction_hint": "",
+            "context_issue_id": "none",
+            "merged_into_issue_id": "",
+        }
+    )
 
 
 def _parse_crosscheck_batch_payload(text: str, issue_ids: set[str]) -> dict[str, dict]:
@@ -595,6 +677,13 @@ def _parse_crosscheck_batch_payload(text: str, issue_ids: set[str]) -> dict[str,
                 continue
 
             rows = _candidate_crosscheck_rows(payload, issue_ids)
+            if not rows and isinstance(payload, dict) and any(
+                key in payload for key in ("results", "result", "items", "issues", "judgments", "scores")
+            ):
+                return {
+                    issue_id: _omitted_crosscheck_payload(issue_id)
+                    for issue_id in sorted(issue_ids, key=_issue_id_sort_key)
+                }
             if not rows:
                 continue
 
@@ -615,7 +704,14 @@ def _parse_crosscheck_batch_payload(text: str, issue_ids: set[str]) -> dict[str,
                 if packed["verdict"] in _CROSSCHECK_VERDICTS:
                     parsed[issue_id] = packed
             if parsed:
+                for issue_id in sorted(issue_ids - set(parsed), key=_issue_id_sort_key):
+                    parsed[issue_id] = _omitted_crosscheck_payload(issue_id)
                 return parsed
+            if rows:
+                return {
+                    issue_id: _omitted_crosscheck_payload(issue_id)
+                    for issue_id in sorted(issue_ids, key=_issue_id_sort_key)
+                }
 
     raise ValueError("crosscheck_batch_response_parse_failed")
 
@@ -649,13 +745,10 @@ def _build_slide_transcript_block(
                 start = float(seg.get("start", 0) or 0)
                 corr = str(seg.get("text", "") or "").strip()
                 orig = str(seg.get("text_original", "") or "").strip()
-                status = str(seg.get("correction_status", "") or "").strip()
                 text = corr or orig
                 if not text:
                     continue
-                if status == "candidate_only":
-                    transcript_lines.append(f"  [{start:.1f}s] {orig or text}")
-                elif corr and orig and corr != orig:
+                if corr and orig and corr != orig:
                     transcript_lines.append(f"  [{start:.1f}s] 교정: {corr} | 원문: {orig}")
                 else:
                     transcript_lines.append(f"  [{start:.1f}s] {text}")
@@ -716,68 +809,133 @@ def _build_utterance_window_block(
     return "\n".join(lines)
 
 
-def _crosscheck_slide_context(ctx: dict, slide_num: int) -> tuple[str, str, str]:
+def _adjacent_slide_numbers(slide_ctx: dict, slide_num: int) -> tuple[int, int]:
+    slide_numbers = sorted(n for n in slide_ctx if isinstance(n, int) and n > 0)
+    prev_numbers = [n for n in slide_numbers if n < slide_num]
+    next_numbers = [n for n in slide_numbers if n > slide_num]
+    return (
+        prev_numbers[-1] if prev_numbers else 0,
+        next_numbers[0] if next_numbers else 0,
+    )
+
+
+
+
+def _boundary_context_lines(
+    utterances: list[dict],
+    slide_num: int,
+    *,
+    first: bool,
+    count: int = 2,
+) -> str:
+    if slide_num <= 0:
+        return "(없음)"
+    candidates = [u for u in utterances if int(u.get("slide_number", 0) or 0) == slide_num]
+    if not candidates:
+        return "(없음)"
+    safe_count = max(1, int(count or 1))
+    targets = candidates[:safe_count] if first else candidates[-safe_count:]
+    return "\n".join(_format_utterance_line(target, marker="  ") for target in targets)
+
+
+def _current_slide_context_lines(
+    utterances: list[dict],
+    slide_num: int,
+    target_labels: dict[int, list[str]] | None = None,
+) -> str:
+    labels = target_labels or {}
+    lines = []
+    for idx, u in enumerate(utterances):
+        if int(u.get("slide_number", 0) or 0) != slide_num:
+            continue
+        text = str(u.get("text", "") or "").strip()
+        if not text:
+            continue
+        label = ",".join(labels.get(idx, []))
+        marker = f">> {label} " if label else "  "
+        lines.append(_format_utterance_line(u, marker=marker))
+    return "\n".join(lines) if lines else "(없음)"
+
+
+def _crosscheck_slide_context(
+    ctx: dict,
+    slide_num: int,
+    target_labels: dict[int, list[str]] | None = None,
+) -> tuple[str, str, str]:
     slide_ctx = ctx["slide_ctx"]
     slides = ctx["slides"]
     utterances = ctx.get("utterances", [])
-    prev_slide_num = max(0, int(slide_num or 0) - 1)
     slide_info = slide_ctx.get(slide_num, {})
     title = slide_info.get("title", f"슬라이드 {slide_num}")
     time_range = slide_info.get("time_range", "")
-    prev_slide_info = slide_ctx.get(prev_slide_num, {}) if prev_slide_num > 0 else {}
-    prev_title = prev_slide_info.get("title", f"슬라이드 {prev_slide_num}") if prev_slide_num > 0 else ""
-    prev_time_range = prev_slide_info.get("time_range", "") if prev_slide_num > 0 else ""
-    slide_numbers = [n for n in [prev_slide_num, int(slide_num or 0)] if n > 0]
-    transcript_block = _build_multi_slide_transcript_block(slides, slide_numbers, utterances)
+    slide_text = ""
+    for slide in slides:
+        if int(slide.get("slide_number", 0) or 0) == slide_num:
+            slide_text = str(slide.get("slide_text", "") or "").strip()
+            break
+
+    prev_slide_num, next_slide_num = _adjacent_slide_numbers(slide_ctx, int(slide_num or 0))
+    prev_label = f"슬라이드 {prev_slide_num}" if prev_slide_num > 0 else "없음"
+    next_label = f"슬라이드 {next_slide_num}" if next_slide_num > 0 else "없음"
+    prev_boundary = _boundary_context_lines(utterances, prev_slide_num, first=False, count=2)
+    next_boundary = _boundary_context_lines(utterances, next_slide_num, first=True, count=2)
+    current_contexts = _current_slide_context_lines(utterances, slide_num, target_labels)
+    transcript_block = (
+        "[현재 슬라이드 정보 텍스트]\n"
+        + (slide_text if slide_text else "(없음)")
+        + "\n\n[이전 슬라이드 마지막 문맥 2개"
+        + (f": {prev_label}" if prev_slide_num > 0 else "")
+        + f"]\n{prev_boundary}\n\n"
+        + "[현재 슬라이드 전체 문맥]\n"
+        + current_contexts
+        + "\n\n[다음 슬라이드 첫 문맥 2개"
+        + (f": {next_label}" if next_slide_num > 0 else "")
+        + f"]\n{next_boundary}"
+    )
     target_label = f"{title} ({time_range})"
-    prev_label = (prev_title + f" ({prev_time_range})") if prev_slide_num > 0 else "없음"
-    return target_label, prev_label, transcript_block
+    boundary_label = f"prev={prev_label}, next={next_label}"
+    return target_label, boundary_label, transcript_block
 
 
-def _crosscheck_context_text(target_label: str, prev_label: str, transcript_block: str) -> str:
+def _crosscheck_context_text(target_label: str, boundary_label: str, transcript_block: str) -> str:
     return (
         f"대상 슬라이드: {target_label}\n"
-        f"이전 슬라이드: {prev_label}\n\n"
-        f"이전+현재 슬라이드 내용 (슬라이드 텍스트 + 강의자 발화)\n"
+        f"경계 문맥: {boundary_label}\n\n"
+        f"현재 슬라이드 중심 문맥\n"
         f"{transcript_block}"
     )
 
 
-def _issue_line_for_batch(issue_id: str, issue: dict) -> str:
+def _issue_line_for_batch(issue_id: str, issue: dict, checked_type_code: str | None = None) -> str:
     from . import claim_common as cv
 
-    issue_type = cv.normalize_issue_type(issue.get("type", ""))
-    issue_label = issue.get("issue_type_label") or cv.issue_type_label(issue_type)
-    source_issues = issue.get("source_issues") if isinstance(issue.get("source_issues"), list) else []
-    related = issue.get("utterance_ids") or issue.get("canonical_member_utterance_ids") or []
-    source_block = ""
-    if source_issues:
-        lines = []
-        for source in source_issues:
-            uid = source.get("utterance_id", "")
-            claim = source.get("claim_text", "") or source.get("problematic_content", "")
-            problem = source.get("issue", "")
-            if claim:
-                lines.append(f"  - {uid}: {claim}")
-            if problem:
-                lines.append(f"    문제 후보: {problem}")
-        source_block = "\n- 묶인 발화/claim:\n" + "\n".join(lines)
-    elif related:
-        source_block = "\n- 관련 utterance_ids: " + ", ".join(str(uid) for uid in related)
-    artifact = issue.get("_transcript_artifact_hint")
-    artifact_block = ""
-    if isinstance(artifact, dict) and artifact.get("likely"):
-        artifact_block = f"\n- 전사 오류 가능성 힌트: {artifact.get('reason', '')}"
-    return (
-        f"### {issue_id}\n"
-        f"- utterance_id: {issue.get('utterance_id', '')}\n"
-        f"- issue_unit_id: {issue.get('issue_unit_id') or issue.get('canonical_issue_id') or ''}\n"
-        f"- 유형: {cv.issue_type_code_label(issue_type)} ({issue_type})\n"
-        f"- claim: {issue.get('claim_text', '')}\n"
-        f"- 문제: {issue.get('issue', '')}"
-        f"{source_block}"
-        f"{artifact_block}"
+    context_id = issue.get("context_id") or issue.get("utterance_id", "")
+    claim_text = str(issue.get("claim_text") or "").strip()
+    source_text = str(
+        issue.get("source_text")
+        or issue.get("claim_context_text")
+        or claim_text
+        or ""
+    ).strip()
+    source_span_ids = ", ".join(
+        str(x)
+        for x in issue.get("source_span_ids", []) or []
     )
+    anchor_ids = ", ".join(str(x) for x in issue.get("anchor_utterance_ids", []) or [])
+    type_code = str(checked_type_code or _checked_type_code_for_issue(issue) or "").strip().upper()
+    type_label = cv.issue_type_code_label(_issue_type_from_code(type_code)) if type_code else "unknown"
+    lines = [
+        f"### {issue_id}\n"
+        f"- context_id: {context_id}\n"
+        f"- checked_type: {type_code} {type_label}\n"
+        f"- 원문 context text: {source_text}\n"
+        f"- extractor claim_text(위치 표식, 원문보다 강하면 무시): {claim_text}"
+    ]
+    if anchor_ids:
+        lines.append(f"- anchor_utterance_ids: {anchor_ids}")
+    if source_span_ids:
+        lines.append(f"- source_span_ids: {source_span_ids}")
+    return "\n".join(lines)
 
 
 def _split_crosscheck_prompt(prompt: str) -> tuple[str, str | None]:
@@ -794,52 +952,53 @@ def _split_crosscheck_prompt(prompt: str) -> tuple[str, str | None]:
 def _build_crosscheck_batch_prompt(
     valid: list[tuple[str, dict]],
     ctx: dict,
-) -> tuple[str, str | None, str, set[str], dict[str, dict]]:
+    checked_type_code: str | None = None,
+) -> tuple[str, str | None, str, set[str]]:
     from . import claim_common as cv
 
     utterances = ctx["utterances"]
     hint = ctx["hint"]
     utt_map = {u["utterance_id"]: (i, u) for i, u in enumerate(utterances)}
 
-    _, first_utt = utt_map[valid[0][1].get("utterance_id", "")]
-    slide_num = int(first_utt.get("slide_number", 0) or 0)
-    target_label, prev_label, transcript_block = _crosscheck_slide_context(ctx, slide_num)
-    context_text = _crosscheck_context_text(target_label, prev_label, transcript_block)
-
-    target_indices = []
     target_labels: dict[int, list[str]] = {}
-    artifact_hints: dict[str, dict] = {}
     for issue_id, issue in valid:
-        issue_indices = []
         related_ids = [issue.get("utterance_id", "")]
+        related_ids.extend(issue.get("source_span_ids") or [])
+        related_ids.extend(issue.get("anchor_utterance_ids") or [])
         related_ids.extend(issue.get("utterance_ids") or [])
         related_ids.extend(issue.get("canonical_member_utterance_ids") or [])
         for uid in dict.fromkeys(str(item or "") for item in related_ids):
             if uid not in utt_map:
                 continue
             idx, _ = utt_map[uid]
-            issue_indices.append(idx)
-            target_indices.append(idx)
             target_labels.setdefault(idx, []).append(issue_id)
-        artifact_hint = _find_transcript_artifact_hint(issue, utterances, ctx["slides"], issue_indices, slide_num)
-        if artifact_hint:
-            issue["_transcript_artifact_hint"] = artifact_hint
-            artifact_hints[issue_id] = artifact_hint
-    nearby_block = _build_utterance_window_block(utterances, target_indices, target_labels=target_labels)
-    context_text = f"{context_text}\n\n대상 발화 전후 ±5개 병합 문맥\n{nearby_block}"
-    artifact_block = "\n".join(
-        f"- {issue_id}: {hint.get('reason', '')}"
-        for issue_id, hint in artifact_hints.items()
-        if hint.get("reason")
-    )
-    if artifact_block:
-        context_text = f"{context_text}\n\n전사 오류 가능성 힌트\n{artifact_block}"
-    issue_block = "\n\n".join(_issue_line_for_batch(issue_id, issue) for issue_id, issue in valid)
-    issue_ids = {issue_id for issue_id, _ in valid}
-    issue_type_definitions = _issue_type_definitions_for_prompt()
 
-    prompt = f"""이전 단계에서 아래 발화들에 대한 issue 후보가 생성되었습니다.
-당신은 각 후보가 타당한지 원문과 강의 문맥만 기준으로 독립 판단해야 합니다.
+    _, first_utt = utt_map[valid[0][1].get("utterance_id", "")]
+    slide_num = int(first_utt.get("slide_number", 0) or 0)
+    target_label, boundary_label, transcript_block = _crosscheck_slide_context(
+        ctx,
+        slide_num,
+        target_labels,
+    )
+    context_text = _crosscheck_context_text(target_label, boundary_label, transcript_block)
+    checked_type_code = str(checked_type_code or _checked_type_code_for_issue(valid[0][1]) or "A").strip().upper()
+    if checked_type_code not in cv.ISSUE_CODE_TO_TYPE:
+        checked_type_code = "A"
+    checked_issue_type = cv.ISSUE_CODE_TO_TYPE[checked_type_code]
+    checked_type_label = cv.issue_type_code_label(checked_issue_type)
+    type_prompt_block = _type_specific_prompt_block(checked_type_code)
+    issue_block = "\n\n".join(_issue_line_for_batch(issue_id, issue, checked_type_code) for issue_id, issue in valid)
+    issue_ids = {issue_id for issue_id, _ in valid}
+
+    prompt = f"""당신은 {checked_type_label} 전용 crosscheck checker입니다.
+이전 단계가 표시한 issue 후보가 제공 문맥 안에서 **{checked_type_label} 기준으로만** 남는지 판단하세요.
+issue 후보는 검토 위치를 찾기 위한 표식일 뿐이며, 맞는 지적이라고 가정하지 마세요.
+
+하지 말아야 할 일:
+- 새 issue 만들기
+- 다른 유형으로 재분류하거나 확정하기
+- extractor claim_text 또는 issue 후보 문장을 증거처럼 사용하기
+- 표현 취향, 더 엄밀한 보충 가능성, 강의 수준 밖 예외만으로 issue 유지하기
 
 ## 도메인
 {hint.get('label', '')}
@@ -847,166 +1006,134 @@ def _build_crosscheck_batch_prompt(
 ## 대상 슬라이드
 {target_label}
 
-## 이전 슬라이드
-{prev_label}
+## 제공 문맥 범위
+현재 슬라이드 정보 텍스트 + 현재 슬라이드 전체 문맥 + 이전 슬라이드 마지막 문맥 2개 + 다음 슬라이드 첫 문맥 2개
 
-## 이전+현재 슬라이드 내용 (슬라이드 텍스트 + 강의자 발화)
+## 제공 문맥 사용 원칙
+- 현재 슬라이드의 발화와 슬라이드 정보 텍스트를 가장 강한 근거로 보세요.
+- 이전/다음 슬라이드 문맥은 같은 주제 흐름을 직접 이어받거나 같은 개념을 명시적으로 보완할 때만 해소 근거로 사용하세요.
+- 주제가 바뀌었거나 단순히 주변에 등장한 설명이면 issue 후보를 해소한 것으로 보지 마세요.
+- 슬라이드 정보 텍스트와 원문 발화가 충돌하면, 학생에게 동시에 노출된 전체 전달 효과를 기준으로 판단하세요.
+- 슬라이드가 명확히 맞는 내용을 제시하고 발화의 부정확성을 바로잡는다면 일부 또는 전체 해소로 볼 수 있습니다.
+- 반대로 슬라이드나 발화 중 하나가 학생에게 잘못된 명제를 독립적으로 남기면 issue를 유지할 수 있습니다.
+
+## 제공 문맥
 {transcript_block}
 
-## 대상 발화 전후 ±5개 병합 문맥
-{nearby_block}
-
-## 전사 오류 가능성 힌트
-{artifact_block or "(없음)"}
-
-## 지적 목록
+## 검토 issue 후보 목록
 {issue_block}
 
 ## 판정 절차
-각 issue_id는 하나의 claim이 아니라 같은 오해를 만들 수 있는 문맥 단위 issue일 수 있습니다.
-issue 안에 묶인 발화/claim이 여러 개 있으면, 개별 문장 하나가 아니라 그 발화 흐름 전체가 학생에게 남기는
-잘못된 명제 또는 오해를 판단하세요.
-서로 다른 issue_id끼리는 독립적으로 판단하세요. 새로운 이슈를 만들지 말고, 제공된 issue_id 각각에 대해서만 criteria_scores와 criteria_evidence를 작성하세요.
+각 issue_id마다 아래만 판단하세요.
 
-## 공통 issue type 정의
-아래 4개 유형은 이전 verifier 단계와 동일한 기준입니다.
-각 issue가 A-D 각각에 얼마나 해당하는지 `issue_type_scores`에 독립적으로 0.0~1.0 점수로 적으세요.
-A-D 점수는 합이 1이 될 필요가 없습니다. 하나의 issue가 A와 C에 동시에 높게 해당할 수 있습니다.
-`issue_type`과 `issue_type_code`에는 가장 높게 채점한 대표 유형을 적으세요.
-이전 verifier 유형이 문맥상 맞으면 유지할 수 있고, 문맥을 본 뒤 더 맞는 유형이 있으면 A-D 안에서만 바꿀 수 있습니다.
-중요: `criteria_scores`는 "이 issue를 유지할 근거가 남는가"를 판단하는 점수이고,
-`issue_type_scores`는 "유지될 경우 어떤 유형의 성격이 강한가"를 나타내는 독립 점수입니다.
-문맥을 보면 issue 자체가 성립하지 않는 경우에는 관련 A-D 유형 점수도 낮게 주세요.
-{issue_type_definitions}
+1. `원문 context text`와 제공 문맥을 기준으로 실제 전달 내용을 먼저 재구성합니다.
+2. extractor claim_text 또는 issue 후보가 원문 context보다 넓거나 강하면 그 강해진 문장은 버리고 원문 context 기준으로만 판단합니다.
+3. 원문 context 안에 남는 실제 문제만 아래 {checked_type_label} gate로 평가해 type_gate_passed를 결정합니다.
+4. 같은 슬라이드/같은 context의 설명, 표, 그림, 바로 이어지는 재표현이 의미·대상·관계·조건·범위를 실제로 바로잡으면 rejected로 둡니다.
+5. 문맥 후에도 학생이 잘못 외울 구체 명제가 {checked_type_label} 기준으로 남으면 kept로 둡니다.
+6. 같은 잘못된 명제를 가리키는 중복 후보만 merged로 둡니다. 같은 슬라이드라는 이유만으로 병합하지 마세요.
 
-중요: 실재 대상의 구체 수치/비율/연도/규모를 다루는 이슈에서는 "핵심 설명용 예시라서 학생이 암기하지 않을 것"만으로
-가산 기준을 자동으로 낮추거나 감점하지 마세요. 강의의 핵심이 다른 개념이어도, 현실 대상에 붙은 수치가 틀리거나 오래되었으면 교수에게 확인 대상으로
-올릴 수 있습니다. 이 경우 문맥이 해결했다는 판단은 "해당 숫자가 임의값/가상값/변수값이라고 명시됨" 또는
-"같은 문맥에서 정확한 값이나 최신 값으로 바로 정정됨"일 때만 가능합니다.
+## Type-specific Crosscheck Gate
+{type_prompt_block}
 
-## 채점 기준
-아래 3개 항목만 채우세요. 3개 항목의 가중치 합은 1.0입니다.
-각 항목은 0.0 / 0.5 / 1.0 중 하나를 기본으로 쓰되, 꼭 필요하면 0.25나 0.75를 사용할 수 있습니다.
+## Final issue_score
+issue_score는 {checked_type_label} gate를 적용한 뒤, 이 issue 후보를 해당 유형의 강의자 검토 대상으로 남길 가치입니다.
+서버는 모델별 issue_score에 모델 가중치를 곱해 최종 상태를 계산합니다.
 
-1. **issue_presence (0.40)**
-   이 issue가 원문 발화와 강의 흐름 기준으로 실제 문제를 얼마나 강하게 포함하는지 검증하세요.
-   잘못 외울 명제, 정답 충돌, 현재성 오류, 범위 과잉, 주체/과정 혼동 같은 문제가 실제로 남으면 높게 줍니다.
-   잘못된 명제를 재구성할 수 없거나 특정 단어/지시어만 과해석해야 성립하거나 표현 취향 수준이면 낮게 줍니다.
+점수 구간 기준:
+- 0.00~0.39: rejected. 문맥상 해소되었거나 검토 가치가 낮음.
+- 0.40~0.79: review/professor_check. 실제 문제가 남을 수 있으나 자동 확정하기는 어려움.
+- 0.80~1.00: confirmed 후보. A형처럼 원문 오류가 명확하고 문맥에서도 해소되지 않음.
 
-2. **context_unresolved (0.35)**
-   제공된 강의 문맥 전체가 해당 issue를 해소하지 못하는 정도를 검증하세요.
-   여기서 문맥은 대상 발화 전후 ±5개 발화, 이전+현재 슬라이드 텍스트, 이전+현재 슬라이드의 강의자 발화를 모두 포함합니다.
-   이 문맥이 대상, 관계, 순서, 주체, 조건, 범위를 충분히 보완하면 낮게 줍니다.
-   문맥이 해소하지 못하거나 같은 오해를 반복/강화하면 높게 줍니다.
+유형별 점수 원칙:
+- A형은 명확한 원문 오류가 남으면 0.80 이상을 줄 수 있습니다.
+- B형은 시점/외부 기준 확인이 필요하므로 보통 0.40~0.79에 둡니다.
+- C형은 실제 배제 명제, 일반화 과잉, 조건 차이, 결과 과장이 구체적으로 남을 때 0.40 이상을 주세요. 자동 확정처럼 0.80 이상은 주지 마세요.
+- D형은 구체적인 학생 오개념 문장이 남을 때만 0.40 이상을 주세요. 자동 확정처럼 0.80 이상은 주지 마세요.
 
-3. **evidence_strength (0.25)**
-   이 issue를 유지할 구체 근거가 얼마나 명확한지 검증하세요.
-   반례, 정의 차이, 수치 오류, 현행성 오류, 슬라이드/발화 직접 충돌, 조건/범위 차이처럼 설명 가능한 근거가 있으면 높게 줍니다.
-   단순히 더 자세히 말할 수 있다는 정도, 강의 수준 밖 세부 예외, 주관적 표현 개선이면 낮게 줍니다.
+type_gate_passed는 이 issue 후보가 {checked_type_label} 기준을 통과했는지 여부입니다.
+다른 유형으로는 가능성이 있어 보여도 {checked_type_label} 기준을 통과하지 못하면 type_gate_passed=false, status=rejected, issue_score 0.39 이하로 두세요.
 
-추가 판단 원칙:
-- 슬라이드와 전사문은 서로 보완 근거입니다. 둘을 함께 봤을 때 학생이 자연스럽게 이해할 최종 의미를 판단하세요.
-- 전사 오류 가능성 힌트가 있는 경우, 해당 이슈가 고립된 단어 하나에만 의존하는지 먼저 확인하세요.
-- 주변 발화와 슬라이드가 일관되게 유사한 대체어를 지지하고, 문제 제기가 그 고립된 단어 없이는 성립하지 않으면 강의 내용 오류로 확정하지 마세요.
-- 단, 같은 오류 표현이 여러 발화에서 반복되거나 슬라이드도 같은 오류를 쓰거나, 고립된 단어 외에도 독립적인 개념 충돌이 있으면 이슈를 유지할 수 있습니다.
-- 완전한 정정 문장이 없더라도, 앞뒤 발화나 슬라이드 구조가 생략된 주어/대상/관계/범위를 자연스럽게 지지하면 그 해석을 우선하세요.
-- 앞에서 올바른 설명이 한 번 나왔거나 슬라이드에 관련 키워드가 있다는 이유만으로 자동 해소하지 마세요. 뒤따르는 발화 흐름이 다시 다른 오해를 만들면 그 흐름 기준으로 판단하세요.
-- 실재 대상의 구체 수치/비율/연도/규모가 틀리거나 오래되었고 학생이 예시 수치로 받아들일 수 있으면 issue를 유지할 수 있습니다. 명시적으로 가상의 대상/임의값/변수값이라고 밝힌 경우에만 이 이유로 낮게 채점할 수 있습니다.
-- 반박 근거는 학생이 이 강의 구간에서 배우는 개념 수준과 맞아야 합니다. 강의가 설명하지 않는 세부 구현, 특수 상황, 예외적 전제만으로는 issue를 유지하지 마세요.
-- "모든", "오직", "~만", "독점" 같은 닫힌 표현이 있어도, 문맥상 역할/책임/관리 주체/대표 경로를 강조한 표준적 설명이면 그 단어만으로 범위 과잉 점수를 올리지 마세요.
-- 범위 과잉 issue를 유지하려면, 원문과 문맥을 함께 본 뒤에도 "다른 가능성은 불가능하다", "다른 주체는 관여하지 않는다", "이 조건에서만 성립한다"처럼 학생이 잘못 외울 닫힌 명제가 구체적으로 남아야 합니다.
-- 반례가 강의 범위 밖의 더 상위/하위 계층, 예외적 구현, 고급 세부사항에만 의존하면 issue_presence와 evidence_strength를 낮게 주세요.
-- 더 자세히 말할 수 있다는 정도, 더 엄밀한 표현 가능성, 표현 취향만이면 모든 항목을 낮게 채점하세요.
+## context_resolution 기준
+- "문맥에서 해소됨": 같은 문맥 안에서 의미, 대상, 관계, 조건, 범위가 명확히 바로잡혀 학생에게 잘못된 명제가 거의 남지 않는 경우
+- "일부 해소됨": issue 후보가 원문보다 과장되었거나 문맥이 일부 보완했지만, 더 좁은 오개념이나 혼동 가능성이 남는 경우
+- "해소 안 됨": 문맥이 문제를 바로잡지 못했거나 오히려 반복/강화하는 경우
 
-최종 점수와 최종 상태는 서버가 criteria_scores를 가중합해 계산합니다.
-모델은 최종 상태를 맞추려고 점수를 조정하지 말고, 위 3개 기준에 따라 독립적으로 채점하세요.
-세 기준에서 실제 문제가 남는다고 판단될 때만 교수에게 보여줄 수 있는 설명 필드를 작성하세요.
-문맥상 issue가 성립하지 않는다고 판단되면 reason에 기각 이유를 쓰고 나머지 설명 필드는 비워도 됩니다.
+## 응답 규칙
+- JSON object 하나만 출력하고 markdown/code fence는 쓰지 마세요.
+- 입력된 모든 issue_id에 대해 results 배열에 정확히 하나씩, 입력 순서대로 출력하세요.
+- 새로운 issue_id를 만들지 마세요.
+- issue_score는 반드시 출력하세요.
+- checked_type_code는 "{checked_type_code}"로만 출력하세요.
+- type_gate_passed는 반드시 true 또는 false로 출력하세요.
+- status는 "kept", "rejected", "merged" 중 하나입니다.
+- issue_type은 "{checked_issue_type}"로만 출력하세요.
+- issue_type_code는 "{checked_type_code}"로만 출력하세요.
+- reason은 {checked_type_label} gate를 통과하거나 통과하지 못한 이유와 문맥 해소 여부를 1~2문장으로 작성하세요.
+- context_issue_summary는 kept인 경우 제공 문맥 안에 실제로 남는 문제를 1문장으로 작성하세요.
+- rejected인 경우 context_issue_summary는 빈 문자열로 두세요.
+- context_resolution은 "문맥에서 해소됨", "일부 해소됨", "해소 안 됨" 중 하나만 쓰세요.
+- context_resolution_reason은 문맥이 왜 해소했거나 못 했는지 1문장입니다.
+- correction_hint는 필요한 경우만 1문장으로 작성하고, 필요 없으면 빈 문자열로 두세요.
+- context_issue_id는 문맥 전체에서 재구성한 실제 문제 단위의 짧은 ID입니다.
+- kept인 경우 context_issue_id는 "ci001"처럼 쓰세요.
+- rejected인 경우 context_issue_id는 "none"으로 쓰세요.
+- merged인 경우 context_issue_id는 대표 issue와 같은 값을 쓰고, merged_into_issue_id에 대표 issue_id를 쓰세요.
+- 대표이거나 독립 issue이면 merged_into_issue_id는 빈 문자열로 두세요.
 
-응답 규칙:
-- 반드시 JSON object 하나만 출력
-- markdown/code fence 금지
-- verdict는 출력하지 마세요
-- confidence는 출력하지 마세요
-- issue_type은 반드시 factual_error / temporal_error / scope_overclaim / confusing_explanation 중 하나
-- issue_type_code는 반드시 A / B / C / D 중 하나
-- issue_type_scores는 반드시 A-D 4개 유형 각각을 독립 0.0~1.0 점수로 출력
-- issue_type_scores의 합을 1로 맞추지 마세요
-- issue_type_rationale은 가장 높게 나온 대표 유형을 고른 이유를 1문장으로 출력
-- criteria_scores와 criteria_evidence는 반드시 출력
-- 입력된 모든 issue_id에 대해 정확히 하나의 criteria_scores와 criteria_evidence를 출력
-- 단일 issue를 받더라도 반드시 results 배열로 출력
-- criteria_evidence의 각 값은 1문장 이내로 짧게 출력
-- reason은 2문장 이내로 출력
-- 추가 설명 필드는 교수에게 보여줄 필요가 있는 경우만 쓰고, 각 필드는 1문장 이내로 출력
-
-응답 예시:
+응답 형식:
 {{
   "results": [
     {{
       "issue_id": "i0001",
-      "issue_type": "factual_error",
-      "issue_type_code": "A",
-      "issue_type_scores": {{
-        "A": 0.0,
-        "B": 0.0,
-        "C": 0.0,
-        "D": 0.0
-      }},
-      "issue_type_rationale": "대표 유형을 고른 이유",
-      "criteria_scores": {{
-        "issue_presence": 0.0,
-        "context_unresolved": 0.0,
-        "evidence_strength": 0.0
-      }},
-      "criteria_evidence": {{
-        "issue_presence": "잘못된 명제나 구체 문제가 남지 않음",
-        "context_unresolved": "제공된 문맥이 의미를 보완함",
-        "evidence_strength": "반례나 직접 충돌 근거가 약함"
-      }},
-      "reason": "원문과 문맥 기준의 판단 이유"
-    }},
-    {{
-      "issue_id": "i0002",
-      "issue_type": "scope_overclaim",
-      "issue_type_code": "C",
-      "issue_type_scores": {{
-        "A": 0.25,
-        "B": 0.0,
-        "C": 0.9,
-        "D": 0.6
-      }},
-      "issue_type_rationale": "닫힌 표현과 문맥 후에도 남는 반례 가능성이 가장 강하므로 C로 분류함",
-      "criteria_scores": {{
-        "issue_presence": 1.0,
-        "context_unresolved": 0.75,
-        "evidence_strength": 0.75
-      }},
-      "criteria_evidence": {{
-        "issue_presence": "학생이 잘못 외울 명제가 남음",
-        "context_unresolved": "제공된 문맥이 조건을 충분히 보완하지 못함",
-        "evidence_strength": "강의 수준에서 설명 가능한 반례나 조건 차이가 있음"
-      }},
-      "reason": "원문과 문맥 기준의 판단 이유",
-      "issue": "문제점 또는 교수 확인 후보 요약",
-      "correct_info": "올바른 정보 또는 필요한 조건/범위",
-      "why_wrong": "왜 틀렸거나 오해를 부를 수 있는지",
-      "counterexample": "반례 또는 예외 조건. 없으면 빈 문자열",
-      "issue_basis": "명확한 반례 있음 | 조건/범위 누락 | 핵심 개념 동일시 | 주체/과정 혼동 | 교수 확인 필요",
-      "student_error": "학생이 잘못 외울 수 있는 구체적 명제",
-      "counterexample_or_condition": "반례 또는 조건",
-      "context_resolution": "문맥에서 해소됨 | 일부 해소됨 | 해소 안 됨 | 모델 간 판단 불일치",
-      "evidence_in_context": "제공된 문맥에서 판단을 뒷받침하는 근거",
-      "student_misunderstanding": "학생 오해 가능성",
-      "why_it_matters": "왜 중요한지",
-      "suggested_rephrase": "대체 표현",
-      "teaching_note": "교수에게 전달할 짧은 메모",
-      "recommendation": "수정 또는 보충 방향"
+      "status": "kept | rejected | merged",
+      "checked_type_code": "{checked_type_code}",
+      "type_gate_passed": true,
+      "issue_type": "{checked_issue_type}",
+      "issue_type_code": "{checked_type_code}",
+      "issue_score": 0.0,
+      "reason": "",
+      "context_issue_summary": "",
+      "context_resolution": "문맥에서 해소됨 | 일부 해소됨 | 해소 안 됨",
+      "context_resolution_reason": "",
+      "correction_hint": "",
+      "context_issue_id": "ci001",
+      "merged_into_issue_id": ""
     }}
   ]
 }}"""
     prompt, system_prompt = _split_crosscheck_prompt(prompt)
-    return prompt, system_prompt, context_text, issue_ids, artifact_hints
+    return prompt, system_prompt, context_text, issue_ids
+
+
+def _group_crosscheck_items_by_type(valid: list[tuple[str, dict]]) -> list[tuple[str, list[tuple[str, dict]]]]:
+    groups: dict[str, list[tuple[str, dict]]] = {}
+    for issue_id, issue in valid:
+        for code in _checked_type_codes_for_issue(issue):
+            groups.setdefault(code, []).append((issue_id, issue))
+    return [(code, groups[code]) for code in ("A", "B", "C", "D") if groups.get(code)]
+
+
+def _crosscheck_payload_score(payload: dict) -> float:
+    score = _coerce_confidence(
+        payload.get("confidence", payload.get("score", payload.get("issue_score"))),
+        0.0,
+    )
+    return float(score or 0.0)
+
+
+def _prefer_crosscheck_payload(current: dict | None, candidate: dict, primary_code: str) -> bool:
+    if not current:
+        return True
+    candidate_score = _crosscheck_payload_score(candidate)
+    current_score = _crosscheck_payload_score(current)
+    if candidate_score > current_score + 0.0001:
+        return True
+    if current_score > candidate_score + 0.0001:
+        return False
+    candidate_code = str(candidate.get("checked_type_code") or candidate.get("issue_type_code") or "").strip().upper()
+    current_code = str(current.get("checked_type_code") or current.get("issue_type_code") or "").strip().upper()
+    return candidate_code == primary_code and current_code != primary_code
 
 
 def _run_crosscheck_batch_prompt(
@@ -1018,11 +1145,72 @@ def _run_crosscheck_batch_prompt(
     if not valid:
         return {}, cv._empty_token_usage(), "", None
 
-    prompt, system_prompt, context_text, issue_ids, artifact_hints = _build_crosscheck_batch_prompt(valid, ctx)
+    groups = _group_crosscheck_items_by_type(valid)
+    if len(groups) <= 1:
+        checked_type_code = groups[0][0] if groups else _checked_type_code_for_issue(valid[0][1])
+        return _run_crosscheck_batch_prompt_for_type(valid, ctx, checked_type_code)
+
+    issues_by_id = {issue_id: issue for issue_id, issue in valid}
+    parsed_all: dict[str, dict] = {}
+    token_usage = cv._empty_token_usage()
+    context_text = ""
+    last_error = None
+    for checked_type_code, group in groups:
+        parsed, call_usage, call_context, call_error = _run_crosscheck_batch_prompt_for_type(
+            group,
+            ctx,
+            checked_type_code,
+        )
+        cv._add_call_usage(token_usage, call_usage)
+        for issue_id, payload in parsed.items():
+            issue = issues_by_id.get(issue_id, {})
+            primary_code = _checked_type_code_for_issue(issue)
+            routed_codes = _checked_type_codes_for_issue(issue)
+            payload["checked_type_candidates"] = routed_codes
+            payload["selected_from_multi_type_route"] = len(routed_codes) > 1
+            if _prefer_crosscheck_payload(parsed_all.get(issue_id), payload, primary_code):
+                parsed_all[issue_id] = payload
+        if call_context and not context_text:
+            context_text = call_context
+        if call_error is not None:
+            last_error = call_error
+    return parsed_all, token_usage, context_text, last_error
+
+
+def _run_crosscheck_batch_prompt_for_type(
+    valid: list[tuple[str, dict]],
+    ctx: dict,
+    checked_type_code: str,
+) -> tuple[dict[str, dict], dict, str, Exception | None]:
+    from . import claim_common as cv
+
+    if not valid:
+        return {}, cv._empty_token_usage(), "", None
+
+    prompt, system_prompt, context_text, issue_ids = _build_crosscheck_batch_prompt(valid, ctx, checked_type_code)
 
     model = str(cv._resolve_stage_model("cross_recheck") or "").strip()
     response_format = {"type": "json_object"} if cv._supports_json_object_response_format(model) else None
-    max_tokens = min(8192, max(4096, 1600 * len(valid)))
+    try:
+        base_output_tokens = int(os.getenv("VERIFIER_CROSSCHECK_BASE_MAX_TOKENS", "1024"))
+        tokens_per_issue = int(os.getenv("VERIFIER_CROSSCHECK_MAX_TOKENS_PER_ISSUE", "420"))
+        output_token_cap = int(os.getenv("VERIFIER_CROSSCHECK_MAX_TOKENS", "3072"))
+    except ValueError:
+        base_output_tokens = 1024
+        tokens_per_issue = 420
+        output_token_cap = 3072
+    max_tokens = min(output_token_cap, max(base_output_tokens, tokens_per_issue * len(valid)))
+    if cv._is_anthropic_model(model):
+        try:
+            anthropic_tokens_per_issue = int(os.getenv("VERIFIER_ANTHROPIC_CROSSCHECK_MAX_TOKENS_PER_ISSUE", "1200"))
+            anthropic_output_cap = int(os.getenv("VERIFIER_ANTHROPIC_CROSSCHECK_MAX_TOKENS", "12000"))
+        except ValueError:
+            anthropic_tokens_per_issue = 1200
+            anthropic_output_cap = 12000
+        max_tokens = min(
+            anthropic_output_cap,
+            max(max_tokens, base_output_tokens, anthropic_tokens_per_issue * len(valid)),
+        )
     if cv._is_deepseek_model(model):
         try:
             deepseek_max_tokens = int(os.getenv("VERIFIER_DEEPSEEK_CROSSCHECK_MAX_TOKENS", "2048"))
@@ -1048,10 +1236,11 @@ def _run_crosscheck_batch_prompt(
             parsed = _parse_crosscheck_batch_payload(text, issue_ids)
             for issue_id, payload in parsed.items():
                 payload.setdefault("crosscheck_context_text", context_text)
-                _apply_transcript_artifact_cap(payload, artifact_hints.get(issue_id))
             return parsed, token_usage, context_text, None
         except Exception as e:
             last_error = e
+            if _is_permanent_crosscheck_api_failure(e):
+                break
             if cv._is_deepseek_model(model) and _is_crosscheck_api_failure(e):
                 break
             if attempt < _CROSSCHECK_PARSE_RETRIES:
