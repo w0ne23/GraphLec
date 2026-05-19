@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { askQa } from '../../lib/api'
+import ChatGraphPreview, { graphStats } from './ChatGraphPreview'
 
 /**
  * src/components/chat/ChatPanel.jsx
@@ -24,9 +25,18 @@ export default function ChatPanel({
   const bottomRef = useRef(null)
   // 인덱스별 펼침 상태를 관리하는 배열
   const [expandedIndices, setExpandedIndices] = useState([])
+  const [expandedGraphIndices, setExpandedGraphIndices] = useState([])
 
   const toggleExpand = (idx) => {
     setExpandedIndices(prev => {
+      const next = [...prev]
+      next[idx] = !next[idx]
+      return next
+    })
+  }
+
+  const toggleGraphExpand = (idx) => {
+    setExpandedGraphIndices(prev => {
       const next = [...prev]
       next[idx] = !next[idx]
       return next
@@ -55,8 +65,20 @@ export default function ChatPanel({
 
   function sourceLabel(text) {
     const compact = String(text || '').replace(/\s+/g, ' ').trim()
-    if (!compact || compact.startsWith('{') || compact.startsWith('[')) return '구간 근거'
+    if (!compact || compact.startsWith('{') || compact.startsWith('[')) return ''
     return compact.length > 42 ? `${compact.slice(0, 42)}...` : compact
+  }
+
+  function videoRefLabel(chunk) {
+    const type = String(chunk?.chunk_type || '')
+    const text = String(chunk?.text || '').replace(/\s+/g, ' ').trim()
+    if (['segment', 'audio', 'structural_row'].includes(type)) {
+      return sourceLabel(text)
+    }
+    if (!text || text.startsWith('슬라이드') || text.includes('슬라이드 강조 점수')) {
+      return ''
+    }
+    return sourceLabel(text)
   }
 
   function refDedupeKey(ref) {
@@ -74,7 +96,7 @@ export default function ChatPanel({
           timestamp: formatTime(chunk.start_sec),
           startSec: chunk.start_sec,
           score: Number.isFinite(Number(chunk.score)) ? Number(chunk.score) : null,
-          label: sourceLabel(chunk.text || chunk.chunk_type),
+          label: videoRefLabel(chunk),
           text: chunk.text || '',
         }))
     const rawRefs = chunkRefs.length > 0
@@ -84,7 +106,7 @@ export default function ChatPanel({
           startSec: t.start,
           slideNumber: t.slide_number,
           score: null,
-          label: sourceLabel(t.label),
+          label: String(t.label || '').startsWith('슬라이드') ? '' : sourceLabel(t.label),
           text: t.label || '',
         }))
 
@@ -258,6 +280,8 @@ export default function ChatPanel({
         content: res.answer || '답변을 생성하지 못했습니다.',
         refs: refsFromResponse(res),
         scenes: scenesFromSlideResponse(res),
+        graph: res.graph || null,
+        coreGraph: res.core_graph || null,
         sourceMode: res.source_mode || 'default',
       }])
     } catch (e) {
@@ -369,6 +393,34 @@ export default function ChatPanel({
                     </div>
                   </div>
                 )}
+                {(() => {
+                  const previewGraph = msg.coreGraph || msg.graph
+                  const stats = graphStats(previewGraph)
+                  if (!stats.hasGraph) return null
+                  const open = Boolean(expandedGraphIndices[msgIdx])
+                  return (
+                    <div className="chat-refs-container chat-graph-container">
+                      <div className="chat-graph-header">
+                        <span className="chat-refs-header">근거 그래프</span>
+                        <button
+                          className="chat-refs-toggle-btn"
+                          onClick={() => toggleGraphExpand(msgIdx)}
+                          aria-expanded={open}
+                        >
+                          {open ? '그래프 접기' : `그래프 보기 (${stats.nodes} nodes · ${stats.edges} edges)`}
+                        </button>
+                      </div>
+                      {open && (
+                        <ChatGraphPreview
+                          graph={previewGraph}
+                          sourceMode={msg.sourceMode}
+                          relatedSlides={msg.scenes}
+                          refs={msg.refs}
+                        />
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             </div>
           )

@@ -162,12 +162,14 @@ class RetrievedChunk(BaseModel):
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     linked_node_id: Optional[str] = None
+    score_breakdown: Optional[dict[str, float]] = None
 
 
 class QueryResponse(BaseModel):
     answer: str
     timestamps: list[dict]
     graph: dict
+    core_graph: dict = Field(default_factory=lambda: {"nodes": [], "edges": []})
     retrieved_chunks: list[RetrievedChunk]
     related_slides: list[dict] = Field(default_factory=list)
     source_mode: str = "default"
@@ -830,6 +832,448 @@ def _graph_from_content_structured(structured: dict[str, list[dict[str, Any]]]) 
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
+_GRAPH_COLOR_MAP = {
+    "GraphRAGEntity": "#FF6B6B",
+    "GraphRAGCommunity": "#FF9F43",
+    "Slide": "#4ECDC4",
+    "Scene": "#A29BFE",
+    "Context": "#81ECEC",
+    "Segment": "#45B7D1",
+    "VisualAsset": "#F59E0B",
+}
+
+
+def _core_reason_score(reason: str) -> float:
+    return {
+        "answer_location": 100.0,
+        "selected_visual_asset": 96.0,
+        "selected_relationship": 92.0,
+        "selected_entity": 88.0,
+        "source_anchor": 78.0,
+        "visual_grounding": 74.0,
+        "scene_anchor": 72.0,
+        "supporting_concept": 58.0,
+        "structural_evidence": 50.0,
+    }.get(reason, 10.0)
+
+
+def _node_payload(
+    node_id: str,
+    label: str,
+    node_type: str,
+    title: str = "",
+    reason: str = "supporting_concept",
+    score: Optional[float] = None,
+    evidence: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    payload = {
+        "id": node_id,
+        "label": (label or node_id)[:48],
+        "color": _GRAPH_COLOR_MAP.get(node_type, "#64748b"),
+        "title": (title or label or node_id)[:500],
+        "type": node_type,
+        "reason": reason,
+        "score": _core_reason_score(reason) if score is None else score,
+    }
+    if evidence:
+        payload["evidence"] = evidence
+    return payload
+
+
+def _merge_node(nodes: dict[str, dict[str, Any]], node: dict[str, Any]) -> None:
+    node_id = str(node.get("id") or "")
+    if not node_id:
+        return
+    prev = nodes.get(node_id)
+    if not prev or float(node.get("score") or 0) > float(prev.get("score") or 0):
+        nodes[node_id] = node
+
+
+def _edge_payload(
+    src: str,
+    tgt: str,
+    label: str,
+    reason: str = "supporting_concept",
+    score: Optional[float] = None,
+    evidence: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    payload = {
+        "from": src,
+        "to": tgt,
+        "label": label,
+        "reason": reason,
+        "score": _core_reason_score(reason) if score is None else score,
+    }
+    if evidence:
+        payload["evidence"] = evidence
+    return payload
+
+
+def _slide_label(slide_number: Any, fallback: str = "slide") -> str:
+    n = _to_int_or_none(slide_number)
+    return f"S{n}" if n is not None else fallback
+
+
+def _full_graph_lookup(graph: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str, str], dict[str, Any]]]:
+    nodes = {str(n.get("id")): n for n in graph.get("nodes", []) if n.get("id")}
+    edges = {}
+    for e in graph.get("edges", []):
+        src = str(e.get("from") or e.get("src_id") or "")
+        tgt = str(e.get("to") or e.get("tgt_id") or "")
+        label = str(e.get("label") or e.get("rel_type") or "")
+        if src and tgt and label:
+            edges[(src, label, tgt)] = e
+    return nodes, edges
+
+
+def _build_core_graph(
+    *,
+    stem: str,
+    graph: dict[str, Any],
+    source_items: list[EvidenceItem],
+    source_mode: str,
+    related_slides: list[dict[str, Any]],
+    retrieved_chunks: list[RetrievedChunk],
+    max_nodes: int = 12,
+    max_edges: int = 16,
+) -> dict[str, Any]:
+    """Build the small graph that actually explains the answer evidence."""
+    full_nodes, full_edges = _full_graph_lookup(graph)
+    nodes: dict[str, dict[str, Any]] = {}
+    edges_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    related_slide_numbers = {
+        int(s["slide_number"]) for s in related_slides
+        if s.get("slide_number") is not None and _to_int_or_none(s.get("slide_number")) is not None
+    }
+    for c in retrieved_chunks:
+        if c.slide_number is not None:
+            related_slide_numbers.add(int(c.slide_number))
+    evidence_text = "\n".join(
+        [it.text for it in source_items if it.text]
+        + [c.text for c in retrieved_chunks if c.text]
+    ).lower()
+
+    def item_evidence(item: EvidenceItem, note: str = "") -> dict[str, Any]:
+        ev: dict[str, Any] = {
+            "source_uid": item.uid,
+            "source_kind": item.kind,
+        }
+        if item.retrieval_score is not None:
+            ev["retrieval_score"] = item.retrieval_score
+        if item.score_breakdown:
+            ev["score_breakdown"] = item.score_breakdown
+        if item.slide_number is not None:
+            ev["slide_number"] = item.slide_number
+        if item.start_sec is not None:
+            ev["start_sec"] = item.start_sec
+        if note:
+            ev["note"] = note
+        return ev
+
+    def add_node(
+        node_id: str,
+        label: str,
+        node_type: str,
+        title: str = "",
+        reason: str = "supporting_concept",
+        score: Optional[float] = None,
+        evidence: Optional[dict[str, Any]] = None,
+    ) -> None:
+        node_id = str(node_id or "")
+        if not node_id:
+            return
+        existing = full_nodes.get(node_id, {})
+        _merge_node(
+            nodes,
+            _node_payload(
+                node_id=node_id,
+                label=str(existing.get("label") or label or node_id),
+                node_type=str(existing.get("type") or node_type),
+                title=str(existing.get("title") or title or label or node_id),
+                reason=reason,
+                score=score,
+                evidence=evidence,
+            ),
+        )
+
+    def add_edge(
+        src: str,
+        tgt: str,
+        label: str,
+        reason: str = "supporting_concept",
+        score: Optional[float] = None,
+        evidence: Optional[dict[str, Any]] = None,
+    ) -> None:
+        src, tgt, label = str(src or ""), str(tgt or ""), str(label or "")
+        if not src or not tgt or not label:
+            return
+        key = (src, label, tgt)
+        edge = _edge_payload(src, tgt, label, reason=reason, score=score, evidence=evidence)
+        prev = edges_by_key.get(key)
+        if not prev or float(edge.get("score") or 0) > float(prev.get("score") or 0):
+            edges_by_key[key] = edge
+
+    def add_full_edge_if_exists(
+        src: str,
+        label: str,
+        tgt: str,
+        reason: str,
+        evidence: Optional[dict[str, Any]] = None,
+    ) -> None:
+        if (src, label, tgt) in full_edges:
+            add_edge(src, tgt, label, reason=reason, evidence=evidence)
+
+    for slide_number in related_slide_numbers:
+        slide_id = f"slide_{slide_number:03d}"
+        add_node(
+            slide_id,
+            f"S{slide_number}",
+            "Slide",
+            reason="answer_location",
+            evidence={"note": "selected from related_slides/retrieved_chunks"},
+        )
+
+    include_scene = source_mode in {"visual_location", "scene_location"}
+    include_segment = source_mode == "scene_location"
+
+    for item in source_items:
+        row = item.row or {}
+        if item.kind == "visual_asset":
+            ev = item_evidence(item, "visual asset selected for answer context")
+            aid = str(row.get("visual_asset_id") or "")
+            slide_id = str(row.get("slide_id") or "")
+            slide_number = row.get("slide_number") or item.slide_number
+            if slide_id:
+                add_node(slide_id, _slide_label(slide_number), "Slide", reason="answer_location", evidence=ev)
+            if aid:
+                add_node(
+                    aid,
+                    str(row.get("asset_type") or "visual"),
+                    "VisualAsset",
+                    (str(row.get("description") or "") + "\n" + str(row.get("raw_text") or "")).strip(),
+                    reason="selected_visual_asset",
+                    evidence=ev,
+                )
+            if slide_id and aid:
+                add_edge(slide_id, aid, "HAS_VISUAL_ASSET", reason="visual_grounding", evidence=ev)
+
+        elif item.kind in {"slide_text", "slide_concept"}:
+            ev = item_evidence(item, "slide evidence selected for answer context")
+            slide_id = str(row.get("slide_id") or "")
+            if slide_id:
+                add_node(
+                    slide_id,
+                    _slide_label(row.get("slide_number") or item.slide_number),
+                    "Slide",
+                    str(row.get("slide_text") or item.text),
+                    reason="source_anchor",
+                    evidence=ev,
+                )
+
+        elif item.kind == "segment":
+            ev = item_evidence(item, "segment evidence selected for answer context")
+            slide_id = str(row.get("slide_id") or "")
+            scene_id = str(row.get("scene_id") or "")
+            segment_id = str(row.get("segment_id") or "")
+            segment_text = str(row.get("segment_text") or item.text)
+            if slide_id:
+                add_node(slide_id, _slide_label(row.get("slide_number") or item.slide_number), "Slide", reason="source_anchor", evidence=ev)
+            if include_scene and scene_id:
+                add_node(scene_id, "scene", "Scene", segment_text, reason="scene_anchor", evidence=ev)
+            if include_scene and scene_id and slide_id:
+                add_edge(scene_id, slide_id, "USES_SLIDE", reason="scene_anchor", evidence=ev)
+            if include_segment and segment_id:
+                add_node(segment_id, "segment", "Segment", segment_text, reason="structural_evidence", evidence=ev)
+
+        elif item.kind == "graphrag_entity":
+            ev = item_evidence(item, "GraphRAG entity selected for answer context")
+            eid = str(row.get("graphrag_entity_id") or "")
+            if eid:
+                add_node(
+                    eid,
+                    str(row.get("graphrag_title") or eid),
+                    "GraphRAGEntity",
+                    str(row.get("graphrag_description") or item.text),
+                    reason="selected_entity",
+                    score=_core_reason_score("selected_entity") + (_to_float_or_none(row.get("final_weight")) or 0.0),
+                    evidence=ev,
+                )
+                if source_mode in {"visual_location", "scene_location", "overview", "default"}:
+                    for sid, sn in zip(row.get("slide_ids") or [], row.get("slide_numbers") or []):
+                        if related_slide_numbers and _to_int_or_none(sn) not in related_slide_numbers:
+                            continue
+                        sid = str(sid or "")
+                        if sid:
+                            add_node(sid, _slide_label(sn), "Slide", reason="source_anchor", evidence=ev)
+                            add_edge(eid, sid, "GRAPHRAG_APPEARS_IN", reason="source_anchor", evidence=ev)
+
+        elif item.kind == "graphrag_relationship":
+            ev = item_evidence(item, "GraphRAG relationship selected for answer context")
+            src = str(row.get("src_id") or "")
+            tgt = str(row.get("tgt_id") or "")
+            if src:
+                add_node(src, str(row.get("src_title") or src), "GraphRAGEntity", reason="selected_relationship", evidence=ev)
+            if tgt:
+                add_node(tgt, str(row.get("tgt_title") or tgt), "GraphRAGEntity", reason="selected_relationship", evidence=ev)
+            if src and tgt:
+                add_edge(src, tgt, "GRAPHRAG_RELATES_TO", reason="selected_relationship", evidence=ev)
+
+    if source_mode in {"visual_location", "scene_location"}:
+        # Keep location graphs readable: connect selected concepts to chosen scenes only when already selected.
+        selected_scene_ids = [nid for nid, node in nodes.items() if node.get("type") == "Scene"]
+        selected_entity_ids = [nid for nid, node in nodes.items() if node.get("type") == "GraphRAGEntity"]
+        for eid in selected_entity_ids:
+            for scene_id in selected_scene_ids[:2]:
+                add_full_edge_if_exists(
+                    eid,
+                    "GRAPHRAG_APPEARS_IN_SCENE",
+                    scene_id,
+                    "source_anchor",
+                    evidence={"note": "selected concept appears in selected scene"},
+                )
+
+    if source_mode == "visual_location" and related_slide_numbers:
+        slide_ids = {f"slide_{n:03d}" for n in related_slide_numbers}
+        candidate_entities: list[tuple[float, str, dict[str, Any]]] = []
+        for eid, node in full_nodes.items():
+            if node.get("type") != "GraphRAGEntity":
+                continue
+            label = str(node.get("label") or "").strip()
+            title = str(node.get("title") or "").strip()
+            hay_terms = [x.lower() for x in (label, title) if len(x.strip()) >= 2]
+            text_hit = any(term and term in evidence_text for term in hay_terms)
+            linked_slide = any((eid, "GRAPHRAG_APPEARS_IN", sid) in full_edges for sid in slide_ids)
+            if not text_hit and not linked_slide:
+                continue
+            score = _core_reason_score("supporting_concept")
+            if linked_slide:
+                score += 12.0
+            if text_hit:
+                score += 18.0
+            score += min(6.0, sum(1 for term in hay_terms if term and term in evidence_text) * 2.0)
+            candidate_entities.append((score, eid, node, {"text_hit": text_hit, "linked_slide": linked_slide}))
+
+        already = {nid for nid, node in nodes.items() if node.get("type") == "GraphRAGEntity"}
+        for score, eid, node, evidence_flags in sorted(candidate_entities, reverse=True):
+            if eid in already:
+                continue
+            add_node(
+                eid,
+                str(node.get("label") or eid),
+                "GraphRAGEntity",
+                str(node.get("title") or node.get("label") or eid),
+                reason="supporting_concept",
+                score=score,
+                evidence={
+                    "note": "concept matched selected visual evidence and/or related slide",
+                    **evidence_flags,
+                },
+            )
+            for sid in slide_ids:
+                add_full_edge_if_exists(
+                    eid,
+                    "GRAPHRAG_APPEARS_IN",
+                    sid,
+                    "source_anchor",
+                    evidence={
+                        "note": "supporting concept appears in selected slide",
+                        **evidence_flags,
+                    },
+                )
+            already.add(eid)
+            if len(already) >= 5:
+                break
+
+        selected_entity_ids = [nid for nid, node in nodes.items() if node.get("type") == "GraphRAGEntity"]
+        for i, src in enumerate(selected_entity_ids):
+            for tgt in selected_entity_ids[i + 1:]:
+                add_full_edge_if_exists(
+                    src,
+                    "GRAPHRAG_RELATES_TO",
+                    tgt,
+                    "selected_relationship",
+                    evidence={"note": "relationship exists between selected/supporting concepts"},
+                )
+                add_full_edge_if_exists(
+                    tgt,
+                    "GRAPHRAG_RELATES_TO",
+                    src,
+                    "selected_relationship",
+                    evidence={"note": "relationship exists between selected/supporting concepts"},
+                )
+
+    selected_entity_ids = [nid for nid, node in nodes.items() if node.get("type") == "GraphRAGEntity"]
+    for i, src in enumerate(selected_entity_ids):
+        for tgt in selected_entity_ids[i + 1:]:
+            add_full_edge_if_exists(
+                src,
+                "GRAPHRAG_RELATES_TO",
+                tgt,
+                "selected_relationship",
+                evidence={"note": "relationship exists between selected core concepts"},
+            )
+            add_full_edge_if_exists(
+                tgt,
+                "GRAPHRAG_RELATES_TO",
+                src,
+                "selected_relationship",
+                evidence={"note": "relationship exists between selected core concepts"},
+            )
+
+    if stem and selected_entity_ids:
+        try:
+            driver = _neo4j_driver()
+            try:
+                with driver.session() as session:
+                    rows = session.run(
+                        """
+                        MATCH (a:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(b:GraphRAGEntity {stem: $stem})
+                        WHERE a.id IN $ids AND b.id IN $ids
+                        RETURN a.id AS src_id, b.id AS tgt_id,
+                               coalesce(r.description, '') AS description,
+                               coalesce(r.emphasis_edge_weight, r.weight, 0) AS weight
+                        ORDER BY weight DESC
+                        LIMIT 24
+                        """,
+                        stem=stem,
+                        ids=selected_entity_ids,
+                    )
+                    for row in rows:
+                        add_edge(
+                            str(row.get("src_id") or ""),
+                            str(row.get("tgt_id") or ""),
+                            "GRAPHRAG_RELATES_TO",
+                            reason="selected_relationship",
+                            score=_core_reason_score("selected_relationship") + (_to_float_or_none(row.get("weight")) or 0.0),
+                            evidence={
+                                "note": "Neo4j relationship between selected core concepts",
+                                "description": str(row.get("description") or "")[:300],
+                            },
+                        )
+            finally:
+                driver.close()
+        except Exception:
+            pass
+
+    sorted_nodes = sorted(nodes.values(), key=lambda n: float(n.get("score") or 0), reverse=True)[:max_nodes]
+    node_ids = {str(n["id"]) for n in sorted_nodes}
+    sorted_edges = sorted(edges_by_key.values(), key=lambda e: float(e.get("score") or 0), reverse=True)
+    sorted_edges = [e for e in sorted_edges if str(e.get("from")) in node_ids and str(e.get("to")) in node_ids][:max_edges]
+    connected_ids = {str(e.get("from")) for e in sorted_edges} | {str(e.get("to")) for e in sorted_edges}
+    if sorted_edges:
+        sorted_nodes = [
+            n for n in sorted_nodes
+            if str(n.get("id")) in connected_ids or n.get("reason") in {"answer_location", "selected_visual_asset"}
+        ]
+    return {
+        "mode": source_mode,
+        "nodes": sorted_nodes,
+        "edges": sorted_edges,
+        "node_count": len(sorted_nodes),
+        "edge_count": len(sorted_edges),
+    }
+
+
 def _graph_from_structural_rows(rows: list[dict[str, Any]]) -> dict:
     """LLM Cypher 결과가 다양해 완전한 그래프는 어렵고, 노드 id 문자열만 수집."""
     nodes: dict[str, dict] = {}
@@ -899,9 +1343,150 @@ def _evidence_to_retrieved_chunks(stem: str, items: list[EvidenceItem]) -> list[
                 start_sec=it.start_sec,
                 end_sec=it.end_sec,
                 linked_node_id=it.linked_node_id,
+                score_breakdown=it.score_breakdown,
             )
         )
     return out
+
+
+def _chunk_needs_segment_label(chunk: RetrievedChunk) -> bool:
+    if chunk.start_sec is None:
+        return False
+    text = (chunk.text or "").strip()
+    if not text:
+        return True
+    compact = re.sub(r"\s+", "", text)
+    if text.startswith("{") or text.startswith("["):
+        return True
+    return (
+        text.startswith("슬라이드")
+        or "슬라이드강조점수" in compact
+        or text.startswith("시각자료(")
+        or chunk.chunk_type in {"slide", "slide_text", "slide_concept", "visual_asset", "lance_strict", "lance_soft"}
+    )
+
+
+def _hydrate_chunk_segment_labels(
+    stem: str,
+    chunks: list[RetrievedChunk],
+    structured: dict[str, list[dict[str, Any]]],
+) -> list[RetrievedChunk]:
+    segments: list[dict[str, Any]] = []
+    for row in structured.get("segments", []):
+        text = str(row.get("segment_text") or "").strip()
+        start = _to_float_or_none(row.get("start"))
+        if not text or start is None:
+            continue
+        segments.append(
+            {
+                "text": text,
+                "start": start,
+                "end": _to_float_or_none(row.get("end")),
+                "slide_number": _to_int_or_none(row.get("slide_number")),
+                "segment_id": str(row.get("segment_id") or ""),
+            }
+        )
+    if not segments:
+        segments = []
+
+    def nearest_segment(chunk: RetrievedChunk) -> Optional[dict[str, Any]]:
+        if chunk.start_sec is None:
+            return None
+        try:
+            chunk_slide = int(chunk.slide_number) if chunk.slide_number is not None else None
+        except (TypeError, ValueError):
+            chunk_slide = None
+        candidates = segments
+        if chunk_slide is not None:
+            slide_candidates = [s for s in segments if s.get("slide_number") == chunk_slide]
+            if slide_candidates:
+                candidates = slide_candidates
+        best = None
+        best_gap = float("inf")
+        for seg in candidates:
+            start = float(seg["start"])
+            end = seg.get("end")
+            if end is not None and start <= float(chunk.start_sec) <= float(end):
+                gap = 0.0
+            else:
+                gap = abs(start - float(chunk.start_sec))
+            if gap < best_gap:
+                best_gap = gap
+                best = seg
+        return best if best is not None and best_gap <= 45.0 else None
+
+    def neo4j_nearest_segment(chunk: RetrievedChunk) -> Optional[dict[str, Any]]:
+        if chunk.start_sec is None:
+            return None
+        try:
+            driver = _neo4j_driver()
+            try:
+                with driver.session() as session:
+                    row = session.run(
+                        """
+                        MATCH (seg:Segment {stem: $stem})
+                        WHERE seg.start IS NOT NULL
+                          AND abs(toFloat(seg.start) - $target) <= 75.0
+                        OPTIONAL MATCH (ctx:Context {stem: $stem})-[:HAS_SEGMENT]->(seg)
+                        OPTIONAL MATCH (scene:Scene {stem: $stem})-[:HAS_CONTEXT]->(ctx)
+                        OPTIONAL MATCH (scene)-[:USES_SLIDE]->(slide:Slide {stem: $stem})
+                        WITH seg, slide,
+                             CASE
+                               WHEN $slide_number IS NOT NULL
+                                    AND slide.slide_number IS NOT NULL
+                                    AND toInteger(slide.slide_number) = $slide_number
+                               THEN 0 ELSE 1
+                             END AS slide_penalty,
+                             abs(toFloat(seg.start) - $target) AS gap
+                        RETURN coalesce(seg.text, '') AS text,
+                               seg.start AS start,
+                               seg.end AS end,
+                               coalesce(seg.id, '') AS segment_id,
+                               slide.slide_number AS slide_number
+                        ORDER BY slide_penalty ASC, gap ASC
+                        LIMIT 1
+                        """,
+                        stem=stem,
+                        target=float(chunk.start_sec),
+                        slide_number=_to_int_or_none(chunk.slide_number),
+                    ).single()
+                    if not row:
+                        return None
+                    text = str(row.get("text") or "").strip()
+                    start = _to_float_or_none(row.get("start"))
+                    if not text or start is None:
+                        return None
+                    return {
+                        "text": text,
+                        "start": start,
+                        "end": _to_float_or_none(row.get("end")),
+                        "slide_number": _to_int_or_none(row.get("slide_number")),
+                        "segment_id": str(row.get("segment_id") or ""),
+                    }
+            finally:
+                driver.close()
+        except Exception:
+            return None
+
+    hydrated: list[RetrievedChunk] = []
+    for chunk in chunks:
+        if not _chunk_needs_segment_label(chunk):
+            hydrated.append(chunk)
+            continue
+        seg = nearest_segment(chunk) or neo4j_nearest_segment(chunk)
+        if not seg:
+            hydrated.append(chunk)
+            continue
+        data = chunk.model_dump() if hasattr(chunk, "model_dump") else chunk.dict()
+        data["text"] = seg["text"]
+        data["chunk_type"] = "segment"
+        data["chunk_id"] = seg.get("segment_id") or data.get("chunk_id", "")
+        data["start_sec"] = seg["start"]
+        data["end_sec"] = seg.get("end") if seg.get("end") is not None else chunk.end_sec
+        if seg.get("slide_number") is not None:
+            data["slide_number"] = seg["slide_number"]
+        hydrated.append(RetrievedChunk(**data))
+    return hydrated
 
 
 def _structural_rows_to_retrieved_chunks(stem: str, rows: list[dict[str, Any]]) -> list[RetrievedChunk]:
@@ -1014,6 +1599,11 @@ def _is_location_question(question: str) -> bool:
 def _is_definition_question(question: str) -> bool:
     q = question.replace(" ", "")
     return any(k in q for k in ("뭐야", "무엇", "정의", "개념", "뜻이", "의미"))
+
+
+def _is_comparison_question(question: str) -> bool:
+    q = question.replace(" ", "").lower()
+    return any(k in q for k in ("차이", "비교", "다른점", "반면", "vs", "versus"))
 
 
 def _is_core_content_question(question: str) -> bool:
@@ -1132,7 +1722,6 @@ def _is_low_signal_slide_item(item: EvidenceItem) -> bool:
 
 def _focus_keywords_for_location(question: str) -> list[str]:
     drop = {
-        "운영체제",
         "설명",
         "설명하는",
         "구간",
@@ -1390,6 +1979,29 @@ def _related_slides_from_evidence(
                     "_order": order_by_slide.get(int(it.slide_number), 10**9),
                 }
             )
+        elif it.kind == "graphrag_entity":
+            row = it.row or {}
+            item_score = score if score is not None else _overview_related_score(it)
+            for idx, slide_number in enumerate(row.get("slide_numbers") or []):
+                try:
+                    sn = int(slide_number)
+                except (TypeError, ValueError):
+                    continue
+                if visual_slides and sn not in visual_slides:
+                    continue
+                start_sec = None
+                scene_starts = row.get("scene_start_secs") or []
+                if idx < len(scene_starts):
+                    start_sec = scene_starts[idx]
+                scored.append(
+                    {
+                        "slide_number": sn,
+                        "start_sec": start_sec,
+                        "score": item_score,
+                        "label": f"슬라이드 {sn}",
+                        "_order": order_by_slide.get(sn, 10**9),
+                    }
+                )
 
     for c in chunks:
         try:
@@ -1446,7 +2058,7 @@ def _related_slides_from_evidence(
 
 
 def _topic_keywords_for_related(question: str) -> list[str]:
-    generic = {
+    instruction_terms = {
         "요약",
         "요약해서",
         "정리",
@@ -1465,9 +2077,10 @@ def _topic_keywords_for_related(question: str) -> list[str]:
         "무엇",
     }
     out: list[str] = []
+    compact_q = question.replace(" ", "").lower()
     for kw in extract_keywords_from_question(question):
         k = kw.strip().lower()
-        if not k or k in generic:
+        if not k or k in instruction_terms:
             continue
         if k.startswith("실행"):
             k = "실행"
@@ -1477,8 +2090,12 @@ def _topic_keywords_for_related(question: str) -> list[str]:
             k = "적재"
         if k not in out:
             out.append(k)
-    if len(out) > 1 and "운영체제" in out:
-        out = [k for k in out if k != "운영체제"]
+    if "응용" in compact_q and "소프트웨어" in compact_q:
+        for k in ("응용소프트웨어", "응용 소프트웨어"):
+            if k not in out:
+                out.append(k)
+    if _is_comparison_question(question) and "운영체제" in compact_q and "운영체제" not in out:
+        out.insert(0, "운영체제")
     return out[:8]
 
 
@@ -1552,6 +2169,12 @@ def _filter_chunks_to_topic(question: str, chunks: list[RetrievedChunk]) -> list
         return chunks
 
     filtered = [c for c in chunks if _chunk_keyword_hits(c.text or "", keywords) > 0]
+    if _is_comparison_question(question) and filtered:
+        max_hits = max(_chunk_keyword_hits(c.text or "", keywords) for c in filtered)
+        if max_hits >= 2:
+            focused = [c for c in filtered if _chunk_keyword_hits(c.text or "", keywords) >= 2]
+            if focused:
+                return focused
     return filtered or chunks
 
 
@@ -1606,6 +2229,10 @@ def _related_slides_from_chunks_for_topic(
     max_hits = max(int(r.get("_hits") or 0) for r in candidates)
     if keywords and max_hits > 0:
         candidates = [r for r in candidates if int(r.get("_hits") or 0) > 0]
+    if _is_comparison_question(question) and max_hits >= 2:
+        focused = [r for r in candidates if int(r.get("_hits") or 0) >= 2]
+        if focused:
+            candidates = focused
 
     candidates.sort(
         key=lambda r: (
@@ -1726,6 +2353,138 @@ def _filter_related_slides_to_answer(
         if int(row.get("slide_number") or -1) == target
     ]
     return filtered or related_slides
+
+
+def _ensure_visual_asset_related_slides(
+    related_slides: list[dict],
+    source_items: list[EvidenceItem],
+    question: str,
+) -> list[dict]:
+    if not _is_visual_question(question):
+        return related_slides
+    out = list(related_slides or [])
+    seen = {
+        int(row["slide_number"]) for row in out
+        if row.get("slide_number") is not None and _to_int_or_none(row.get("slide_number")) is not None
+    }
+    visual_rows: list[dict] = []
+    for idx, it in enumerate(source_items):
+        if it.kind != "visual_asset" or it.slide_number is None:
+            continue
+        try:
+            slide_number = int(it.slide_number)
+        except (TypeError, ValueError):
+            continue
+        if slide_number in seen:
+            continue
+        seen.add(slide_number)
+        visual_rows.append(
+            {
+                "slide_number": slide_number,
+                "start_sec": it.start_sec,
+                "score": it.retrieval_score if it.retrieval_score is not None else it.lance_score,
+                "label": f"슬라이드 {slide_number}",
+                "_visual_order": idx,
+            }
+        )
+    if not visual_rows:
+        return related_slides
+    visual_rows.sort(key=lambda row: (row.get("_visual_order", 10**9), int(row.get("slide_number") or 10**9)))
+    merged = out + visual_rows
+    for row in merged:
+        row.pop("_visual_order", None)
+    return merged[:6]
+
+
+def _align_chunks_to_related_slides(
+    chunks: list[RetrievedChunk],
+    related_slides: list[dict],
+    question: str,
+) -> list[RetrievedChunk]:
+    if not chunks or not related_slides:
+        return chunks
+    slide_numbers = {
+        int(row["slide_number"]) for row in related_slides
+        if row.get("slide_number") is not None and _to_int_or_none(row.get("slide_number")) is not None
+    }
+    if not slide_numbers:
+        return chunks
+
+    def chunk_slide(c: RetrievedChunk) -> Optional[int]:
+        try:
+            return int(c.slide_number) if c.slide_number is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    aligned = [c for c in chunks if chunk_slide(c) in slide_numbers]
+    if not aligned:
+        return chunks
+    if _is_comparison_question(question) or len(slide_numbers) <= 3:
+        return aligned
+    return chunks
+
+
+def _prune_related_slides(
+    related_slides: list[dict],
+    chunks: list[RetrievedChunk],
+    question: str,
+    max_items: int = 2,
+) -> list[dict]:
+    if not related_slides:
+        return related_slides
+    if _is_lecture_overview_question(question) or _is_visual_list_question(question):
+        return related_slides
+
+    keywords = _topic_keywords_for_related(question)
+    chunk_by_slide: dict[int, list[RetrievedChunk]] = {}
+    for c in chunks:
+        if c.slide_number is None:
+            continue
+        try:
+            sn = int(c.slide_number)
+        except (TypeError, ValueError):
+            continue
+        chunk_by_slide.setdefault(sn, []).append(c)
+
+    scored: list[tuple[float, dict]] = []
+    for idx, row in enumerate(related_slides):
+        try:
+            sn = int(row.get("slide_number"))
+        except (TypeError, ValueError):
+            continue
+        row_chunks = chunk_by_slide.get(sn, [])
+        chunk_text = " ".join(c.text or "" for c in row_chunks)
+        if _is_title_or_intro_text(chunk_text or str(row.get("label") or "")):
+            continue
+        keyword_hits = _chunk_keyword_hits(chunk_text, keywords)
+        chunk_score = max((_to_float_or_none(c.score) or 0.0) for c in row_chunks) if row_chunks else 0.0
+        base = _to_float_or_none(row.get("score")) or 0.0
+        has_timed_chunk = any(c.start_sec is not None for c in row_chunks)
+        score = base + chunk_score + 0.45 * keyword_hits + (0.35 if has_timed_chunk else 0.0) - 0.03 * idx
+        scored.append((score, row))
+
+    if not scored:
+        return related_slides[:max_items]
+
+    if keywords:
+        max_hits = max(
+            _chunk_keyword_hits(" ".join(c.text or "" for c in chunk_by_slide.get(int(row.get("slide_number")), [])), keywords)
+            for _, row in scored
+            if row.get("slide_number") is not None
+        )
+        if max_hits > 0:
+            focused = [
+                (score, row) for score, row in scored
+                if _chunk_keyword_hits(
+                    " ".join(c.text or "" for c in chunk_by_slide.get(int(row.get("slide_number")), [])),
+                    keywords,
+                ) > 0
+            ]
+            if focused:
+                scored = focused
+
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [row for _, row in scored[:max_items]]
 
 
 def _extract_keywords(question: str) -> list[str]:
@@ -1879,6 +2638,7 @@ def _empty_query_response() -> QueryResponse:
         answer="제공된 그래프 근거만으로는 답변하기 어렵습니다. 질문을 더 구체화하거나 강의 그래프 생성/적재 상태를 확인해주세요.",
         timestamps=[],
         graph={"nodes": [], "edges": []},
+        core_graph={"nodes": [], "edges": []},
         retrieved_chunks=[],
         related_slides=[],
         source_mode="default",
@@ -2006,9 +2766,14 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         and not _is_core_content_question(question)
         and not _is_emphasis_overview_question(question)
     ):
-        related_slides = _related_slides_from_chunks_for_topic(question, retrieved_chunks, max_items=4)
+        related_slides = _related_slides_from_evidence(source_items, [], max_items=4, filter_to_visual_slides=False)
         if not related_slides:
-            related_slides = _related_slides_from_evidence(source_items, retrieved_chunks, max_items=4)
+            related_slides = _related_slides_from_chunks_for_topic(question, retrieved_chunks, max_items=4)
+        elif _is_comparison_question(question):
+            focused = _related_slides_from_chunks_for_topic(question, retrieved_chunks, max_items=4)
+            focused_slides = {int(r.get("slide_number")) for r in focused if r.get("slide_number") is not None}
+            if focused_slides:
+                related_slides = [r for r in related_slides if int(r.get("slide_number") or -1) in focused_slides] or focused
     else:
         related_slides = _related_slides_from_evidence(
             source_items,
@@ -2023,6 +2788,35 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
             overview_rank=_is_lecture_overview_question(question) or _is_core_content_question(question) or _is_emphasis_overview_question(question),
         )
     related_slides = _filter_related_slides_to_answer(related_slides, answer, question)
+    related_slides = _ensure_visual_asset_related_slides(related_slides, source_items, question)
+    retrieved_chunks = _align_chunks_to_related_slides(retrieved_chunks, related_slides, question)
+    related_slides = _prune_related_slides(related_slides, retrieved_chunks, question)
+    related_slides = _ensure_visual_asset_related_slides(related_slides, source_items, question)
+    retrieved_chunks = _align_chunks_to_related_slides(retrieved_chunks, related_slides, question)
+    if q_type == "content":
+        retrieved_chunks = _hydrate_chunk_segment_labels(stem, retrieved_chunks, structured)
+    core_source_items = list(source_items)
+    if q_type == "content" and source_mode in {"visual_location", "scene_location", "overview"}:
+        seen_uids = {it.uid for it in core_source_items}
+        for it in selected_items:
+            if it.uid in seen_uids or it.kind not in {"graphrag_entity", "graphrag_relationship"}:
+                continue
+            core_source_items.append(it)
+            seen_uids.add(it.uid)
+            if len([x for x in core_source_items if x.kind in {"graphrag_entity", "graphrag_relationship"}]) >= 8:
+                break
+    core_graph = (
+        {"nodes": [], "edges": []}
+        if _is_refusal_answer(answer)
+        else _build_core_graph(
+            stem=stem,
+            graph=graph,
+            source_items=core_source_items if q_type == "content" else [],
+            source_mode=source_mode,
+            related_slides=related_slides,
+            retrieved_chunks=retrieved_chunks,
+        )
+    )
 
     return QueryResponse(
         answer=answer,
@@ -2032,6 +2826,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
             else (_chunks_to_timestamps(retrieved_chunks) or ([] if _is_location_question(question) else timestamps))
         ),
         graph=graph,
+        core_graph=core_graph,
         retrieved_chunks=retrieved_chunks,
         related_slides=related_slides,
         source_mode=source_mode,
