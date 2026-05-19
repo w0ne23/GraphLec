@@ -330,6 +330,11 @@
 .gv-network { width: 100%; height: 100%; background: #fafbfc; }
 .gv-status { padding: 40px; text-align: center; color: var(--t3); font-size: 13px; }
 .gv-error { color: var(--red); }
+.gv-tooltip { position: absolute; z-index: 20; max-width: min(280px, calc(100% - 28px)); max-height: 140px; overflow: auto; padding: 7px 9px; border: 1px solid var(--blue-br); border-radius: 6px; background: rgba(255, 255, 255, .98); box-shadow: 0 8px 24px rgba(15, 23, 42, .14); color: var(--t2); font-size: 11px; line-height: 1.45; white-space: pre-wrap; pointer-events: none; }
+.gv-tooltip-title { margin-bottom: 3px; font-size: 12px; font-weight: 700; color: var(--t1); }
+.gv-edge-info { position: absolute; left: 8px; right: 8px; bottom: 8px; z-index: 15; display: flex; align-items: center; gap: 6px; min-width: 0; padding: 6px 8px; border: 1px solid var(--b1); border-radius: 6px; background: rgba(255, 255, 255, .96); box-shadow: 0 6px 18px rgba(15, 23, 42, .10); color: var(--t2); font-size: 11px; }
+.gv-edge-info strong { color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gv-edge-info span { flex-shrink: 0; padding: 1px 6px; border-radius: 999px; background: var(--blue-bg); color: var(--blue); font-weight: 700; }
 
 /* LectureInfoModal (lim-*) */
 .lim-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 300; display: flex; align-items: center; justify-content: center; }

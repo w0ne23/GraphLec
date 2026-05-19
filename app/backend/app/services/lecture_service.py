@@ -677,11 +677,17 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
             label = _str_cell(row.get("label")) or nid
             props = _str_cell(row.get("properties_json")) or "{}"
             try:
-                ntype = json.loads(props).get("type", "node")
+                props_dict = json.loads(props)
+                ntype = props_dict.get("type") or label or "node"
             except:
-                ntype = "node"
+                props_dict = {}
+                ntype = label or "node"
             nodes_out.append({
                 "id": nid, "label": label[:120], "title": props[:800],
+                "name": _str_cell(props_dict.get("name")) or _str_cell(props_dict.get("title")),
+                "text": _str_cell(props_dict.get("text")) or _str_cell(props_dict.get("target_content")),
+                "asset_type": _str_cell(props_dict.get("asset_type")),
+                "description": _str_cell(props_dict.get("description")),
                 "type": ntype, "color": _hex_color(label),
             })
 

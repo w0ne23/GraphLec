@@ -4,6 +4,90 @@ import { Network } from 'vis-network'
 const NODE_LIMIT = 12
 const EDGE_LIMIT = 16
 const STRUCTURE_VISIBLE_TYPES = new Set(['Slide', 'Scene', 'VisualAsset'])
+const GRAPH_COLORS = {
+  GraphRAGEntity: '#FF6B6B',
+  GraphRAGCommunity: '#FF9F43',
+  Concept: '#FF6B6B',
+  Slide: '#4ECDC4',
+  Scene: '#A29BFE',
+  Context: '#81ECEC',
+  Segment: '#7ED957',
+  VisualAsset: '#F59E0B',
+  AnnotationEmphasis: '#E879F9',
+  Video: '#60A5FA',
+  Lecture: '#60A5FA',
+}
+const STRUCTURE_TYPES = new Set(['Slide', 'Scene', 'Context', 'Segment'])
+const GENERIC_CONCEPT_LABELS = new Set(['concept', 'entity', 'node', 'graphragentity', 'graphrag entity'])
+
+function nodeProps(node) {
+  if (node?.props && typeof node.props === 'object') return node.props
+  if (node?.properties && typeof node.properties === 'object') return node.properties
+  const raw = typeof node?.title === 'string' ? node.title.trim() : ''
+  if (!raw.startsWith('{')) return {}
+  try {
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function normalizedType(node) {
+  const props = nodeProps(node)
+  const id = String(node?.id || '').toLowerCase()
+  const label = String(node?.label || '').toLowerCase()
+  const raw = String(node?.type || props.type || '').replace(/[\s_-]+/g, '').toLowerCase()
+  if (raw === 'slide') return 'Slide'
+  if (raw === 'scene') return 'Scene'
+  if (raw === 'context' || raw === 'ctx') return 'Context'
+  if (raw === 'segment') return 'Segment'
+  if (raw === 'visualasset' || raw === 'visual') return 'VisualAsset'
+  if (raw === 'video' || raw === 'lecture' || raw === 'lecturevideo') return 'Video'
+  if (raw === 'graphragentity' || raw === 'concept' || raw === 'conceptgraph' || raw === 'entity') return 'GraphRAGEntity'
+  if (raw === 'graphragcommunity' || raw === 'community') return 'GraphRAGCommunity'
+  if (raw === 'annotation' || raw === 'annotationemphasis' || raw === 'annot') return 'AnnotationEmphasis'
+  if (/slide[_/-]?\d+/.test(id) || /^s\d+$/.test(label)) return 'Slide'
+  if (/scene[_/-]?\d+/.test(id)) return 'Scene'
+  if (/(context|ctx)[_/-]?\d+/.test(id)) return 'Context'
+  if (/segment[_/-]?\d+/.test(id)) return 'Segment'
+  if (/visual/.test(id) || label === 'visualasset') return 'VisualAsset'
+  if (/lecture|video/.test(id) || label === 'video' || label === 'lecture') return 'Video'
+  if (/annotation|annot/.test(id) || /annotation|annot/.test(label)) return 'AnnotationEmphasis'
+  if (/concept|graphrag/.test(id) || /concept|entity/.test(label)) return 'GraphRAGEntity'
+  return node?.type || 'node'
+}
+
+function graphColor(node) {
+  const type = normalizedType(node)
+  if (GRAPH_COLORS[type]) return GRAPH_COLORS[type]
+  return type === 'node' || type === 'orphan' ? '#94A3B8' : GRAPH_COLORS.GraphRAGEntity
+}
+
+function conceptLabel(node) {
+  const props = nodeProps(node)
+  const name = String(node?.name || props.name || props.title || props.target_content || '').trim()
+  if (name) return name.slice(0, 34)
+  const label = String(node?.label || '').trim()
+  const title = String(props.title || '').trim()
+  const id = String(node?.id || '').trim()
+  if (label && !GENERIC_CONCEPT_LABELS.has(label.toLowerCase())) return label.slice(0, 34)
+  if (title && !GENERIC_CONCEPT_LABELS.has(title.toLowerCase())) return title.slice(0, 34)
+  return id.slice(0, 34)
+}
+
+function visualAssetLabel(node, fallback) {
+  const props = nodeProps(node)
+  const slideNo = props.slide_number ?? String(node?.id || '').match(/slide[_/-]?0*(\d+)/i)?.[1]
+  return slideNo != null ? `visualAsset${Number(slideNo)}` : fallback
+}
+
+function firstSentence(text) {
+  const compact = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!compact) return ''
+  const match = compact.match(/^(.+?[.!?。！？]|.+?(?:다|요)\.)\s+/)
+  return (match?.[1] || compact).slice(0, 180)
+}
 
 function edgeLabel(edge) {
   return String(edge.label || edge.rel_type || '')
@@ -71,7 +155,7 @@ function compactGraph(graph, options = {}) {
 
   function nodePriority(node) {
     const id = String(node.id)
-    const type = node.type
+    const type = normalizedType(node)
     const relatedSlide = isRelatedSlide(id)
     if (sourceMode === 'visual_location') {
       if (type === 'Slide' && relatedSlide) return 120
@@ -103,8 +187,8 @@ function compactGraph(graph, options = {}) {
 
   function edgePriority(edge) {
     const label = edgeLabel(edge)
-    const fromType = nodesById.get(edge._from)?.type
-    const toType = nodesById.get(edge._to)?.type
+    const fromType = normalizedType(nodesById.get(edge._from))
+    const toType = normalizedType(nodesById.get(edge._to))
     if (sourceMode === 'visual_location') {
       if (label === 'HAS_VISUAL_ASSET' && connectedToRelatedSlide(edge)) return 130
       if (label === 'USES_SLIDE' && connectedToRelatedSlide(edge)) return 120
@@ -157,7 +241,8 @@ function compactGraph(graph, options = {}) {
 
   function nodeAllowed(node) {
     if (sourceMode !== 'visual_location') return true
-    return STRUCTURE_VISIBLE_TYPES.has(node.type) || node.type === 'GraphRAGEntity'
+    const type = normalizedType(node)
+    return STRUCTURE_VISIBLE_TYPES.has(type) || type === 'GraphRAGEntity'
   }
 
   const selectedIds = new Set()
@@ -236,20 +321,25 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
     graphData.nodes.forEach(node => {
       const id = String(node.id)
       const label = String(node.label || '')
-      if (node.type === 'Slide') {
+      const type = normalizedType(node)
+      if (type === 'Slide') {
         const slideNo = label.match(/^S(\d+)$/i)?.[1] || id.match(/slide[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, slideNo ? `slide${Number(slideNo)}` : nextLabel('slide'))
-      } else if (node.type === 'Scene') {
+      } else if (type === 'VisualAsset') {
+        labels.set(id, visualAssetLabel(node, nextLabel('visualAsset')))
+      } else if (type === 'AnnotationEmphasis') {
+        labels.set(id, id.slice(0, 34))
+      } else if (type === 'Scene') {
         const sceneNo = id.match(/scene[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, sceneNo ? `scene${Number(sceneNo)}` : nextLabel('scene'))
-      } else if (node.type === 'Context') {
+      } else if (type === 'Context') {
         const contextNo = id.match(/context[_/-]?0*(\d+)/i)?.[1] || id.match(/ctx[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, contextNo ? `context${Number(contextNo)}` : nextLabel('context'))
-      } else if (node.type === 'Segment') {
+      } else if (type === 'Segment') {
         const segmentNo = id.match(/segment[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, segmentNo ? `segment${Number(segmentNo)}` : nextLabel('segment'))
       } else {
-        labels.set(id, String(node.label || node.title || node.id).slice(0, 34))
+        labels.set(id, conceptLabel(node))
       }
     })
 
@@ -257,12 +347,20 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
   }, [graphData])
 
   function nodeDetail(node) {
-    const parts = []
-    if (node.type) parts.push(node.type)
-    const title = String(node.title || '').trim()
-    if (title && title !== node.label && title !== node.id) parts.push(title)
-    if (!title && node.label) parts.push(String(node.label))
-    return parts.join('\n')
+    const type = normalizedType(node)
+    const props = nodeProps(node)
+    if (type === 'VisualAsset') {
+      const assetType = String(node?.asset_type || props.asset_type || '').trim()
+      return assetType ? `asset_type: ${assetType}` : 'asset_type: visual'
+    }
+    if (type === 'Segment' || type === 'Context') {
+      const text = firstSentence(node?.text || props.text)
+      return text
+    }
+    if (type === 'AnnotationEmphasis') {
+      return `type: ${String(node?.type || props.type || type).trim()}`
+    }
+    return ''
   }
 
   function relationLabel(edge) {
@@ -278,19 +376,25 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
     const nodesById = new Map(graphData.nodes.map(node => [String(node.id), node]))
     const edgeInfoById = new Map()
 
-    const nodes = graphData.nodes.map(node => ({
-      id: String(node.id),
-      label: displayById.get(String(node.id)),
-      title: nodeDetail(node),
-      shape: 'dot',
-      size: node.type === 'GraphRAGEntity' ? 18 : 14,
-      color: {
-        background: node.color || '#64748b',
-        border: '#334155',
-        highlight: { background: node.color || '#64748b', border: '#0f172a' },
-      },
-      font: { color: '#111827', size: 11 },
-    }))
+    const nodes = graphData.nodes.map(node => {
+      const color = graphColor(node)
+      const type = normalizedType(node)
+      const isConcept = type === 'GraphRAGEntity' || type === 'GraphRAGCommunity'
+      const isVisual = type === 'VisualAsset'
+      return {
+        id: String(node.id),
+        label: displayById.get(String(node.id)),
+        title: nodeDetail(node),
+        shape: 'dot',
+        size: isConcept ? 18 : (isVisual ? 16 : 14),
+        color: {
+          background: color,
+          border: '#334155',
+          highlight: { background: color, border: '#0f172a' },
+        },
+        font: { color: '#111827', size: 11 },
+      }
+    })
 
     const edges = graphData.edges.map((edge, idx) => {
       const edgeId = `qa-edge-${idx}`
@@ -321,6 +425,7 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
         font: { size: 0 },
         smooth: { type: 'dynamic' },
         width: 1.2,
+        arrows: { to: { enabled: true, scaleFactor: 0.45 } },
         selectionWidth: 2.5,
       },
       physics: {
@@ -344,11 +449,13 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
     networkRef.current.on('hoverNode', params => {
       const node = nodesById.get(String(params.node))
       if (!node) return
+      const body = nodeDetail(node)
+      if (!body) return
       setHoverInfo({
         x: params.pointer.DOM.x,
         y: params.pointer.DOM.y,
         label: displayById.get(String(params.node)) || String(params.node),
-        body: nodeDetail(node),
+        body,
       })
     })
     networkRef.current.on('blurNode', () => setHoverInfo(null))
