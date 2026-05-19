@@ -44,6 +44,7 @@ export default function ChatPanel({
   }
 
   function parseTimestamp(value) {
+    if (Number.isFinite(Number(value))) return Number(value)
     if (value == null) return null
     const parts = String(value).split(':').map(v => Number(v))
     if (parts.some(Number.isNaN)) return null
@@ -65,9 +66,9 @@ export default function ChatPanel({
   }
 
   function refsFromResponse(res) {
+    if (['visual_location', 'scene_location', 'overview'].includes(res.source_mode)) return []
     const chunks = Array.isArray(res.retrieved_chunks) ? res.retrieved_chunks : []
-    const rawRefs = chunks.length > 0
-      ? chunks
+    const chunkRefs = chunks
         .filter(chunk => chunk.start_sec != null && chunk.chunk_type !== 'slide')
         .map(chunk => ({
           timestamp: formatTime(chunk.start_sec),
@@ -76,6 +77,8 @@ export default function ChatPanel({
           label: sourceLabel(chunk.text || chunk.chunk_type),
           text: chunk.text || '',
         }))
+    const rawRefs = chunkRefs.length > 0
+      ? chunkRefs
       : (res.timestamps || []).map(t => ({
           timestamp: formatTime(t.start),
           startSec: t.start,
@@ -157,7 +160,7 @@ export default function ChatPanel({
       let bestSec = -1
       scenes.forEach((scene, idx) => {
         if (ref.slideNumber != null && Number(scene.slide_number) !== Number(ref.slideNumber)) return
-        const sec = parseTimestamp(scene.timestamp)
+        const sec = parseTimestamp(scene.timestamp_sec ?? scene.timestamp)
         if (sec == null) return
         if (sec <= targetSec && sec > bestSec) {
           bestSec = sec
@@ -184,7 +187,55 @@ export default function ChatPanel({
     if (idx < 0) return null
     const scene = idx >= 0 ? lecture?.scenes?.[idx] : null
     const n = scene?.scene_number ?? idx + 1
+    if (ref.slideNumber != null) return `슬라이드 ${ref.slideNumber} · Scene${n}`
     return `Scene${n}`
+  }
+
+  function renderAnswerContent(content) {
+    const lines = String(content || '').split('\n')
+    const nodes = []
+    let i = 0
+
+    const isTableLine = line => /^\s*\|.*\|\s*$/.test(line)
+    const isSeparatorLine = line => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+
+    while (i < lines.length) {
+      if (isTableLine(lines[i]) && i + 1 < lines.length && isSeparatorLine(lines[i + 1])) {
+        const header = lines[i].trim().slice(1, -1).split('|').map(cell => cell.trim())
+        i += 2
+        const rows = []
+        while (i < lines.length && isTableLine(lines[i])) {
+          rows.push(lines[i].trim().slice(1, -1).split('|').map(cell => cell.trim()))
+          i += 1
+        }
+        nodes.push(
+          <div key={`tbl-${nodes.length}`} className="chat-table-wrap">
+            <table className="chat-answer-table">
+              <thead>
+                <tr>{header.map((cell, idx) => <th key={idx}>{cell}</th>)}</tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rIdx) => (
+                  <tr key={rIdx}>{header.map((_, cIdx) => <td key={cIdx}>{row[cIdx] || ''}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+        continue
+      }
+
+      if (!lines[i].trim()) {
+        nodes.push(<br key={`br-${nodes.length}`} />)
+        i += 1
+        continue
+      }
+
+      nodes.push(<div key={`ln-${nodes.length}`}>{lines[i]}</div>)
+      i += 1
+    }
+
+    return nodes
   }
 
   async function send() {
@@ -207,6 +258,7 @@ export default function ChatPanel({
         content: res.answer || '답변을 생성하지 못했습니다.',
         refs: refsFromResponse(res),
         scenes: scenesFromSlideResponse(res),
+        sourceMode: res.source_mode || 'default',
       }])
     } catch (e) {
       setMessages(prev => [...prev, {
@@ -236,8 +288,8 @@ export default function ChatPanel({
           ) : (
             <div key={msgIdx} className="chat-msg-ai">
               <div className="chat-bubble-ai">
-                <div className="chat-answer-text">{msg.content}</div>
-                {msg.refs?.length > 0 && (
+                <div className="chat-answer-text">{renderAnswerContent(msg.content)}</div>
+                {!['visual_location', 'scene_location'].includes(msg.sourceMode) && msg.refs?.length > 0 && (
                   <div className="chat-refs-container">
                     <div className="chat-refs-header">영상 구간</div>
                     
@@ -293,7 +345,13 @@ export default function ChatPanel({
                 )}
                 {msg.scenes?.length > 0 && (
                   <div className="chat-refs-container">
-                    <div className="chat-refs-header">관련 장면</div>
+                    <div className="chat-refs-header">
+                      {msg.sourceMode === 'visual_location'
+                        ? '확인 위치'
+                        : msg.sourceMode === 'overview'
+                          ? '관련 슬라이드'
+                          : '관련 장면'}
+                    </div>
                     <div className="chat-refs-list">
                       {msg.scenes.map((scene, i) => {
                         const idx = findRefSceneIndex(scene)
@@ -302,7 +360,7 @@ export default function ChatPanel({
                         return (
                           <button key={i} className="chat-scene-btn"
                             title={`슬라이드 ${scene.slideNumber} 관련 장면`}
-                            onClick={() => onJumpToScene?.(idx, null, { autoPlay: false, offsetSec: 0.4 })}
+                            onClick={() => onJumpToScene?.(idx, null, { autoPlay: false, offsetSec: 0.7 })}
                           >
                             {label}
                           </button>

@@ -100,6 +100,32 @@ T1_EXTRACTION_PROMPT = """
       "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
       "description": "이 시각자료 하나가 전달하는 내용",
       "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "visual_elements": [
+        {
+          "type": "arrow" | "box" | "icon" | "icon_group" | "line" | "layer" | "callout" | "label" | "text_block" | "table_cell" | "axis" | "marker" | "other",
+          "label": "요소에 보이는 텍스트/이름",
+          "role": "요소가 시각자료 안에서 맡는 역할",
+          "meaning": "요소가 전달하는 의미",
+          "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        }
+      ],
+      "visual_relations": [
+        {
+          "source": "관계 시작 요소",
+          "target": "관계 대상 요소",
+          "relation": "관계 의미",
+          "visual_cue": "arrow" | "line" | "position" | "containment" | "color" | "alignment" | "other",
+          "direction": "bidirectional" | "source_to_target" | "target_to_source" | "none",
+          "meaning": "이 시각적 관계가 설명하는 내용"
+        }
+      ],
+      "layout": {
+        "top": ["상단 요소"],
+        "middle": ["중앙 요소"],
+        "bottom": ["하단 요소"],
+        "left": ["왼쪽 요소"],
+        "right": ["오른쪽 요소"]
+      },
       "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
     }
   ],
@@ -131,6 +157,9 @@ slide_type 판별 기준:
   - 텍스트 불릿만 있는 일반 슬라이드는 목록 구조가 의미 전달의 핵심일 때만 "list"로 포함
   - 시각자료가 없으면 빈 배열 []
   - description은 각 시각자료의 의미를 요약하고, raw_text는 내부에 보이는 텍스트를 원문에 가깝게 기재
+  - visual_elements는 화살표, 박스, 아이콘, 레이어, 말풍선, 라벨, 선, 축 등 질문 대상이 될 수 있는 시각 요소를 분리
+  - visual_relations는 화살표/선/위치/포함 관계가 무엇을 연결하고 무엇을 의미하는지 분리
+  - layout은 상단/중앙/하단/좌/우 등 공간 배치가 의미를 갖는 경우에만 작성
 
 image_only / mixed 슬라이드 처리:
 - raw_text: 이미지 내에 인쇄된 캡션/레이블 텍스트만 기재 (없으면 빈 문자열)
@@ -186,6 +215,32 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
       "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
       "description": "이 시각자료 하나가 전달하는 내용",
       "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "visual_elements": [
+        {
+          "type": "arrow" | "box" | "icon" | "icon_group" | "line" | "layer" | "callout" | "label" | "text_block" | "table_cell" | "axis" | "marker" | "other",
+          "label": "요소에 보이는 텍스트/이름",
+          "role": "요소가 시각자료 안에서 맡는 역할",
+          "meaning": "요소가 전달하는 의미",
+          "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        }
+      ],
+      "visual_relations": [
+        {
+          "source": "관계 시작 요소",
+          "target": "관계 대상 요소",
+          "relation": "관계 의미",
+          "visual_cue": "arrow" | "line" | "position" | "containment" | "color" | "alignment" | "other",
+          "direction": "bidirectional" | "source_to_target" | "target_to_source" | "none",
+          "meaning": "이 시각적 관계가 설명하는 내용"
+        }
+      ],
+      "layout": {
+        "top": ["상단 요소"],
+        "middle": ["중앙 요소"],
+        "bottom": ["하단 요소"],
+        "left": ["왼쪽 요소"],
+        "right": ["오른쪽 요소"]
+      },
       "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
     }
   ],
@@ -208,6 +263,9 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
     교수 필기/손글씨/강의 중 추가된 선과 도형은 포함하지 말 것.
   - 한 슬라이드에 표/다이어그램/그림/차트/목록이 여러 개 있으면 visual_assets 배열에 각각 분리할 것.
   - 시각자료가 없으면 빈 배열 [].
+  - visual_elements는 화살표, 박스, 아이콘, 레이어, 말풍선, 라벨, 선, 축 등 질문 대상이 될 수 있는 시각 요소를 분리할 것.
+  - visual_relations는 화살표/선/위치/포함 관계가 무엇을 연결하고 무엇을 의미하는지 분리할 것.
+  - layout은 상단/중앙/하단/좌/우 등 공간 배치가 의미를 갖는 경우에만 작성할 것.
 
 [slide_emphasis]
   - 반드시 Image 1 (BASE) 만을 기준으로 판단할 것.
@@ -596,6 +654,123 @@ class T1Extractor:
         return filtered
 
     @classmethod
+    def _normalize_visual_elements(cls, elements: Any) -> List[Dict]:
+        if not isinstance(elements, list):
+            return []
+
+        normalized: List[Dict] = []
+        for item in elements:
+            if isinstance(item, str):
+                item = {"label": item}
+            if not isinstance(item, dict):
+                continue
+
+            bbox = item.get("bbox")
+            if not isinstance(bbox, dict):
+                bbox = None
+
+            entry = {
+                "type": str(item.get("type") or "other").strip().lower(),
+                "label": str(item.get("label") or item.get("text") or item.get("name") or "").strip(),
+                "role": str(item.get("role") or "").strip(),
+                "meaning": str(item.get("meaning") or item.get("description") or "").strip(),
+                "bbox": bbox,
+            }
+            if any(entry.get(k) for k in ("label", "role", "meaning")):
+                normalized.append(entry)
+        return normalized
+
+    @classmethod
+    def _normalize_visual_relations(cls, relations: Any) -> List[Dict]:
+        if not isinstance(relations, list):
+            return []
+
+        normalized: List[Dict] = []
+        for item in relations:
+            if isinstance(item, str):
+                item = {"meaning": item}
+            if not isinstance(item, dict):
+                continue
+
+            entry = {
+                "source": str(item.get("source") or item.get("from") or "").strip(),
+                "target": str(item.get("target") or item.get("to") or "").strip(),
+                "relation": str(item.get("relation") or item.get("type") or "").strip(),
+                "visual_cue": str(item.get("visual_cue") or item.get("cue") or "").strip().lower(),
+                "direction": str(item.get("direction") or "").strip().lower(),
+                "meaning": str(item.get("meaning") or item.get("description") or "").strip(),
+            }
+            if any(entry.values()):
+                normalized.append(entry)
+        return normalized
+
+    @staticmethod
+    def _normalize_visual_layout(layout: Any) -> Dict:
+        if not isinstance(layout, dict):
+            return {}
+        normalized: Dict[str, Any] = {}
+        for key, value in layout.items():
+            key_s = str(key).strip()
+            if not key_s:
+                continue
+            if isinstance(value, list):
+                vals = [str(v).strip() for v in value if str(v).strip()]
+                if vals:
+                    normalized[key_s] = vals
+            elif isinstance(value, (str, int, float)):
+                value_s = str(value).strip()
+                if value_s:
+                    normalized[key_s] = value_s
+        return normalized
+
+    @staticmethod
+    def _visual_elements_text(elements: List[Dict]) -> str:
+        lines = []
+        for el in elements:
+            parts = [
+                str(el.get("type") or "").strip(),
+                str(el.get("label") or "").strip(),
+                str(el.get("role") or "").strip(),
+                str(el.get("meaning") or "").strip(),
+            ]
+            line = " | ".join(part for part in parts if part)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _visual_relations_text(relations: List[Dict]) -> str:
+        lines = []
+        for rel in relations:
+            endpoints = " -> ".join(
+                part for part in [str(rel.get("source") or "").strip(), str(rel.get("target") or "").strip()]
+                if part
+            )
+            parts = [
+                endpoints,
+                str(rel.get("relation") or "").strip(),
+                str(rel.get("visual_cue") or "").strip(),
+                str(rel.get("direction") or "").strip(),
+                str(rel.get("meaning") or "").strip(),
+            ]
+            line = " | ".join(part for part in parts if part)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _visual_layout_text(layout: Dict) -> str:
+        lines = []
+        for key, value in layout.items():
+            if isinstance(value, list):
+                value_s = ", ".join(str(v) for v in value if str(v).strip())
+            else:
+                value_s = str(value).strip()
+            if value_s:
+                lines.append(f"{key}: {value_s}")
+        return "\n".join(lines)
+
+    @classmethod
     def _normalize_visual_assets(cls, assets: Any) -> List[Dict]:
         if not isinstance(assets, list):
             return []
@@ -620,6 +795,9 @@ class T1Extractor:
             bbox = item.get("bbox")
             if not isinstance(bbox, dict):
                 bbox = None
+            visual_elements = cls._normalize_visual_elements(item.get("visual_elements") or item.get("elements"))
+            visual_relations = cls._normalize_visual_relations(item.get("visual_relations") or item.get("relations"))
+            layout = cls._normalize_visual_layout(item.get("layout"))
 
             normalized.append(
                 {
@@ -628,6 +806,12 @@ class T1Extractor:
                     "title": title,
                     "description": description,
                     "raw_text": raw_text,
+                    "visual_elements": visual_elements,
+                    "visual_relations": visual_relations,
+                    "layout": layout,
+                    "visual_elements_text": cls._visual_elements_text(visual_elements),
+                    "visual_relations_text": cls._visual_relations_text(visual_relations),
+                    "layout_text": cls._visual_layout_text(layout),
                     "bbox": bbox,
                 }
             )

@@ -33,7 +33,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from pipeline.lance_ingest import default_lance_root, lance_search  # noqa: E402
 
-from .content_retrieval import EvidenceItem, infer_intents_json, run_enhanced_content_pipeline  # noqa: E402
+from .content_retrieval import (  # noqa: E402
+    EvidenceItem,
+    build_sectioned_context,
+    infer_intents_json,
+    run_enhanced_content_pipeline,
+)
 app = FastAPI(title="GraphLEC Query Service", version="0.3.0")
 
 app.add_middleware(
@@ -124,12 +129,13 @@ ANSWER_SYSTEM_PROMPT = """
 1. 질문에 직접 필요한 내용만 답한다. 근거가 많아도 전부 나열하지 말고 핵심만 추린다.
 2. 기본 답변은 1문장 요약 + 최대 4개 항목으로 작성한다. 각 항목은 한 문장으로 짧게 쓴다.
 3. 사용자가 "자세히", "구체적으로", "전부", "비교표"처럼 확장을 요청한 경우에만 더 길게 답한다.
-4. 초 단위 시간·구간·슬라이드 번호는 UI의 출처 버튼으로 따로 제공된다. 답변 본문에는 같은 시간 범위를 여러 줄로 나열하지 말고, "해당 내용은 관련 영상 구간에서 확인할 수 있다"처럼 요약한다.
-5. 사용자가 "정확히 몇 초", "전체 구간을 모두", "시작/끝 시간을 표로"처럼 명시적으로 시간 목록을 요구한 경우에만 시간 범위를 본문에 나열한다.
-6. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
-7. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 "제공된 근거만으로는 사례를 확인하기 어렵습니다."라고 말한다.
-8. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
-9. 한국어로 답한다.
+4. 초 단위 시간·구간·슬라이드 번호는 UI의 출처 버튼으로 따로 제공된다. 답변 본문에는 시간·구간·슬라이드 확인 안내를 쓰지 않는다.
+5. "어디", "장면", "구간"이라는 단어만으로는 시간값을 본문에 쓰지 않는다. 사용자가 "정확히 몇 초", "전체 구간을 모두", "시작/끝 시간을 표로"처럼 명시적으로 시간 목록을 요구한 경우에만 시간 범위를 본문에 나열한다.
+6. "장면 4:", "슬라이드 8:"처럼 출처 위치를 항목 제목으로 쓰지 않는다. 위치는 UI 버튼에서만 제공된다.
+7. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
+8. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 "제공된 근거만으로는 사례를 확인하기 어렵습니다."라고 말한다.
+9. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
+10. 한국어로 답한다.
 """
 
 
@@ -164,6 +170,7 @@ class QueryResponse(BaseModel):
     graph: dict
     retrieved_chunks: list[RetrievedChunk]
     related_slides: list[dict] = Field(default_factory=list)
+    source_mode: str = "default"
 
 
 class GraphEvidence(BaseModel):
@@ -278,7 +285,13 @@ def _is_emphasis_content_question(question: str) -> bool:
 
 
 def classify_question(question: str) -> str:
+    if _is_visual_question(question):
+        return "content"
     if _is_emphasis_content_question(question):
+        return "content"
+    if any(k in question for k in ("설명", "내용", "기능", "역할", "정의", "차이", "이유", "의미", "개념")) and any(
+        k in question for k in ("구간", "어디", "어디서", "언제", "장면", "씬")
+    ):
         return "content"
     if "슬라이드" in question and any(
         k in question
@@ -364,7 +377,7 @@ def _call_gemini_raw(contents: str, system_instruction: str) -> str:
         except Exception as e:
             last_err = e
             err_s = str(e)
-            if "429" not in err_s and "RESOURCE_EXHAUSTED" not in err_s:
+            if not any(k in err_s for k in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "high demand")):
                 raise
     assert last_err is not None
     raise last_err
@@ -391,7 +404,7 @@ def _call_gemini_answer(context: str, question: str) -> str:
         except Exception as e:
             last_err = e
             err_s = str(e)
-            if "429" not in err_s and "RESOURCE_EXHAUSTED" not in err_s:
+            if not any(k in err_s for k in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "high demand")):
                 raise
     assert last_err is not None
     raise last_err
@@ -514,7 +527,12 @@ def _concise_bullet_body(title: str, body: str) -> str:
     return _first_sentence(body, max_chars=45)
 
 
-def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedChunk]] = None) -> str:
+def _compact_answer(
+    answer: str,
+    question: str,
+    chunks: Optional[list[RetrievedChunk]] = None,
+    source_mode: str = "default",
+) -> str:
     """Clean presentation-only noise without truncating or summarizing model content."""
     raw = answer.strip()
     if not raw:
@@ -527,6 +545,54 @@ def _compact_answer(answer: str, question: str, chunks: Optional[list[RetrievedC
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
     cleaned = re.sub(r"\n*\s*출처\s*\n(?:\s*[-*].*(?:\n|$))+\s*$", "", cleaned).strip()
+    cleaned = re.sub(
+        r"\s*\((?:슬라이드\s*\d+\s*,?\s*)?(?:약\s*)?\d+(?:\.\d+)?초\)\s*",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\s*\(슬라이드\s*\d+\)\s*",
+        " ",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\s*\(?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\n?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*",
+        "\n",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"\s*\(?\s*관련\s*(?:장면|구간|출처)에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
+        "",
+        cleaned,
+    )
+    if source_mode == "visual_location":
+        cleaned = re.sub(
+            r"(?:은|는)?\s*\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?(?:,\s*(?:그리고\s*)?\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?)*\s*(?:나옵니다|등장합니다|확인됩니다|확인할\s*수\s*있습니다)\.?",
+            "입니다.",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\s*\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?",
+            "",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\n?\s*해당\s*내용은\s*관련\s*영상\s*구간\s*\([^)]*\)\s*에서\s*확인할\s*수\s*있습니다\.?\s*",
+            "\n",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\n?\s*해당\s*내용은\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*",
+            "\n",
+            cleaned,
+        )
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        cleaned = _compact_visual_location_answer(cleaned)
 
     if _is_refusal_answer(cleaned):
         return cleaned
@@ -885,16 +951,307 @@ def _chunks_to_timestamps(chunks: list[RetrievedChunk]) -> list[dict]:
 
 
 def _is_visual_question(question: str) -> bool:
-    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도"))
+    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도", "화살표", "양방향"))
 
 
-def _visual_asset_slide_numbers(items: list[EvidenceItem]) -> set[int]:
+def _is_visual_interpretation_question(question: str) -> bool:
+    if not _is_visual_question(question):
+        return False
+    q = question.replace(" ", "")
+    return any(k in q for k in ("뭘의미", "무엇을의미", "의미해", "의미야", "왜", "이유", "설명해", "나타내", "말하는"))
+
+
+def _is_visual_list_question(question: str) -> bool:
+    if not _is_visual_question(question):
+        return False
+    q = question.replace(" ", "")
+    return (
+        any(k in q for k in ("이강의에서", "전체", "모두", "전부"))
+        and any(k in q for k in ("나오는", "등장하는", "있는장면", "있는슬라이드", "장면들", "슬라이드들", "슬라이드만"))
+    )
+
+
+def _is_lecture_overview_question(question: str) -> bool:
+    return _has_lecture_overview_scope(question)
+
+
+def _has_lecture_overview_scope(question: str) -> bool:
+    q = question.replace(" ", "")
+    overview_terms = (
+        "강의내용요약",
+        "내용요약",
+        "전체요약",
+        "전체내용",
+        "전체흐름",
+        "내용정리",
+        "강의정리",
+        "수업정리",
+        "큰그림",
+        "뭘배웠",
+        "무엇을배웠",
+        "어떤내용",
+        "주로뭘",
+        "주로무엇",
+        "주로다뤄",
+        "뭘다뤄",
+        "무엇을다뤄",
+        "전반적으로",
+    )
+    scoped_summary = (
+        ("요약" in q or "정리" in q or "흐름" in q)
+        and any(scope in q for scope in ("강의", "수업", "전체", "내용", "전반"))
+    )
+    return any(
+        k in q
+        for k in overview_terms
+    ) or scoped_summary
+
+
+def _is_location_question(question: str) -> bool:
+    return any(k in question for k in ("구간", "어디", "어디서", "언제", "장면", "씬"))
+
+
+def _is_definition_question(question: str) -> bool:
+    q = question.replace(" ", "")
+    return any(k in q for k in ("뭐야", "무엇", "정의", "개념", "뜻이", "의미"))
+
+
+def _is_core_content_question(question: str) -> bool:
+    q = question.replace(" ", "")
+    return (
+        any(k in q for k in ("핵심", "중요", "주요", "시험", "출제", "나올것같", "나올만한"))
+        and any(k in q for k in ("내용", "개념", "키워드", "용어", "알려줘", "뭐야", "정리"))
+    )
+
+
+def _is_emphasis_overview_question(question: str) -> bool:
+    q = question.replace(" ", "")
+    return "강조" in q and any(k in q for k in ("내용", "뭐", "무엇", "어떤", "핵심", "중요", "키워드", "개념", "정리"))
+
+
+def _is_emphasis_location_question(question: str) -> bool:
+    return "강조" in question and any(k in question for k in ("장면", "씬", "구간", "어디", "언제"))
+
+
+def _evidence_slide_numbers(items: list[EvidenceItem], kinds: set[str]) -> set[int]:
+    slides: set[int] = set()
+    for it in items:
+        if it.kind not in kinds or it.slide_number is None:
+            continue
+        try:
+            slides.add(int(it.slide_number))
+        except (TypeError, ValueError):
+            continue
+    return slides
+
+
+def _chunk_score(item: EvidenceItem) -> float:
+    score = item.retrieval_score if item.retrieval_score is not None else item.lance_score
+    try:
+        return float(score) if score is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _emphasis_score_for_item(item: EvidenceItem) -> float:
+    row = item.row or {}
+    if item.kind == "segment":
+        return max(
+            _to_float_or_none(row.get("scene_emphasis_total")) or 0.0,
+            _to_float_or_none(row.get("slide_emphasis_total")) or 0.0,
+        )
+    return _to_float_or_none(row.get("emphasis_total")) or 0.0
+
+
+def _is_overview_item(item: EvidenceItem) -> bool:
+    text = item.text.replace(" ", "").lower()
+    return any(
+        k in text
+        for k in (
+            "강의목표",
+            "강의의목표",
+            "학습목표",
+            "목차",
+            "개요",
+            "chapter",
+            "이장의목적",
+            "강의의목적",
+            "학습의목적",
+        )
+    )
+
+
+def _is_overview_text(text: str) -> bool:
+    compact = (text or "").replace(" ", "").lower()
+    return any(
+        k in compact
+        for k in (
+            "강의목표",
+            "강의의목표",
+            "학습목표",
+            "목차",
+            "개요",
+            "chapter",
+            "이장의목적",
+            "강의의목적",
+            "학습의목적",
+        )
+    )
+
+
+def _is_title_or_intro_text(text: str) -> bool:
+    compact = (text or "").replace(" ", "").lower()
+    if _is_overview_text(text):
+        return True
+    if any(k in compact for k in ("[slide_001]", "운영체제의시작과발전")):
+        return True
+    intro_markers = (
+        "알아보도록하죠",
+        "알아보도록하겠습니다",
+        "알아보고",
+        "보겠습니다",
+        "시작하겠습니다",
+        "들어보셨을",
+        "말을많이들었",
+    )
+    if any(k in compact for k in intro_markers) and len(compact) < 180:
+        return True
+    return False
+
+
+def _is_overview_target_question(question: str) -> bool:
+    q = question.replace(" ", "")
+    return any(k in q for k in ("강의목표", "학습목표", "목차", "개요", "이장의목적", "강의의목적"))
+
+
+def _is_low_signal_slide_item(item: EvidenceItem) -> bool:
+    if item.kind not in {"slide_text", "slide_concept", "visual_asset"}:
+        return False
+    return _overview_related_score(item) < 3.0 and _chunk_score(item) < 0.75
+
+
+def _focus_keywords_for_location(question: str) -> list[str]:
+    drop = {
+        "운영체제",
+        "설명",
+        "설명하는",
+        "구간",
+        "어디",
+        "어디서",
+        "언제",
+        "장면",
+        "장면들",
+        "씬",
+        "교수",
+        "알려줘",
+    }
+    return [k for k in extract_keywords_from_question(question) if k not in drop]
+
+
+def _source_items_for_question(question: str, items: list[EvidenceItem]) -> list[EvidenceItem]:
+    if _is_visual_question(question):
+        visual_items = [
+            it for it in items
+            if it.kind == "visual_asset" and it.slide_number is not None
+        ]
+        if visual_items:
+            if _is_visual_list_question(question):
+                visual_items.sort(key=lambda it: int(it.slide_number or 10**9))
+            else:
+                visual_items.sort(key=_chunk_score, reverse=True)
+            return visual_items[:8 if _is_visual_list_question(question) else 4]
+
+    if _is_core_content_question(question):
+        candidates = [
+            it for it in items
+            if it.kind in {"graphrag_entity", "graphrag_relationship", "slide_text", "slide_concept", "visual_asset"}
+            and not _is_overview_item(it)
+            and not _is_low_signal_slide_item(it)
+        ]
+        if candidates:
+            candidates.sort(
+                key=lambda it: (
+                    _overview_related_score(it),
+                    _emphasis_score_for_item(it),
+                    _chunk_score(it),
+                ),
+                reverse=True,
+            )
+            return candidates[:8]
+
+    if _is_emphasis_overview_question(question):
+        candidates = [
+            it for it in items
+            if it.kind in {"graphrag_entity", "graphrag_relationship", "slide_text", "slide_concept", "visual_asset"}
+            and not _is_overview_item(it)
+            and not _is_low_signal_slide_item(it)
+        ]
+        if candidates:
+            candidates.sort(
+                key=lambda it: (
+                    _emphasis_score_for_item(it),
+                    _overview_related_score(it),
+                    _chunk_score(it),
+                ),
+                reverse=True,
+            )
+            return candidates[:8]
+
+    if not _is_location_question(question):
+        if _is_overview_target_question(question):
+            return items
+        non_overview = [it for it in items if not _is_overview_item(it)]
+        return non_overview or items
+
+    keywords = _focus_keywords_for_location(question)
+
+    if not _is_emphasis_location_question(question):
+        candidates = [
+            it for it in items
+            if it.kind in {"segment", "slide_text", "slide_concept", "visual_asset", "lance_strict"}
+            and it.slide_number is not None
+            and not _is_overview_item(it)
+        ]
+        if keywords:
+            focused = [it for it in candidates if any(k.lower() in it.text.lower() for k in keywords)]
+            if focused:
+                candidates = focused
+        if not candidates:
+            return items
+        candidates.sort(key=_chunk_score, reverse=True)
+        return candidates[:4]
+
+    keywords = [k for k in keywords if k not in {"강조"}]
+    emphasized = [it for it in items if _emphasis_score_for_item(it) > 0]
+    non_overview = [it for it in emphasized if not _is_overview_item(it)]
+    if non_overview:
+        emphasized = non_overview
+    if keywords:
+        focused = [it for it in emphasized if any(k.lower() in it.text.lower() for k in keywords)]
+        if focused:
+            emphasized = focused
+    if not emphasized:
+        return items
+    emphasized.sort(key=lambda it: (_emphasis_score_for_item(it), _chunk_score(it)), reverse=True)
+    return emphasized[:4]
+
+
+def _visual_asset_slide_numbers(items: list[EvidenceItem], question: str = "") -> set[int]:
     visual_items = [
         it for it in items
         if it.kind == "visual_asset" and it.slide_number is not None
     ]
     if not visual_items:
         return set()
+
+    if _is_visual_list_question(question):
+        slides: set[int] = set()
+        for it in visual_items:
+            try:
+                slides.add(int(it.slide_number))
+            except (TypeError, ValueError):
+                continue
+        return slides
 
     def score_of(it: EvidenceItem) -> float:
         score = it.retrieval_score if it.retrieval_score is not None else it.lance_score
@@ -915,12 +1272,35 @@ def _visual_asset_slide_numbers(items: list[EvidenceItem]) -> set[int]:
     return slides
 
 
+def _filter_location_question_chunks(
+    question: str,
+    items: list[EvidenceItem],
+    chunks: list[RetrievedChunk],
+) -> list[RetrievedChunk]:
+    if not _is_location_question(question):
+        return chunks
+
+    evidence_slides = _evidence_slide_numbers(items, {"slide_text", "slide_concept", "visual_asset"})
+    if not evidence_slides:
+        return chunks
+
+    filtered: list[RetrievedChunk] = []
+    for c in chunks:
+        try:
+            slide_number = int(c.slide_number) if c.slide_number is not None else None
+        except (TypeError, ValueError):
+            slide_number = None
+        if slide_number in evidence_slides:
+            filtered.append(c)
+    return filtered
+
+
 def _filter_visual_question_chunks(
     question: str,
     items: list[EvidenceItem],
     chunks: list[RetrievedChunk],
 ) -> list[RetrievedChunk]:
-    visual_slides = _visual_asset_slide_numbers(items)
+    visual_slides = _visual_asset_slide_numbers(items, question)
     if not visual_slides or not _is_visual_question(question):
         return chunks
 
@@ -930,25 +1310,84 @@ def _filter_visual_question_chunks(
             slide_number = int(c.slide_number) if c.slide_number is not None else None
         except (TypeError, ValueError):
             slide_number = None
-        if slide_number in visual_slides:
+        if slide_number in visual_slides and c.chunk_type in {"slide", "visual_asset"}:
             filtered.append(c)
     return filtered
 
 
-def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[RetrievedChunk], max_items: int = 6) -> list[dict]:
+def _source_mode_for(question: str, items: list[EvidenceItem]) -> str:
+    if _is_lecture_overview_question(question):
+        return "overview"
+    if _is_core_content_question(question) or _is_emphasis_overview_question(question):
+        return "overview"
+    if _is_visual_question(question) and _visual_asset_slide_numbers(items, question):
+        return "visual_location"
+    if _is_emphasis_location_question(question):
+        return "scene_location"
+    return "default"
+
+
+def _overview_related_score(item: EvidenceItem) -> float:
+    row = item.row or {}
+    if item.kind in {"slide_text", "slide_concept"}:
+        return (
+            (_to_float_or_none(row.get("emphasis_total")) or 0.0)
+            + (3.0 if row.get("visual_asset_text") or row.get("t1_structure") else 0.0)
+        )
+    if item.kind == "visual_asset":
+        return 12.0
+    if item.kind == "segment":
+        return max(
+            _to_float_or_none(row.get("scene_emphasis_total")) or 0.0,
+            _to_float_or_none(row.get("slide_emphasis_total")) or 0.0,
+        )
+    if item.kind == "graphrag_entity":
+        return (
+            (_to_float_or_none(row.get("final_weight")) or 0.0)
+            + 0.75 * (_to_float_or_none(row.get("emphasis_boost_local")) or 0.0)
+            + 0.20 * (_to_float_or_none(row.get("frequency")) or 0.0)
+            + 0.10 * (_to_float_or_none(row.get("degree")) or 0.0)
+        )
+    if item.kind == "graphrag_relationship":
+        return (
+            (_to_float_or_none(row.get("emphasis_edge_weight")) or 0.0)
+            + 0.10 * (_to_float_or_none(row.get("combined_degree")) or 0.0)
+        )
+    return 0.0
+
+
+def _related_slides_from_evidence(
+    items: list[EvidenceItem],
+    chunks: list[RetrievedChunk],
+    max_items: int = 6,
+    preserve_item_order: bool = False,
+    filter_to_visual_slides: bool = True,
+    overview_rank: bool = False,
+) -> list[dict]:
     scored: list[dict] = []
-    visual_slides = _visual_asset_slide_numbers(items)
+    visual_slides = _visual_asset_slide_numbers(items) if filter_to_visual_slides else set()
+    order_by_slide: dict[int, int] = {}
+    for idx, it in enumerate(items):
+        if it.slide_number is None:
+            continue
+        try:
+            order_by_slide.setdefault(int(it.slide_number), idx)
+        except (TypeError, ValueError):
+            continue
     for it in items:
         if visual_slides and it.kind != "visual_asset" and it.slide_number not in visual_slides:
             continue
         score = it.retrieval_score if it.retrieval_score is not None else it.lance_score
         if it.slide_number is not None:
+            if overview_rank:
+                score = _overview_related_score(it)
             scored.append(
                 {
                     "slide_number": it.slide_number,
                     "start_sec": it.start_sec,
                     "score": score,
                     "label": f"슬라이드 {it.slide_number}",
+                    "_order": order_by_slide.get(int(it.slide_number), 10**9),
                 }
             )
 
@@ -960,22 +1399,38 @@ def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[Retrie
         if visual_slides and chunk_slide_number not in visual_slides:
             continue
         if c.slide_number is not None and c.chunk_type == "slide":
+            score = c.score
+            if overview_rank and chunk_slide_number is not None:
+                score = float("-inf")
             scored.append(
                 {
                     "slide_number": c.slide_number,
                     "start_sec": c.start_sec,
-                    "score": c.score,
+                    "score": score,
                     "label": f"슬라이드 {c.slide_number}",
+                    "_order": order_by_slide.get(int(c.slide_number), 10**9),
                 }
             )
 
-    scored.sort(
-        key=lambda r: (
-            -(float(r.get("score")) if r.get("score") is not None else float("-inf")),
-            float(r.get("start_sec")) if r.get("start_sec") is not None else float("inf"),
-            int(r.get("slide_number") or 10**9),
+    if preserve_item_order:
+        def _order_value(row: dict) -> int:
+            value = row.get("_order")
+            return int(value) if value is not None else 10**9
+
+        scored.sort(
+            key=lambda r: (
+                _order_value(r),
+                int(r.get("slide_number") or 10**9),
+            )
         )
-    )
+    else:
+        scored.sort(
+            key=lambda r: (
+                -(float(r.get("score")) if r.get("score") is not None else float("-inf")),
+                float(r.get("start_sec")) if r.get("start_sec") is not None else float("inf"),
+                int(r.get("slide_number") or 10**9),
+            )
+        )
     out: list[dict] = []
     seen: set[int] = set()
     for row in scored:
@@ -983,10 +1438,294 @@ def _related_slides_from_evidence(items: list[EvidenceItem], chunks: list[Retrie
         if slide_number in seen:
             continue
         seen.add(slide_number)
+        row.pop("_order", None)
         out.append(row)
         if len(out) >= max_items:
             break
     return out
+
+
+def _topic_keywords_for_related(question: str) -> list[str]:
+    generic = {
+        "요약",
+        "요약해서",
+        "정리",
+        "설명",
+        "설명해줘",
+        "알려줘",
+        "과정",
+        "내용",
+        "강의",
+        "수업",
+        "특징",
+        "종류",
+        "개념",
+        "정의",
+        "뭐야",
+        "무엇",
+    }
+    out: list[str] = []
+    for kw in extract_keywords_from_question(question):
+        k = kw.strip().lower()
+        if not k or k in generic:
+            continue
+        if k.startswith("실행"):
+            k = "실행"
+        elif k.startswith("부팅"):
+            k = "부팅"
+        elif k.startswith("적재"):
+            k = "적재"
+        if k not in out:
+            out.append(k)
+    if len(out) > 1 and "운영체제" in out:
+        out = [k for k in out if k != "운영체제"]
+    return out[:8]
+
+
+def _definition_focus_terms(question: str) -> list[str]:
+    if not _is_definition_question(question):
+        return []
+    terms = _topic_keywords_for_related(question)
+    q = question.replace(" ", "")
+    if "운영체제" in q and "운영체제" not in terms:
+        terms.insert(0, "운영체제")
+    return terms[:6]
+
+
+def _definition_signal_hits(text: str) -> int:
+    signals = (
+        "정의",
+        "개념",
+        "시스템소프트웨어",
+        "소프트웨어",
+        "중개",
+        "자원관리",
+        "자원을관리",
+        "관리하고제어",
+        "관리",
+        "제어",
+        "독점",
+        "배타",
+        "메모리",
+        "부팅",
+    )
+    compact = re.sub(r"\s+", "", (text or "").lower())
+    return sum(1 for s in signals if s in compact)
+
+
+def _strong_definition_signal_hits(text: str) -> int:
+    signals = (
+        "정의",
+        "시스템소프트웨어",
+        "중개",
+        "핵심단어",
+        "실체가있는소프트웨어",
+        "컴퓨터가아닙니다",
+        "소프트웨어입니다",
+    )
+    compact = re.sub(r"\s+", "", (text or "").lower())
+    return sum(1 for s in signals if s in compact)
+
+
+def _filter_chunks_to_topic(question: str, chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
+    if _is_location_question(question) or _is_lecture_overview_question(question):
+        return chunks
+    if _is_core_content_question(question) or _is_emphasis_overview_question(question) or _is_visual_question(question):
+        return chunks
+
+    non_intro = [c for c in chunks if not _is_title_or_intro_text(c.text or "")]
+    if non_intro:
+        chunks = non_intro
+
+    definition_terms = _definition_focus_terms(question)
+    if definition_terms:
+        topic_matched = [c for c in chunks if _chunk_keyword_hits(c.text or "", definition_terms) > 0]
+        if topic_matched:
+            strong_signal = [c for c in topic_matched if _strong_definition_signal_hits(c.text or "") > 0]
+            if strong_signal:
+                return strong_signal
+            with_signal = [c for c in topic_matched if _definition_signal_hits(c.text or "") > 0]
+            return with_signal or topic_matched
+
+    keywords = _topic_keywords_for_related(question)
+    if not keywords:
+        return chunks
+
+    filtered = [c for c in chunks if _chunk_keyword_hits(c.text or "", keywords) > 0]
+    return filtered or chunks
+
+
+def _chunk_keyword_hits(text: str, keywords: list[str]) -> int:
+    if not keywords:
+        return 0
+    compact = re.sub(r"\s+", "", (text or "").lower())
+    hits = 0
+    for kw in keywords:
+        k = kw.lower()
+        if k in compact or k in (text or "").lower():
+            hits += 1
+    return hits
+
+
+def _related_slides_from_chunks_for_topic(
+    question: str,
+    chunks: list[RetrievedChunk],
+    max_items: int = 4,
+) -> list[dict]:
+    keywords = _topic_keywords_for_related(question)
+    candidates: list[dict] = []
+    for c in chunks:
+        if c.slide_number is None:
+            continue
+        try:
+            slide_number = int(c.slide_number)
+        except (TypeError, ValueError):
+            continue
+        text = c.text or ""
+        hits = _chunk_keyword_hits(text, keywords)
+        base = _to_float_or_none(c.score) or 0.0
+        type_bonus = 0.0
+        if c.chunk_type in {"segment", "audio", "structural_row"}:
+            type_bonus = 0.18
+        elif c.chunk_type in {"slide", "slide_text", "slide_concept"}:
+            type_bonus = 0.08
+        score = base + 0.28 * hits + type_bonus
+        candidates.append(
+            {
+                "slide_number": slide_number,
+                "start_sec": c.start_sec,
+                "score": score,
+                "label": f"슬라이드 {slide_number}",
+                "_hits": hits,
+            }
+        )
+
+    if not candidates:
+        return []
+
+    max_hits = max(int(r.get("_hits") or 0) for r in candidates)
+    if keywords and max_hits > 0:
+        candidates = [r for r in candidates if int(r.get("_hits") or 0) > 0]
+
+    candidates.sort(
+        key=lambda r: (
+            -(float(r.get("score")) if r.get("score") is not None else float("-inf")),
+            float(r.get("start_sec")) if r.get("start_sec") is not None else float("inf"),
+            int(r.get("slide_number") or 10**9),
+        )
+    )
+
+    out: list[dict] = []
+    seen: set[int] = set()
+    for row in candidates:
+        slide_number = int(row["slide_number"])
+        if slide_number in seen:
+            continue
+        seen.add(slide_number)
+        row.pop("_hits", None)
+        out.append(row)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _compact_visual_location_answer(answer: str) -> str:
+    lines = [ln.strip() for ln in answer.splitlines()]
+    kept: list[str] = []
+    for ln in lines:
+        if not ln:
+            if kept and kept[-1]:
+                kept.append("")
+            continue
+        line = re.sub(r"^\d+\.\s*", "- ", ln)
+        line = re.sub(r"^[*-]\s*", "- ", line)
+        line = re.sub(r"^-\s*(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "- ", line, flags=re.IGNORECASE)
+        line = re.sub(r"^-\s*슬라이드\s*\d+\s*[:：]\s*", "- ", line)
+        line = re.sub(r"^(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "", line, flags=re.IGNORECASE)
+        line = re.sub(r"^슬라이드\s*\d+\s*[:：]\s*", "", line)
+        kept.append(line)
+
+    text = "\n".join(kept).strip()
+    text = re.sub(r"\b(?:장면|씬|Scene)\s*\d+\b", "해당 장면", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b슬라이드\s*\d+\b", "해당 슬라이드", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text
+
+
+def _visual_asset_label(asset_type: str) -> str:
+    t = (asset_type or "").lower()
+    if t == "diagram":
+        return "다이어그램"
+    if t == "table":
+        return "표"
+    if t == "chart":
+        return "차트"
+    if t in {"figure", "image"}:
+        return "그림"
+    if t == "list":
+        return "목록"
+    return "시각자료"
+
+
+def _short_visual_description(text: str) -> str:
+    body = re.sub(r"^시각자료\([^)]*\)\s*-\s*슬라이드\s*\d+\s*[^\n]*\n?", "", text or "").strip()
+    body = re.sub(r"^이\s*슬라이드는\s*", "", body)
+    body = re.sub(r"\s+", " ", body)
+    if not body:
+        return ""
+    m = re.search(r"(.+?(?:다\.|요\.|[.!?。]))(?:\s+|$)", body)
+    first = (m.group(1) if m else body).strip()
+    return _first_sentence(first, max_chars=72)
+
+
+def _visual_list_answer(items: list[EvidenceItem]) -> str:
+    visual_items = [it for it in items if it.kind == "visual_asset" and it.slide_number is not None]
+    if not visual_items:
+        return ""
+
+    asset_label = _visual_asset_label(str((visual_items[0].row or {}).get("asset_type", "")))
+    lines = [f"이 강의에서 {asset_label}은 총 {len(visual_items)}곳에 나옵니다.", ""]
+    for it in visual_items:
+        row = it.row or {}
+        title = str(row.get("title") or "").strip()
+        desc = _short_visual_description(it.text)
+        label = f"슬라이드 {it.slide_number}"
+        if title:
+            label += f": {title}"
+        if desc:
+            label += f" - {desc}"
+        lines.append(f"- {label}")
+    return "\n".join(lines).strip()
+
+
+def _slides_explicitly_mentioned_in_answer(answer: str) -> set[int]:
+    slides: set[int] = set()
+    for m in re.finditer(r"슬라이드\s*(\d+)", answer or ""):
+        try:
+            slides.add(int(m.group(1)))
+        except (TypeError, ValueError):
+            continue
+    return slides
+
+
+def _filter_related_slides_to_answer(
+    related_slides: list[dict],
+    answer: str,
+    question: str,
+) -> list[dict]:
+    if not related_slides or not _is_visual_question(question):
+        return related_slides
+    if _is_visual_interpretation_question(question):
+        return related_slides
+    mentioned = _slides_explicitly_mentioned_in_answer(answer)
+    if len(mentioned) != 1:
+        return related_slides
+    target = next(iter(mentioned))
+    filtered = [
+        row for row in related_slides
+        if int(row.get("slide_number") or -1) == target
+    ]
+    return filtered or related_slides
 
 
 def _extract_keywords(question: str) -> list[str]:
@@ -1027,6 +1766,18 @@ def _build_hybrid_context_base(graph_context: str, supporting_chunks: list[Retri
             lines.append(f"{i}. {meta} {c.text[:500]}")
         lines.append("Lance 텍스트는 그래프 근거를 보강하는 범위에서만 사용한다.")
     return "\n".join(lines)
+
+
+def _augment_answer_context_for_question(context: str, question: str) -> str:
+    if not _is_visual_interpretation_question(question):
+        return context
+    return (
+        context
+        + "\n\n[답변 지시]\n"
+        + "- 이 질문은 시각자료의 위치를 묻는 것이 아니라, 그림/화살표/표현이 의미하는 관계를 묻는 시각 해석 질문이다.\n"
+        + "- 본문 첫 문장에 핵심 의미를 답하고, 이어서 근거에 있는 시각 관계를 바탕으로 2~4개 항목으로 설명한다.\n"
+        + "- 위치 정보는 본문에 쓰지 말고 UI의 확인 위치 버튼으로만 제공한다.\n"
+    )
 
 
 def _neo4j_driver():
@@ -1130,6 +1881,7 @@ def _empty_query_response() -> QueryResponse:
         graph={"nodes": [], "edges": []},
         retrieved_chunks=[],
         related_slides=[],
+        source_mode="default",
     )
 
 
@@ -1148,11 +1900,12 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     graph: dict = {"nodes": [], "edges": []}
     selected_items: list[EvidenceItem] = []
     raw_rows: list[dict[str, Any]] = []
+    intent_weights_for_context: dict[str, float] = {"general": 1.0}
 
     try:
         with driver.session() as session:
             if q_type == "content":
-                graph_context, _intent_w, allowed_ids, structured, selected_items = run_enhanced_content_pipeline(
+                graph_context, intent_weights_for_context, allowed_ids, structured, selected_items = run_enhanced_content_pipeline(
                     session,
                     stem,
                     question,
@@ -1189,10 +1942,20 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
 
     retrieved_chunks: list[RetrievedChunk] = []
     supporting_chunks: list[RetrievedChunk] = []
+    source_items = _source_items_for_question(question, selected_items)
+    if q_type == "content" and source_items != selected_items:
+        graph_context = build_sectioned_context(
+            question,
+            intent_weights_for_context,
+            source_items,
+            max_chars=900,
+        )
     if q_type == "content":
         try:
-            retrieved_chunks = _evidence_to_retrieved_chunks(stem, selected_items)
-            retrieved_chunks = _filter_visual_question_chunks(question, selected_items, retrieved_chunks)
+            retrieved_chunks = _evidence_to_retrieved_chunks(stem, source_items)
+            retrieved_chunks = _filter_location_question_chunks(question, source_items, retrieved_chunks)
+            retrieved_chunks = _filter_visual_question_chunks(question, source_items, retrieved_chunks)
+            retrieved_chunks = _filter_chunks_to_topic(question, retrieved_chunks)
         except Exception:
             retrieved_chunks = []
     else:
@@ -1221,21 +1984,55 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         if q_type == "content"
         else _build_hybrid_context_base(graph_context, supporting_chunks)
     )
-    try:
-        answer = _call_gemini_answer(context, question)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
-    answer = _compact_answer(answer, question, retrieved_chunks)
+    context = _augment_answer_context_for_question(context, question)
+    source_mode = _source_mode_for(question, source_items)
+    if _is_visual_list_question(question):
+        answer = _visual_list_answer(source_items)
+    else:
+        try:
+            answer = _call_gemini_answer(context, question)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
+        answer = _compact_answer(answer, question, retrieved_chunks, source_mode=source_mode)
     if _is_refusal_answer(answer):
         retrieved_chunks = []
         timestamps = []
         graph = {"nodes": [], "edges": []}
-    related_slides = _related_slides_from_evidence(selected_items, retrieved_chunks)
+    if (
+        q_type == "content"
+        and source_mode == "default"
+        and not _is_location_question(question)
+        and not _is_lecture_overview_question(question)
+        and not _is_core_content_question(question)
+        and not _is_emphasis_overview_question(question)
+    ):
+        related_slides = _related_slides_from_chunks_for_topic(question, retrieved_chunks, max_items=4)
+        if not related_slides:
+            related_slides = _related_slides_from_evidence(source_items, retrieved_chunks, max_items=4)
+    else:
+        related_slides = _related_slides_from_evidence(
+            source_items,
+            retrieved_chunks,
+            max_items=6 if (_is_lecture_overview_question(question) or _is_core_content_question(question) or _is_emphasis_overview_question(question)) else (3 if _is_location_question(question) else 6),
+            preserve_item_order=_is_visual_list_question(question),
+            filter_to_visual_slides=not (
+                _is_lecture_overview_question(question)
+                or _is_core_content_question(question)
+                or _is_emphasis_overview_question(question)
+            ) and _is_visual_question(question),
+            overview_rank=_is_lecture_overview_question(question) or _is_core_content_question(question) or _is_emphasis_overview_question(question),
+        )
+    related_slides = _filter_related_slides_to_answer(related_slides, answer, question)
 
     return QueryResponse(
         answer=answer,
-        timestamps=_chunks_to_timestamps(retrieved_chunks) or timestamps,
+        timestamps=(
+            []
+            if source_mode in {"visual_location", "scene_location", "overview"} or _is_visual_question(question)
+            else (_chunks_to_timestamps(retrieved_chunks) or ([] if _is_location_question(question) else timestamps))
+        ),
         graph=graph,
         retrieved_chunks=retrieved_chunks,
         related_slides=related_slides,
+        source_mode=source_mode,
     )

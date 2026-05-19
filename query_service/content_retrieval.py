@@ -16,7 +16,7 @@ import numpy as np
 from pipeline.embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, embed_query, get_genai_client
 from pipeline.lance_ingest import default_lance_root, lance_search
 
-from .neo4j_content_queries import run_content_queries
+from .neo4j_content_queries import run_content_queries, run_overview_queries
 
 
 def _load_cfg() -> dict[str, Any]:
@@ -28,6 +28,83 @@ def _load_cfg() -> dict[str, Any]:
 
 
 _CFG = _load_cfg()
+
+
+def _add_intent(weights: dict[str, float], name: str, weight: float = 1.0) -> None:
+    weights[name] = max(float(weight), weights.get(name, 0.0))
+
+
+def _renormalize_intents(weights: dict[str, float]) -> dict[str, float]:
+    weights = {k: float(v) for k, v in weights.items() if v and float(v) > 0}
+    if not weights:
+        return {"general": 1.0}
+    total = sum(weights.values())
+    return {k: v / total for k, v in weights.items()}
+
+
+def _apply_rule_intent_overrides(
+    question: str,
+    weights: dict[str, float],
+    hints: list[Any],
+) -> tuple[dict[str, float], list[Any]]:
+    """LLM intent를 기본으로 쓰되, 고신뢰 표현은 GraphLec 전용 intent로 보정한다."""
+    q = question.replace(" ", "")
+    q_lower = question.lower()
+    out = dict(weights)
+
+    overview_terms = (
+        "강의내용요약",
+        "내용요약",
+        "전체요약",
+        "전체내용",
+        "전체흐름",
+        "내용정리",
+        "강의정리",
+        "큰그림",
+        "뭘배웠",
+        "무엇을배웠",
+        "어떤내용",
+        "주로뭘",
+        "주로무엇",
+        "주로다뤄",
+        "뭘다뤄",
+        "무엇을다뤄",
+        "전반적으로",
+    )
+    if _has_lecture_overview_scope(question) or any(t in q for t in overview_terms):
+        _add_intent(out, "lecture_overview", 1.0)
+    elif out.get("lecture_overview", 0) > 0:
+        out.pop("lecture_overview", None)
+
+    if any(t in q for t in ("핵심키워드", "중요키워드", "주요키워드", "핵심개념", "주요개념", "핵심용어")):
+        _add_intent(out, "core_concepts", 1.0)
+
+    if _is_exam_prep_query(question):
+        _add_intent(out, "core_concepts", 1.0)
+
+    if "강조" in q or any(t in q for t in ("중요하게다룬", "중요하게말한", "교수가중요", "강의자가중요")):
+        _add_intent(out, "emphasis_overview", 0.9)
+
+    if any(t in q_lower for t in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도", "화살표", "양방향", "table", "diagram", "arrow")):
+        _add_intent(out, "visual_location", 0.95)
+
+    if any(t in q for t in ("장면", "구간", "어디", "언제", "몇초", "몇분", "씬")):
+        _add_intent(out, "scene_location", 0.7)
+
+    if "슬라이드" in q and any(t in q for t in ("중요", "핵심", "강조", "비중", "순위", "랭킹")):
+        _add_intent(out, "slide_importance", 0.95)
+
+    if out.keys() != weights.keys():
+        hints = list(hints or [])
+        if out.get("lecture_overview", 0) > 0:
+            for h in ("운영체제", "강의 목표", "핵심 개념", "주요 내용"):
+                if h not in hints:
+                    hints.append(h)
+        if out.get("core_concepts", 0) > 0 and _is_exam_prep_query(question):
+            for h in ("운영체제 정의", "운영체제 목적", "운영체제 기능", "응용 소프트웨어 차이"):
+                if h not in hints:
+                    hints.append(h)
+    return _renormalize_intents(out), hints
 
 
 INTENT_SYSTEM_PROMPT = """
@@ -43,6 +120,12 @@ INTENT_SYSTEM_PROMPT = """
 }
 
 name은 반드시 아래 중에서만 고른다:
+- lecture_overview: 강의 전체 요약·전체 흐름·무엇을 배웠는지·큰 그림
+- core_concepts: 핵심 개념·핵심 키워드·주요 용어
+- emphasis_overview: 교수/강의자가 강조한 내용·중요하게 다룬 부분
+- visual_location: 표·그림·다이어그램·시각자료가 어디 있는지
+- scene_location: 관련 장면·구간·시간 위치 찾기
+- slide_importance: 중요한 슬라이드·핵심 슬라이드 순위
 - definition: 정의·개념·무엇인지
 - example: 예시·사례·예를 들어
 - explanation: 이유·설명·왜·어떻게 동작
@@ -60,17 +143,20 @@ name은 반드시 아래 중에서만 고른다:
 
 def infer_intents_json(question: str, call_gemini_raw: Callable[[str, str], str]) -> tuple[dict[str, float], list[str]]:
     """LLM으로 의도 가중치 + 키워드 힌트. 실패 시 general=1.0."""
-    raw = call_gemini_raw(
-        f"사용자 질문:\n{question}\n",
-        INTENT_SYSTEM_PROMPT,
-    )
+    try:
+        raw = call_gemini_raw(
+            f"사용자 질문:\n{question}\n",
+            INTENT_SYSTEM_PROMPT,
+        )
+    except Exception:
+        return _apply_rule_intent_overrides(question, {"general": 1.0}, [])
     m = re.search(r"\{[\s\S]*\}", raw)
     if not m:
-        return {"general": 1.0}, []
+        return _apply_rule_intent_overrides(question, {"general": 1.0}, [])
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
-        return {"general": 1.0}, []
+        return _apply_rule_intent_overrides(question, {"general": 1.0}, [])
     intents_in = obj.get("intents") or []
     weights: dict[str, float] = {}
     for it in intents_in:
@@ -85,11 +171,12 @@ def infer_intents_json(question: str, call_gemini_raw: Callable[[str, str], str]
         if name and wf > 0:
             weights[name] = weights.get(name, 0.0) + wf
     if not weights:
-        return {"general": 1.0}, []
+        return _apply_rule_intent_overrides(question, {"general": 1.0}, obj.get("keywords_hint") or [])
     s = sum(weights.values())
     if s > 0:
         weights = {k: v / s for k, v in weights.items()}
-    hints = obj.get("keywords_hint") or []
+    weights, hints = _apply_rule_intent_overrides(question, weights, obj.get("keywords_hint") or [])
+    hints = hints or []
     hints = [str(h).strip() for h in hints if isinstance(h, str) and len(str(h).strip()) >= 2][:12]
     return weights, hints
 
@@ -221,11 +308,23 @@ def _structured_to_items(structured: dict[str, list[dict[str, Any]]]) -> list[Ev
         title = str(r.get("title", "") or "")
         desc = str(r.get("description", "") or "")
         raw_text = str(r.get("raw_text", "") or "")
+        elements = str(r.get("visual_elements_text", "") or "")
+        relations = str(r.get("visual_relations_text", "") or "")
+        layout = str(r.get("layout_text", "") or "")
         uid = f"vis:{aid or sn}:{asset_type}"
-        if uid in seen or not (desc or raw_text):
+        if uid in seen or not (desc or raw_text or elements or relations or layout):
             continue
         seen.add(uid)
-        body = "\n".join(part for part in [desc, raw_text] if part)
+        body = "\n".join(
+            part for part in [
+                desc,
+                raw_text,
+                f"시각 요소:\n{elements}" if elements else "",
+                f"시각 관계:\n{relations}" if relations else "",
+                f"배치:\n{layout}" if layout else "",
+            ]
+            if part
+        )
         text = f"시각자료({asset_type}) - 슬라이드 {sn} {title}\n{body}".strip()
         items.append(
             EvidenceItem(
@@ -368,8 +467,43 @@ def _is_slide_importance_query(question: str) -> bool:
     return "슬라이드" in question and any(k in question for k in ("중요", "핵심", "강조", "비중", "순위", "랭킹"))
 
 
+def _is_exam_prep_query(question: str) -> bool:
+    q = question.replace(" ", "")
+    return any(k in q for k in ("시험", "출제", "시험대비", "나올것같", "나올만한"))
+
+
+def _is_overview_item(it: EvidenceItem) -> bool:
+    text = (it.text or "").replace(" ", "").lower()
+    return any(k in text for k in ("강의목표", "강의의목표", "학습목표", "목차", "개요", "chapter"))
+
+
 def _is_visual_query(question: str) -> bool:
-    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도"))
+    return any(k in question for k in ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도", "화살표", "양방향"))
+
+
+def _is_current_visual_query(question: str) -> bool:
+    if _is_visual_list_query(question):
+        return False
+    return _is_visual_query(question) and any(
+        k in question for k in ("이 ", "이것", "이거", "저 ", "저것", "저거", "현재", "지금", "보고 있는", "보고있는")
+    )
+
+
+def _is_visual_list_query(question: str) -> bool:
+    if not _is_visual_query(question):
+        return False
+    q = question.replace(" ", "")
+    return (
+        any(k in q for k in ("이강의에서", "전체", "모두", "전부"))
+        and any(k in q for k in ("나오는", "등장하는", "있는장면", "있는슬라이드", "장면들", "슬라이드들", "슬라이드만"))
+    )
+
+
+def _is_visual_interpretation_query(question: str) -> bool:
+    if not _is_visual_query(question):
+        return False
+    q = question.replace(" ", "")
+    return any(k in q for k in ("뭘의미", "무엇을의미", "의미해", "의미야", "왜", "이유", "설명해", "나타내", "말하는"))
 
 
 def _is_emphasis_overview_query(question: str) -> bool:
@@ -377,10 +511,57 @@ def _is_emphasis_overview_query(question: str) -> bool:
 
 
 def _is_core_keyword_query(question: str) -> bool:
-    return any(k in question for k in ("핵심 키워드", "중요 키워드", "주요 키워드", "핵심 개념", "주요 개념")) or (
+    return _is_exam_prep_query(question) or any(k in question for k in ("핵심 키워드", "중요 키워드", "주요 키워드", "핵심 개념", "주요 개념")) or (
         any(k in question for k in ("핵심", "중요", "주요"))
-        and any(k in question for k in ("키워드", "개념", "용어"))
+        and any(k in question for k in ("키워드", "개념", "용어", "내용"))
     )
+
+
+def _intent_weight(intent_weights: dict[str, float], name: str) -> float:
+    try:
+        return float(intent_weights.get(name, 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _is_lecture_overview_query(question: str, intent_weights: dict[str, float] | None = None) -> bool:
+    if intent_weights and _intent_weight(intent_weights, "lecture_overview") >= 0.25 and _has_lecture_overview_scope(question):
+        return True
+    if intent_weights and _intent_weight(intent_weights, "lecture_overview") >= 0.25:
+        return False
+    return _has_lecture_overview_scope(question)
+
+
+def _has_lecture_overview_scope(question: str) -> bool:
+    q = question.replace(" ", "")
+    overview_terms = (
+        "강의내용요약",
+        "내용요약",
+        "전체요약",
+        "전체내용",
+        "전체흐름",
+        "내용정리",
+        "강의정리",
+        "수업정리",
+        "큰그림",
+        "뭘배웠",
+        "무엇을배웠",
+        "어떤내용",
+        "주로뭘",
+        "주로무엇",
+        "주로다뤄",
+        "뭘다뤄",
+        "무엇을다뤄",
+        "전반적으로",
+    )
+    scoped_summary = (
+        ("요약" in q or "정리" in q or "흐름" in q)
+        and any(scope in q for scope in ("강의", "수업", "전체", "내용", "전반"))
+    )
+    return any(
+        k in q
+        for k in overview_terms
+    ) or scoped_summary
 
 
 def _row_float(row: dict[str, Any] | None, key: str, default: float = 0.0) -> float:
@@ -400,6 +581,53 @@ def _entity_core_score(row: dict[str, Any] | None) -> float:
         + 0.20 * _row_float(row, "frequency")
         + 0.10 * _row_float(row, "degree")
     )
+
+
+def _select_lecture_overview_items(items: list[EvidenceItem]) -> list[EvidenceItem]:
+    """전체 요약용 근거: 슬라이드 흐름을 보존하고, 핵심 개념/관계/강조/시각자료를 보강한다."""
+    slides = [it for it in items if it.kind in {"slide_text", "slide_concept"} and it.slide_number is not None]
+    slides.sort(key=lambda it: int(it.slide_number or 10**9))
+
+    entities = [it for it in items if it.kind == "graphrag_entity"]
+    entities.sort(key=lambda it: _entity_core_score(it.row), reverse=True)
+
+    rels = [it for it in items if it.kind == "graphrag_relationship"]
+    rels.sort(
+        key=lambda it: (
+            _row_float(it.row, "emphasis_edge_weight"),
+            _row_float(it.row, "combined_degree"),
+            _row_float(it.row, "weight"),
+        ),
+        reverse=True,
+    )
+
+    segments = [it for it in items if it.kind == "segment"]
+    segments.sort(
+        key=lambda it: (
+            max(_row_float(it.row, "scene_emphasis_total"), _row_float(it.row, "slide_emphasis_total")),
+            -(it.start_sec or 0.0),
+        ),
+        reverse=True,
+    )
+
+    visuals = [it for it in items if it.kind == "visual_asset"]
+    visuals.sort(key=lambda it: int(it.slide_number or 10**9))
+
+    selected: list[EvidenceItem] = []
+    selected.extend(slides[:14])
+    selected.extend(entities[:8])
+    selected.extend(rels[:6])
+    selected.extend(segments[:5])
+    selected.extend(visuals[:5])
+
+    seen: set[str] = set()
+    out: list[EvidenceItem] = []
+    for it in selected:
+        if it.uid in seen:
+            continue
+        seen.add(it.uid)
+        out.append(it)
+    return out
 
 
 def _cosine_mat(vectors: list[np.ndarray]) -> np.ndarray:
@@ -534,17 +762,30 @@ def build_sectioned_context(
     for it in items:
         buckets.setdefault(it.kind, []).append(it)
 
-    order = [
-        "visual_asset",
-        "graphrag_entity",
-        "graphrag_relationship",
-        "sub_concept",
-        "slide_text",
-        "slide_concept",
-        "segment",
-        "lance_strict",
-        "lance_soft",
-    ]
+    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
+        order = [
+            "slide_text",
+            "slide_concept",
+            "graphrag_entity",
+            "graphrag_relationship",
+            "segment",
+            "visual_asset",
+            "sub_concept",
+            "lance_strict",
+            "lance_soft",
+        ]
+    else:
+        order = [
+            "visual_asset",
+            "graphrag_entity",
+            "graphrag_relationship",
+            "sub_concept",
+            "slide_text",
+            "slide_concept",
+            "segment",
+            "lance_strict",
+            "lance_soft",
+        ]
     for bk in order:
         for it in buckets.get(bk, []):
             tag = {
@@ -568,10 +809,16 @@ def build_sectioned_context(
             chunk = it.text[:max_chars]
             lines.append(f"{meta}\n{chunk}")
             lines.append("")
-    lines.append(
-        "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
-        "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
-    )
+    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
+        lines.append(
+            "강의 전체 요약 질문이다. 슬라이드 순서를 중심으로 전체 흐름을 요약하고, 핵심 개념과 중요한 시각자료/강조 근거는 보조로만 사용한다. "
+            "답변은 한 문장 요약, 강의 흐름 3~5개, 핵심 개념 3~5개로 간결하게 작성한다."
+        )
+    else:
+        lines.append(
+            "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
+            "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
+        )
     return "\n".join(lines).strip()
 
 
@@ -594,6 +841,7 @@ def run_enhanced_content_pipeline(
     prior_map = cfg.get("intent_source_prior") or {}
 
     intent_weights, hints = infer_intents_json(question, call_gemini_raw)
+    lecture_overview_query = _is_lecture_overview_query(question, intent_weights)
     kws = extract_keywords_fn(question)
     for h in hints:
         if h not in kws:
@@ -605,6 +853,19 @@ def run_enhanced_content_pipeline(
         if x and x not in seen_k:
             seen_k.add(x)
             keywords.append(x)
+    if lecture_overview_query:
+        structured, _raw = run_overview_queries(session, stem)
+        n_total = sum(len(v) for v in structured.values())
+        if n_total == 0:
+            return "", intent_weights, set(), structured, []
+        allowed_ids = _collect_ids(structured)
+        graph_items = _structured_to_items(structured)
+        selected = _select_lecture_overview_items(graph_items)
+        if not selected:
+            return "", intent_weights, allowed_ids, structured, []
+        context = build_sectioned_context(question, intent_weights, selected, int(lim.get("max_context_chars_per_item", 900)))
+        return context, intent_weights, allowed_ids, structured, selected
+
     if not keywords:
         return "", intent_weights, set(), {}, []
 
@@ -628,6 +889,19 @@ def run_enhanced_content_pipeline(
 
     max_lance_ctx = int(lim.get("max_lance_in_context", 10))
     all_items = graph_items + strict_l + soft_l[: max(0, max_lance_ctx - len(strict_l))]
+
+    if current_slide_number is not None and _is_current_visual_query(question):
+        try:
+            current_sn = int(current_slide_number)
+        except (TypeError, ValueError):
+            current_sn = None
+        if current_sn is not None:
+            current_items = [
+                it for it in all_items
+                if it.slide_number is not None and int(it.slide_number) == current_sn
+            ]
+            if current_items:
+                all_items = current_items
 
     if not all_items:
         return "", intent_weights, allowed_ids, structured, []
@@ -657,6 +931,7 @@ def run_enhanced_content_pipeline(
     kw_w = float(score_cfg.get("keyword_weight", 0.15))
     slide_importance_query = _is_slide_importance_query(question)
     visual_query = _is_visual_query(question)
+    current_visual_query = _is_current_visual_query(question)
     emphasis_overview_query = _is_emphasis_overview_query(question)
     core_keyword_query = _is_core_keyword_query(question)
     max_slide_emphasis = max(
@@ -690,7 +965,7 @@ def run_enhanced_content_pipeline(
                 combined[i] += 0.55
             elif it.kind in {"slide_text", "slide_concept"} and (it.row or {}).get("t1_structure"):
                 combined[i] += 0.25
-            if current_slide_number is not None and it.slide_number == current_slide_number:
+            if current_visual_query and current_slide_number is not None and it.slide_number == current_slide_number:
                 combined[i] += 0.60
         if emphasis_overview_query:
             if it.kind in {"slide_text", "slide_concept"} and max_slide_emphasis > 0:
@@ -714,6 +989,17 @@ def run_enhanced_content_pipeline(
     lambda_mmr = float(mmr_cfg.get("lambda_example_heavy", 0.62)) if ex_w > 0.45 else float(mmr_cfg.get("lambda_default", 0.78))
     picked_idx = _mmr(order, sim_to_q, sim_all, min(mmr_k, len(all_items)), lambda_mmr)
     selected = [all_items[i] for i in picked_idx]
+    if visual_query:
+        visual_items = [it for it in all_items if it.kind == "visual_asset"]
+        visual_items.sort(key=lambda it: it.retrieval_score if it.retrieval_score is not None else 0.0, reverse=True)
+        if _is_visual_list_query(question) and visual_items:
+            selected = visual_items[: min(8, len(visual_items))]
+        elif _is_visual_interpretation_query(question) and visual_items:
+            keep = visual_items[: min(3, len(visual_items))]
+            keep_uids = {it.uid for it in keep}
+            selected = keep + [it for it in selected if it.uid not in keep_uids]
+        elif visual_items and not any(it.kind == "visual_asset" for it in selected):
+            selected.insert(0, visual_items[0])
     selected_uids = {it.uid for it in selected}
     if not any(_is_media_evidence(it) for it in selected):
         for i in order:

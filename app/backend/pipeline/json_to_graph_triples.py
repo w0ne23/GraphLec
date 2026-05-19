@@ -371,6 +371,9 @@ class Preprocessor:
             str(asset.get('title') or '').strip(),
             str(asset.get('description') or '').strip(),
             str(asset.get('raw_text') or '').strip(),
+            str(asset.get('visual_elements_text') or '').strip(),
+            str(asset.get('visual_relations_text') or '').strip(),
+            str(asset.get('layout_text') or '').strip(),
         ]
         return '\n'.join(part for part in parts if part)
 
@@ -390,6 +393,12 @@ class Preprocessor:
                 'title': str(asset.get('title') or '').strip(),
                 'description': str(asset.get('description') or text).strip(),
                 'raw_text': str(asset.get('raw_text') or '').strip(),
+                'visual_elements': asset.get('visual_elements') if isinstance(asset.get('visual_elements'), list) else [],
+                'visual_relations': asset.get('visual_relations') if isinstance(asset.get('visual_relations'), list) else [],
+                'layout': asset.get('layout') if isinstance(asset.get('layout'), dict) else {},
+                'visual_elements_text': str(asset.get('visual_elements_text') or '').strip(),
+                'visual_relations_text': str(asset.get('visual_relations_text') or '').strip(),
+                'layout_text': str(asset.get('layout_text') or '').strip(),
                 'bbox': asset.get('bbox') if isinstance(asset.get('bbox'), dict) else None,
             })
 
@@ -405,6 +414,12 @@ class Preprocessor:
             'title': str(slide.get('title') or '').strip(),
             'description': structure_text,
             'raw_text': '',
+            'visual_elements': [],
+            'visual_relations': [],
+            'layout': {},
+            'visual_elements_text': '',
+            'visual_relations_text': '',
+            'layout_text': '',
             'bbox': None,
         }]
 
@@ -565,6 +580,12 @@ class StructureLayerBuilder:
                     'asset_type': asset.get('asset_type') or self.pre._visual_type(slide, asset),
                     'description': asset.get('description', ''),
                     'raw_text': asset.get('raw_text', ''),
+                    'visual_elements': asset.get('visual_elements', []),
+                    'visual_relations': asset.get('visual_relations', []),
+                    'layout': asset.get('layout', {}),
+                    'visual_elements_text': asset.get('visual_elements_text', ''),
+                    'visual_relations_text': asset.get('visual_relations_text', ''),
+                    'layout_text': asset.get('layout_text', ''),
                     'bbox': asset.get('bbox'),
                     'slide_id': sid,
                     'slide_number': slide.get('slide_number'),

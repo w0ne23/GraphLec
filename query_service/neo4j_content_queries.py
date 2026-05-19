@@ -51,14 +51,18 @@ def _relevance_score(text: str, keywords: list[str]) -> int:
 def _requested_visual_types(keywords: list[str]) -> set[str]:
     joined = " ".join(str(k or "").lower() for k in keywords)
     types: set[str] = set()
-    if any(k in joined for k in ("비교표", "도표", "표", "table")):
+    table_requested = (
+        any(k in joined for k in ("비교표", "도표", "테이블", "table"))
+        or any(str(k or "").strip().lower() == "표" for k in keywords)
+    )
+    if table_requested:
         types.add("table")
-    if any(k in joined for k in ("다이어그램", "구조도", "diagram")):
+    if any(k in joined for k in ("다이어그램", "구조도", "화살표", "양방향", "diagram", "arrow")):
         types.add("diagram")
     if any(k in joined for k in ("차트", "그래프", "chart", "graph")):
         types.add("chart")
     if any(k in joined for k in ("그림", "이미지", "figure", "image")):
-        types.update({"figure", "image"})
+        types.update({"diagram", "figure", "image"})
     if any(k in joined for k in ("목록", "리스트", "list")):
         types.add("list")
     return types
@@ -136,11 +140,11 @@ def run_content_queries(
     ORDER BY title_relevance DESC, relevance DESC, emphasis_total DESC, slide.slide_number LIMIT {SLIDE_LIM}
     """
     q_visual_asset = f"""
-    MATCH (slide:Slide {{stem: $stem}})-[:HAS_VISUAL_ASSET]->(asset:VisualAsset {{stem: $stem}})
+    MATCH (slide:Slide {{stem: $stem}})-[:HAS_VISUAL_ASSET]->(asset:VisualAsset)
     WITH slide, asset,
          CASE
            WHEN coalesce(asset.asset_type, '') = 'table' THEN ' 표 도표 비교표 table'
-           WHEN coalesce(asset.asset_type, '') = 'diagram' THEN ' 다이어그램 구조도 diagram'
+           WHEN coalesce(asset.asset_type, '') = 'diagram' THEN ' 다이어그램 구조도 화살표 양방향 arrow diagram'
            WHEN coalesce(asset.asset_type, '') = 'chart' THEN ' 차트 그래프 chart graph'
            WHEN coalesce(asset.asset_type, '') IN ['figure', 'image'] THEN ' 그림 이미지 figure image'
            WHEN coalesce(asset.asset_type, '') = 'list' THEN ' 목록 리스트 list'
@@ -152,7 +156,10 @@ def run_content_queries(
         coalesce(asset.title,'') + ' ' +
         coalesce(asset.asset_type,'') + ' ' +
         coalesce(asset.description,'') + ' ' +
-        coalesce(asset.raw_text,'') + ' ' +
+        coalesce(properties(asset).raw_text,'') + ' ' +
+        coalesce(properties(asset).visual_elements_text,'') + ' ' +
+        coalesce(properties(asset).visual_relations_text,'') + ' ' +
+        coalesce(properties(asset).layout_text,'') + ' ' +
         type_alias + ' ' +
         '시각자료 visual'
     ) AS haystack
@@ -168,7 +175,10 @@ def run_content_queries(
     RETURN coalesce(asset.id, '') AS visual_asset_id,
            asset.asset_type AS asset_type,
            asset.description AS description,
-           asset.raw_text AS raw_text,
+           properties(asset).raw_text AS raw_text,
+           properties(asset).visual_elements_text AS visual_elements_text,
+           properties(asset).visual_relations_text AS visual_relations_text,
+           properties(asset).layout_text AS layout_text,
            asset.title AS title,
            slide.slide_number AS slide_number,
            coalesce(slide.id,'') AS slide_id,
@@ -206,6 +216,8 @@ def run_content_queries(
            coalesce(slide.id,'') AS slide_id, coalesce(seg.id,'') AS segment_id,
            coalesce(scene.id,'') AS scene_id, coalesce(ctx.id,'') AS context_id,
            scene.start_sec AS scene_start_sec, scene.end_sec AS scene_end_sec,
+           coalesce(slide.emphasis_total, 0) AS slide_emphasis_total,
+           coalesce(scene.emphasis_total, 0) AS scene_emphasis_total,
            size(hits) AS relevance
     ORDER BY relevance DESC, seg.start LIMIT {SEG_LIM}
     """
@@ -360,15 +372,164 @@ def run_content_queries(
             ]
             if filtered_assets:
                 results["visual_assets"] = filtered_assets
+        lexical_scores = [
+            _relevance_score(
+                str(r.get("description", ""))
+                + str(r.get("raw_text", ""))
+                + str(r.get("visual_elements_text", ""))
+                + str(r.get("visual_relations_text", ""))
+                + str(r.get("layout_text", ""))
+                + str(r.get("title", "")),
+                keywords,
+            )
+            for r in results["visual_assets"]
+        ]
+        max_lexical = max(lexical_scores or [0])
+        if max_lexical >= 3:
+            results["visual_assets"] = [
+                r for r, score in zip(results["visual_assets"], lexical_scores)
+                if score >= max_lexical - 1
+            ]
         results["visual_assets"].sort(
             key=lambda r: (
                 int(r.get("relevance") or 0),
                 _relevance_score(
-                    str(r.get("description", "")) + str(r.get("raw_text", "")) + str(r.get("title", "")),
+                    str(r.get("description", ""))
+                    + str(r.get("raw_text", ""))
+                    + str(r.get("visual_elements_text", ""))
+                    + str(r.get("visual_relations_text", ""))
+                    + str(r.get("layout_text", ""))
+                    + str(r.get("title", "")),
                     keywords,
                 ),
             ),
             reverse=True,
         )
+
+    return dict(results), raw_all
+
+
+def run_overview_queries(session, stem: str) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+    """강의 전체 요약용: 키워드 매칭 없이 슬라이드 흐름 + 핵심 노드 + 강조 근거를 모은다."""
+    results: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    raw_all: list[dict[str, Any]] = []
+
+    q_slides = """
+    MATCH (slide:Slide {stem: $stem})
+    OPTIONAL MATCH (scene:Scene {stem: $stem})-[:USES_SLIDE]->(slide)
+    RETURN slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id,
+           slide.title AS title,
+           slide.slide_text AS slide_text,
+           slide.t1_structure AS t1_structure,
+           slide.visual_asset_text AS visual_asset_text,
+           slide.slide_type AS slide_type,
+           min(scene.start_sec) AS start_sec,
+           max(scene.end_sec) AS end_sec,
+           coalesce(slide.emphasis_total, 0) AS emphasis_total,
+           1 AS relevance,
+           0 AS title_relevance
+    ORDER BY slide.slide_number
+    LIMIT 30
+    """
+    q_entities = """
+    MATCH (ge:GraphRAGEntity {stem: $stem})
+    OPTIONAL MATCH (ge)-[:GRAPHRAG_APPEARS_IN]->(slide:Slide {stem: $stem})
+    OPTIONAL MATCH (ge)-[:GRAPHRAG_APPEARS_IN_SCENE]->(scene:Scene {stem: $stem})
+    RETURN coalesce(ge.id, '') AS graphrag_entity_id,
+           ge.title AS graphrag_title,
+           ge.type AS graphrag_type,
+           ge.description AS graphrag_description,
+           ge.degree AS degree,
+           ge.frequency AS frequency,
+           ge.emphasis_boost_local AS emphasis_boost_local,
+           ge.final_weight AS final_weight,
+           ge.emphasis_sources AS emphasis_sources,
+           ge.emphasis_matched_keywords AS emphasis_matched_keywords,
+           ge.emphasis_visual_keywords AS emphasis_visual_keywords,
+           [] AS concept_ids,
+           [] AS concept_names,
+           collect(DISTINCT slide.slide_number) AS slide_numbers,
+           collect(DISTINCT coalesce(slide.id, '')) AS slide_ids,
+           collect(DISTINCT coalesce(scene.id, '')) AS scene_ids,
+           collect(DISTINCT scene.start_sec) AS scene_start_secs,
+           collect(DISTINCT scene.end_sec) AS scene_end_secs,
+           1 AS relevance
+    ORDER BY coalesce(ge.final_weight, 0) DESC,
+             coalesce(ge.emphasis_boost_local, 0) DESC,
+             coalesce(ge.frequency, 0) DESC,
+             coalesce(ge.degree, 0) DESC
+    LIMIT 12
+    """
+    q_relationships = """
+    MATCH (src:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_RELATES_TO]->(tgt:GraphRAGEntity {stem: $stem})
+    RETURN coalesce(src.id, '') AS src_id,
+           src.title AS src_title,
+           coalesce(tgt.id, '') AS tgt_id,
+           tgt.title AS tgt_title,
+           r.description AS rel_description,
+           r.weight AS weight,
+           r.emphasis_edge_weight AS emphasis_edge_weight,
+           r.combined_degree AS combined_degree,
+           [] AS src_concept_ids,
+           [] AS tgt_concept_ids,
+           1 AS relevance
+    ORDER BY coalesce(r.emphasis_edge_weight, r.weight, 0) DESC,
+             coalesce(r.combined_degree, 0) DESC
+    LIMIT 10
+    """
+    q_visual_assets = """
+    MATCH (slide:Slide {stem: $stem})-[:HAS_VISUAL_ASSET]->(asset:VisualAsset)
+    WHERE coalesce(asset.asset_type, '') IN ['diagram', 'table', 'chart', 'figure', 'image']
+    OPTIONAL MATCH (scene:Scene {stem: $stem})-[:USES_SLIDE]->(slide)
+    RETURN coalesce(asset.id, '') AS visual_asset_id,
+           asset.asset_type AS asset_type,
+           asset.description AS description,
+           properties(asset).raw_text AS raw_text,
+           properties(asset).visual_elements_text AS visual_elements_text,
+           properties(asset).visual_relations_text AS visual_relations_text,
+           properties(asset).layout_text AS layout_text,
+           asset.title AS title,
+           slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id,
+           min(scene.start_sec) AS start_sec,
+           max(scene.end_sec) AS end_sec,
+           1 AS relevance
+    ORDER BY slide.slide_number
+    LIMIT 8
+    """
+    q_segments = """
+    MATCH (scene:Scene {stem: $stem})-[:USES_SLIDE]->(slide:Slide {stem: $stem})
+    MATCH (scene)-[:HAS_CONTEXT]->(ctx:Context {stem: $stem})-[:HAS_SEGMENT]->(seg:Segment {stem: $stem})
+    WHERE coalesce(scene.emphasis_total, 0) > 0 OR coalesce(slide.emphasis_total, 0) > 0
+    RETURN coalesce(seg.text,'') AS segment_text,
+           seg.start AS start,
+           seg.end AS end,
+           slide.slide_number AS slide_number,
+           coalesce(slide.id,'') AS slide_id,
+           coalesce(seg.id,'') AS segment_id,
+           coalesce(scene.id,'') AS scene_id,
+           coalesce(ctx.id,'') AS context_id,
+           scene.start_sec AS scene_start_sec,
+           scene.end_sec AS scene_end_sec,
+           coalesce(slide.emphasis_total, 0) AS slide_emphasis_total,
+           coalesce(scene.emphasis_total, 0) AS scene_emphasis_total,
+           1 AS relevance
+    ORDER BY coalesce(scene.emphasis_total, 0) DESC,
+             coalesce(slide.emphasis_total, 0) DESC,
+             seg.start ASC
+    LIMIT 12
+    """
+
+    for key, query in (
+        ("slides", q_slides),
+        ("graphrag_entities", q_entities),
+        ("graphrag_relationships", q_relationships),
+        ("visual_assets", q_visual_assets),
+        ("segments", q_segments),
+    ):
+        rows = _run_cypher_dicts(session, query, {"stem": stem})
+        results[key].extend(rows)
+        raw_all.extend(rows)
 
     return dict(results), raw_all
