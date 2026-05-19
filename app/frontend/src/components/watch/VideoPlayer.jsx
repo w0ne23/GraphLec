@@ -15,6 +15,11 @@ function tsToSec(ts = '00:00') {
   return parts[0] * 3600 + parts[1] * 60 + parts[2]
 }
 
+function sceneStartSec(scene) {
+  if (Number.isFinite(Number(scene?.timestamp_sec))) return Number(scene.timestamp_sec)
+  return tsToSec(scene?.timestamp)
+}
+
 export default function VideoPlayer({
   lecture,
   scenes = [],
@@ -50,7 +55,7 @@ export default function VideoPlayer({
 
     // 장면(Scene) 동기화
     if (scenes.length > 0) {
-      const activeSceneIndex = [...scenes].reverse().findIndex(s => tsToSec(s.timestamp) <= sec)
+      const activeSceneIndex = [...scenes].reverse().findIndex(s => sceneStartSec(s) <= sec)
       if (activeSceneIndex !== -1) {
         const actualIndex = scenes.length - 1 - activeSceneIndex
         // Ref를 참조하여 의존성 배열에서 currentScene 제거
@@ -153,7 +158,7 @@ export default function VideoPlayer({
   // 외부(목록 클릭 등)에서 명시적인 점프 요청이 왔을 때 영상 이동
   useEffect(() => {
     if (!seekTo || !scenes[seekTo.index]) return
-    const targetSec = tsToSec(scenes[seekTo.index].timestamp) + Number(seekTo.offsetSec || 0)
+    const targetSec = sceneStartSec(scenes[seekTo.index]) + Number(seekTo.offsetSec || 0)
     jumpToTime(targetSec, seekTo.autoPlay ?? true)
   }, [seekTo, scenes, jumpToTime])
 
@@ -220,7 +225,7 @@ export default function VideoPlayer({
             </div>
             {scenes.map((s, i) => {
               if (!duration) return null
-              const pct = (tsToSec(s.timestamp) / duration) * 100
+              const pct = (sceneStartSec(s) / duration) * 100
               const cls = { slide: 'vp-marker--slide', emphasis: 'vp-marker--emphasis', demo: 'vp-marker--demo' }[s.type] ?? 'vp-marker--slide'
               return (
                 <div

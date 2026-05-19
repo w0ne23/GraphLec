@@ -601,6 +601,7 @@ async def ask_question(
                 "graph": qr.get("graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
                 "related_slides": qr.get("related_slides", []),
+                "source_mode": qr.get("source_mode", "default"),
             }
     except httpx.HTTPError:
         raise HTTPException(status_code=503, detail="Query service unreachable")
@@ -624,11 +625,17 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
         scenes = []
         for s in data.get("scenes", []):
             img_url = make_file_url(s.get("image_path"))
-            ts = s.get("timestamp_formatted", "00:00").split(".")[0]
+            timestamp_sec = s.get("timestamp")
+            try:
+                timestamp_sec = float(timestamp_sec)
+            except (TypeError, ValueError):
+                timestamp_sec = 0.0
+            ts = s.get("timestamp_formatted", "00:00")
             if ts.startswith("00:"): ts = ts[3:]
 
             scenes.append({
                 "timestamp":    ts,
+                "timestamp_sec": timestamp_sec,
                 "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
                 "text":         s.get("title") or f"Slide {s.get('slide_number')}",
                 "image_url":    img_url,

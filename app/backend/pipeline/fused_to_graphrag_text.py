@@ -61,7 +61,19 @@ def _format_visual_assets(slide: dict[str, Any]) -> str:
         title = _clean_inline(asset.get("title"))
         desc = _clean_text(asset.get("description"))
         raw_text = _clean_text(asset.get("raw_text") or asset.get("text"))
-        body = "\n".join(part for part in [desc, raw_text] if part)
+        elements = _clean_text(asset.get("visual_elements_text"))
+        relations = _clean_text(asset.get("visual_relations_text"))
+        layout = _clean_text(asset.get("layout_text"))
+        body = "\n".join(
+            part for part in [
+                desc,
+                raw_text,
+                f"시각 요소:\n{elements}" if elements else "",
+                f"시각 관계:\n{relations}" if relations else "",
+                f"배치:\n{layout}" if layout else "",
+            ]
+            if part
+        )
         if not (title or body):
             continue
         label = f"{idx}. {asset_type or 'visual'}"
