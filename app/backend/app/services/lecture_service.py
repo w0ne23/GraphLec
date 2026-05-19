@@ -711,17 +711,19 @@ async def ask_question(
     async with stem_lock:
         await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{query_url}/internal/query",
-                json={
-                    "stem": stem,
-                    "question": question,
-                    "current_scene_number": current_scene_number,
-                    "current_slide_number": current_slide_number,
-                },
-            )
+    last_err: tuple | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=40.0) as client:
+                resp = await client.post(
+                    f"{query_url}/internal/query",
+                    json={
+                        "stem": stem,
+                        "question": question,
+                        "current_scene_number": current_scene_number,
+                        "current_slide_number": current_slide_number,
+                    },
+                )
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")
             qr = resp.json()
@@ -734,8 +736,26 @@ async def ask_question(
                 "related_slides": qr.get("related_slides", []),
                 "source_mode": qr.get("source_mode", "default"),
             }
-    except httpx.HTTPError:
-        raise HTTPException(status_code=503, detail="Query service unreachable")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as exc:
+            last_err = ("timeout", exc)
+        except httpx.ConnectError as exc:
+            last_err = ("connect", exc)
+        except httpx.HTTPError as exc:
+            last_err = ("http", exc)
+        if attempt == 0:
+            await asyncio.sleep(1)
+
+    if last_err and last_err[0] == "timeout":
+        raise HTTPException(
+            status_code=504,
+            detail="QnA 서비스 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+        )
+    raise HTTPException(
+        status_code=503,
+        detail="QnA 서비스에 연결할 수 없습니다. 서버 상태를 확인해 주세요.",
+    )
 
 
 async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]]:

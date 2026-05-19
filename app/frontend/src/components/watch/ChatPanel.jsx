@@ -26,6 +26,8 @@ export default function ChatPanel({
   // 인덱스별 펼침 상태를 관리하는 배열
   const [expandedIndices, setExpandedIndices] = useState([])
   const [expandedGraphIndices, setExpandedGraphIndices] = useState([])
+  const [slowHint, setSlowHint] = useState(false)
+  const slowTimerRef = useRef(null)
 
   const toggleExpand = (idx) => {
     setExpandedIndices(prev => {
@@ -44,6 +46,17 @@ export default function ChatPanel({
   }
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, loading])
+
+  useEffect(() => {
+    if (loading) {
+      setSlowHint(false)
+      slowTimerRef.current = setTimeout(() => setSlowHint(true), 20000)
+    } else {
+      setSlowHint(false)
+      clearTimeout(slowTimerRef.current)
+    }
+    return () => clearTimeout(slowTimerRef.current)
+  }, [loading])
 
   function formatTime(seconds) {
     if (seconds == null || Number.isNaN(Number(seconds))) return null
@@ -260,21 +273,15 @@ export default function ChatPanel({
     return nodes
   }
 
-  async function send() {
-    const question = input.trim()
+  async function sendQuestion(question) {
     if (!question || loading || !lecture?.id) return
-    setInput('')
-    // id를 제거하고 간결하게 변경
-    setMessages(prev => [...prev, { role: 'user', content: question, refs: [] }])
     setLoading(true)
-    
     try {
       const currentScene = lecture?.scenes?.[currentSceneIndex] || null
       const res = await askQa(lecture.id, question, {
         current_scene_number: currentScene?.scene_number ?? null,
         current_slide_number: currentScene?.slide_number ?? null,
       })
-
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: res.answer || '답변을 생성하지 못했습니다.',
@@ -287,11 +294,22 @@ export default function ChatPanel({
     } catch (e) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: `오류: ${e.message}`, refs: [],
+        isError: true,
+        retryQuestion: question,
+        content: e.message || 'QnA 서비스 오류가 발생했습니다.',
+        refs: [],
       }])
     } finally {
       setLoading(false)
     }
+  }
+
+  function send() {
+    const question = input.trim()
+    if (!question || loading || !lecture?.id) return
+    setInput('')
+    setMessages(prev => [...prev, { role: 'user', content: question, refs: [] }])
+    sendQuestion(question)
   }
 
   return (
@@ -312,7 +330,22 @@ export default function ChatPanel({
           ) : (
             <div key={msgIdx} className="chat-msg-ai">
               <div className="chat-bubble-ai">
+                {msg.isError ? (
+                  <div className="chat-error-notice">
+                    <span className="chat-error-text">{msg.content}</span>
+                    <button
+                      className="chat-retry-btn"
+                      onClick={() => {
+                        setMessages(prev => prev.slice(0, -1))
+                        sendQuestion(msg.retryQuestion)
+                      }}
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                ) : (
                 <div className="chat-answer-text">{renderAnswerContent(msg.content)}</div>
+                )}
                 {!['visual_location', 'scene_location'].includes(msg.sourceMode) && msg.refs?.length > 0 && (
                   <div className="chat-refs-container">
                     <div className="chat-refs-header">영상 구간</div>
@@ -425,7 +458,12 @@ export default function ChatPanel({
             </div>
           )
         )}
-        {loading && <div className="chat-loading">답변 생성 중...</div>}
+        {loading && (
+          <div className="chat-loading">
+            답변 생성 중...
+            {slowHint && <span className="chat-loading-slow"> 응답이 오래 걸리고 있습니다. 잠시만 기다려 주세요.</span>}
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
