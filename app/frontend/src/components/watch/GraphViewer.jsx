@@ -16,7 +16,15 @@ const GRAPH_COLORS = {
   Lecture: '#60A5FA',
 };
 
+const GRAPH_VIEW_MODES = [
+  { id: 'all', label: '전체 보기' },
+  { id: 'structure', label: '구조 그래프 보기' },
+  { id: 'concept', label: '개념 그래프 보기' },
+];
+
 const GENERIC_CONCEPT_LABELS = new Set(['concept', 'entity', 'node', 'graphragentity', 'graphrag entity']);
+const STRUCTURE_TYPES = new Set(['Video', 'Slide', 'Scene', 'Context', 'Segment', 'VisualAsset', 'AnnotationEmphasis']);
+const CONCEPT_TYPES = new Set(['GraphRAGEntity', 'GraphRAGCommunity']);
 
 function nodeProps(node) {
   if (node?.props && typeof node.props === 'object') return node.props;
@@ -60,6 +68,49 @@ function graphColor(node) {
   const type = normalizedType(node);
   if (GRAPH_COLORS[type]) return GRAPH_COLORS[type];
   return type === 'node' || type === 'orphan' ? '#94A3B8' : GRAPH_COLORS.GraphRAGEntity;
+}
+
+function graphGroup(type) {
+  if (STRUCTURE_TYPES.has(type)) return 'structure';
+  if (CONCEPT_TYPES.has(type)) return 'concept';
+  return 'other';
+}
+
+function isModeFocused(group, mode) {
+  return mode === 'all' || group === mode;
+}
+
+function styledNodeColor(baseColor, focused) {
+  const background = focused ? baseColor : '#CBD5E1';
+  const border = focused ? '#334155' : '#94A3B8';
+  return {
+    background,
+    border,
+    highlight: {
+      background: focused ? baseColor : '#CBD5E1',
+      border: focused ? '#0f172a' : '#64748B',
+    },
+  };
+}
+
+function styledEdge(edge, source, target, mode) {
+  const fromGroup = graphGroup(normalizedType(source));
+  const toGroup = graphGroup(normalizedType(target));
+  const relation = relationLabel(edge);
+  const isStructureEdge = fromGroup === 'structure' && toGroup === 'structure';
+  const isConceptEdge = fromGroup === 'concept' && toGroup === 'concept';
+  const focused = mode === 'all'
+    || (mode === 'structure' && isStructureEdge)
+    || (mode === 'concept' && isConceptEdge);
+  const color = mode === 'all'
+    ? '#94A3B8'
+    : (focused ? (mode === 'structure' ? '#38BDF8' : '#FB7185') : 'rgba(148, 163, 184, 0.22)');
+  return {
+    relation,
+    focused,
+    color,
+    width: focused ? 1.5 : 0.45,
+  };
 }
 
 function conceptLabel(node) {
@@ -148,14 +199,77 @@ function relationLabel(edge) {
     .trim();
 }
 
+function buildStyledGraph(rawGraph, displayById, mode) {
+  const rawNodes = Array.isArray(rawGraph?.nodes) ? rawGraph.nodes : [];
+  const rawEdges = Array.isArray(rawGraph?.edges) ? rawGraph.edges : [];
+  const nCount = rawNodes.length;
+  const heavy = nCount > 150;
+  const nodesById = new Map(rawNodes.map(node => [String(node.id), node]));
+  const edgeInfoById = new Map();
+
+  const nodes = rawNodes.map((n) => {
+    const baseColor = graphColor(n);
+    const type = normalizedType(n);
+    const group = graphGroup(type);
+    const focused = isModeFocused(group, mode);
+    const isConcept = type === 'GraphRAGEntity' || type === 'GraphRAGCommunity';
+    const isVisual = type === 'VisualAsset';
+    return {
+      id: n.id != null ? String(n.id) : 'n',
+      label: displayById.get(String(n.id)) || conceptLabel(n),
+      title: nodeDetail(n),
+      shape: 'dot',
+      size: isConcept ? (nCount > 400 ? 13 : 18) : (isVisual ? (nCount > 400 ? 12 : 16) : (nCount > 400 ? 11 : 14)),
+      color: styledNodeColor(baseColor, focused),
+      borderWidth: focused ? 2 : 1,
+      opacity: focused ? 1 : 0.28,
+      font: {
+        color: focused ? '#111827' : 'rgba(100, 116, 139, 0.48)',
+        size: nCount > 400 ? 10 : 11,
+      },
+    };
+  });
+
+  const edges = rawEdges.map((e, i) => {
+    const edgeId = `gv-edge-${i}`;
+    const from = String(e.from != null ? e.from : e.src_id);
+    const to = String(e.to != null ? e.to : e.tgt_id);
+    const source = nodesById.get(from);
+    const target = nodesById.get(to);
+    const edgeStyle = styledEdge(e, source, target, mode);
+    edgeInfoById.set(edgeId, {
+      relation: edgeStyle.relation,
+      from: displayById.get(from) || from,
+      to: displayById.get(to) || to,
+      source,
+      target,
+      focused: edgeStyle.focused,
+    });
+    return {
+      id: edgeId,
+      from,
+      to,
+      title: edgeStyle.relation,
+      arrows: 'to',
+      color: edgeStyle.color,
+      width: heavy ? Math.max(0.35, edgeStyle.width * 0.8) : edgeStyle.width,
+    };
+  }).filter(e => e.from && e.to);
+
+  return { nodes, edges, nodesById, edgeInfoById, heavy, nCount };
+}
+
 function GraphViewer({ lectureId }) {
   const containerRef = useRef(null);
   const networkRef = useRef(null);
+  const graphCacheRef = useRef(null);
+  const lastStyledModeRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [graphData, setGraphData] = useState(null);
   const [hoverInfo, setHoverInfo] = useState(null);
   const [selectedEdge, setSelectedEdge] = useState(null);
+  const [viewMode, setViewMode] = useState('all');
 
   const rawGraph = graphData?.graph || { nodes: [], edges: [] };
   const displayById = useMemo(
@@ -188,54 +302,18 @@ function GraphViewer({ lectureId }) {
   useEffect(() => {
     if (!containerRef.current || !graphData || !graphData.graph) return;
 
-    const { nodes: rawNodes, edges: rawEdges } = graphData.graph;
-    const nCount = rawNodes.length;
-    const nodesById = new Map(rawNodes.map(node => [String(node.id), node]));
-    const edgeInfoById = new Map();
-
-    const nodes = rawNodes.map((n) => {
-      const color = graphColor(n);
-      const type = normalizedType(n);
-      const isConcept = type === 'GraphRAGEntity' || type === 'GraphRAGCommunity';
-      const isVisual = type === 'VisualAsset';
-      return {
-        id: n.id != null ? String(n.id) : 'n',
-        label: displayById.get(String(n.id)) || conceptLabel(n),
-        title: nodeDetail(n),
-        shape: 'dot',
-        size: isConcept ? (nCount > 400 ? 13 : 18) : (isVisual ? (nCount > 400 ? 12 : 16) : (nCount > 400 ? 11 : 14)),
-        color: {
-          background: color,
-          border: '#334155',
-          highlight: { background: color, border: '#0f172a' },
-        },
-        font: { color: '#111827', size: nCount > 400 ? 10 : 11 },
-      };
-    });
-
-    const edges = rawEdges.map((e, i) => {
-      const edgeId = `gv-edge-${i}`;
-      const from = String(e.from != null ? e.from : e.src_id);
-      const to = String(e.to != null ? e.to : e.tgt_id);
-      const relation = relationLabel(e);
-      edgeInfoById.set(edgeId, {
-        relation,
-        from: displayById.get(from) || from,
-        to: displayById.get(to) || to,
-        source: nodesById.get(from),
-        target: nodesById.get(to),
-      });
-      return {
-        id: edgeId,
-        from,
-        to,
-        title: relation,
-        arrows: 'to',
-      };
-    }).filter(e => e.from && e.to);
+    const {
+      nodes,
+      edges,
+      nodesById,
+      edgeInfoById,
+      heavy,
+      nCount,
+    } = buildStyledGraph(graphData.graph, displayById, viewMode);
+    graphCacheRef.current = { nodesById, edgeInfoById };
+    lastStyledModeRef.current = viewMode;
 
     const data = { nodes, edges };
-    const heavy = nCount > 150;
 
     const options = {
       nodes: { borderWidth: 2 },
@@ -249,7 +327,7 @@ function GraphViewer({ lectureId }) {
       },
       physics: {
         enabled: true,
-        stabilization: { enabled: false },
+        stabilization: { enabled: true, iterations: heavy ? 80 : 120, fit: false },
         barnesHut: {
           gravitationalConstant: heavy ? -4000 : -2000,
           springLength: heavy ? 150 : 100,
@@ -307,7 +385,11 @@ function GraphViewer({ lectureId }) {
         setSelectedEdge(null);
         return;
       }
-      setSelectedEdge(edgeInfoById.get(params.edges[0]) || null);
+      setSelectedEdge(graphCacheRef.current?.edgeInfoById?.get(params.edges[0]) || null);
+    });
+
+    network.once('stabilizationIterationsDone', () => {
+      network.setOptions({ physics: false });
     });
 
     // [개선] 초기 로딩 시 그래프 맞춤 (안정화 시 재정렬은 사용자 요청으로 제거)
@@ -350,12 +432,38 @@ function GraphViewer({ lectureId }) {
     };
   }, [displayById, graphData]);
 
+  useEffect(() => {
+    if (!networkRef.current || !graphData?.graph) return;
+    if (lastStyledModeRef.current === viewMode) return;
+    const { nodes, edges, nodesById, edgeInfoById } = buildStyledGraph(graphData.graph, displayById, viewMode);
+    graphCacheRef.current = { nodesById, edgeInfoById };
+    networkRef.current.body.data.nodes.update(nodes);
+    networkRef.current.body.data.edges.update(edges);
+    networkRef.current.setOptions({ physics: false });
+    lastStyledModeRef.current = viewMode;
+  }, [displayById, graphData, viewMode]);
+
   return (
     <div className="gv-container" style={{ position: 'relative' }}>
       <div className="gv-header">
         <span className="gv-stats">
           {loading ? '데이터 로딩 중...' : `노드: ${graphData?.node_count || 0}개 · 엣지: ${graphData?.edge_count || 0}개`}
         </span>
+        <div className="gv-mode-tabs" aria-label="그래프 보기 모드">
+          {GRAPH_VIEW_MODES.map(mode => (
+            <button
+              key={mode.id}
+              type="button"
+              className={`gv-mode-tab ${viewMode === mode.id ? 'is-active' : ''}`}
+              onClick={() => {
+                setViewMode(mode.id);
+                setSelectedEdge(null);
+              }}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
       </div>
       
       <div className="gv-network-wrapper" style={{ position: 'relative', flex: 1, minHeight: 0 }}>

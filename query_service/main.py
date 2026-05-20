@@ -59,10 +59,9 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 
 GRAPH_SCHEMA = """
 노드 타입과 주요 프로퍼티:
-- Video          : id, stem, title
+- Video          : id, stem, title, domain, subdomain
 - Slide          : id, stem, slide_number, title, slide_text, t1_structure, visual_asset_text, slide_type, emphasis_total, emphasis_score, emphasis_keywords_text
 - VisualAsset    : id, stem, asset_type, description, raw_text, slide_number, scene_number, title, image_path
-- Domain         : id, stem, name, subdomain
 - Scene          : id, stem, source_slide_id, scene_number, slide_number, start_sec, end_sec, role, emphasis_total
 - Context        : id, stem, slide_id, scene_id, context_index, start, end, stressed, text
 - Segment        : id, stem, start, end, text, stressed
@@ -73,7 +72,6 @@ GRAPH_SCHEMA = """
 
 관계 (방향 중요):
 - (Video)-[:HAS_SCENE]->(Scene)
-- (Video)-[:HAS_DOMAIN]->(Domain)
 - (Video)-[:HAS_SLIDE]->(Slide)
 - (Slide)-[:HAS_VISUAL_ASSET]->(VisualAsset)
 - (Scene)-[:USES_SLIDE]->(Slide)

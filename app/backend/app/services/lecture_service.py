@@ -926,6 +926,8 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
             except:
                 props_dict = {}
                 ntype = label or "node"
+            if label == "Domain" or ntype == "Domain" or nid == "lecture_video" or nid.startswith("domain/"):
+                continue
             nodes_out.append({
                 "id": nid, "label": label[:120], "title": props[:800],
                 "name": _str_cell(props_dict.get("name")) or _str_cell(props_dict.get("title")),
@@ -941,7 +943,16 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
             src, tgt = _str_cell(row.get("src_id")), _str_cell(row.get("tgt_id"))
             if not src or not tgt:
                 continue
-            edges_out.append({"from": src, "to": tgt, "label": _str_cell(row.get("rel_type")) or "related"})
+            rel_type = _str_cell(row.get("rel_type")) or "related"
+            if (
+                rel_type == "HAS_DOMAIN"
+                or src == "lecture_video"
+                or tgt == "lecture_video"
+                or src.startswith("domain/")
+                or tgt.startswith("domain/")
+            ):
+                continue
+            edges_out.append({"from": src, "to": tgt, "label": rel_type})
             for x in (src, tgt):
                 if x not in seen_ids:
                     seen_ids.add(x)
