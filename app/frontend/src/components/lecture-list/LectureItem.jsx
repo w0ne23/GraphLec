@@ -8,18 +8,21 @@
  */
 export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
   const isDone = lecture.status === 'done';
+  const isDummy = lecture.is_dummy || lecture.source === 'metadata';
+  const isPlayable = isDone && !isDummy;
+  const metaLabel = lecture.created_at ? new Date(lecture.created_at).toLocaleDateString() : '';
   
   return (
     <article 
       className={`lecture-card ${viewMode === 'list' ? 'lecture-card--list' : ''}`}
-      onClick={() => isDone && onClick?.(lecture)}
-      style={{ cursor: isDone ? 'pointer' : 'default' }}
+      onClick={() => isPlayable && onClick?.(lecture)}
+      style={{ cursor: isPlayable ? 'pointer' : 'default' }}
     >
       <div className="lecture-card-thumb" style={{ background: 'var(--card)' }}>
         <span className="lecture-card-thumb-icon">
           {lecture.category === '수학' ? '📐' : '🎬'}
         </span>
-        {!isDone && (
+        {!isDummy && !isDone && (
           <span className={`lecture-card-status-badge status-${lecture.status}`}>
             {lecture.status === 'error' ? '오류' : '분석 중'}
           </span>
@@ -30,7 +33,7 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
         <div className="lecture-card-category">{lecture.category}</div>
         <h3 className="lecture-card-title">{lecture.title}</h3>
         <div className="lecture-card-meta">
-          {new Date(lecture.created_at).toLocaleDateString()}
+          {metaLabel}
         </div>
         {lecture.tags?.length > 0 && (
           <div className="lecture-card-tags">

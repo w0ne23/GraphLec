@@ -38,6 +38,8 @@ services:
       context: .
       dockerfile: ./query_service/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8001:8001"
     environment:
@@ -68,6 +70,8 @@ services:
       context: .
       dockerfile: ./app/backend/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     environment:
@@ -77,14 +81,36 @@ services:
       - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
       - GRAPHRAG_API_KEY=${GRAPHRAG_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - XAI_BASE_URL=${XAI_BASE_URL:-https://api.x.ai/v1}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      - DEEPSEEK_THINKING=${DEEPSEEK_THINKING:-disabled}
+      - DEEPSEEK_REASONING_EFFORT=${DEEPSEEK_REASONING_EFFORT:-}
+      - DEEPSEEK_TIMEOUT_SEC=${DEEPSEEK_TIMEOUT_SEC:-180}
+      - VERIFIER_DEEPSEEK_THINKING=${VERIFIER_DEEPSEEK_THINKING:-disabled}
+      - VERIFIER_DEEPSEEK_REASONING_EFFORT=${VERIFIER_DEEPSEEK_REASONING_EFFORT:-}
+      - VERIFIER_DEEPSEEK_TIMEOUT_SEC=${VERIFIER_DEEPSEEK_TIMEOUT_SEC:-180}
+      - VERIFIER_DEEPSEEK_API_MAX_RETRIES=${VERIFIER_DEEPSEEK_API_MAX_RETRIES:-4}
+      - VERIFIER_DEEPSEEK_API_INITIAL_WAIT=${VERIFIER_DEEPSEEK_API_INITIAL_WAIT:-5}
       - GROQ_API_KEY=${GROQ_API_KEY}
-      - CROSS_VERIFY_MODEL=${CROSS_VERIFY_MODEL:-gpt-5.4}
+      - ISSUE_JUDGE_MODELS=${ISSUE_JUDGE_MODELS:-gpt-5.4,claude-sonnet-4.5,grok-4.3,deepseek-v4-pro}
+      - ISSUE_JUDGE_MODEL_WEIGHTS=${ISSUE_JUDGE_MODEL_WEIGHTS:-gpt-5.4=0.40,claude-sonnet-4.5=0.35,deepseek-v4-pro=0.18,grok-4.3=0.07}
+      - ISSUE_JUDGE_MAX_WORKERS=${ISSUE_JUDGE_MAX_WORKERS:-6}
       - VERIFIER_MODEL=${VERIFIER_MODEL:-gemini-2.5-flash}
-      - VERIFIER_CLAIM_EXTRACT_MODEL=${VERIFIER_CLAIM_EXTRACT_MODEL:-}
+      - VERIFIER_CLAIM_EXTRACT_MODEL=${VERIFIER_CLAIM_EXTRACT_MODEL:-gemini-2.5-flash}
+      - VERIFIER_CLAIM_EXTRACT_BATCH_SIZE=${VERIFIER_CLAIM_EXTRACT_BATCH_SIZE:-2}
+      - VERIFIER_CLAIM_EXTRACT_MAX_WORKERS=${VERIFIER_CLAIM_EXTRACT_MAX_WORKERS:-4}
+      - VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE=${VERIFIER_CLAIM_EXTRACT_PROMPT_PROFILE:-auto}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_SIZE=${ISSUE_TYPE_CLASSIFIER_BATCH_SIZE:-10}
+      - ISSUE_TYPE_CLASSIFIER_MAX_WORKERS=${ISSUE_TYPE_CLASSIFIER_MAX_WORKERS:-1}
+      - ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_API_RETRY_WAIT_SEC:-10}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES=${ISSUE_TYPE_CLASSIFIER_BATCH_RETRIES:-2}
+      - ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_BATCH_RETRY_WAIT_SEC:-10}
+      - ISSUE_TYPE_CLASSIFIER_GROK_RETRY_WAIT_SEC=${ISSUE_TYPE_CLASSIFIER_GROK_RETRY_WAIT_SEC:-60}
       - VERIFIER_CLAIM_JUDGE_MODEL=${VERIFIER_CLAIM_JUDGE_MODEL:-}
-      - VERIFIER_CROSS_RECHECK_MODEL=${VERIFIER_CROSS_RECHECK_MODEL:-gemini-2.5-flash}
-      - VERIFIER_SLIDE_RECHECK_MODEL=${VERIFIER_SLIDE_RECHECK_MODEL:-}
-      - VERIFIER_GROUNDING_MODEL=${VERIFIER_GROUNDING_MODEL:-}
+      - VERIFIER_SLIDE_ERROR_MODEL=${VERIFIER_SLIDE_ERROR_MODEL:-gemini-2.5-flash}
       - VERIFIER_TEMPERATURE=${VERIFIER_TEMPERATURE:-0.0}
       - QUERY_SERVICE_URL=http://query_service:8001
       - NEO4J_URI=bolt://neo4j:7687
@@ -93,6 +119,12 @@ services:
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
       - LOCAL_STORAGE_DIR=/pipeline/local_storage
       - GRAPHLEC_SLIDE_DECODE_BACKEND=auto
+      - GRAPHLEC_FFMPEG_HWACCEL=auto
+      - PYTHONDONTWRITEBYTECODE=1
+      - PYTHONPYCACHEPREFIX=/tmp/graphlec-pycache
+      - TRANSCRIBE_SILENCE_SPLIT_SEC=${TRANSCRIBE_SILENCE_SPLIT_SEC:-1.5}
+      - TRANSCRIBE_CHUNK_MAX_SEC=${TRANSCRIBE_CHUNK_MAX_SEC:-180}
+      - TRANSCRIBE_CHUNK_MIN_SEC=${TRANSCRIBE_CHUNK_MIN_SEC:-30}
       - GRAPHLEC_METADATA_DIR=/app/metadata
       - RECOMMENDER_DB_DIR=/lance/lancedb
       - GRAPHLEC_CLEAR_NEO4J_ON_START=0
@@ -114,6 +146,8 @@ services:
       context: .
       dockerfile: ./app/backend/Dockerfile
       network: host
+    env_file:
+      - .env
     ports:
       - "8002:8002"
     environment:
@@ -127,7 +161,7 @@ services:
     command:
       - /bin/sh
       - -lc
-      - python /app/recommender/build_index.py --metadata_dir "$$METADATA_DIR" --db_dir "$$RECOMMENDER_DB_DIR" && uvicorn recommender.recommender_web:app --host 0.0.0.0 --port 8002 --reload
+      - python -m recommender.ensure_index --metadata_dir "$$METADATA_DIR" --db_dir "$$RECOMMENDER_DB_DIR" && uvicorn recommender.recommender_web:app --host 0.0.0.0 --port 8002 --reload
     depends_on:
       - backend
 
