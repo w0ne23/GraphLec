@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shutil
 import logging
 import json
@@ -142,6 +143,116 @@ def _context_emphasis_score(ctx: dict) -> float:
     return _float_val(score)
 
 
+def _read_video_domain(output_dir: Path, stem: str) -> tuple[str, str]:
+    nodes_path = output_dir / f"{stem}_nodes.parquet"
+    if not nodes_path.is_file():
+        return "", ""
+    try:
+        ndf = pd.read_parquet(nodes_path)
+        video_id = f"lecture_video/{stem}"
+        for _, row in ndf.iterrows():
+            if _str_cell(row.get("node_id")) != video_id:
+                continue
+            props = json.loads(_str_cell(row.get("properties_json")) or "{}")
+            if not isinstance(props, dict):
+                return "", ""
+            return _str_cell(props.get("domain")), _str_cell(props.get("subdomain"))
+    except Exception:
+        return "", ""
+    return "", ""
+
+
+def _format_domain_label(domain: str, subdomain: str, fallback: str) -> str:
+    domain = _str_cell(domain).strip()
+    subdomain = _str_cell(subdomain).strip()
+    if domain and subdomain:
+        return f"{domain} / {subdomain}"
+    if domain:
+        return domain
+    return _str_cell(fallback) or "기타"
+
+
+def _visual_asset_stats_from_fused(fused: dict) -> dict:
+    entries = fused.get("slides") if isinstance(fused.get("slides"), list) and fused.get("slides") else fused.get("scenes")
+    if not isinstance(entries, list) or not entries:
+        return {"visual_percent": 0, "visual_count": 0, "total_count": 0}
+
+    visual_asset_types = {"diagram", "table", "chart", "figure", "image"}
+    total_count = 0
+    visual_count = 0
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        total_count += 1
+        visual_assets = item.get("visual_assets")
+        has_visual_asset = False
+        has_asset_metadata = isinstance(visual_assets, list) and len(visual_assets) > 0
+        if isinstance(visual_assets, list):
+            for asset in visual_assets:
+                if not isinstance(asset, dict):
+                    continue
+                asset_type = _str_cell(asset.get("asset_type") or asset.get("type")).strip().lower()
+                if asset_type in visual_asset_types:
+                    has_visual_asset = True
+                    break
+        slide_type = _str_cell(item.get("slide_type")).strip().lower()
+        if has_visual_asset or slide_type in {"image_only", "diagram", "chart", "figure"}:
+            visual_count += 1
+
+    visual_percent = round((visual_count / total_count) * 100) if total_count else 0
+    return {
+        "visual_percent": visual_percent,
+        "visual_count": visual_count,
+        "total_count": total_count,
+    }
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        return f"{int(round(float(value)))}%"
+    except (TypeError, ValueError):
+        return "0%"
+
+
+def _split_sentences(text: str) -> list[str]:
+    compact = re.sub(r"\s+", " ", _str_cell(text)).strip()
+    if not compact:
+        return []
+    pattern = r".+?(?:[.!?。！？]+|(?:다|요|죠|니다|습니다|어요|예요|에요)(?=\s|$))"
+    sentences = [m.group(0).strip() for m in re.finditer(pattern, compact)]
+    consumed = sum(len(s) for s in sentences)
+    if consumed < len(compact):
+        rest = compact[consumed:].strip()
+        if rest:
+            sentences.append(rest)
+    return [s for s in sentences if s]
+
+
+def _trim_at_word_boundary(text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", _str_cell(text)).strip()
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return f"{clipped}..."
+
+
+def _highlight_excerpt(text: str, min_chars: int = 35, max_chars: int = 120, max_sentences: int = 3) -> str:
+    sentences = _split_sentences(text)
+    if not sentences:
+        return ""
+    picked: list[str] = []
+    for sentence in sentences[:max_sentences]:
+        candidate = " ".join(picked + [sentence]).strip()
+        if picked and len(candidate) > max_chars:
+            break
+        picked.append(sentence)
+        if len(candidate) >= min_chars:
+            break
+    return _trim_at_word_boundary(" ".join(picked), max_chars)
+
+
 def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> dict:
     metadata = _first_existing_json([
         output_dir / "metadata" / f"{stem}_metadata.json",
@@ -150,7 +261,12 @@ def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> 
     fused = _first_existing_json([output_dir / f"{stem}_fused.json"])
 
     summary = _str_cell(metadata.get("summary"))
-    domain = _str_cell(metadata.get("domain")) or fallback_category
+    graph_domain = _str_cell(metadata.get("graph_domain"))
+    graph_subdomain = _str_cell(metadata.get("graph_subdomain"))
+    if not graph_domain:
+        graph_domain, graph_subdomain = _read_video_domain(output_dir, stem)
+    domain = _format_domain_label(graph_domain, graph_subdomain, fallback_category)
+    visual_stats = _visual_asset_stats_from_fused(fused)
     keywords = [
         kw for kw in (_keyword_label(item) for item in (metadata.get("keywords") or []))
         if kw
@@ -184,11 +300,11 @@ def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> 
 
     highlights = []
     for ctx in sorted(scored_contexts[:3], key=lambda x: _float_val(x.get("start_sec"))):
-        text = ctx["text"].replace("\n", " ").strip()
+        text = _highlight_excerpt(ctx["text"])
         highlights.append({
             "timestamp": _format_mmss(ctx.get("start_sec")),
             "start_sec": _float_val(ctx.get("start_sec")),
-            "text": text[:80] + ("..." if len(text) > 80 else ""),
+            "text": text,
             "score": round(ctx["score"], 3),
             "scene_number": ctx.get("scene_number"),
             "slide_number": ctx.get("slide_number"),
@@ -198,14 +314,21 @@ def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> 
     return {
         "summary": summary,
         "domain": domain,
+        "graph_domain": graph_domain,
+        "graph_subdomain": graph_subdomain,
+        "visual_asset_percent": visual_stats["visual_percent"],
+        "visual_asset_label": _format_percent(visual_stats["visual_percent"]),
+        "visual_asset_count": visual_stats["visual_count"],
+        "visual_asset_total": visual_stats["total_count"],
         "keywords": keywords,
         "highlights": highlights,
         "stats": {
             "scene_count": scene_count,
-            "scene_transitions": max(0, scene_count - 1),
             "emphasis_contexts": emphasis_context_count,
             "emphasis_threshold": round(threshold, 3),
-            "stt_confidence": 94,
+            "visual_asset_percent": visual_stats["visual_percent"],
+            "visual_asset_count": visual_stats["visual_count"],
+            "visual_asset_total": visual_stats["total_count"],
         },
     }
 

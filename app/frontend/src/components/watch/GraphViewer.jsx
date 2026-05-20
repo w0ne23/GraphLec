@@ -327,7 +327,7 @@ function GraphViewer({ lectureId }) {
       },
       physics: {
         enabled: true,
-        stabilization: { enabled: true, iterations: heavy ? 80 : 120, fit: false },
+        stabilization: { enabled: false },
         barnesHut: {
           gravitationalConstant: heavy ? -4000 : -2000,
           springLength: heavy ? 150 : 100,
@@ -388,10 +388,6 @@ function GraphViewer({ lectureId }) {
       setSelectedEdge(graphCacheRef.current?.edgeInfoById?.get(params.edges[0]) || null);
     });
 
-    network.once('stabilizationIterationsDone', () => {
-      network.setOptions({ physics: false });
-    });
-
     // [개선] 초기 로딩 시 그래프 맞춤 (안정화 시 재정렬은 사용자 요청으로 제거)
     const handleFit = () => {
       if (networkRef.current) {
@@ -408,6 +404,11 @@ function GraphViewer({ lectureId }) {
 
     // 패널이 열리면서 크기가 변할 때를 대비해 약간의 지연 후 fit 실행
     const initialFitTimer = setTimeout(handleFit, 600);
+    const physicsStopTimer = setTimeout(() => {
+      if (networkRef.current) {
+        networkRef.current.setOptions({ physics: false });
+      }
+    }, heavy ? 2600 : 1800);
 
     // [개선] 컨테이너 크기 변화 감지 (ResizeObserver)
     const resizeObserver = new ResizeObserver(() => {
@@ -423,6 +424,7 @@ function GraphViewer({ lectureId }) {
 
     return () => {
       if (initialFitTimer) clearTimeout(initialFitTimer);
+      if (physicsStopTimer) clearTimeout(physicsStopTimer);
       resizeObserver.disconnect();
       
       if (networkRef.current) {
