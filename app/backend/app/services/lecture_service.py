@@ -16,7 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession
+from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
+CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
@@ -469,6 +470,76 @@ async def _get_lecture(db: AsyncSession, lecture_id: str) -> Optional[Lecture]:
     return result.scalar_one_or_none()
 
 
+def classify_query_taxonomy(question: str) -> dict[str, str]:
+    q = (question or "").replace(" ", "").lower()
+    visual_terms = ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도", "화살표")
+    location_terms = ("어디", "어디서", "위치", "몇슬라이드", "슬라이드", "장면", "씬", "구간", "언제")
+    if any(t in q for t in visual_terms):
+        if any(t in q for t in location_terms):
+            return {"major": "C", "minor": "1", "label": "시각 질의/슬라이드 탐색"}
+        return {"major": "C", "minor": "2", "label": "시각 질의/시각 해석"}
+    if "강조" in q or "중요" in q or "핵심" in q:
+        return {"major": "B", "minor": "3", "label": "탐색 질의/강조"}
+    if any(t in q for t in ("요약", "개관", "전체", "흐름", "정리")):
+        return {"major": "B", "minor": "2", "label": "탐색 질의/요약/개관"}
+    if any(t in q for t in location_terms):
+        return {"major": "B", "minor": "1", "label": "탐색 질의/위치"}
+    if any(t in q for t in ("차이", "비교", "다른점", "반면", "vs", "versus")):
+        return {"major": "A", "minor": "2", "label": "내용 질의/비교"}
+    if any(t in q for t in ("관계", "절차", "과정", "순서", "연결", "왜", "이유", "어떻게", "원리")):
+        return {"major": "A", "minor": "3", "label": "내용 질의/관계/절차"}
+    return {"major": "A", "minor": "1", "label": "내용 질의/개념"}
+
+
+async def _get_or_create_chat_session(
+    db: AsyncSession,
+    lecture_id,
+    session_id: str,
+) -> ChatSession:
+    clean_id = (session_id or "").strip() or "default"
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.lecture_id == lecture_id,
+            ChatSession.session_id == clean_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+    row = ChatSession(lecture_id=lecture_id, session_id=clean_id)
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def _recent_chat_history(db: AsyncSession, chat_session: ChatSession, limit: int = CHAT_HISTORY_TURNS) -> list[dict[str, str]]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_session_id == chat_session.id)
+        .order_by(ChatMessage.turn_index.desc(), ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    rows = list(reversed(result.scalars().all()))
+    history: list[dict[str, str]] = []
+    for row in rows:
+        if row.question:
+            history.append({"role": "user", "content": row.question})
+        if row.answer:
+            history.append({"role": "assistant", "content": row.answer})
+    return history
+
+
+async def _next_chat_turn_index(db: AsyncSession, chat_session: ChatSession) -> int:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_session_id == chat_session.id)
+        .order_by(ChatMessage.turn_index.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+    return int(last.turn_index) + 1 if last else 0
+
+
 # ── GraphSession 헬퍼 ────────────────────────────────────────────────────────
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -697,6 +768,7 @@ async def ask_question(
     db: AsyncSession,
     lecture_id: str,
     question: str,
+    chat_session_id: str = "default",
     current_scene_number: Any = None,
     current_slide_number: Any = None,
 ) -> Dict[str, Any]:
@@ -705,6 +777,9 @@ async def ask_question(
         raise HTTPException(status_code=404, detail="Lecture not found")
 
     stem = str(lecture.id)
+    chat_session = await _get_or_create_chat_session(db, lecture.id, chat_session_id)
+    conversation_history = await _recent_chat_history(db, chat_session)
+    query_type = classify_query_taxonomy(question)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
     stem_lock = await get_stem_load_lock(stem)
     loop = asyncio.get_running_loop()
@@ -722,11 +797,28 @@ async def ask_question(
                         "question": question,
                         "current_scene_number": current_scene_number,
                         "current_slide_number": current_slide_number,
+                        "conversation_history": conversation_history,
                     },
                 )
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")
             qr = resp.json()
+            turn_index = await _next_chat_turn_index(db, chat_session)
+            db.add(ChatMessage(
+                lecture_id=lecture.id,
+                chat_session_id=chat_session.id,
+                turn_index=turn_index,
+                question=question,
+                answer=qr.get("answer") or "",
+                query_major=query_type["major"],
+                query_minor=query_type["minor"],
+                query_type_label=query_type["label"],
+                source_mode=qr.get("source_mode", "default"),
+                related_slides=qr.get("related_slides", []),
+                retrieved_chunks=qr.get("retrieved_chunks", []),
+                core_graph=qr.get("core_graph", {"nodes": [], "edges": []}),
+            ))
+            await db.commit()
             return {
                 "answer": qr.get("answer"),
                 "timestamps": qr.get("timestamps", []),
@@ -735,6 +827,8 @@ async def ask_question(
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
                 "related_slides": qr.get("related_slides", []),
                 "source_mode": qr.get("source_mode", "default"),
+                "chat_session_id": chat_session.session_id,
+                "query_type": query_type,
             }
         except HTTPException:
             raise
