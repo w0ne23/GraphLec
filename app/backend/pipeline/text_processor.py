@@ -125,6 +125,41 @@ def _is_variable_or_abbrev_fix(orig: str, corrected: str) -> bool:
     return False
 
 
+def _is_safe_auto_correction(orig: str, corrected: str, is_cs: bool = False) -> bool:
+    """Return True only for corrections that cannot change lecture meaning."""
+    if not orig or not corrected:
+        return False
+    if _normalize_text(orig) == _normalize_text(corrected):
+        return False
+    if _is_spacing_only(orig, corrected):
+        return True
+    if _is_english_term_fix(orig, corrected):
+        return True
+    if is_cs and _is_variable_or_abbrev_fix(orig, corrected):
+        return True
+    return False
+
+
+def _candidate_only(text: str, risk: str, reason: str) -> dict:
+    return {
+        "candidate_text": text,
+        "applied_text": "",
+        "risk": risk,
+        "apply": False,
+        "reason": reason,
+    }
+
+
+def _applied(text: str, risk: str, reason: str) -> dict:
+    return {
+        "candidate_text": text,
+        "applied_text": text,
+        "risk": risk,
+        "apply": True,
+        "reason": reason,
+    }
+
+
 def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> dict:
     titles_block = "\n".join(f"- {title}" for title in slide_titles[:10] if title)
     transcript_block = transcript_sample[:1500]
@@ -428,8 +463,9 @@ def _correct_batch_pass1(
 - 강의자의 발화 구조와 의미를 절대적으로 보존하라
 - 문장 길이와 정보량은 원문과 거의 똑같게 유지
 - 문맥상 말이 안 되는 단어(ASR 깨짐)만 복원. 의미가 통하는 단어는 그대로 둘 것
-- 강의자의 단어 선택에 있어, 문맥적으로 맞는데, 오탈자가 있다면, 문맥에만 맞게 바꾸어주라(해당 내용이 틀리던 말던, 문맥에는 맞으면 됨)
-- 절대 강의자가 주어와 서술어를 반대되는 개념으로 설명하여도, 바꾸지 말아라. 강의자가 잘못된 내용을 말한 것이다.
+- 강의자가 틀린 개념, 반대 개념, 이상한 관계를 말한 것처럼 보여도 정답처럼 고치지 말 것
+- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 교정 대상이 아니다
+- 의미가 바뀔 수 있는 한국어 전문용어 교체는 하지 말 것
 - 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것"""
 
     def call():
@@ -502,12 +538,13 @@ def _correct_batch_pass2(
 - 요약, 재서술, 슬라이드 bullet 복사 금지
 - 강의자의 발화 중 오인식된 단어가 있다면 해당 단어에 대해서만 교체하는 수준이다
 - 슬라이드와 발화가 완전히 다르다면, 발화를 따르도록 할 것.
-- 전사본을 따라갔을 때, 해당 강의 자체의 문맥에 맞지 않을 때는 반드시 문맥에 맞는 단어로 바꾸어야 한다.
+- 전사본을 따라갔을 때 강의 내용이 틀려 보이더라도 정답으로 고치지 말 것
+- 슬라이드의 정답/문맥에 맞추기 위해 강의자의 한국어 개념어를 반대 개념으로 바꾸지 말 것
 - 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것
 
 ### 중요 원칙
 - 강의자의 발화 구조를 절대적으로 따라가라
-- 강의자의 단어 선택에 있어, 문맥적으로 맞는데, 오탈자가 있다면, 문맥에만 맞게 바꾸어주라(해당 내용이 틀리던 말던, 문맥에는 맞으면 됨)"""
+- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 verifier가 확인할 문제이므로 전사 보정에서 제거하지 말 것"""
 
     contents = []
     if has_image:
@@ -564,62 +601,47 @@ def merge_two_passes(
 
         if p1 and p2:
             if _normalize_text(p1) == _normalize_text(p2):
-                corrections[global_i] = {
-                    "candidate_text": p1,
-                    "applied_text": p1,
-                    "risk": "low",
-                    "apply": True,
-                    "reason": "pass1+pass2 일치",
-                }
+                if _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                    corrections[global_i] = _applied(p1, "low", "pass1+pass2 일치, 안전 교정")
+                else:
+                    corrections[global_i] = _candidate_only(
+                        p1,
+                        "high",
+                        "pass1+pass2 일치했지만 의미 변경 가능성으로 원문 유지",
+                    )
             else:
-                corrections[global_i] = {
-                    "candidate_text": p2,
-                    "applied_text": p1,
-                    "risk": "medium",
-                    "apply": True,
-                    "reason": "pass1 채택 (pass2 상이)",
-                }
+                if _is_safe_auto_correction(original, p2, is_cs=is_cs):
+                    corrections[global_i] = _applied(p2, "low", "pass2 안전 교정 채택")
+                elif _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                    corrections[global_i] = _applied(p1, "low", "pass1 안전 교정 채택")
+                else:
+                    corrections[global_i] = _candidate_only(
+                        p2,
+                        "high",
+                        "pass1/pass2 상이, 의미 변경 가능성으로 원문 유지",
+                    )
         elif p1 and not p2:
-            corrections[global_i] = {
-                "candidate_text": p1,
-                "applied_text": p1,
-                "risk": "low",
-                "apply": True,
-                "reason": "pass1만 교정 (문맥 기반)",
-            }
+            if _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                corrections[global_i] = _applied(p1, "low", "pass1 안전 교정")
+            else:
+                corrections[global_i] = _candidate_only(
+                    p1,
+                    "high",
+                    "pass1만 교정, 의미 변경 가능성으로 원문 유지",
+                )
         elif p2 and not p1:
             if _is_spacing_only(original, p2):
-                corrections[global_i] = {
-                    "candidate_text": p2,
-                    "applied_text": p2,
-                    "risk": "low",
-                    "apply": True,
-                    "reason": "pass2 띄어쓰기 교정만 (안전)",
-                }
+                corrections[global_i] = _applied(p2, "low", "pass2 띄어쓰기 교정만 (안전)")
             elif is_cs and _is_variable_or_abbrev_fix(original, p2):
-                corrections[global_i] = {
-                    "candidate_text": p2,
-                    "applied_text": p2,
-                    "risk": "low",
-                    "apply": True,
-                    "reason": "pass2 변수명/약어 표기 반영 (CS)",
-                }
+                corrections[global_i] = _applied(p2, "low", "pass2 변수명/약어 표기 반영 (CS)")
             elif _is_english_term_fix(original, p2):
-                corrections[global_i] = {
-                    "candidate_text": p2,
-                    "applied_text": p2,
-                    "risk": "low",
-                    "apply": True,
-                    "reason": "pass2 영문 용어 교정 (ASR 오인식)",
-                }
+                corrections[global_i] = _applied(p2, "low", "pass2 영문 용어 교정 (ASR 오인식)")
             else:
-                corrections[global_i] = {
-                    "candidate_text": p2,
-                    "applied_text": "",
-                    "risk": "high",
-                    "apply": False,
-                    "reason": "pass2만 교정 (슬라이드 영향 가능성)",
-                }
+                corrections[global_i] = _candidate_only(
+                    p2,
+                    "high",
+                    "pass2만 교정 (슬라이드 영향 가능성)",
+                )
     return corrections
 
 

@@ -76,8 +76,11 @@ async function _fetchResults(params) {
         error_message: lec.error_message,
         pipeline_stages: lec.pipeline_stages || [],
         tags: lec.tags || [],
+        is_dummy: lec.is_dummy || false,
+        source: lec.source || 'database',
       })),
       totalPages,
+      totalItems,
     }
   } catch (error) {
     console.error('_fetchResults error:', error)
