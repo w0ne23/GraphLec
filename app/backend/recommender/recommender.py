@@ -1281,11 +1281,12 @@ class Recommender:
         self.cfg                 = config or RecommenderConfig()
         self._available_domains  = self.collection.available_domains()
         self._available_keywords = self.collection.available_keywords()
-        # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지)
+
+        # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지).
+        # 테이블이 아직 생성되지 않은 초기 상태에서는 벡터 검색만 비활성화하고,
+        # metadata 기반 BM25/직접매칭/그래프 점수로 추천을 계속 제공한다.
         print("[LanceDB 레코드 로드 중...]")
-        db               = lancedb.connect(self.cfg.DB_DIR)
-        table            = db.open_table("lectures")
-        self._index_rows = table.to_arrow().to_pylist()
+        self._index_rows = self._load_lancedb_rows()
         self._row_by_video_id = {
             row["video_id"]: row
             for row in self._index_rows
@@ -1296,9 +1297,18 @@ class Recommender:
             for video_id in self._row_by_video_id
             if (lec := self.collection.get(video_id)) is not None
         ]
-        self._lexical_stats = _build_lexical_stats(indexed_lectures)
-        self._community_index = CommunityIndex(indexed_lectures)
+        metadata_lectures = self.collection.all()
+        scoring_lectures = indexed_lectures if indexed_lectures else metadata_lectures
+        self._lexical_stats = _build_lexical_stats(scoring_lectures)
+        self._community_index = CommunityIndex(scoring_lectures)
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
+        if not self._index_rows and metadata_lectures:
+            print("  ⚠ LanceDB lectures 테이블 없음/비어 있음 — 벡터 검색 없이 metadata 기반 추천으로 동작합니다.\n")
+        elif len(indexed_lectures) < len(metadata_lectures):
+            print(
+                f"  ⚠ 벡터 인덱스에 없는 metadata 강의 "
+                f"{len(metadata_lectures) - len(indexed_lectures)}개는 metadata 기반으로만 점수화합니다.\n"
+            )
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
         print(
@@ -1306,6 +1316,19 @@ class Recommender:
             f"avg_len={self._lexical_stats.avg_doc_len:.1f}\n"
         )
         print(f"[Vector]    matrix rows={len(self._vector_search_index.video_ids)}\n")
+
+    def _load_lancedb_rows(self) -> list[dict]:
+        try:
+            db = lancedb.connect(self.cfg.DB_DIR)
+            table_names = set(db.table_names())
+            if "lectures" not in table_names:
+                print(f"  ⚠ LanceDB 테이블 없음: lectures ({self.cfg.DB_DIR})")
+                return []
+            table = db.open_table("lectures")
+            return table.to_arrow().to_pylist()
+        except Exception as exc:
+            print(f"  ⚠ LanceDB 로드 실패: {exc}")
+            return []
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
@@ -1352,7 +1375,7 @@ class Recommender:
         )
 
     def _all_candidate_ids(self) -> list[str]:
-        return [row["video_id"] for row in self._index_rows]
+        return [lec.video_id for lec in self.collection.all()]
 
     def _list_by_domain_results(self, ctx: QueryContext, top_k: int) -> list[RecommendResult]:
         difficulty_order = {
@@ -1362,10 +1385,7 @@ class Recommender:
             "unknown": 3,
         }
         lectures = []
-        for video_id in self._row_by_video_id:
-            lec = self.collection.get(video_id)
-            if lec is None:
-                continue
+        for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
                 continue
             lectures.append(lec)
@@ -1431,11 +1451,7 @@ class Recommender:
             return None
 
         preferred = set()
-        for video_id in self._row_by_video_id:
-            lec = self.collection.get(video_id)
-            if lec is None:
-                continue
-
+        for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
                 continue
             if ctx.difficulty_hint and lec.difficulty != ctx.difficulty_hint:
@@ -1671,7 +1687,7 @@ class Recommender:
         semantic 후보 검색기. 기존 vec_score와 같은 필드 가중치로 top-N을 뽑는다.
         """
         index = self._vector_search_index
-        if not index.video_ids:
+        if not index.video_ids or not query_vec:
             return []
 
         q = _normalize_vector(query_vec)
@@ -1703,7 +1719,7 @@ class Recommender:
 
     def _score_candidate(
         self,
-        row: dict,
+        row: Optional[dict],
         lec: LectureMetadata,
         ctx: QueryContext,
         query_vec: list[float],
@@ -1724,20 +1740,24 @@ class Recommender:
         else:
             duration_score = 1.0
 
-        # 필드별 코사인 유사도
-        sim_title   = _cosine_sim(query_vec, row["title_vec"])
-        sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
-        sim_summary = _cosine_sim(query_vec, row["summary_vec"])
+        # 필드별 코사인 유사도. LanceDB row가 없으면 벡터 성분만 0으로 둔다.
+        has_vector_row = row is not None and bool(query_vec)
+        if has_vector_row:
+            sim_title   = _cosine_sim(query_vec, row["title_vec"])
+            sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
+            sim_summary = _cosine_sim(query_vec, row["summary_vec"])
 
-        # keyword vec threshold 필터
-        sim_keyword_filtered = (
-            sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
-        )
-        vec_score = (
-            self.cfg.W_TITLE   * sim_title            +
-            self.cfg.W_KEYWORD * sim_keyword_filtered +
-            self.cfg.W_SUMMARY * sim_summary
-        )
+            # keyword vec threshold 필터
+            sim_keyword_filtered = (
+                sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
+            )
+            vec_score = (
+                self.cfg.W_TITLE   * sim_title            +
+                self.cfg.W_KEYWORD * sim_keyword_filtered +
+                self.cfg.W_SUMMARY * sim_summary
+            )
+        else:
+            sim_title = sim_keyword = sim_summary = sim_keyword_filtered = vec_score = 0.0
 
         # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
         if self.cfg.USE_TF_IRF_DM:
@@ -1757,9 +1777,10 @@ class Recommender:
         )
 
         # 블렌딩 — content 최대 0.85로 제한 (boost 여유 확보)
+        vec_blend = self.cfg.VEC_BLEND if has_vector_row else 0.0
         content_score = min(
-            self.cfg.VEC_BLEND       * vec_score +
-            (1 - self.cfg.VEC_BLEND) * dm_score,
+            vec_blend       * vec_score +
+            (1 - vec_blend) * dm_score,
             0.85
         )
 
@@ -1897,7 +1918,7 @@ class Recommender:
         for video_id in candidate_ids:
             row = self._row_by_video_id.get(video_id)
             lec = self.collection.get(video_id)
-            if row is None or lec is None:
+            if lec is None:
                 continue
             detail = self._score_candidate(
                 row,
@@ -2072,7 +2093,11 @@ class Recommender:
 
         try:
             # ── 질의 벡터화 ───────────────────────────────────────────────
-            query_vec = _embed(ctx.search_text)
+            query_vec = (
+                _embed(ctx.search_text)
+                if self._vector_search_index.video_ids
+                else []
+            )
             candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
             candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
 
