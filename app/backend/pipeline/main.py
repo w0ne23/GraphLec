@@ -1111,40 +1111,7 @@ def stage9_build_analyzer_merged_clean(
     return {"merged_clean_path": str(merged_clean_path), "elapsed": elapsed}
 
 
-def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dict:
-    from .analyzer.run_all import run_all_analyzers
-
-    stem = Path(args.input).stem
-    analyzer_dir = output_dir / f"{stem}_analyzer"
-    claim_output_path = analyzer_dir / f"{stem}_verification.json"
-    claim_report_path = analyzer_dir / f"{stem}_report.txt"
-
-    if (
-        not args.force
-        and _claim_output_is_cross_verification(claim_output_path)
-        and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
-    ):
-        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
-        print(f"     {claim_output_path}")
-        print("─" * 70)
-        return {
-            "claim_output": str(claim_output_path),
-            "claim_report": "",
-            "elapsed": 0.0,
-        }
-
-    _banner("Stage 10  —  verifier 실행")
-    t0 = time.time()
-    result = run_all_analyzers(
-        merged_clean_path,
-        output_dir=str(analyzer_dir),
-    )
-    elapsed = time.time() - t0
-    _done("verifier 실행", elapsed)
-    return {"claim_output": str(claim_output_path), "elapsed": elapsed, **result}
-
-
-def _claim_output_is_cross_verification(claim_output_path: Path) -> bool:
+def _claim_output_is_final_verification(claim_output_path: Path) -> bool:
     if not claim_output_path.exists():
         return False
     try:
@@ -1152,7 +1119,7 @@ def _claim_output_is_cross_verification(claim_output_path: Path) -> bool:
             payload = json.load(f)
     except Exception:
         return False
-    return payload.get("mode") == "cross_verification"
+    return payload.get("mode") == "classified_issue_verifier"
 
 
 def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
@@ -1162,7 +1129,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
         extract_claims_only,
     )
     from .analyzer.claim_pipeline import prepare_verification
-    from .analyzer.cross_utils import _write_claims_jsonl
+    from .analyzer.verifier_utils import _write_claims_jsonl
 
     def _claim_cache_matches(path: Path, batch_mode: str, context_window: tuple[int, int]) -> bool:
         if not path.exists() or path.stat().st_size <= 0:
@@ -1179,9 +1146,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
     def _claim_output_payload(claim: dict) -> dict:
         context_ids = claim.get("context_ids")
         if not isinstance(context_ids, list) or not context_ids:
-            context_ids = claim.get("utterance_ids")
-        if not isinstance(context_ids, list) or not context_ids:
-            context_ids = [claim.get("context_id") or claim.get("utterance_id")]
+            context_ids = [claim.get("context_id")]
         context_ids = [str(item) for item in context_ids if str(item or "").strip()]
 
         context_id = str(claim.get("context_id") or (context_ids[0] if context_ids else "")).strip()
@@ -1204,7 +1169,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
-    claim_stub_path = analyzer_dir / f"{stem}_verification.json"
+    claim_stub_path = analyzer_dir / f"{stem}_verification_final.json"
     claims_jsonl_path = analyzer_dir / f"{stem}_claims.jsonl"
     claims_json_path = analyzer_dir / f"{stem}_claims.json"
     merged_file = Path(merged_clean_path)
@@ -1232,7 +1197,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
     t0 = time.time()
     ctx = prepare_verification(str(merged_file))
     claims_by_batch, api_calls, token_usage = extract_claims_only(
-        ctx["utterances"],
+        ctx["contexts"],
         ctx["current_date"],
         ctx["hint"],
         ctx["slide_ctx"],
@@ -1295,13 +1260,13 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
-    claim_output_path = analyzer_dir / f"{stem}_verification.json"
+    claim_output_path = analyzer_dir / f"{stem}_verification_final.json"
     claim_report_path = analyzer_dir / f"{stem}_report.txt"
     analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
 
     if (
         not args.force
-        and _claim_output_is_cross_verification(claim_output_path)
+        and _claim_output_is_final_verification(claim_output_path)
         and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
     ):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
@@ -1327,7 +1292,6 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         merged_clean_path,
         "--output-dir",
         str(analyzer_dir),
-        "--classified-issue-pipeline",
     ]
 
     with open(analyzer_log_path, "a", encoding="utf-8") as log_fp:
@@ -1336,7 +1300,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         )
         log_fp.write(f"cwd       : {pkg_root}\n")
         log_fp.write(f"cmd       : {' '.join(cmd)}\n")
-        log_fp.write("mode      : classified_issue_pipeline (forced)\n")
+        log_fp.write("mode      : classified_issue_pipeline\n")
         log_fp.flush()
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -1353,7 +1317,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     elapsed = time.time() - t0
     print(f"\n  ✓ verifier 백그라운드 시작  ({elapsed:.1f}초)")
     print(f"     PID : {proc.pid}")
-    print("     mode: classified_issue_pipeline (forced)")
+    print("     mode: classified_issue_pipeline")
     print(f"     로그: {analyzer_log_path}")
     print("─" * 70)
     return {
@@ -2031,7 +1995,7 @@ def run_pipeline(args, progress_callback=None):
                 stem=stem,
                 output_dir=output_dir,
                 timings=timings,
-                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_verification.json",
+                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_verification_final.json",
             )
             print(f"\n  ✓ 비용 리포트 저장: {cost_report_path}")
         except Exception as e:

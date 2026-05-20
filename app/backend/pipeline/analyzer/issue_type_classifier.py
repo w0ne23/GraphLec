@@ -43,24 +43,6 @@ ISSUE_TYPE_LABELS = {
     "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "범위 과잉 단정",
 }
-ISSUE_TYPE_ALIASES = {
-    "outdated": "temporal_error",
-    "currentness_error": "temporal_error",
-    "temporal": "temporal_error",
-    "missing_condition": "scope_overclaim",
-    "clarification_needed": "scope_overclaim",
-    "needs_clarification": "scope_overclaim",
-    "overgeneralization": "scope_overclaim",
-    "overclaim": "scope_overclaim",
-    "ambiguous_expression": "confusing_explanation",
-    "misleading_explanation": "confusing_explanation",
-    "misconception_risk": "confusing_explanation",
-    "ambiguous": "confusing_explanation",
-    "ambiguity": "confusing_explanation",
-    "misleading": "confusing_explanation",
-    "misunderstanding_risk": "confusing_explanation",
-    "student_misunderstanding": "confusing_explanation",
-}
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -236,8 +218,7 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
 
 def _normalize_issue_type(value: Any) -> str | None:
     raw = str(value or "").strip().lower()
-    normalized = ISSUE_TYPE_ALIASES.get(raw, raw)
-    return normalized if normalized in ISSUE_TYPES else None
+    return raw if raw in ISSUE_TYPES else None
 
 
 def _issue_type_label(issue_type: str | None) -> str:

@@ -30,7 +30,7 @@ DEFAULT_BATCH_SIZE = 5
 DEFAULT_MIN_SCORE = 0.0
 
 SLIDE_ERROR_TYPES = {
-    "typo": "철자/표기 오류",
+    "text_error": "철자/표기 오류",
     "numeric_unit": "숫자/단위 표기 오류",
     "other": "기타 슬라이드 표면 오류",
 }
@@ -249,8 +249,8 @@ def _slides_for_check(
     return rows
 
 
-def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
-    return f"""당신은 강의 슬라이드에서 눈에 보이는 오타를 찾는 교정자입니다.
+def _build_slide_error_prompt(slide_no: int, title: str, slide_text: str) -> str:
+    return f"""당신은 강의 슬라이드에서 눈에 보이는 텍스트 오류를 찾는 교정자입니다.
 
 중요:
 - 슬라이드 이미지가 원본입니다.
@@ -265,7 +265,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 {slide_text[:3000]}
 
 보고할 것:
-- 이미지에서 명백하게 보이는 한글 철자 오타
+- 이미지에서 명백하게 보이는 한글 철자/표기 오류
 - 영문 철자 오류
 - 숫자/단위 오기
 
@@ -274,7 +274,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 - 용어 선택/문체/표현 선호
 - 사실 오류나 개념 오류
 - 띄어쓰기, 줄바꿈, 글자 간격, 디자인 문제
-- 약어, 고유명사, 표기 관례처럼 오타로 단정하기 어려운 것
+- 약어, 고유명사, 표기 관례처럼 오류로 단정하기 어려운 것
 - 복합어 띄어쓰기 관례
 - 조사/어미/접속 표현 교정
 - 외래어를 한국어로 순화하는 교정
@@ -284,7 +284,7 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 
 ```json
 {{
-  "typos": [
+  "slide_errors": [
     {{
       "problematic_text": "슬라이드의 문제 표현",
       "corrected_text": "수정 표현",
@@ -298,18 +298,18 @@ def _build_slide_typo_prompt(slide_no: int, title: str, slide_text: str) -> str:
 지침:
 1. 확신이 0.80 미만이면 출력하지 마세요.
 2. "더 자연스럽다", "더 적절하다" 수준이면 출력하지 마세요.
-3. 오타가 없으면 {{"typos": []}}만 출력하세요.
+3. 오류가 없으면 {{"slide_errors": []}}만 출력하세요.
 4. JSON 외 텍스트 금지.
 """
 
 
 def _parse_response(text: str) -> list[dict[str, Any]]:
     payload = json.loads(_strip_json_fence(text))
-    rows = payload.get("typos", [])
+    rows = payload.get("slide_errors", [])
     return rows if isinstance(rows, list) else []
 
 
-def _is_reportable_slide_typo(problematic: str, corrected: str, reason: str = "") -> bool:
+def _is_reportable_slide_error(problematic: str, corrected: str, reason: str = "") -> bool:
     p = str(problematic or "").strip()
     c = str(corrected or "").strip()
     r = str(reason or "").strip().lower()
@@ -355,7 +355,7 @@ def _is_reportable_slide_typo(problematic: str, corrected: str, reason: str = ""
 def _guess_error_type(problematic: str, corrected: str) -> str:
     if re.search(r"\d|[%℃°]|(?:ms|sec|kb|mb|gb|hz|khz|mhz|ghz)\b", f"{problematic} {corrected}", re.IGNORECASE):
         return "numeric_unit"
-    return "typo"
+    return "text_error"
 
 
 def _normalize_error(
@@ -371,7 +371,7 @@ def _normalize_error(
     confidence = _clamp01(row.get("confidence"))
     if confidence < 0.80:
         return None
-    if not _is_reportable_slide_typo(problematic, corrected, reason):
+    if not _is_reportable_slide_error(problematic, corrected, reason):
         return None
     error_type = _guess_error_type(problematic, corrected)
     severity_score = confidence
@@ -417,7 +417,7 @@ def _check_single_slide(
     slide_number = _slide_number(slide) or 0
     title = str(slide.get("title", "") or "")
     slide_text = str(slide.get("slide_text") or slide.get("t1") or "")
-    prompt = _build_slide_typo_prompt(slide_number, title, slide_text)
+    prompt = _build_slide_error_prompt(slide_number, title, slide_text)
     img_path = _existing_path(slide.get("image_path")) or _find_slide_image(img_dir, slide_number)
     img_bytes = img_path.read_bytes() if img_path and img_path.exists() else None
     response_format = {"type": "json_object"} if cc._supports_json_object_response_format(model) else None
@@ -432,7 +432,7 @@ def _check_single_slide(
             image_bytes=img_bytes,
             thinking_budget=0,
             response_format=response_format,
-            stage="slide_typo",
+            stage="slide_error",
         )
         api_calls += 1
         cc._add_call_usage(token_usage, call_usage)
@@ -448,7 +448,7 @@ def _check_single_slide(
             return errors, False, api_calls, token_usage
         except Exception:
             if attempt < cc.VERIFIER_PARSE_RETRIES:
-                print(f"    ↺ 슬라이드 {slide_number} 오타 JSON 파싱 재시도 ({attempt+1}/{cc.VERIFIER_PARSE_RETRIES})")
+                print(f"    ↺ 슬라이드 {slide_number} 오류 JSON 파싱 재시도 ({attempt+1}/{cc.VERIFIER_PARSE_RETRIES})")
     return [], True, api_calls, token_usage
 
 
@@ -468,9 +468,7 @@ def detect_classified_slide_errors(
 
     _load_env()
     current_date = current_date or datetime.now().date().isoformat()
-    # Match the legacy slide typo checker: the actual model is resolved from
-    # VERIFIER_SLIDE_TYPO_MODEL/VERIFIER_MODEL through claim_common.
-    model = str(cc._resolve_stage_model("slide_typo") or "").strip()
+    model = str(cc._resolve_stage_model("slide_error") or "").strip()
     models = [model] if model else (models or _default_models())
     min_score = DEFAULT_MIN_SCORE if min_score is None else max(0.0, min(1.0, min_score))
 
