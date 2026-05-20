@@ -54,6 +54,7 @@ async def ask_question(lecture_id: str, request: Request, db: AsyncSession = Dep
         db,
         lecture_id,
         question,
+        chat_session_id=body.get("chat_session_id") or "default",
         current_scene_number=body.get("current_scene_number"),
         current_slide_number=body.get("current_slide_number"),
     )

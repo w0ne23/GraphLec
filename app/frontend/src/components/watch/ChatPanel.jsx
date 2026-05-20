@@ -20,7 +20,8 @@ export default function ChatPanel({
   input,
   setInput,
   loading,
-  setLoading
+  setLoading,
+  chatSessionId,
 }) {
   const bottomRef = useRef(null)
   // 인덱스별 펼침 상태를 관리하는 배열
@@ -279,6 +280,7 @@ export default function ChatPanel({
     try {
       const currentScene = lecture?.scenes?.[currentSceneIndex] || null
       const res = await askQa(lecture.id, question, {
+        chat_session_id: chatSessionId,
         current_scene_number: currentScene?.scene_number ?? null,
         current_slide_number: currentScene?.slide_number ?? null,
       })

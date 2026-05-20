@@ -144,6 +144,7 @@ class InternalQueryRequest(BaseModel):
     question: str = Field(..., min_length=1)
     current_scene_number: Optional[int] = None
     current_slide_number: Optional[int] = None
+    conversation_history: list[dict[str, str]] = Field(default_factory=list)
 
 
 class InternalGraphQueryRequest(BaseModel):
@@ -385,9 +386,91 @@ def _call_gemini_raw(contents: str, system_instruction: str) -> str:
     raise last_err
 
 
-def _call_gemini_answer(context: str, question: str) -> str:
+def _format_conversation_history(history: list[dict[str, str]], max_chars: int = 1600) -> str:
+    lines: list[str] = []
+    for turn in history[-12:]:
+        role = "사용자" if turn.get("role") == "user" else "답변"
+        content = str(turn.get("content") or "").strip()
+        if not content:
+            continue
+        content = re.sub(r"\s+", " ", content)
+        lines.append(f"{role}: {content[:300]}")
+    text = "\n".join(lines)
+    return text[-max_chars:]
+
+
+def _last_history_user_question(history: list[dict[str, str]]) -> str:
+    fallback = ""
+    for turn in reversed(history or []):
+        if turn.get("role") != "user":
+            continue
+        content = re.sub(r"\s+", " ", str(turn.get("content") or "")).strip()
+        if not content:
+            continue
+        if not fallback:
+            fallback = content
+        if not _looks_like_followup_question(content):
+            return content
+    return fallback
+
+
+def _looks_like_followup_question(question: str) -> bool:
+    compact = re.sub(r"\s+", "", question or "")
+    if not compact:
+        return False
+    followup_terms = (
+        "그이유",
+        "왜",
+        "그건",
+        "그게",
+        "그거",
+        "그것",
+        "이건",
+        "이게",
+        "이거",
+        "이것",
+        "앞에서",
+        "방금",
+        "좀더",
+        "자세히",
+        "구체적",
+        "예시",
+        "그러면",
+        "그럼",
+    )
+    has_followup_marker = any(term in compact for term in followup_terms)
+    has_topic_hint = len(re.findall(r"[가-힣A-Za-z0-9]{2,}", question or "")) >= 3
+    return (len(compact) <= 18 and has_followup_marker) or (has_followup_marker and not has_topic_hint)
+
+
+def _resolve_followup_question(question: str, conversation_history: Optional[list[dict[str, str]]] = None) -> str:
+    question = (question or "").strip()
+    if not question or not _looks_like_followup_question(question):
+        return question
+    previous_question = _last_history_user_question(conversation_history or [])
+    if not previous_question:
+        return question
+    compact = re.sub(r"\s+", "", question)
+    if "이유" in compact or "왜" in compact:
+        if previous_question.endswith("?"):
+            previous_question = previous_question[:-1].strip()
+        return f"{previous_question} 이유"
+    return f"{previous_question} {question}"
+
+
+def _call_gemini_answer(
+    context: str,
+    question: str,
+    conversation_history: Optional[list[dict[str, str]]] = None,
+    resolved_question: Optional[str] = None,
+) -> str:
     client = _gemini_client()
-    contents = f"질문: {question}\n\n근거:\n{context}"
+    history = _format_conversation_history(conversation_history or [])
+    history_block = f"이전 대화:\n{history}\n\n" if history else ""
+    resolved_block = ""
+    if resolved_question and resolved_question.strip() and resolved_question.strip() != question.strip():
+        resolved_block = f"이전 대화를 반영한 검색 질문: {resolved_question.strip()}\n\n"
+    contents = f"{history_block}현재 질문: {question}\n\n{resolved_block}근거:\n{context}"
     last_err: Optional[Exception] = None
     for delay in RETRY_DELAYS:
         if delay:
@@ -1203,6 +1286,44 @@ def _build_core_graph(
                 )
 
     selected_entity_ids = [nid for nid, node in nodes.items() if node.get("type") == "GraphRAGEntity"]
+    selected_slide_ids = [
+        nid for nid, node in nodes.items()
+        if node.get("type") == "Slide"
+    ]
+    if stem and selected_entity_ids and selected_slide_ids:
+        try:
+            driver = _neo4j_driver()
+            try:
+                with driver.session() as session:
+                    rows = session.run(
+                        """
+                        MATCH (e:GraphRAGEntity {stem: $stem})-[r:GRAPHRAG_APPEARS_IN]->(s:Slide {stem: $stem})
+                        WHERE e.id IN $entity_ids AND s.id IN $slide_ids
+                        RETURN e.id AS entity_id,
+                               s.id AS slide_id,
+                               s.slide_number AS slide_number
+                        LIMIT 48
+                        """,
+                        stem=stem,
+                        entity_ids=selected_entity_ids,
+                        slide_ids=selected_slide_ids,
+                    )
+                    for row in rows:
+                        add_edge(
+                            str(row.get("entity_id") or ""),
+                            str(row.get("slide_id") or ""),
+                            "GRAPHRAG_APPEARS_IN",
+                            reason="source_anchor",
+                            evidence={
+                                "note": "selected core concept appears in selected slide",
+                                "slide_number": _to_int_or_none(row.get("slide_number")),
+                            },
+                        )
+            finally:
+                driver.close()
+        except Exception:
+            pass
+
     for i, src in enumerate(selected_entity_ids):
         for tgt in selected_entity_ids[i + 1:]:
             add_full_edge_if_exists(
@@ -2648,8 +2769,9 @@ def _empty_query_response() -> QueryResponse:
 @app.post("/internal/query", response_model=QueryResponse)
 async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     stem = req.stem.strip()
-    question = req.question.strip()
-    if not stem or not question:
+    raw_question = req.question.strip()
+    question = _resolve_followup_question(raw_question, req.conversation_history)
+    if not stem or not raw_question:
         raise HTTPException(status_code=400, detail="stem/question은 비어 있을 수 없습니다.")
 
     driver = _neo4j_driver()
@@ -2750,7 +2872,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         answer = _visual_list_answer(source_items)
     else:
         try:
-            answer = _call_gemini_answer(context, question)
+            answer = _call_gemini_answer(context, raw_question, req.conversation_history, resolved_question=question)
         except Exception as e:
             raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
         answer = _compact_answer(answer, question, retrieved_chunks, source_mode=source_mode)

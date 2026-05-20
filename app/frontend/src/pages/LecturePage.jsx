@@ -22,7 +22,7 @@ export default function LecturePage() {
   const navigate = useNavigate()
 
   const { chatWidth, handleResizerMouseDown } = useResizer(300)
-  const { messages: chatMessages, setMessages: setChatMessages, input: chatInput, setInput: setChatInput, loading: chatLoading, setLoading: setChatLoading } = useChatSession(id)
+  const { messages: chatMessages, setMessages: setChatMessages, input: chatInput, setInput: setChatInput, loading: chatLoading, setLoading: setChatLoading, sessionId: chatSessionId } = useChatSession(id)
   useGraphSession(id)
 
   const [lecture, setLecture] = useState(null)
@@ -203,6 +203,7 @@ export default function LecturePage() {
             setInput={setChatInput}
             loading={chatLoading}
             setLoading={setChatLoading}
+            chatSessionId={chatSessionId}
           />
           </div>
         </div>
