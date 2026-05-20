@@ -46,6 +46,8 @@ class Config:
     google_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_API_KEY_1', ''))
     gemini_model:   str = GEMINI_GENERATIVE_MODEL
     lecture_title:  str = "강의"
+    domain:         str = ""
+    subdomain:      str = ""
 
     def __post_init__(self):
         try:
@@ -545,7 +547,12 @@ class StructureLayerBuilder:
         logger.info("✓ 구조 레이어 완료")
 
     def _build_root(self):
-        self.c.add(self.vid, 'type', 'Video', {'title': self.cfg.lecture_title, 'stem': self.cfg.stem})
+        props = {'title': self.cfg.lecture_title, 'stem': self.cfg.stem}
+        if self.cfg.domain:
+            props['domain'] = self.cfg.domain
+        if self.cfg.subdomain:
+            props['subdomain'] = self.cfg.subdomain
+        self.c.add(self.vid, 'type', 'Video', props)
 
     def _build_slides(self):
         for slide in self.pre.unique_slides.values():
@@ -673,15 +680,8 @@ class ConceptLayerBuilder:
             logger.warning("전체 콘텐츠가 비어있음")
             return
 
-        # ── 0. 도메인 감지 ───────────────────────────────────────────────────
-        # 토큰 절약: 앞 3000자만 사용
-        domain_result = self._call_gemini(DOMAIN_PROMPT.format(content=content[:3000]))
-        domain, subdomain = resolve_domain_from_api(domain_result)
+        domain, subdomain = self.resolve_domain(content)
         logger.info(f"  도메인: {domain} / {subdomain}")
-
-        # 도메인 노드 저장
-        self.c.add('lecture_video', 'HAS_DOMAIN', f'domain/{domain}')
-        self.c.add(f'domain/{domain}', 'type', 'Domain', {'name': domain, 'subdomain': subdomain})
 
         # ── 1. 엔티티 추출 ───────────────────────────────────────────────────
         logger.info("엔티티 레이어 추출 중...")
@@ -826,6 +826,16 @@ class ConceptLayerBuilder:
             logger.error(f"  ✗ Gemini 호출 실패: {e}")
             return None
 
+    def resolve_domain(self, content: str) -> Tuple[str, str]:
+        if self.cfg.domain:
+            return self.cfg.domain, self.cfg.subdomain
+        # 토큰 절약: 앞 3000자만 사용
+        domain_result = self._call_gemini(DOMAIN_PROMPT.format(content=content[:3000]))
+        domain, subdomain = resolve_domain_from_api(domain_result)
+        self.cfg.domain = domain
+        self.cfg.subdomain = subdomain
+        return domain, subdomain
+
 
 # ============================================================================
 #  파이프라인
@@ -927,6 +937,11 @@ class GraphPipeline:
         print('\n[Step 2] 전처리')
         pre = Preprocessor(slides)
         collector = TripleCollector()
+        concept_builder = ConceptLayerBuilder(pre, collector, cfg)
+        domain_content = concept_builder._build_full_content()
+        if domain_content.strip():
+            domain, subdomain = concept_builder.resolve_domain(domain_content)
+            logger.info(f"✓ 도메인 확정: {domain} / {subdomain}")
 
         # ── 구조 레이어 ───────────────────────────────────────────────────────
         print('\n[Step 3] 구조 레이어 생성')
@@ -937,7 +952,6 @@ class GraphPipeline:
 
         # ── 개념 레이어 ───────────────────────────────────────────────────────
         print('\n[Step 4] 개념 레이어 생성 (Gemini)')
-        concept_builder = ConceptLayerBuilder(pre, collector, cfg)
         concept_builder.build()
         concept_count = len(collector.triples) - struct_count
         logger.info(f"✓ 개념 트리플: {concept_count}개")
