@@ -1089,6 +1089,99 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
 
+def _filter_served_slide_errors(items: list[dict]) -> list[dict]:
+    filtered = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        problematic = str(item.get("problematic_text", "") or "").strip()
+        corrected = str(item.get("corrected_text", "") or "").strip()
+        if not problematic or not corrected or problematic == corrected:
+            continue
+        filtered.append(item)
+    return filtered
+
+
+def _slide_number_key(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_count(value: Any, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_slide_image_url_map(output_dir: Path) -> dict[str, dict[Any, str]]:
+    classified_paths = list(output_dir.glob("*_slide_classified.json"))
+    if not classified_paths:
+        return {"by_number": {}, "by_title": {}}
+
+    image_urls: dict[str, dict[Any, str]] = {"by_number": {}, "by_title": {}}
+    for classified_path in classified_paths:
+        try:
+            with open(classified_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            logger.warning("Failed to read slide image metadata: %s", classified_path, exc_info=True)
+            continue
+
+        slides = []
+        if isinstance(data.get("slides"), list):
+            slides.extend(data.get("slides") or [])
+        if isinstance(data.get("scenes"), list):
+            slides.extend(data.get("scenes") or [])
+
+        for slide in slides:
+            if not isinstance(slide, dict):
+                continue
+
+            image_url = make_file_url(slide.get("image_path"))
+            if not image_url:
+                continue
+
+            slide_number = _slide_number_key(slide.get("slide_number"))
+            if slide_number is not None:
+                image_urls["by_number"][slide_number] = image_url
+
+            title = str(slide.get("title") or "").strip()
+            if title:
+                image_urls["by_title"][title] = image_url
+
+    return image_urls
+
+
+def _attach_slide_image_urls(items: list[dict], image_urls: dict[str, dict[Any, str]]) -> list[dict]:
+    by_number = image_urls.get("by_number", {}) or {}
+    by_title = image_urls.get("by_title", {}) or {}
+    enriched = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+
+        copied = dict(item)
+        slide_number = _slide_number_key(copied.get("slide_number"))
+        slide_title = str(copied.get("slide_title") or "").strip()
+        image_url = copied.get("slide_image_url") or copied.get("image_url")
+        if not image_url:
+            image_url = make_file_url(copied.get("slide_image_path"))
+        if not image_url:
+            image_url = by_title.get(slide_title)
+            if not image_url and slide_number is not None:
+                image_url = by_number.get(slide_number)
+        if image_url:
+            copied.setdefault("slide_image_url", image_url)
+            copied.setdefault("image_url", image_url)
+        enriched.append(copied)
+
+    return enriched
+
 
 async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     """verifier 결과 조회 (Lecture ID 기준)."""
@@ -1098,10 +1191,11 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
     output_dir = Path(detail["output_dir"])
     stem = str(detail["stem"])
+    analyzer_dir = output_dir / f"{stem}_analyzer"
 
     candidate_paths = [
-        output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
-        output_dir / f"{stem}_content_verification.json",
+        analyzer_dir / f"{stem}_verification_final.json",
+        output_dir / f"{stem}_verification_final.json",
     ]
     verifier_path = next((path for path in candidate_paths if path.exists()), None)
     if not verifier_path:
@@ -1115,16 +1209,92 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
     flow = data.get("claim_decision_flow", {}) or {}
     summary = data.get("claim_decision_flow_summary", {}) or {}
-    final_claims = flow.get("final_confirmed_claims", []) or []
+    content_summary = data.get("summary", {}) or summary
+    feedback_items = data.get("feedback_items", []) or []
+    confirmed_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") == "confirmed"
+    ]
+    professor_check_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") in {"professor_check", "review_needed"}
+    ]
+    rejected_feedback_items = [
+        item for item in feedback_items
+        if isinstance(item, dict) and item.get("status") == "rejected"
+    ]
+    final_claims = flow.get("final_confirmed_claims", []) or data.get("final_confirmed_claims", []) or []
+    needs_review_claims = flow.get("needs_review_claims", []) or data.get("needs_review_claims", []) or []
+    verifier_rejected_claims = flow.get("verifier_rejected_claims", []) or data.get("verifier_rejected_claims", []) or []
+    slide_image_urls = _load_slide_image_url_map(output_dir)
+    slide_errors = _attach_slide_image_urls(
+        _filter_served_slide_errors(data.get("slide_errors", []) or []),
+        slide_image_urls,
+    )
+    slide_error_needs_review = _attach_slide_image_urls(
+        _filter_served_slide_errors(data.get("slide_error_needs_review", []) or []),
+        slide_image_urls,
+    )
 
     return {
         "lecture_id": str(detail["id"]),
         "stem": stem,
         "verification_path": str(verifier_path),
-        "final_confirmed_claim_count": int(
-            summary.get("final_confirmed_claim_count", len(final_claims))
+        "schema_version": data.get("schema_version"),
+        "mode": data.get("mode", ""),
+        "verification_date": data.get("verification_date", ""),
+        "models": data.get("models", {}) or [],
+        "pipeline_models": data.get("pipeline_models", {}) or {},
+        "primary_model": data.get("primary_model", ""),
+        "verifier_source_models": data.get("verifier_source_models", []) or [],
+        "verifier_model_weights": data.get("verifier_model_weights", {}) or {},
+        "severity_score_report": data.get("severity_score_report", {}) or {},
+        "summary": content_summary,
+        "overview": data.get("claim_decision_overview", []) or [],
+        "counts": {
+            "final_confirmed": _safe_count(
+                content_summary.get(
+                    "confirmed_feedback_count",
+                    summary.get("final_confirmed_claim_count", len(confirmed_feedback_items) or len(final_claims)),
+                )
+            ),
+            "needs_review": _safe_count(
+                content_summary.get(
+                    "review_needed_feedback_count",
+                    summary.get("needs_review_claim_count", len(professor_check_feedback_items) or len(needs_review_claims)),
+                )
+            ),
+            "rejected": _safe_count(
+                content_summary.get("rejected_feedback_count", len(rejected_feedback_items))
+            ),
+            "slide_errors": _safe_count(content_summary.get("slide_error_count", len(slide_errors))),
+            "slide_error_needs_review": len(slide_error_needs_review),
+            "verifier_rejected": _safe_count(summary.get("verifier_rejected_claim_count", len(verifier_rejected_claims))),
+        },
+        "final_confirmed_claim_count": _safe_count(
+            content_summary.get(
+                "confirmed_feedback_count",
+                summary.get("final_confirmed_claim_count", len(confirmed_feedback_items) or len(final_claims)),
+            )
         ),
+        "claims": data.get("claims", []) or [],
+        "feedback_groups": data.get("feedback_groups", []) or [],
+        "feedback_items": feedback_items,
+        "views": data.get("views", {}) or {},
         "final_confirmed_claims": final_claims,
+        "needs_review_claims": needs_review_claims,
+        "verifier_rejected_claims": verifier_rejected_claims,
+        "issues": data.get("issues", []) or [],
+        "slide_errors": slide_errors,
+        "slide_error_needs_review": slide_error_needs_review,
+        "slide_error_consensus": data.get("slide_error_consensus", {}) or {},
+        "slide_error_status": data.get("slide_error_status", ""),
+        "slide_error_summary": data.get("slide_error_summary", {}) or {},
+        "slide_error_path": data.get("slide_error_path", ""),
+        "claim_decision_flow_summary": summary,
+        "classified_issue_artifacts": data.get("classified_issue_artifacts", {}) or {},
+        "classified_issue_verifier_path": data.get("classified_issue_verifier_path", ""),
+        "classified_issue_verifier": (data.get("views", {}) or {}).get("classified_issue_verifier", {}),
     }
 
 
