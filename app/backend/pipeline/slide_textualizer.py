@@ -34,7 +34,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 from PIL import Image
 
@@ -94,6 +94,41 @@ T1_EXTRACTION_PROMPT = """
   "title": "슬라이드 제목 (없으면 빈 문자열)",
   "raw_text": "슬라이드에 보이는 모든 텍스트 (위→아래, 좌→우 순서, 줄바꿈은 \\n)",
   "structure": "다이어그램/표/화살표 관계를 텍스트로 기술",
+  "visual_assets": [
+    {
+      "asset_type": "table" | "diagram" | "figure" | "list" | "chart" | "image" | "other",
+      "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
+      "description": "이 시각자료 하나가 전달하는 내용",
+      "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "visual_elements": [
+        {
+          "type": "arrow" | "box" | "icon" | "icon_group" | "line" | "layer" | "callout" | "label" | "text_block" | "table_cell" | "axis" | "marker" | "other",
+          "label": "요소에 보이는 텍스트/이름",
+          "role": "요소가 시각자료 안에서 맡는 역할",
+          "meaning": "요소가 전달하는 의미",
+          "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        }
+      ],
+      "visual_relations": [
+        {
+          "source": "관계 시작 요소",
+          "target": "관계 대상 요소",
+          "relation": "관계 의미",
+          "visual_cue": "arrow" | "line" | "position" | "containment" | "color" | "alignment" | "other",
+          "direction": "bidirectional" | "source_to_target" | "target_to_source" | "none",
+          "meaning": "이 시각적 관계가 설명하는 내용"
+        }
+      ],
+      "layout": {
+        "top": ["상단 요소"],
+        "middle": ["중앙 요소"],
+        "bottom": ["하단 요소"],
+        "left": ["왼쪽 요소"],
+        "right": ["오른쪽 요소"]
+      },
+      "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+    }
+  ],
   "slide_emphasis": [
     {
       "text": "강조된 텍스트 원문",
@@ -117,6 +152,14 @@ slide_type 판별 기준:
 - structure 필드: 다이어그램이 없으면 빈 문자열
   예시) "사용자 → 응용소프트웨어 → 운영체제 → 컴퓨터 하드웨어 (위에서 아래 계층 구조)"
   예시) "운영체제 vs 응용소프트웨어 비교표: 목적(자원관리 vs 사용자목적), 개발언어(C/C++ vs 다양)"
+- visual_assets 필드: 슬라이드 안의 표/다이어그램/그림/차트/목록 등 독립적인 시각자료를 배열로 분리
+  - 한 슬라이드에 표와 다이어그램이 함께 있으면 항목 2개로 분리
+  - 텍스트 불릿만 있는 일반 슬라이드는 목록 구조가 의미 전달의 핵심일 때만 "list"로 포함
+  - 시각자료가 없으면 빈 배열 []
+  - description은 각 시각자료의 의미를 요약하고, raw_text는 내부에 보이는 텍스트를 원문에 가깝게 기재
+  - visual_elements는 화살표, 박스, 아이콘, 레이어, 말풍선, 라벨, 선, 축 등 질문 대상이 될 수 있는 시각 요소를 분리
+  - visual_relations는 화살표/선/위치/포함 관계가 무엇을 연결하고 무엇을 의미하는지 분리
+  - layout은 상단/중앙/하단/좌/우 등 공간 배치가 의미를 갖는 경우에만 작성
 
 image_only / mixed 슬라이드 처리:
 - raw_text: 이미지 내에 인쇄된 캡션/레이블 텍스트만 기재 (없으면 빈 문자열)
@@ -129,6 +172,9 @@ image_only / mixed 슬라이드 처리:
 slide_emphasis 추출 규칙:
 - 슬라이드 제작 시 의도적으로 삽입된 시각적 강조만 수집
   (교수 필기/손글씨는 포함하지 말 것)
+- 슬라이드 최상단 제목과 페이지 번호는 제외하되, 본문 영역 안에서 하위 내용을 묶는
+  섹션 헤더/소제목은 포함할 것. 특히 주변 본문보다 명확히 크거나 굵거나 색이 다르거나
+  계층 제목처럼 배치된 텍스트는 "bold" 또는 적절한 type으로 수집할 것.
 - 대상 및 type 값:
     "color"     : 다른 텍스트와 색상이 다른 텍스트 (빨간색, 주황색 등)
     "bold"      : 굵게 처리된 텍스트
@@ -163,6 +209,41 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
   "title": "슬라이드 제목 (없으면 빈 문자열)",
   "raw_text": "슬라이드에 보이는 모든 텍스트 (위→아래, 좌→우 순서, 줄바꿈은 \\n)",
   "structure": "다이어그램/표/화살표 관계를 텍스트로 기술",
+  "visual_assets": [
+    {
+      "asset_type": "table" | "diagram" | "figure" | "list" | "chart" | "image" | "other",
+      "title": "시각자료 제목/캡션 (없으면 빈 문자열)",
+      "description": "이 시각자료 하나가 전달하는 내용",
+      "raw_text": "시각자료 내부의 셀/레이블/캡션 텍스트",
+      "visual_elements": [
+        {
+          "type": "arrow" | "box" | "icon" | "icon_group" | "line" | "layer" | "callout" | "label" | "text_block" | "table_cell" | "axis" | "marker" | "other",
+          "label": "요소에 보이는 텍스트/이름",
+          "role": "요소가 시각자료 안에서 맡는 역할",
+          "meaning": "요소가 전달하는 의미",
+          "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+        }
+      ],
+      "visual_relations": [
+        {
+          "source": "관계 시작 요소",
+          "target": "관계 대상 요소",
+          "relation": "관계 의미",
+          "visual_cue": "arrow" | "line" | "position" | "containment" | "color" | "alignment" | "other",
+          "direction": "bidirectional" | "source_to_target" | "target_to_source" | "none",
+          "meaning": "이 시각적 관계가 설명하는 내용"
+        }
+      ],
+      "layout": {
+        "top": ["상단 요소"],
+        "middle": ["중앙 요소"],
+        "bottom": ["하단 요소"],
+        "left": ["왼쪽 요소"],
+        "right": ["오른쪽 요소"]
+      },
+      "bbox": {"x": 0.0, "y": 0.0, "w": 0.0, "h": 0.0}
+    }
+  ],
   "slide_emphasis": [
     {
       "text": "강조된 텍스트 원문",
@@ -178,6 +259,13 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
   - Image 2 (LAST_ANNOT) 기준으로 추출
   - PPT 애니메이션으로 나중에 나타난 텍스트까지 모두 포함
   - 교수가 직접 쓴 손글씨/필기는 무시하고 인쇄된 원본 텍스트만 추출
+  - visual_assets는 Image 2 (LAST_ANNOT)의 완전 전개 상태를 기준으로 추출하되,
+    교수 필기/손글씨/강의 중 추가된 선과 도형은 포함하지 말 것.
+  - 한 슬라이드에 표/다이어그램/그림/차트/목록이 여러 개 있으면 visual_assets 배열에 각각 분리할 것.
+  - 시각자료가 없으면 빈 배열 [].
+  - visual_elements는 화살표, 박스, 아이콘, 레이어, 말풍선, 라벨, 선, 축 등 질문 대상이 될 수 있는 시각 요소를 분리할 것.
+  - visual_relations는 화살표/선/위치/포함 관계가 무엇을 연결하고 무엇을 의미하는지 분리할 것.
+  - layout은 상단/중앙/하단/좌/우 등 공간 배치가 의미를 갖는 경우에만 작성할 것.
 
 [slide_emphasis]
   - 반드시 Image 1 (BASE) 만을 기준으로 판단할 것.
@@ -187,6 +275,9 @@ T1_EXTRACTION_PROMPT_WITH_ANNOT = """
   - Image 1과 Image 2를 비교했을 때 Image 2에서 새로 생긴 색상/강조는
     슬라이드 디자인이 아닌 교수 필기이므로 포함하지 말 것.
   - 슬라이드 제작 시 의도적으로 삽입된 시각적 강조만 수집:
+    - 슬라이드 최상단 제목과 페이지 번호는 제외하되, 본문 영역 안에서 하위 내용을 묶는
+      섹션 헤더/소제목은 포함할 것. 특히 주변 본문보다 명확히 크거나 굵거나 색이 다르거나
+      계층 제목처럼 배치된 텍스트는 "bold" 또는 적절한 type으로 수집할 것.
     "color"     : Image 1에서 이미 다른 텍스트와 색상이 다른 텍스트 (빨간색, 주황색 등)
     "bold"      : 굵게 처리된 텍스트
     "underline" : 슬라이드 디자인의 일부인 밑줄 (Image 1에 이미 존재하는 것만)
@@ -497,6 +588,8 @@ class SlideLoader:
 class T1Extractor:
     """슬라이드 base 이미지 → t1 (원본 텍스트) + t1_structure 추출"""
 
+    _ASSET_TYPES = {"table", "diagram", "figure", "list", "chart", "image", "other"}
+
     def __init__(self, config: Config):
         self.config = config
         from .config import gemini_client
@@ -560,6 +653,170 @@ class T1Extractor:
 
         return filtered
 
+    @classmethod
+    def _normalize_visual_elements(cls, elements: Any) -> List[Dict]:
+        if not isinstance(elements, list):
+            return []
+
+        normalized: List[Dict] = []
+        for item in elements:
+            if isinstance(item, str):
+                item = {"label": item}
+            if not isinstance(item, dict):
+                continue
+
+            bbox = item.get("bbox")
+            if not isinstance(bbox, dict):
+                bbox = None
+
+            entry = {
+                "type": str(item.get("type") or "other").strip().lower(),
+                "label": str(item.get("label") or item.get("text") or item.get("name") or "").strip(),
+                "role": str(item.get("role") or "").strip(),
+                "meaning": str(item.get("meaning") or item.get("description") or "").strip(),
+                "bbox": bbox,
+            }
+            if any(entry.get(k) for k in ("label", "role", "meaning")):
+                normalized.append(entry)
+        return normalized
+
+    @classmethod
+    def _normalize_visual_relations(cls, relations: Any) -> List[Dict]:
+        if not isinstance(relations, list):
+            return []
+
+        normalized: List[Dict] = []
+        for item in relations:
+            if isinstance(item, str):
+                item = {"meaning": item}
+            if not isinstance(item, dict):
+                continue
+
+            entry = {
+                "source": str(item.get("source") or item.get("from") or "").strip(),
+                "target": str(item.get("target") or item.get("to") or "").strip(),
+                "relation": str(item.get("relation") or item.get("type") or "").strip(),
+                "visual_cue": str(item.get("visual_cue") or item.get("cue") or "").strip().lower(),
+                "direction": str(item.get("direction") or "").strip().lower(),
+                "meaning": str(item.get("meaning") or item.get("description") or "").strip(),
+            }
+            if any(entry.values()):
+                normalized.append(entry)
+        return normalized
+
+    @staticmethod
+    def _normalize_visual_layout(layout: Any) -> Dict:
+        if not isinstance(layout, dict):
+            return {}
+        normalized: Dict[str, Any] = {}
+        for key, value in layout.items():
+            key_s = str(key).strip()
+            if not key_s:
+                continue
+            if isinstance(value, list):
+                vals = [str(v).strip() for v in value if str(v).strip()]
+                if vals:
+                    normalized[key_s] = vals
+            elif isinstance(value, (str, int, float)):
+                value_s = str(value).strip()
+                if value_s:
+                    normalized[key_s] = value_s
+        return normalized
+
+    @staticmethod
+    def _visual_elements_text(elements: List[Dict]) -> str:
+        lines = []
+        for el in elements:
+            parts = [
+                str(el.get("type") or "").strip(),
+                str(el.get("label") or "").strip(),
+                str(el.get("role") or "").strip(),
+                str(el.get("meaning") or "").strip(),
+            ]
+            line = " | ".join(part for part in parts if part)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _visual_relations_text(relations: List[Dict]) -> str:
+        lines = []
+        for rel in relations:
+            endpoints = " -> ".join(
+                part for part in [str(rel.get("source") or "").strip(), str(rel.get("target") or "").strip()]
+                if part
+            )
+            parts = [
+                endpoints,
+                str(rel.get("relation") or "").strip(),
+                str(rel.get("visual_cue") or "").strip(),
+                str(rel.get("direction") or "").strip(),
+                str(rel.get("meaning") or "").strip(),
+            ]
+            line = " | ".join(part for part in parts if part)
+            if line:
+                lines.append(line)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _visual_layout_text(layout: Dict) -> str:
+        lines = []
+        for key, value in layout.items():
+            if isinstance(value, list):
+                value_s = ", ".join(str(v) for v in value if str(v).strip())
+            else:
+                value_s = str(value).strip()
+            if value_s:
+                lines.append(f"{key}: {value_s}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _normalize_visual_assets(cls, assets: Any) -> List[Dict]:
+        if not isinstance(assets, list):
+            return []
+
+        normalized: List[Dict] = []
+        for idx, item in enumerate(assets, start=1):
+            if isinstance(item, str):
+                item = {"description": item}
+            if not isinstance(item, dict):
+                continue
+
+            asset_type = str(item.get("asset_type") or item.get("type") or "other").strip().lower()
+            if asset_type not in cls._ASSET_TYPES:
+                asset_type = "other"
+
+            title = str(item.get("title") or item.get("caption") or "").strip()
+            description = str(item.get("description") or item.get("summary") or "").strip()
+            raw_text = str(item.get("raw_text") or item.get("text") or "").strip()
+            if not (title or description or raw_text):
+                continue
+
+            bbox = item.get("bbox")
+            if not isinstance(bbox, dict):
+                bbox = None
+            visual_elements = cls._normalize_visual_elements(item.get("visual_elements") or item.get("elements"))
+            visual_relations = cls._normalize_visual_relations(item.get("visual_relations") or item.get("relations"))
+            layout = cls._normalize_visual_layout(item.get("layout"))
+
+            normalized.append(
+                {
+                    "asset_index": idx,
+                    "asset_type": asset_type,
+                    "title": title,
+                    "description": description,
+                    "raw_text": raw_text,
+                    "visual_elements": visual_elements,
+                    "visual_relations": visual_relations,
+                    "layout": layout,
+                    "visual_elements_text": cls._visual_elements_text(visual_elements),
+                    "visual_relations_text": cls._visual_relations_text(visual_relations),
+                    "layout_text": cls._visual_layout_text(layout),
+                    "bbox": bbox,
+                }
+            )
+        return normalized
+
     def _call_gemini(self, image: Image.Image, base_image: Image.Image = None) -> str:
         """재시도 로직 포함 Gemini Vision 호출.
 
@@ -616,6 +873,7 @@ class T1Extractor:
         slide.setdefault("title", f"Slide {slide['slide_number']}")
         slide.setdefault("t1", "")
         slide.setdefault("t1_structure", "")
+        slide.setdefault("visual_assets", [])
         slide.setdefault("slide_emphasis", [])
 
         # build/clean_final을 쓰는 슬라이드는 교수 필기가 없으므로 1장 프롬프트 사용.
@@ -654,6 +912,9 @@ class T1Extractor:
             slide["t1"]             = result.get("raw_text", "")
             slide["t1_structure"]   = result.get("structure", "")
             slide["slide_type"]     = result.get("slide_type", "text")
+            slide["visual_assets"]  = self._normalize_visual_assets(
+                result.get("visual_assets", [])
+            )
             slide["slide_emphasis"] = self._filter_emphasis(
                 result.get("slide_emphasis", [])
             )
@@ -681,6 +942,7 @@ class T1Extractor:
                 slide["t1"] = cached["t1"]
                 slide["t1_structure"] = cached["t1_structure"]
                 slide["slide_type"] = cached["slide_type"]
+                slide["visual_assets"] = list(cached.get("visual_assets", []))
                 slide["slide_emphasis"] = list(cached["slide_emphasis"])
                 logger.info(
                     f"  [{i+1}/{len(slides)}] Scene {slide['scene_number']} "
@@ -694,6 +956,7 @@ class T1Extractor:
                 "t1": slide["t1"],
                 "t1_structure": slide["t1_structure"],
                 "slide_type": slide.get("slide_type", "text"),
+                "visual_assets": list(slide.get("visual_assets", [])),
                 "slide_emphasis": list(slide.get("slide_emphasis", [])),
                 "representative_scene_number": slide.get("representative_scene_number", slide.get("scene_number")),
             }
@@ -703,6 +966,7 @@ class T1Extractor:
                 f"[{slide.get('text_source', 'base')}]: "
                 f"t1={len(slide['t1'])} chars, "
                 f"structure={len(slide['t1_structure'])} chars, "
+                f"visual_assets={len(slide.get('visual_assets', []))}개, "
                 f"slide_emphasis={len(slide.get('slide_emphasis', []))}개"
             )
 
@@ -817,6 +1081,7 @@ class TextualizationPipeline:
                     "t1":                  s["t1"],
                     "t1_structure":        s["t1_structure"],
                     "slide_type":          s.get("slide_type", "text"),
+                    "visual_assets":       s.get("visual_assets", []),
                     "slide_emphasis":      s.get("slide_emphasis", []),
                     "slide_topic_keywords": s.get("slide_topic_keywords", []),
                     "slide_topic_total_count_sum": s.get("slide_topic_total_count_sum", 0),

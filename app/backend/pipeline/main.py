@@ -1260,6 +1260,10 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     entities_path = output_graph_dir / "entities.parquet"
     relationships_path = output_graph_dir / "relationships.parquet"
     input_path = input_dir / f"{stem}.txt"
+    metrics_path = workspace_dir / "graphrag_index_metrics.json"
+    model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4")
+    embedding_model = os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small")
+    method_name = getattr(args, "graphrag_method", "standard")
 
     if (
         not args.force
@@ -1302,7 +1306,26 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
 
     env = os.environ.copy()
     env["GRAPHRAG_API_KEY"] = api_key
+    env["PYTHONUNBUFFERED"] = "1"
     _write_graphrag_env(workspace_dir, api_key)
+
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "running",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "started_at_epoch": t0,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     settings_path = workspace_dir / "settings.yaml"
     if not settings_path.exists():
@@ -1313,9 +1336,9 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
                 "--root",
                 str(workspace_dir),
                 "--model",
-                os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-4.1-mini"),
+                model_name,
                 "--embedding",
-                os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small"),
+                embedding_model,
             ],
             check=True,
             env=env,
@@ -1334,13 +1357,35 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
             "--root",
             str(workspace_dir),
             "--method",
-            getattr(args, "graphrag_method", "standard"),
+            method_name,
         ],
         check=True,
         env=env,
     )
 
     elapsed = time.time() - t0
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "done",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "started_at_epoch": t0,
+                "finished_at_epoch": time.time(),
+                "elapsed": elapsed,
+                "elapsed_sec": elapsed,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+                "entities_parquet": str(entities_path),
+                "relationships_parquet": str(relationships_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     _done("GraphRAG 인덱스 생성", elapsed)
     return {
         "elapsed": elapsed,
@@ -1348,6 +1393,7 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
         "input_path": str(input_path),
         "entities_parquet": str(entities_path),
         "relationships_parquet": str(relationships_path),
+        "metrics_path": str(metrics_path),
     }
 
 
@@ -1410,6 +1456,7 @@ def stage11_build_recommender_index(args) -> dict:
 def run_pipeline(args, progress_callback=None):
     total_start = time.time()
     timings: dict[str, float] = {}
+    stage_status: dict[str, str] = {}
     
     def notify_stage(stage_key, status):
         if progress_callback:
@@ -1425,6 +1472,29 @@ def run_pipeline(args, progress_callback=None):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     slides_dir.mkdir(parents=True, exist_ok=True)
+    timing_path = output_dir / "pipeline_timings.json"
+
+    def write_timings(current_stage: str | None = None) -> None:
+        payload = {
+            "stem": stem,
+            "status": "running",
+            "current_stage": current_stage,
+            "started_at_epoch": total_start,
+            "updated_at_epoch": time.time(),
+            "elapsed_total_sec": time.time() - total_start,
+            "timings": timings,
+            "stage_status": stage_status,
+        }
+        tmp_path = timing_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(timing_path)
+
+    def record_timing(stage: str, elapsed: float, status: str = "done") -> None:
+        timings[stage] = elapsed
+        stage_status[stage] = status
+        write_timings(stage)
+
+    write_timings("pipeline_start")
 
     paths = output_paths(stem, output_dir, slides_dir)
     try:
@@ -1641,10 +1711,12 @@ def run_pipeline(args, progress_callback=None):
         if getattr(args, "skip_graphrag_index", False):
             print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
             print("─" * 70)
-            timings["Stage 7B GraphRAG 인덱스"] = 0.0
+            record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
         else:
+            stage_status["Stage 7B GraphRAG 인덱스"] = "run"
+            write_timings("Stage 7B GraphRAG 인덱스")
             r7b = stage7b_graphrag_index(args, output_dir)
-            timings["Stage 7B GraphRAG 인덱스"] = r7b.get("elapsed", 0.0)
+            record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
 
         # ── Stage 8 (직렬): 메타데이터 생성 ──  ← 여기 추가
         r8: dict = {}
@@ -1729,6 +1801,22 @@ def run_pipeline(args, progress_callback=None):
 
         # 성공/실패 무관하게 항상 타이밍 출력
         total_elapsed = time.time() - total_start
+        try:
+            final_payload = {
+                "stem": stem,
+                "status": "finished",
+                "current_stage": "finished",
+                "started_at_epoch": total_start,
+                "updated_at_epoch": time.time(),
+                "elapsed_total_sec": total_elapsed,
+                "timings": timings,
+                "stage_status": stage_status,
+            }
+            tmp_path = timing_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(final_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(timing_path)
+        except Exception as e:
+            print(f"\n  ⚠️ 타이밍 파일 저장 실패: {e}")
         print("\n" + "═" * 70)
         print("  단계별 소요 시간 (현재까지)")
         print("═" * 70)

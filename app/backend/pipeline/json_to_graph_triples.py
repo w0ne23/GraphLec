@@ -18,7 +18,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 from google import genai
 from dotenv import load_dotenv
@@ -46,6 +46,8 @@ class Config:
     google_api_key: str = field(default_factory=lambda: os.getenv('GOOGLE_API_KEY_1', ''))
     gemini_model:   str = GEMINI_GENERATIVE_MODEL
     lecture_title:  str = "강의"
+    domain:         str = ""
+    subdomain:      str = ""
 
     def __post_init__(self):
         try:
@@ -327,7 +329,114 @@ class Preprocessor:
 
     @staticmethod
     def _content_score(slide: Dict) -> int:
-        return len(str(slide.get('slide_text') or '')) + len(str(slide.get('title') or ''))
+        visual_text = ' '.join(
+            f"{asset.get('title', '')} {asset.get('description', '')} {asset.get('raw_text', '')}"
+            for asset in (slide.get('visual_assets') or [])
+            if isinstance(asset, dict)
+        )
+        return (
+            len(str(slide.get('slide_text') or ''))
+            + len(str(slide.get('t1_structure') or ''))
+            + len(visual_text)
+            + len(str(slide.get('title') or ''))
+        )
+
+    @staticmethod
+    def _visual_type(slide: Dict, asset: Optional[Dict] = None) -> str:
+        if isinstance(asset, dict):
+            asset_type = str(asset.get('asset_type') or asset.get('type') or '').strip().lower()
+            if asset_type in {'table', 'diagram', 'figure', 'list', 'chart', 'image', 'other'}:
+                return asset_type
+        slide_type = str(slide.get('slide_type') or '').lower()
+        structure = ' '.join(
+            [
+                str(slide.get('t1_structure') or ''),
+                str((asset or {}).get('description') or ''),
+                str((asset or {}).get('raw_text') or ''),
+            ]
+        ).lower()
+        if any(k in structure for k in ('표 형태', '표로 구성', '비교표', 'table')):
+            return 'table'
+        if any(k in structure for k in ('다이어그램', 'diagram', '구조도')):
+            return 'diagram'
+        if any(k in structure for k in ('list', '목록', '불릿', '리스트')):
+            return 'list'
+        if '계층' in structure:
+            return 'diagram'
+        if slide_type in {'mixed', 'image_only'}:
+            return 'figure'
+        return slide_type or 'visual'
+
+    @staticmethod
+    def _asset_text(asset: Dict) -> str:
+        parts = [
+            str(asset.get('title') or '').strip(),
+            str(asset.get('description') or '').strip(),
+            str(asset.get('raw_text') or '').strip(),
+            str(asset.get('visual_elements_text') or '').strip(),
+            str(asset.get('visual_relations_text') or '').strip(),
+            str(asset.get('layout_text') or '').strip(),
+        ]
+        return '\n'.join(part for part in parts if part)
+
+    def _visual_assets(self, slide: Dict) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        for idx, asset in enumerate(slide.get('visual_assets') or [], start=1):
+            if isinstance(asset, str):
+                asset = {'description': asset}
+            if not isinstance(asset, dict):
+                continue
+            text = self._asset_text(asset)
+            if not text:
+                continue
+            normalized.append({
+                'asset_index': int(asset.get('asset_index') or idx),
+                'asset_type': self._visual_type(slide, asset),
+                'title': str(asset.get('title') or '').strip(),
+                'description': str(asset.get('description') or text).strip(),
+                'raw_text': str(asset.get('raw_text') or '').strip(),
+                'visual_elements': asset.get('visual_elements') if isinstance(asset.get('visual_elements'), list) else [],
+                'visual_relations': asset.get('visual_relations') if isinstance(asset.get('visual_relations'), list) else [],
+                'layout': asset.get('layout') if isinstance(asset.get('layout'), dict) else {},
+                'visual_elements_text': str(asset.get('visual_elements_text') or '').strip(),
+                'visual_relations_text': str(asset.get('visual_relations_text') or '').strip(),
+                'layout_text': str(asset.get('layout_text') or '').strip(),
+                'bbox': asset.get('bbox') if isinstance(asset.get('bbox'), dict) else None,
+            })
+
+        if normalized:
+            return normalized
+
+        structure_text = str(slide.get('t1_structure') or '').strip()
+        if not structure_text:
+            return []
+        return [{
+            'asset_index': 1,
+            'asset_type': self._visual_type(slide),
+            'title': str(slide.get('title') or '').strip(),
+            'description': structure_text,
+            'raw_text': '',
+            'visual_elements': [],
+            'visual_relations': [],
+            'layout': {},
+            'visual_elements_text': '',
+            'visual_relations_text': '',
+            'layout_text': '',
+            'bbox': None,
+        }]
+
+    @staticmethod
+    def _emphasis_keywords_text(slide: Dict) -> str:
+        keywords = []
+        for entry in slide.get('slide_node_emphasized_keywords', slide.get('emphasized_keywords', [])) or []:
+            if isinstance(entry, dict):
+                keyword = entry.get('keyword') or entry.get('text') or entry.get('name')
+            else:
+                keyword = entry
+            keyword = str(keyword or '').strip()
+            if keyword and keyword not in keywords:
+                keywords.append(keyword)
+        return ' '.join(keywords)
 
     def _build(self):
         seg_idx = 0
@@ -353,6 +462,7 @@ class Preprocessor:
                 'slide_number':   slide.get('slide_number'),
                 'role':           slide.get('role'),
                 'emphasis_total': (slide.get('emphasis_score') or {}).get('total', 0.0),
+                'emphasis_score':  slide.get('emphasis_score', {}),
             }
 
             for ctx in slide.get('contexts', []):
@@ -378,6 +488,8 @@ class Preprocessor:
                     'end':           ctx.get('end'),
                     'stressed':      ctx.get('stressed', False),
                     'text':          ctx.get('text', ''),
+                    'audio_emphasis': ctx.get('audio_emphasis', {}),
+                    'emphasis_score': ctx.get('emphasis_score', {}),
                 }
 
             for ann in slide.get('annotations_summary', []):
@@ -435,17 +547,59 @@ class StructureLayerBuilder:
         logger.info("✓ 구조 레이어 완료")
 
     def _build_root(self):
-        self.c.add(self.vid, 'type', 'Video', {'title': self.cfg.lecture_title, 'stem': self.cfg.stem})
+        props = {'title': self.cfg.lecture_title, 'stem': self.cfg.stem}
+        if self.cfg.domain:
+            props['domain'] = self.cfg.domain
+        if self.cfg.subdomain:
+            props['subdomain'] = self.cfg.subdomain
+        self.c.add(self.vid, 'type', 'Video', props)
 
     def _build_slides(self):
         for slide in self.pre.unique_slides.values():
             sid = slide['slide_id']
+            visual_assets = self.pre._visual_assets(slide)
+            visual_asset_text = '\n\n'.join(
+                self.pre._asset_text(asset) for asset in visual_assets if self.pre._asset_text(asset)
+            )
             self.c.add(self.vid, 'HAS_SLIDE', sid)
             self.c.add(sid, 'type', 'Slide', {
                 'slide_number': slide.get('slide_number'),
                 'title':        slide.get('title', ''),
                 'slide_text':   slide.get('slide_text', ''),
+                't1_structure': slide.get('t1_structure', ''),
+                'visual_asset_text': visual_asset_text,
+                'slide_type': slide.get('slide_type', ''),
+                'emphasis_score': slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})),
+                'emphasis_total': (
+                    slide.get('slide_node_emphasis_score', slide.get('emphasis_score', {})) or {}
+                ).get('total', 0.0),
+                'emphasis_keywords_text': Preprocessor._emphasis_keywords_text(slide),
+                'emphasized_keywords': slide.get(
+                    'slide_node_emphasized_keywords',
+                    slide.get('emphasized_keywords', []),
+                ),
             })
+            for idx, asset in enumerate(visual_assets, start=1):
+                visual_id = f"{sid}/visual/{idx:02d}"
+                self.c.add(sid, 'HAS_VISUAL_ASSET', visual_id)
+                self.c.add(visual_id, 'type', 'VisualAsset', {
+                    'asset_index': asset.get('asset_index', idx),
+                    'asset_type': asset.get('asset_type') or self.pre._visual_type(slide, asset),
+                    'description': asset.get('description', ''),
+                    'raw_text': asset.get('raw_text', ''),
+                    'visual_elements': asset.get('visual_elements', []),
+                    'visual_relations': asset.get('visual_relations', []),
+                    'layout': asset.get('layout', {}),
+                    'visual_elements_text': asset.get('visual_elements_text', ''),
+                    'visual_relations_text': asset.get('visual_relations_text', ''),
+                    'layout_text': asset.get('layout_text', ''),
+                    'bbox': asset.get('bbox'),
+                    'slide_id': sid,
+                    'slide_number': slide.get('slide_number'),
+                    'scene_number': slide.get('representative_scene_number', slide.get('scene_number')),
+                    'title': asset.get('title') or slide.get('title', ''),
+                    'image_path': slide.get('image_path', ''),
+                })
 
     def _build_scenes(self):
         """Scene 노드 생성 (슬라이드 등장 구간, 1 per scene occurrence)."""
@@ -461,6 +615,7 @@ class StructureLayerBuilder:
                 'end_sec':         data['end'],
                 'role':            data.get('role'),
                 'emphasis_total':  data.get('emphasis_total', 0.0),
+                'emphasis_score':  data.get('emphasis_score', {}),
             })
         """Context 노드 생성 (발화 문맥 묶음, Scene 내부)"""
         for context_id, data in self.pre.context_data.items():
@@ -473,6 +628,8 @@ class StructureLayerBuilder:
                 'end':           data['end'],
                 'stressed':      data['stressed'],
                 'text':          data['text'],
+                'audio_emphasis': data.get('audio_emphasis', {}),
+                'emphasis_score': data.get('emphasis_score', {}),
             })
 
     def _build_segments(self):
@@ -523,15 +680,8 @@ class ConceptLayerBuilder:
             logger.warning("전체 콘텐츠가 비어있음")
             return
 
-        # ── 0. 도메인 감지 ───────────────────────────────────────────────────
-        # 토큰 절약: 앞 3000자만 사용
-        domain_result = self._call_gemini(DOMAIN_PROMPT.format(content=content[:3000]))
-        domain, subdomain = resolve_domain_from_api(domain_result)
+        domain, subdomain = self.resolve_domain(content)
         logger.info(f"  도메인: {domain} / {subdomain}")
-
-        # 도메인 노드 저장
-        self.c.add('lecture_video', 'HAS_DOMAIN', f'domain/{domain}')
-        self.c.add(f'domain/{domain}', 'type', 'Domain', {'name': domain, 'subdomain': subdomain})
 
         # ── 1. 엔티티 추출 ───────────────────────────────────────────────────
         logger.info("엔티티 레이어 추출 중...")
@@ -676,6 +826,16 @@ class ConceptLayerBuilder:
             logger.error(f"  ✗ Gemini 호출 실패: {e}")
             return None
 
+    def resolve_domain(self, content: str) -> Tuple[str, str]:
+        if self.cfg.domain:
+            return self.cfg.domain, self.cfg.subdomain
+        # 토큰 절약: 앞 3000자만 사용
+        domain_result = self._call_gemini(DOMAIN_PROMPT.format(content=content[:3000]))
+        domain, subdomain = resolve_domain_from_api(domain_result)
+        self.cfg.domain = domain
+        self.cfg.subdomain = subdomain
+        return domain, subdomain
+
 
 # ============================================================================
 #  파이프라인
@@ -685,6 +845,71 @@ class GraphPipeline:
 
     def __init__(self, config: Config = None):
         self.config = config or Config()
+
+    @staticmethod
+    def _slide_level_keywords(slide: Dict) -> list[Dict]:
+        def as_float(value) -> float:
+            try:
+                return float(value or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        keywords: list[Dict] = []
+        for entry in slide.get('emphasized_keywords', []) or []:
+            if not isinstance(entry, dict):
+                continue
+            sources = [s for s in entry.get('sources', []) if s == 'visual']
+            visual_score = as_float(entry.get('visual_score'))
+            slide_text_score = as_float(entry.get('slide_text_score'))
+            if not sources and visual_score == 0.0 and slide_text_score == 0.0:
+                continue
+            keywords.append({
+                'keyword': entry.get('keyword') or entry.get('text') or entry.get('name'),
+                'sources': sources,
+                'visual_score': visual_score,
+                'slide_text_score': slide_text_score,
+            })
+        return [kw for kw in keywords if kw.get('keyword')]
+
+    @staticmethod
+    def _merge_slide_level_fields(fused: Dict) -> list[Dict]:
+        if not fused.get('scenes') and fused.get('slides'):
+            slides = []
+            for slide in fused.get('slides') or []:
+                merged = dict(slide)
+                merged['slide_node_emphasis_score'] = slide.get('emphasis_score', {})
+                merged['slide_node_emphasized_keywords'] = GraphPipeline._slide_level_keywords(slide)
+                slides.append(merged)
+            return slides
+        slide_by_id = {
+            str(slide.get('slide_id') or '').strip(): slide
+            for slide in fused.get('slides', []) or []
+            if str(slide.get('slide_id') or '').strip()
+        }
+        slide_level_fields = (
+            'emphasized_keywords',
+            'annotation_highlights_summary',
+            'annotations_summary',
+            'slide_topic_keywords',
+            'slide_topic_keyword_scores',
+            'slide_topic_keyword_score',
+        )
+        merged_scenes = []
+        for scene in fused.get('scenes', []) or []:
+            merged = dict(scene)
+            slide = slide_by_id.get(str(scene.get('slide_id') or '').strip())
+            if slide:
+                if slide.get('emphasis_score'):
+                    merged['slide_node_emphasis_score'] = slide.get('emphasis_score')
+                if slide.get('emphasized_keywords'):
+                    merged['slide_node_emphasized_keywords'] = GraphPipeline._slide_level_keywords(slide)
+                for field in slide_level_fields:
+                    if not merged.get(field) and slide.get(field):
+                        merged[field] = slide.get(field)
+                if not merged.get('emphasis_score') and slide.get('emphasis_score'):
+                    merged['emphasis_score'] = slide.get('emphasis_score')
+            merged_scenes.append(merged)
+        return merged_scenes
 
     def run(self):
         start = time.time()
@@ -700,7 +925,7 @@ class GraphPipeline:
         print('\n[Step 1] 데이터 로드')
         with open(cfg.fused_path, encoding='utf-8') as f:
             fused = json.load(f)
-        slides = fused['scenes']
+        slides = self._merge_slide_level_fields(fused)
         logical_slide_count = len({
             slide.get('slide_number')
             for slide in slides
@@ -712,6 +937,11 @@ class GraphPipeline:
         print('\n[Step 2] 전처리')
         pre = Preprocessor(slides)
         collector = TripleCollector()
+        concept_builder = ConceptLayerBuilder(pre, collector, cfg)
+        domain_content = concept_builder._build_full_content()
+        if domain_content.strip():
+            domain, subdomain = concept_builder.resolve_domain(domain_content)
+            logger.info(f"✓ 도메인 확정: {domain} / {subdomain}")
 
         # ── 구조 레이어 ───────────────────────────────────────────────────────
         print('\n[Step 3] 구조 레이어 생성')
@@ -722,7 +952,6 @@ class GraphPipeline:
 
         # ── 개념 레이어 ───────────────────────────────────────────────────────
         print('\n[Step 4] 개념 레이어 생성 (Gemini)')
-        concept_builder = ConceptLayerBuilder(pre, collector, cfg)
         concept_builder.build()
         concept_count = len(collector.triples) - struct_count
         logger.info(f"✓ 개념 트리플: {concept_count}개")

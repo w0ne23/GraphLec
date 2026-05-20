@@ -165,6 +165,8 @@ class SlideIntegrator:
             "title":               slide.get("title", ""),
             "t1":                  t1,
             "t1_structure":        slide.get("t1_structure", ""),
+            "visual_assets":       slide.get("visual_assets", []),
+            "slide_type":          slide.get("slide_type", "text"),
             "emphasized":          emphasized,
             "t1_integrated":       t1_integrated,
             "has_annotation":      len(emphasized) > 0,

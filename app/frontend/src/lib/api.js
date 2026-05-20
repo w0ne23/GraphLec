@@ -142,11 +142,11 @@ export async function getLectureVerifier(lectureId) {
   return res.json();
 }
 
-export async function askQa(lectureId, question) {
+export async function askQa(lectureId, question, context = {}) {
   const res = await fetch(`${API_BASE}/results/${lectureId}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question })
+    body: JSON.stringify({ question, ...context })
   });
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));

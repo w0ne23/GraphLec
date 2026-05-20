@@ -71,7 +71,11 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
             update_job_stage_sync(job_id, stages_array, stage_text)
             logger.info(f"[{job_id}] Progress: {stage_key} -> {status}")
 
-        with open(log_file_path, "w", encoding="utf-8") as log_file:
+        with open(log_file_path, "w", encoding="utf-8", buffering=1) as log_file:
+            try:
+                log_file.reconfigure(line_buffering=True, write_through=True)
+            except Exception:
+                pass
             with redirect_stdout(log_file), redirect_stderr(log_file):
                 try:
                     logger.info(f"[{job_id}] Importing pipeline...")
@@ -88,6 +92,7 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
                         "--metadata-dir", str(output_dir / "metadata"),
                         "--lance-root",   str(output_dir / "lancedb"),
                     ])
+                    os.environ["PYTHONUNBUFFERED"] = "1"
                     logger.info(f"[{job_id}] Starting pipeline...")
                     pipeline_main.run_pipeline(args, progress_callback=on_progress)
 

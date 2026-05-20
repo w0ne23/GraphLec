@@ -62,7 +62,7 @@ class Config:
 
     # 강조 가중치
     W_AUDIO:    float = 0.8
-    W_VISUAL:   float = 1.5
+    W_VISUAL:   float = 0.5
     W_ANNOT:    float = 1.0   # annotation 점수는 자체 배율이 크므로 1.0
     BOTH_BONUS: float = 1.3   # 오디오 + annotation 동시 감지 보너스
     AUDIO_SIGNAL_MAX: float = 10.0      # volume_score(5) + pitch_score(5)
@@ -78,6 +78,7 @@ class Config:
     MIN_KEYWORD_LEN: int = 2
     MIN_SLIDE_TEXT_LINE_LEN: int = 4  # 슬라이드 본문 라인 최소 길이 (불릿·번호 제외)
     SLIDE_TEXT_SCORE: float = 0.3     # 슬라이드 본문 등장 1회당 점수
+    SLIDE_TEXT_REPEAT_MIN_COUNT: int = 2  # slide 강조 점수에는 2회 이상 반복된 본문 키워드만 반영
     STOPWORDS: frozenset = frozenset({
         # 조사·접속사
         "이", "그", "저", "은", "는", "가", "을", "를", "의", "에", "도",
@@ -151,8 +152,25 @@ def score_slide_emphasis(slide_emphasis_items: list[dict]) -> float:
     total = 0.0
     for item in slide_emphasis_items:
         raw_type = item.get("type") or "other"
-        t = (raw_type[0] if isinstance(raw_type, list) else raw_type).lower()
-        total += SLIDE_EMPHASIS_WEIGHTS.get(t, SLIDE_EMPHASIS_WEIGHTS["other"])
+        types = raw_type if isinstance(raw_type, list) else [raw_type]
+        seen: set[str] = set()
+        for value in types:
+            t = str(value or "other").lower()
+            if t in seen:
+                continue
+            seen.add(t)
+            total += SLIDE_EMPHASIS_WEIGHTS.get(t, SLIDE_EMPHASIS_WEIGHTS["other"])
+    return round(total, 3)
+
+
+def score_slide_text_repeat(emphasized_keywords: list[dict], cfg: Config) -> float:
+    """슬라이드 본문에서 반복 등장한 키워드 점수만 slide-level 강조로 합산한다."""
+    threshold = cfg.SLIDE_TEXT_SCORE * max(1, cfg.SLIDE_TEXT_REPEAT_MIN_COUNT)
+    total = 0.0
+    for item in emphasized_keywords:
+        score = float(item.get("slide_text_score", 0.0) or 0.0)
+        if score >= threshold:
+            total += score
     return round(total, 3)
 
 
@@ -221,37 +239,71 @@ def score_audio_emphasis(contexts: list[dict], cfg: Config) -> dict:
     }
 
 
+def score_context_emphasis(ctx: dict, cfg: Config) -> dict:
+    """Context 강조 점수: 내부 keyword 강조(topic/importance) + 음성 강조(pitch/volume)."""
+    detail = get_context_emphasis_detail(ctx)
+    audio = detail.get("audio") or {}
+    topic = detail.get("topic") or {}
+    importance = detail.get("importance_keywords") or {}
+
+    signal_score = float(
+        audio.get(
+            "audio_signal_score",
+            audio.get("std_based_score", audio.get("score", 0.0)),
+        )
+        or 0.0
+    )
+    topic_score = float(topic.get("topic_keyword_score", 0.0) or 0.0)
+    importance_score = float(importance.get("score", 0.0) or 0.0)
+
+    topic_norm = min(topic_score, cfg.AUDIO_TOPIC_MAX) / cfg.AUDIO_TOPIC_MAX
+    importance_norm = min(importance_score, cfg.AUDIO_IMPORTANCE_MAX) / cfg.AUDIO_IMPORTANCE_MAX
+    signal_norm = min(signal_score, cfg.AUDIO_SIGNAL_MAX) / cfg.AUDIO_SIGNAL_MAX
+
+    keyword_score = round(topic_norm + importance_norm, 3)
+    audio_score = round(cfg.W_AUDIO * signal_norm, 3)
+    total = round(keyword_score + audio_score, 3)
+
+    return {
+        "keyword": keyword_score,
+        "audio": audio_score,
+        "total": total,
+        "raw": {
+            "topic_keyword": round(topic_score, 3),
+            "importance_keyword": round(importance_score, 3),
+            "audio_signal": round(signal_score, 3),
+        },
+    }
+
+
 def get_context_emphasis_detail(ctx: dict) -> dict:
     """라벨 필드 없이 feature/detail 위치를 호환 조회한다."""
     return ctx.get("audio_emphasis") or ctx.get("emphasis_detail") or ctx.get("emphasis", {}).get("detail") or {}
 
 
 def _merge_keyword_entries(existing: list[dict], incoming: list[dict]) -> list[dict]:
-    """여러 scene에서 나온 emphasized_keywords를 slide 단위로 합치되 audio 신호는 제외한다."""
+    """여러 scene에서 나온 emphasized_keywords를 slide 단위로 합치되 slide 계열 신호만 남긴다."""
     merged: dict[str, dict] = {}
     for item in existing + incoming:
         kw = item.get("keyword")
         if not kw:
             continue
-        sources = [s for s in item.get("sources", []) if s != "audio"]
+        sources = [s for s in item.get("sources", []) if s == "visual"]
         visual_score = float(item.get("visual_score", 0.0) or 0.0)
-        annotation_score = float(item.get("annotation_score", 0.0) or 0.0)
         slide_text_score = float(item.get("slide_text_score", 0.0) or 0.0)
-        if not sources and visual_score == 0.0 and annotation_score == 0.0 and slide_text_score == 0.0:
+        if not sources and visual_score == 0.0 and slide_text_score == 0.0:
             continue
         if kw not in merged:
             merged[kw] = {
                 "keyword": kw,
                 "sources": [],
                 "visual_score": 0.0,
-                "annotation_score": 0.0,
                 "slide_text_score": 0.0,
             }
         entry = merged[kw]
         entry["sources"] = sorted(set(entry["sources"]) | set(sources))
-        entry["visual_score"] = round(entry["visual_score"] + visual_score, 3)
-        entry["annotation_score"] = round(entry["annotation_score"] + annotation_score, 3)
-        entry["slide_text_score"] = round(entry["slide_text_score"] + slide_text_score, 3)
+        entry["visual_score"] = round(max(entry["visual_score"], visual_score), 3)
+        entry["slide_text_score"] = round(max(entry["slide_text_score"], slide_text_score), 3)
     result = list(merged.values())
     result.sort(key=lambda x: (-len(x["sources"]), x["keyword"]))
     return result
@@ -647,20 +699,6 @@ def run_fusion(cfg: Config) -> dict:
         annot_score  = score_annotation_emphasis(flat_annots)
         audio_score  = score_audio_emphasis(au_slide["contexts"] if au_slide else [], cfg)
 
-        both_bonus = calc_both_bonus(
-            audio_score["norm"], annot_score, annot_ts_list,
-            au_slide["contexts"] if au_slide else [],
-            cfg,
-        )
-
-        total_score = round(
-            cfg.W_VISUAL * visual_score
-            + cfg.W_ANNOT  * annot_score
-            + cfg.W_AUDIO  * audio_score["norm"]
-            + both_bonus,
-            3,
-        )
-
         # ── 강조 키워드 수집 ─────────────────────────────────────────────────
         audio_kws: list[str] = []
         if au_slide:
@@ -711,6 +749,7 @@ def run_fusion(cfg: Config) -> dict:
                     if detail.get(key) is not None
                 }
                 stressed = int(ctx.get("detection_count", 0) or 0) > 0
+                context_emphasis_score = score_context_emphasis(ctx, cfg)
 
                 fused_segs = []
                 for seg in ctx.get("segments", []):
@@ -736,6 +775,7 @@ def run_fusion(cfg: Config) -> dict:
                     "text":          ctx["text"],
                     "stressed":      stressed,
                     "audio_emphasis": audio_emphasis,
+                    "emphasis_score": context_emphasis_score,
                     "segments":      fused_segs,
                 })
 
@@ -778,9 +818,22 @@ def run_fusion(cfg: Config) -> dict:
         )
         slide_emphasis_score = {
             "visual":     round(cfg.W_VISUAL * visual_score, 3),
+            "text_repeat": 0.0,
         }
-        slide_emphasis_score["total"] = slide_emphasis_score["visual"]
+        slide_emphasis_score["total"] = round(
+            slide_emphasis_score["visual"] + slide_emphasis_score["text_repeat"],
+            3,
+        )
+        context_emphasis_total = round(
+            sum((ctx.get("emphasis_score") or {}).get("total", 0.0) for ctx in fused_contexts),
+            3,
+        )
         scene_annotation_score = round(cfg.W_ANNOT * annot_score, 3)
+        scene_emphasis_score = {
+            "context": context_emphasis_total,
+            "annotation": scene_annotation_score,
+            "total": round(context_emphasis_total + scene_annotation_score, 3),
+        }
 
         # ── slide 저장소 구성 ────────────────────────────────────────────────
         if slide_id not in slide_records:
@@ -792,6 +845,7 @@ def run_fusion(cfg: Config) -> dict:
                 "title":        cl_slide.get("title", ""),
                 "slide_text":   cl_slide.get("t1", ""),
                 "t1_structure": cl_slide.get("t1_structure"),
+                "visual_assets": cl_slide.get("visual_assets", []),
                 "slide_type":   cl_slide.get("slide_type", "text"),
                 "slide_topic_keywords": cl_slide.get("slide_topic_keywords", []),
                 "slide_topic_keyword_scores": cl_slide.get("slide_topic_keyword_scores", {}),
@@ -802,6 +856,7 @@ def run_fusion(cfg: Config) -> dict:
                 "scene_indexes": [],
                 "emphasis_score": {
                     "visual": 0.0,
+                    "text_repeat": 0.0,
                     "total": 0.0,
                 },
                 "emphasized_keywords": [],
@@ -811,14 +866,20 @@ def run_fusion(cfg: Config) -> dict:
         _append_unique(slide_record["scene_ids"], scene_id)
         _append_unique(slide_record["scene_numbers"], scene_num)
         _append_unique(slide_record["scene_indexes"], scene_index)
-        if slide_emphasis_score["total"] >= slide_record["emphasis_score"].get("total", 0.0):
-            slide_record["emphasis_score"] = {
-                **slide_emphasis_score,
-            }
         slide_record["emphasized_keywords"] = _merge_keyword_entries(
             slide_record["emphasized_keywords"],
             emphasized_keywords,
         )
+        slide_visual_score = max(
+            float((slide_record.get("emphasis_score") or {}).get("visual", 0.0) or 0.0),
+            slide_emphasis_score["visual"],
+        )
+        slide_text_repeat_score = score_slide_text_repeat(slide_record["emphasized_keywords"], cfg)
+        slide_record["emphasis_score"] = {
+            "visual": round(slide_visual_score, 3),
+            "text_repeat": slide_text_repeat_score,
+            "total": round(slide_visual_score + slide_text_repeat_score, 3),
+        }
 
         # ── scene 통합 ───────────────────────────────────────────────────────
         fused_scene = {
@@ -837,12 +898,11 @@ def run_fusion(cfg: Config) -> dict:
             "title":        cl_slide.get("title", ""),
             "slide_text":   cl_slide.get("t1", ""),
             "t1_structure": cl_slide.get("t1_structure", ""),
+            "visual_assets": cl_slide.get("visual_assets", []),
             "slide_type":   cl_slide.get("slide_type", "text"),
-            "emphasis_score": {
-                "annotation": scene_annotation_score,
-                "total": scene_annotation_score,
-            },
+            "emphasis_score": scene_emphasis_score,
             "slide_summary": slide_summary,
+            "emphasized_keywords": emphasized_keywords,
             "annotation_highlights_summary": annotation_highlights_summary,
             "annotation": annotation_events,
             "annotation_events": annotation_events,
@@ -854,8 +914,9 @@ def run_fusion(cfg: Config) -> dict:
 
         fused_scenes.append(fused_scene)
         print(f"  scene_{scene_label:03d} / {slide_id} | role={cl_slide.get('role'):12s} | "
-              f"total={total_score:.2f} "
-              f"(vis={visual_score:.1f} ann={annot_score:.1f} aud={audio_score['norm']:.2f} bonus={both_bonus:.1f})")
+              f"total={scene_emphasis_score['total']:.2f} "
+              f"(ctx={context_emphasis_total:.2f} ann={scene_annotation_score:.2f} "
+              f"slide_vis={slide_emphasis_score['total']:.2f} aud_best={audio_score['norm']:.2f})")
 
     # ── 출력 ─────────────────────────────────────────────────────────────────
     fused_slides = sorted(
