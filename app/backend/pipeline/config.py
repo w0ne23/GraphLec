@@ -55,6 +55,10 @@ GEMINI_API_KEY_2 = os.getenv("GOOGLE_API_KEY_2") or GEMINI_API_KEY_1  # 키 1개
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+XAI_API_KEY = os.getenv("XAI_API_KEY")
+XAI_BASE_URL = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 
 missing_keys: list[str] = []
 if not GEMINI_API_KEY_1:
@@ -76,9 +80,15 @@ gemini_client   = genai.Client(api_key=GEMINI_API_KEY_1)  # 비디오 파이프�
 gemini_client_2 = genai.Client(api_key=GEMINI_API_KEY_2)  # 오디오 파이프라인용
 groq_client     = Groq(api_key=GROQ_API_KEY)
 openai_client   = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY and OpenAI is not None else None
+xai_client      = OpenAI(api_key=XAI_API_KEY, base_url=XAI_BASE_URL) if XAI_API_KEY and OpenAI is not None else None
+deepseek_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL) if DEEPSEEK_API_KEY and OpenAI is not None else None
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY and Anthropic is not None else None
 
 _openai_client_key = OPENAI_API_KEY or ""
+_xai_client_key = XAI_API_KEY or ""
+_xai_base_url = XAI_BASE_URL or ""
+_deepseek_client_key = DEEPSEEK_API_KEY or ""
+_deepseek_base_url = DEEPSEEK_BASE_URL or ""
 _anthropic_client_key = ANTHROPIC_API_KEY or ""
 _gemini_client_key_1 = GEMINI_API_KEY_1 or ""
 _gemini_client_key_2 = GEMINI_API_KEY_2 or ""
@@ -137,6 +147,36 @@ def get_openai_client():
     return openai_client
 
 
+def get_xai_client():
+    global xai_client, _xai_client_key, _xai_base_url
+    current_key = os.getenv("XAI_API_KEY") or ""
+    current_base_url = os.getenv("XAI_BASE_URL", "https://api.x.ai/v1")
+    if current_key != _xai_client_key or current_base_url != _xai_base_url:
+        _xai_client_key = current_key
+        _xai_base_url = current_base_url
+        xai_client = (
+            OpenAI(api_key=current_key, base_url=current_base_url)
+            if current_key and OpenAI is not None
+            else None
+        )
+    return xai_client
+
+
+def get_deepseek_client():
+    global deepseek_client, _deepseek_client_key, _deepseek_base_url
+    current_key = os.getenv("DEEPSEEK_API_KEY") or ""
+    current_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+    if current_key != _deepseek_client_key or current_base_url != _deepseek_base_url:
+        _deepseek_client_key = current_key
+        _deepseek_base_url = current_base_url
+        deepseek_client = (
+            OpenAI(api_key=current_key, base_url=current_base_url)
+            if current_key and OpenAI is not None
+            else None
+        )
+    return deepseek_client
+
+
 def get_anthropic_client():
     global anthropic_client, _anthropic_client_key
     current_key = os.getenv("ANTHROPIC_API_KEY") or ""
@@ -166,12 +206,12 @@ def get_gemini_client_sequence():
 
 def resolve_anthropic_model(model_name: str) -> str:
     aliases = {
-        "haiku-4.5": "claude-3-5-haiku-latest",
-        "claude-haiku-4.5": "claude-3-5-haiku-latest",
-        "claude-haiku-4-5": "claude-3-5-haiku-latest",
-        "sonnet-4.5": "claude-3-5-sonnet-latest",
-        "claude-sonnet-4.5": "claude-3-5-sonnet-latest",
-        "claude-sonnet-4-5": "claude-3-5-sonnet-latest",
+        "haiku-4.5": "claude-haiku-4-5-20251001",
+        "claude-haiku-4.5": "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        "sonnet-4.5": "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+        "claude-sonnet-4-5": "claude-sonnet-4-5-20250929",
         "opus-4.5": "claude-3-opus-latest",
         "claude-opus-4.5": "claude-3-opus-latest",
         "claude-opus-4-5": "claude-3-opus-latest",

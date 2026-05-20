@@ -41,25 +41,65 @@ def resolve_pipeline_package_root() -> Path:
     return root
 
 
-def api_call_with_retry(func, max_retries=5, initial_wait=10):
+def api_call_with_retry(func, max_retries=None, initial_wait=None):
     """API 호출 재시도 (429, 503, 500 에러 처리)"""
+    if max_retries is None:
+        max_retries = int(os.getenv("VERIFIER_API_MAX_RETRIES", "5"))
+    if initial_wait is None:
+        initial_wait = float(os.getenv("VERIFIER_API_INITIAL_WAIT", "10"))
+    last_error = None
     for attempt in range(max_retries):
         try:
             return func()
         except Exception as e:
+            last_error = e
             error_msg = str(e)
-            retry_errors = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
-            if any(code in error_msg for code in retry_errors):
+            retry_errors = [
+                "429",
+                "503",
+                "500",
+                "RESOURCE_EXHAUSTED",
+                "UNAVAILABLE",
+                "overloaded",
+                "timeout",
+                "timed out",
+                "APITimeout",
+                "ReadTimeout",
+                "Connection error",
+                "APIConnectionError",
+                "ConnectTimeout",
+                "connect timeout",
+            ]
+            if any(code in error_msg for code in retry_errors) and attempt < max_retries - 1:
                 print(f"API ERROR: {error_msg}")
-                time.sleep(initial_wait * (attempt + 1))
+                wait = initial_wait * (attempt + 1)
+                print(f"  ↺ {wait:.1f}s 후 재시도 ({attempt + 1}/{max_retries - 1})")
+                time.sleep(wait)
             else:
                 raise e
+    if last_error is not None:
+        raise last_error
     raise Exception("API 호출 실패")
 
 
 def is_retryable_api_error(error) -> bool:
     error_msg = str(error)
-    retry_errors = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
+    retry_errors = [
+        "429",
+        "503",
+        "500",
+        "RESOURCE_EXHAUSTED",
+        "UNAVAILABLE",
+        "overloaded",
+        "timeout",
+        "timed out",
+        "APITimeout",
+        "ReadTimeout",
+        "Connection error",
+        "APIConnectionError",
+        "ConnectTimeout",
+        "connect timeout",
+    ]
     return any(code in error_msg for code in retry_errors)
 
 
