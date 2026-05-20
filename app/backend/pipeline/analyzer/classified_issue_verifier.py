@@ -1,7 +1,7 @@
-"""Final severity judge for classified issue candidates.
+"""Final verifier for classified issue candidates.
 
 This module consumes ``classified_issue_input.v1`` produced by
-``issue_type_classifier.py`` and runs a category-specific final judge over each
+``issue_type_classifier.py`` and runs a category-specific final verifier over each
 already-classified issue.
 """
 
@@ -29,7 +29,7 @@ from .issue_type_classifier import (
 )
 
 
-SCHEMA_VERSION = "classified_issue_severity_judge.v1"
+SCHEMA_VERSION = "classified_issue_verifier.v1"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
 DEFAULT_CONTEXT_WINDOW = 2
@@ -80,8 +80,8 @@ CATEGORY_RUBRICS = {
 
 
 def _status_from_severity(score: float) -> str:
-    confirmed = _safe_float(os.getenv("CLASSIFIED_ISSUE_SEVERITY_CONFIRMED_THRESHOLD"), 0.50)
-    rejected = _safe_float(os.getenv("CLASSIFIED_ISSUE_SEVERITY_REJECTED_THRESHOLD"), 0.20)
+    confirmed = _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.50)
+    rejected = _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_REJECTED_THRESHOLD"), 0.20)
     if score >= confirmed:
         return "confirmed"
     if score <= rejected:
@@ -90,7 +90,7 @@ def _status_from_severity(score: float) -> str:
 
 
 def _confirmed_threshold() -> float:
-    return _safe_float(os.getenv("CLASSIFIED_ISSUE_SEVERITY_CONFIRMED_THRESHOLD"), 0.50)
+    return _safe_float(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONFIRMED_THRESHOLD"), 0.50)
 
 
 def _now_iso() -> str:
@@ -121,10 +121,7 @@ def _clamp01(value: Any, default: float = 0.0) -> float:
 
 def _default_models() -> list[str]:
     _load_env()
-    configured = (
-        _split_csv(os.getenv("CLASSIFIED_ISSUE_SEVERITY_MODELS"))
-        or _split_csv(os.getenv("VERIFIER_CLASSIFIED_ISSUE_SEVERITY_MODELS"))
-    )
+    configured = _split_csv(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODELS"))
     return configured or list(DEFAULT_MODELS)
 
 
@@ -388,7 +385,6 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0.
 - category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0.
 - context_resolution: 제공된 문맥이 issue를 얼마나 해소하는지. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨.
-- final_model_score: 최종 점수. 기본적으로 is_valid_issue * category_severity * (1 - context_resolution)를 따르되, 필요하면 소폭 보정할 수 있다. 0.0~1.0.
 
 판정 라벨:
 - valid_issue: 이 분류 기준에서 유효한 issue
@@ -412,7 +408,6 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
       "is_valid_issue": 0.0,
       "category_severity": 0.0,
       "context_resolution": 0.0,
-      "final_model_score": 0.0,
       "reason": "판단 근거",
       "minimal_fix": "수정안"
     }}
@@ -443,8 +438,7 @@ def _normalize_judgment_row(
     is_valid_issue = _clamp01(row.get("is_valid_issue"))
     category_severity = _clamp01(row.get("category_severity"))
     context_resolution = _clamp01(row.get("context_resolution"))
-    default_final = is_valid_issue * category_severity * (1.0 - context_resolution)
-    final_model_score = _clamp01(row.get("final_model_score"), default_final)
+    final_model_score = _clamp01(is_valid_issue * category_severity * (1.0 - context_resolution))
     return {
         "id": ref["id"],
         "model": model,
@@ -593,7 +587,7 @@ def _issue_result_record(
     model_weights: dict[str, float],
 ) -> dict[str, Any]:
     issue = ref["issue"]
-    final_score, used_weights, missing_weight, disagreement, needs_cross_check = _weighted_final_score(
+    final_score, used_weights, missing_weight, disagreement, needs_manual_review = _weighted_final_score(
         verdicts,
         model_weights,
     )
@@ -635,7 +629,7 @@ def _issue_result_record(
         "model_weights": used_weights,
         "missing_model_weight": missing_weight,
         "model_disagreement": disagreement,
-        "needs_cross_check": needs_cross_check or bool(issue.get("low_margin")),
+        "needs_manual_review": needs_manual_review or bool(issue.get("low_margin")),
         "model_judgments": verdicts,
     }
 
@@ -657,7 +651,7 @@ def _group_issue_results(records: list[dict[str, Any]]) -> dict[str, list[dict[s
 
 def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     by_type = Counter(record.get("category") or "unknown" for record in records)
-    cross_check_count = sum(1 for record in records if record.get("needs_cross_check"))
+    manual_review_count = sum(1 for record in records if record.get("needs_manual_review"))
     high_count = sum(
         1
         for record in records
@@ -667,7 +661,7 @@ def _summary(records: list[dict[str, Any]], model_results: dict[str, dict[str, A
         "total_issue_count": len(records),
         "breakdown_by_type": {category: by_type.get(category, 0) for category in ISSUE_TYPES},
         "high_severity_count": high_count,
-        "needs_cross_check_count": cross_check_count,
+        "needs_manual_review_count": manual_review_count,
         "model_breakdown": {
             model: {
                 "status": result.get("status", ""),
@@ -761,9 +755,9 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "claim_text": issue.get("claim_text", ""),
                 "resolved_claim": issue.get("resolved_claim", ""),
                 "location": location,
-                "crosscheck_score": score,
-                "crosscheck_score_percent": round(score * 100.0, 2),
-                "crosscheck_weighted_status": status,
+                "severity_score": score,
+                "severity_score_percent": round(score * 100.0, 2),
+                "severity_status": status,
                 "problem": {
                     "problematic_content": issue.get("resolved_claim") or issue.get("claim_text", ""),
                     "summary": reason or f"{category_label} 후보입니다.",
@@ -785,7 +779,7 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "source_issues": [issue],
                 },
                 "checks": {
-                    "crosscheck": {
+                    "severity": {
                         "score": score,
                         "score_percent": round(score * 100.0, 2),
                         "status_by_score": status,
@@ -793,14 +787,14 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                         "model_results": model_judgments,
                     }
                 },
-                "classified_issue_severity": {
+                "classified_issue_verifier": {
                     "final_severity_score": score,
                     "final_severity_percent": issue.get("final_severity_percent", round(score * 100.0, 2)),
                     "average_is_valid_issue": issue.get("average_is_valid_issue", 0.0),
                     "average_category_severity": issue.get("average_category_severity", 0.0),
                     "average_context_resolution": issue.get("average_context_resolution", 0.0),
                     "model_disagreement": issue.get("model_disagreement", 0.0),
-                    "needs_cross_check": bool(issue.get("needs_cross_check")),
+                    "needs_manual_review": bool(issue.get("needs_manual_review")),
                 },
             }
         )
@@ -811,11 +805,11 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
     breakdown = Counter(item.get("feedback_type") or "unknown" for item in feedback_items)
     return {
         "schema_version": "content_verification.v2",
-        "mode": "classified_issue_severity",
+        "mode": "classified_issue_verifier",
         "verification_date": result.get("generated_at", ""),
         "models": list((result.get("model_weights") or {}).keys()),
-        "crosscheck_source_models": list((result.get("model_weights") or {}).keys()),
-        "crosscheck_model_weights": result.get("model_weights", {}),
+        "verifier_source_models": list((result.get("model_weights") or {}).keys()),
+        "verifier_model_weights": result.get("model_weights", {}),
         "summary": {
             "total_feedback_count": len(feedback_items),
             "confirmed_feedback_count": len(confirmed),
@@ -831,18 +825,18 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
         "claims": claims,
         "feedback_items": feedback_items,
         "views": {
-            "classified_issue_severity": result,
+            "classified_issue_verifier": result,
         },
         "final_confirmed_claims": confirmed,
         "needs_review_claims": review,
-        "crosscheck_rejected_claims": rejected,
+        "verifier_rejected_claims": rejected,
         "claim_decision_flow_summary": {
             "final_confirmed_claim_count": len(confirmed),
             "needs_review_claim_count": len(review),
-            "crosscheck_rejected_claim_count": len(rejected),
+            "verifier_rejected_claim_count": len(rejected),
         },
         "issues": all_issues,
-        "classified_issue_severity_path": result.get("output_path", ""),
+        "classified_issue_verifier_path": result.get("output_path", ""),
     }
 
 
@@ -966,7 +960,7 @@ def judge_classified_issues(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "classified_issue_severity_judge",
+        "stage": "classified_issue_verifier",
         "source_input_path": str(input_path),
         "source_classification_path": payload.get("source_classification_path", ""),
         "source_issue_path": payload.get("source_issue_path", ""),
@@ -991,7 +985,7 @@ def _default_output_path(input_path: Path) -> Path:
         stem = stem[: -len("_classified_issues")]
     elif stem.endswith("_issue_judge"):
         stem = stem[: -len("_issue_judge")]
-    return input_path.with_name(f"{stem}_issue_severity.json")
+    return input_path.with_name(f"{stem}_classified_issue_verifier.json")
 
 
 def _guess_related_path(input_path: Path, suffix: str) -> Path:
@@ -1007,7 +1001,7 @@ def _guess_related_path(input_path: Path, suffix: str) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run category-specific final severity judges over classified verifier issues.",
+        description="Run the category-specific final verifier over classified issues.",
     )
     parser.add_argument("input_json", help="classified_issue_input.v1 JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
@@ -1017,18 +1011,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
-        help="comma/space separated model list. Default: CLASSIFIED_ISSUE_SEVERITY_MODELS or preset",
+        help="comma/space separated model list. Default: CLASSIFIED_ISSUE_VERIFIER_MODELS or preset",
     )
     parser.add_argument(
         "--model-weights",
-        default=os.getenv("CLASSIFIED_ISSUE_SEVERITY_MODEL_WEIGHTS", DEFAULT_MODEL_WEIGHTS),
+        default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS", DEFAULT_MODEL_WEIGHTS),
         help="comma/space separated weights, e.g. gpt=0.4,claude=0.4,grok=0.2",
     )
-    parser.add_argument("--batch-size", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_SEVERITY_BATCH_SIZE", "4")))
-    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_SEVERITY_MAX_TOKENS", "8192")))
-    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_SEVERITY_MAX_WORKERS", "1")))
-    parser.add_argument("--context-window", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_SEVERITY_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))))
-    parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_SEVERITY_CURRENT_DATE", "2026-05-14"))
+    parser.add_argument("--batch-size", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "4")))
+    parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_TOKENS", "8192")))
+    parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "1")))
+    parser.add_argument("--context-window", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))))
+    parser.add_argument("--current-date", default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_CURRENT_DATE", "2026-05-14"))
     parser.add_argument("--limit", type=int, default=None, help="optional issue count limit for quick tests")
     parser.add_argument("--dry-run", action="store_true", help="validate input/output shape without calling LLMs")
     return parser
@@ -1056,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
 
     models = _split_csv(args.models)
     if not models:
-        raise ValueError("사용할 모델이 없습니다. --models 또는 CLASSIFIED_ISSUE_SEVERITY_MODELS를 설정하세요.")
+        raise ValueError("사용할 모델이 없습니다. --models 또는 CLASSIFIED_ISSUE_VERIFIER_MODELS를 설정하세요.")
 
     result = judge_classified_issues(
         payload,
@@ -1085,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"출력: {output_path}")
     print(f"유형별 분포: {json.dumps(summary['breakdown_by_type'], ensure_ascii=False)}")
     print(f"high severity: {summary['high_severity_count']}건")
-    print(f"needs cross-check: {summary['needs_cross_check_count']}건")
+    print(f"needs manual review: {summary['needs_manual_review_count']}건")
     return 0
 
 
