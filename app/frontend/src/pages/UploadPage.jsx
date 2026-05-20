@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { listActiveJobs, listUploadedLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
 import '../styles/upload.css'
@@ -23,6 +24,8 @@ const THUMB_ICON = {
 }
 
 export default function UploadPage() {
+  const navigate = useNavigate()
+
   const [lectures,    setLectures]    = useState([])
   const [title,       setTitle]       = useState('')
   const [category,    setCategory]    = useState('컴퓨터 과학')
