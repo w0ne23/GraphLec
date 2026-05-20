@@ -74,6 +74,63 @@ GEN: gen/writing, gen/critical_thinking, gen/career, gen/ethics,
      gen/language, gen/interdisciplinary, gen/other
 """
 
+GRAPH_DOMAIN_TO_METADATA_DOMAIN = {
+    ("engineering", "computer_science"): "eng/cs",
+    ("engineering", "electrical_engineering"): "eng/electrical",
+    ("engineering", "mechanical_engineering"): "eng/mechanical",
+    ("engineering", "civil_engineering"): "eng/civil",
+    ("engineering", "chemical_engineering"): "eng/chemical",
+    ("engineering", "industrial_engineering"): "eng/industrial",
+    ("engineering", "biomedical_engineering"): "eng/biomedical",
+    ("engineering", "aerospace_engineering"): "eng/aerospace",
+    ("engineering", "materials_engineering"): "eng/materials",
+    ("engineering", "environmental_engineering"): "eng/environmental",
+    ("natural_science", "physics"): "sci/physics",
+    ("natural_science", "chemistry"): "sci/chemistry",
+    ("natural_science", "biology"): "sci/biology",
+    ("natural_science", "earth_science"): "sci/earth_science",
+    ("natural_science", "astronomy"): "sci/astronomy",
+    ("natural_science", "ecology"): "sci/ecology",
+    ("humanities", "philosophy"): "hum/philosophy",
+    ("humanities", "history"): "hum/history",
+    ("humanities", "linguistics"): "hum/linguistics",
+    ("humanities", "literature"): "hum/literature",
+    ("humanities", "art_history"): "hum/art_history",
+    ("humanities", "religion"): "hum/religion",
+    ("social_science", "economics"): "soc/economics",
+    ("social_science", "business"): "soc/business",
+    ("social_science", "law"): "soc/law",
+    ("social_science", "political_science"): "soc/political_science",
+    ("social_science", "sociology"): "soc/sociology",
+    ("social_science", "psychology"): "soc/psychology",
+    ("social_science", "education"): "soc/education",
+    ("health_sciences", "anatomy"): "med/anatomy",
+    ("health_sciences", "physiology"): "med/physiology",
+    ("health_sciences", "pharmacology"): "med/pharmacology",
+    ("health_sciences", "clinical"): "med/clinical",
+    ("health_sciences", "public_health"): "med/public_health",
+    ("health_sciences", "nursing"): "med/nursing",
+    ("arts", "fine_arts"): "art/fine_arts",
+    ("arts", "music"): "art/music",
+    ("arts", "design"): "art/design",
+    ("arts", "film"): "art/film",
+    ("arts", "theater"): "art/theater",
+    ("sports", "physical_education"): "art/physical_education",
+    ("sports", "sports_science"): "art/sports_science",
+    ("education", "education"): "soc/education",
+}
+
+GRAPH_DOMAIN_DEFAULTS = {
+    "arts": "art/fine_arts",
+    "education": "soc/education",
+    "health_sciences": "med/public_health",
+    "humanities": "hum/philosophy",
+    "natural_science": "sci/biology",
+    "social_science": "soc/sociology",
+    "sports": "art/sports_science",
+    "etc": "gen/other",
+}
+
 # 키워드 점수 가중치
 W_FREQ       = 0.4
 W_EMPHASIS   = 0.2
@@ -100,6 +157,67 @@ def load_fused(stem: str, output_dir: Path) -> dict:
         path = output_dir / f"{stem}_fused.json"
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def _normalize_graph_domain_token(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _metadata_domain_from_graph_domain(domain: str, subdomain: str) -> str:
+    domain = _normalize_graph_domain_token(domain)
+    subdomain = _normalize_graph_domain_token(subdomain)
+    if not domain:
+        return ""
+    mapped = GRAPH_DOMAIN_TO_METADATA_DOMAIN.get((domain, subdomain))
+    if mapped:
+        return mapped
+    if domain == "engineering" and subdomain:
+        if "computer" in subdomain or subdomain in {"cs", "software", "operating_systems"}:
+            return "eng/cs"
+        if "electrical" in subdomain:
+            return "eng/electrical"
+        if "mechanical" in subdomain:
+            return "eng/mechanical"
+        if "civil" in subdomain:
+            return "eng/civil"
+        if "chemical" in subdomain:
+            return "eng/chemical"
+        if "biomedical" in subdomain:
+            return "eng/biomedical"
+        if "aerospace" in subdomain:
+            return "eng/aerospace"
+        if "material" in subdomain:
+            return "eng/materials"
+        if "environment" in subdomain:
+            return "eng/environmental"
+        if "industrial" in subdomain:
+            return "eng/industrial"
+    return GRAPH_DOMAIN_DEFAULTS.get(domain, "")
+
+
+def load_graph_domain(stem: str, output_dir: Path) -> tuple[str, str, str]:
+    nodes_path = output_dir / f"{stem}_nodes.parquet"
+    if not nodes_path.is_file():
+        return "", "", ""
+    try:
+        import pandas as pd
+
+        ndf = pd.read_parquet(nodes_path)
+    except Exception:
+        return "", "", ""
+    video_id = f"lecture_video/{stem}"
+    for _, row in ndf.iterrows():
+        if str(row.get("node_id") or "").strip() != video_id:
+            continue
+        try:
+            props = json.loads(str(row.get("properties_json") or "{}"))
+        except Exception:
+            props = {}
+        graph_domain = _normalize_graph_domain_token(props.get("domain"))
+        graph_subdomain = _normalize_graph_domain_token(props.get("subdomain"))
+        metadata_domain = _metadata_domain_from_graph_domain(graph_domain, graph_subdomain)
+        return metadata_domain, graph_domain, graph_subdomain
+    return "", "", ""
 
 
 def fused_scene_entries(fused: dict) -> list[dict]:
@@ -1019,8 +1137,16 @@ def generate_metadata(
     concept_degrees = fetch_concept_degrees(stem)
     print(f"       → Concept {len(concept_degrees)}개")
 
-    print(f"[{stem}] 도메인 분류 중...")
-    domain = classify_domain(slide_texts, transcript_texts)
+    metadata_domain, graph_domain, graph_subdomain = load_graph_domain(stem, output_dir)
+    if metadata_domain:
+        print(
+            f"[{stem}] Stage 6 도메인 재사용: "
+            f"{graph_domain}/{graph_subdomain or '-'} → {metadata_domain}"
+        )
+        domain = metadata_domain
+    else:
+        print(f"[{stem}] 도메인 분류 중...")
+        domain = classify_domain(slide_texts, transcript_texts)
 
     print(f"[{stem}] 요약 생성 중...")
     summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
@@ -1083,6 +1209,8 @@ def generate_metadata(
         "instructor_id":       instructor_id,
         "duration_sec":        round(duration_sec, 1),
         "domain":              domain,
+        "graph_domain":        graph_domain,
+        "graph_subdomain":     graph_subdomain,
         "difficulty":          difficulty,
         "summary":             summary,
         "learning_objectives": learning_objectives,

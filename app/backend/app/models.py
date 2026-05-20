@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, UniqueConstraint, Integer
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
@@ -80,3 +80,52 @@ class GraphSession(Base):
     last_heartbeat_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     ended_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ChatSession(Base):
+    """강의별 QnA 대화 세션."""
+    __tablename__ = "chat_sessions"
+    __table_args__ = (
+        UniqueConstraint("lecture_id", "session_id", name="uq_chat_sessions_lecture_session"),
+    )
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    lecture_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("lectures.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    session_id = Column(String, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class ChatMessage(Base):
+    """사용자 질의와 응답 로그. 통계/추천/멀티턴 컨텍스트의 원천 데이터."""
+    __tablename__ = "chat_messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    lecture_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("lectures.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    chat_session_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    turn_index = Column(Integer, nullable=False, default=0)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=True)
+    query_major = Column(String, nullable=False, default="A")
+    query_minor = Column(String, nullable=False, default="1")
+    query_type_label = Column(String, nullable=False, default="내용 질의/개념")
+    source_mode = Column(String, nullable=True)
+    related_slides = Column(JSONB, nullable=True)
+    retrieved_chunks = Column(JSONB, nullable=True)
+    core_graph = Column(JSONB, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

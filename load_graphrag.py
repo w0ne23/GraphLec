@@ -11,6 +11,14 @@ from pipeline.graphrag_neo4j_ingest import (
     load_graphrag_layer_tx,
     find_graphrag_output_dir,
 )
+from pipeline.graphrag_emphasis import (
+    compute_keyword_match,
+    compute_visual_match,
+    compute_annotation_match,
+    compute_audio_segment_match,
+    compute_final_weight,
+    compute_relation_boost,
+)
 
 STEM = "os1-1"
 OUTPUT_DIR = Path("output")
@@ -32,6 +40,14 @@ with driver.session() as session:
         delete_graphrag_layer_tx(tx, STEM),
         load_graphrag_layer_tx(tx, STEM, graphrag_dir),
     )[2])
+    fused_path = OUTPUT_DIR / f"{STEM}_fused.json"
+    if fused_path.is_file():
+        counts.update(compute_keyword_match(session, STEM, fused_path))
+        counts.update(compute_visual_match(session, STEM, fused_path))
+    counts.update(compute_annotation_match(session, STEM))
+    counts.update(compute_audio_segment_match(session, STEM))
+    counts.update(compute_final_weight(session, STEM))
+    counts.update(compute_relation_boost(session, STEM))
     summary = session.run(
         "MATCH (n {stem: $stem}) RETURN count(n) AS total", stem=STEM
     ).single()
