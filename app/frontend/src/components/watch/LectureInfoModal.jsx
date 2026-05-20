@@ -15,15 +15,15 @@ export default function LectureInfoModal({ lecture, scenes = [], onClose }) {
   const highlights = info.highlights ?? []
   const summary = info.summary || lecture.summary || '강의 분석이 완료되면 요약이 표시됩니다.'
   const domain = info.domain || lecture.domain || lecture.category || '기타'
-  const sceneTransitions = Number.isFinite(Number(stats.scene_transitions))
-    ? Number(stats.scene_transitions)
-    : Math.max(0, scenes.length - 1)
+  const sceneCount = Number.isFinite(Number(stats.scene_count))
+    ? Number(stats.scene_count)
+    : scenes.length
   const emphasisCount = Number.isFinite(Number(stats.emphasis_contexts))
     ? Number(stats.emphasis_contexts)
     : scenes.filter(s => s.type === 'emphasis').length
-  const sttConfidence = Number.isFinite(Number(stats.stt_confidence))
-    ? Number(stats.stt_confidence)
-    : 94
+  const visualPercent = Number.isFinite(Number(stats.visual_asset_percent ?? info.visual_asset_percent))
+    ? `${Math.round(Number(stats.visual_asset_percent ?? info.visual_asset_percent))}%`
+    : '0%'
   const uploadedAt = lecture.created_at
     ? new Date(lecture.created_at).toLocaleDateString('ko-KR')
     : '알 수 없음'
@@ -74,16 +74,16 @@ export default function LectureInfoModal({ lecture, scenes = [], onClose }) {
             <h4>ℹ️ 강의 상세</h4>
             <div className="lim-stat-row">
               <div className="lim-stat-box">
-                <div className="lim-stat-num" style={{ color: 'var(--blue)' }}>{sceneTransitions}</div>
-                <div className="lim-stat-lbl">장면 전환</div>
+                <div className="lim-stat-num" style={{ color: 'var(--blue)' }}>{sceneCount}</div>
+                <div className="lim-stat-lbl">장면</div>
               </div>
               <div className="lim-stat-box">
                 <div className="lim-stat-num" style={{ color: 'var(--amber)' }}>{emphasisCount}</div>
                 <div className="lim-stat-lbl">강조 구간</div>
               </div>
               <div className="lim-stat-box">
-                <div className="lim-stat-num" style={{ color: 'var(--green)' }}>{sttConfidence}%</div>
-                <div className="lim-stat-lbl">STT 신뢰도</div>
+                <div className="lim-stat-num" style={{ color: 'var(--green)' }}>{visualPercent}</div>
+                <div className="lim-stat-lbl">시각자료</div>
               </div>
             </div>
             <div className="lim-meta">
