@@ -144,6 +144,28 @@ MAX_COMMUNITIES_IN_METADATA = int(os.getenv("GRAPHLEC_METADATA_MAX_COMMUNITIES",
 MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY_CHARS", "800"))
 MAX_VISUAL_CONCEPT_TERMS = int(os.getenv("GRAPHLEC_METADATA_MAX_VISUAL_TERMS", "80"))
 _VISUAL_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
+_KOREAN_SYLLABLE_RE = re.compile(r"[가-힣]")
+
+APPLICATION_KEYWORDS = (
+    "예를 들어",
+    "예시",
+    "예제",
+    "사례",
+    "적용",
+    "활용",
+    "실행",
+    "시연",
+    "데모",
+    "실습",
+    "문제",
+    "풀이",
+    "풀어보",
+    "계산해",
+    "구현",
+    "코드",
+    "실험",
+    "시뮬레이션",
+)
 
 
 # ── fused.json 파싱 ────────────────────────────────────────────────────────────
@@ -354,6 +376,194 @@ def collect_pedagogy(fused: dict) -> dict:
         "visual_ratio":    visual_ratio,
         "structure_ratio": structure_ratio,
         "style_tags":      style_tags,
+    }
+
+
+def _load_json_optional(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _segments_from_fused(fused: dict) -> list[dict]:
+    segments: list[dict] = []
+    for scene in fused_scene_entries(fused):
+        for ctx in scene.get("contexts", []) or []:
+            for seg in ctx.get("segments", []) or []:
+                if isinstance(seg, dict):
+                    segments.append(seg)
+    return segments
+
+
+def _load_segments_for_diagnostics(stem: str, output_dir: Path, fused: dict) -> tuple[list[dict], str]:
+    payload = _load_json_optional(output_dir / f"{stem}_segments.json")
+    segments = payload.get("segments")
+    if isinstance(segments, list):
+        return [s for s in segments if isinstance(s, dict)], "segments_json"
+    return _segments_from_fused(fused), "fused_contexts"
+
+
+def _count_korean_syllables(text: str) -> int:
+    return len(_KOREAN_SYLLABLE_RE.findall(str(text or "")))
+
+
+def _collect_speech_rate_spm(segments: list[dict]) -> dict:
+    syllable_count = 0
+    speech_duration_sec = 0.0
+    usable_segments = 0
+    total_segments = len(segments)
+
+    for seg in segments:
+        text = str(seg.get("text") or "")
+        count = _count_korean_syllables(text)
+        try:
+            start = float(seg.get("start", 0.0) or 0.0)
+            end = float(seg.get("end", start) or start)
+        except Exception:
+            start = 0.0
+            end = 0.0
+        duration = max(0.0, end - start)
+        if duration <= 0 or count <= 0:
+            continue
+        syllable_count += count
+        speech_duration_sec += duration
+        usable_segments += 1
+
+    speech_duration_min = speech_duration_sec / 60.0
+    spm = syllable_count / speech_duration_min if speech_duration_min > 0 else None
+    return {
+        "speech_rate_spm": round(spm, 2) if spm is not None else None,
+        "korean_syllable_count": syllable_count,
+        "speech_duration_sec": round(speech_duration_sec, 3),
+        "speech_segment_count": usable_segments,
+        "total_segment_count": total_segments,
+        "excluded_segment_count": max(0, total_segments - usable_segments),
+    }
+
+
+def _has_application_keyword(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(keyword.lower() in lowered for keyword in APPLICATION_KEYWORDS)
+
+
+def _ratio_with_application_keywords(texts: list[str]) -> tuple[float, int, int]:
+    cleaned = [str(t or "").strip() for t in texts if str(t or "").strip()]
+    if not cleaned:
+        return 0.0, 0, 0
+    hits = sum(1 for text in cleaned if _has_application_keyword(text))
+    return round(hits / len(cleaned), 4), hits, len(cleaned)
+
+
+def _collect_application_orientation(fused: dict, segments: list[dict]) -> dict:
+    transcript_texts = [str(seg.get("text") or "") for seg in segments]
+    slide_texts: list[str] = []
+    for scene in fused_scene_entries(fused):
+        if scene.get("role") == "objectives":
+            continue
+        parts = [
+            str(scene.get("title") or ""),
+            str(scene.get("slide_text") or ""),
+            str(scene.get("t1_structure") or ""),
+        ]
+        for asset in scene.get("visual_assets") or []:
+            if not isinstance(asset, dict):
+                continue
+            parts.extend(str(asset.get(key) or "") for key in ("type", "label", "role", "meaning", "description"))
+        slide_texts.append(" ".join(parts))
+
+    transcript_ratio, transcript_hits, transcript_total = _ratio_with_application_keywords(transcript_texts)
+    slide_ratio, slide_hits, slide_total = _ratio_with_application_keywords(slide_texts)
+    score = round(0.5 * transcript_ratio + 0.5 * slide_ratio, 4)
+    return {
+        "application_orientation_score": score,
+        "transcript_application_signal": transcript_ratio,
+        "slide_application_signal": slide_ratio,
+        "matched_transcript_segments": transcript_hits,
+        "transcript_segment_count": transcript_total,
+        "matched_slides": slide_hits,
+        "slide_count": slide_total,
+        "keyword_set": list(APPLICATION_KEYWORDS),
+    }
+
+
+def _collect_visual_ratio(fused: dict, pedagogy: dict) -> dict:
+    slides = [
+        s for s in fused_scene_entries(fused)
+        if s.get("role") != "objectives"
+    ]
+    total = len(slides)
+    asset_count = sum(1 for s in slides if s.get("visual_assets"))
+    if total > 0 and asset_count > 0:
+        return {
+            "visual_ratio": round(asset_count / total, 4),
+            "visual_slide_count": asset_count,
+            "slide_count": total,
+            "source": "visual_assets",
+        }
+    return {
+        "visual_ratio": round(float(pedagogy.get("visual_ratio", 0.0) or 0.0), 4),
+        "visual_slide_count": asset_count,
+        "slide_count": total,
+        "source": "pedagogy_visual_ratio",
+    }
+
+
+def _collect_listenability(stem: str, output_dir: Path) -> dict:
+    audio_quality = _load_json_optional(output_dir / f"{stem}_audio_quality.json")
+    details = audio_quality.get("details", {}) if isinstance(audio_quality.get("details"), dict) else {}
+    rms = details.get("rms_energy", {}) if isinstance(details.get("rms_energy"), dict) else {}
+    mfcc = details.get("mfcc_stability", {}) if isinstance(details.get("mfcc_stability"), dict) else {}
+
+    def _score(row: dict) -> float | None:
+        try:
+            return max(0.0, min(100.0, float(row.get("score")))) / 100.0
+        except Exception:
+            return None
+
+    volume_score = _score(rms)
+    stability_score = _score(mfcc)
+    scores = [s for s in (volume_score, stability_score) if s is not None]
+    listenability_score = round(sum(scores) / len(scores), 4) if scores else None
+    return {
+        "listenability_score": listenability_score,
+        "volume_score": volume_score,
+        "voice_stability_score": stability_score,
+        "rms_energy": rms.get("value"),
+        "mfcc_stability": mfcc.get("value"),
+        "source": "audio_quality" if scores else "missing_audio_quality",
+    }
+
+
+def collect_diagnostics(stem: str, output_dir: Path, fused: dict, pedagogy: dict) -> dict:
+    segments, segment_source = _load_segments_for_diagnostics(stem, output_dir, fused)
+    speech_rate = _collect_speech_rate_spm(segments)
+    application = _collect_application_orientation(fused, segments)
+    visual = _collect_visual_ratio(fused, pedagogy)
+    listenability = _collect_listenability(stem, output_dir)
+
+    delivery = {
+        **speech_rate,
+        **listenability,
+        "segment_source": segment_source,
+    }
+    teaching_style = {
+        **visual,
+        **application,
+    }
+    print(
+        f"[디버그] diagnostics: spm={delivery.get('speech_rate_spm')} "
+        f"listenability={delivery.get('listenability_score')} "
+        f"visual_ratio={teaching_style.get('visual_ratio')} "
+        f"application={teaching_style.get('application_orientation_score')}"
+    )
+    return {
+        "delivery": delivery,
+        "teaching_style": teaching_style,
     }
 
 
@@ -1128,6 +1338,7 @@ def generate_metadata(
     slide_texts, transcript_texts, core_slide_texts, core_trans_texts = collect_texts(fused)
     emphasized   = collect_emphasized(fused)
     pedagogy     = collect_pedagogy(fused)
+    diagnostics  = collect_diagnostics(stem, output_dir, fused, pedagogy)
 
     # objectives 슬라이드는 요약/키워드 연산과 독립적으로 별도 수집
     learning_objectives = collect_learning_objectives(fused)
@@ -1220,6 +1431,7 @@ def generate_metadata(
         "communities":         communities,
         "visual_concept_terms": visual_concept_terms,
         "pedagogy":            pedagogy,
+        "diagnostics":         diagnostics,
     }
 
     # 저장
