@@ -968,14 +968,19 @@ def _collect_contexts(slides: list[dict]) -> list[dict]:
     has_contexts = any(slide.get("contexts") for slide in slides)
     if has_contexts:
         for slide in slides:
-            slide_no = int(slide.get("slide_number", 0) or 0)
-            for ctx in slide.get("contexts", []) or []:
+            slide_no = int(slide.get("slide_number") or slide.get("slide_index") or 0)
+            for fallback_context_index, ctx in enumerate(slide.get("contexts", []) or [], start=1):
                 text = str(ctx.get("text", "") or "").strip()
                 if not text:
                     continue
                 context_id = str(ctx.get("context_id", "") or "").strip()
                 if not context_id:
-                    context_id = f"S{slide_no:03d}-C{len(contexts) + 1:04d}"
+                    raw_context_index = ctx.get("context_index")
+                    if raw_context_index is not None:
+                        context_index = int(raw_context_index) + 1
+                    else:
+                        context_index = fallback_context_index
+                    context_id = f"S{slide_no:03d}-C{context_index:03d}"
                 contexts.append({
                     "context_id": context_id,
                     "slide_number": slide_no,
@@ -996,7 +1001,7 @@ def _collect_contexts(slides: list[dict]) -> list[dict]:
         return contexts
 
     for slide in slides:
-        slide_no = int(slide.get("slide_number", 0) or 0)
+        slide_no = int(slide.get("slide_number") or slide.get("slide_index") or 0)
         for seg in slide.get("transcript_segments", []) or []:
             corr = str(seg.get("text", "") or "").strip()
             orig = str(seg.get("text_original", "") or "").strip()
@@ -1026,13 +1031,13 @@ def _build_slide_context_map(slides: list[dict]) -> dict:
     """slides 데이터에서 slide_number → {title, time_range, slide_text} 매핑."""
     ctx = {}
     for slide in slides:
-        sn = int(slide.get("slide_number", 0) or 0)
+        sn = int(slide.get("slide_number") or slide.get("slide_index") or 0)
         if sn <= 0:
             continue
         ctx[sn] = {
             "title": str(slide.get("title", "") or ""),
             "time_range": str(slide.get("time_range", "") or ""),
-            "slide_text": str(slide.get("slide_text", "") or "").strip(),
+            "slide_text": str(slide.get("slide_text") or slide.get("text") or "").strip(),
         }
     return ctx
 

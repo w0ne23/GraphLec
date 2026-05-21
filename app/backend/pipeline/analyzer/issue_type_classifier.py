@@ -22,10 +22,10 @@ DEFAULT_MODELS = (
     "grok",
 )
 ISSUE_TYPES = (
-    "factual_error",
     "temporal_error",
-    "confusing_explanation",
     "scope_overclaim",
+    "factual_error",
+    "confusing_explanation",
 )
 DEFAULT_LIST_KEYS = ("issues",)
 DEFAULT_MODEL_WEIGHTS = {
@@ -38,10 +38,10 @@ DEFAULT_MODEL_WEIGHTS = {
     "xai": 0.2,
 }
 ISSUE_TYPE_LABELS = {
-    "factual_error": "발언 자체 오류",
     "temporal_error": "시대적 오류",
-    "confusing_explanation": "혼동 가능 설명",
     "scope_overclaim": "범위 과잉 단정",
+    "factual_error": "발언 자체 오류",
+    "confusing_explanation": "혼동 가능 설명",
 }
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
@@ -140,7 +140,6 @@ def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
         "start_time": issue.get("start_time"),
         "end_time": issue.get("end_time"),
         "needs_context": issue.get("needs_context"),
-        "resolution_status": issue.get("resolution_status", ""),
     }
 
 
@@ -155,10 +154,10 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 애매한 경우에는 가장 그럴듯한 한 유형에만 몰지 말고, 가능한 유형들에 확률을 나누어 주세요.
 
 분류:
-- factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
 - temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 더 이상 맞지 않는 정보인 경우.
-- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
 - scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
+- factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
+- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
 
 판단 기준:
 - resolved_claim을 주 판단 기준으로 사용하고, claim_text는 원문 표현이나 범위 표현 확인용 보조 정보로만 사용하세요.
@@ -185,10 +184,10 @@ confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도�
     {{
       "id": "입력 id",
       "probabilities": {{
-        "factual_error": 0.0,
         "temporal_error": 0.0,
-        "confusing_explanation": 0.0,
-        "scope_overclaim": 0.0
+        "scope_overclaim": 0.0,
+        "factual_error": 0.0,
+        "confusing_explanation": 0.0
       }},
       "reason": "한두 문장 근거",
       "confidence": 0.0
@@ -656,6 +655,19 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 current_date=current_date,
                 max_tokens=max_tokens,
             )
+            ok_count = sum(1 for row in rows if row.get("status") == "ok")
+            if ok_count < len(rows) and attempt < attempts:
+                last_exc = ValueError(
+                    f"probability vectors parsed {ok_count}/{len(rows)}"
+                )
+                print(
+                    f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
+                    f"{attempt}/{attempts - 1}: {last_exc}",
+                    flush=True,
+                )
+                if retry_wait:
+                    time.sleep(retry_wait)
+                continue
             break
         except Exception as exc:
             last_exc = exc
@@ -853,14 +865,13 @@ def _classification_record(
         "resolved_claim": issue.get("resolved_claim", ""),
         "claim_text": issue.get("claim_text", ""),
         "issue": issue.get("issue", ""),
-        "candidate_reason": issue.get("candidate_reason", ""),
+        "basis_code": issue.get("basis_code", ""),
         "context_id": issue.get("context_id", ""),
         "context_ids": issue.get("context_ids", []),
         "slide_number": issue.get("slide_number"),
         "start_time": issue.get("start_time"),
         "end_time": issue.get("end_time"),
         "needs_context": issue.get("needs_context"),
-        "resolution_status": issue.get("resolution_status", ""),
         "final_issue_type": final_type,
         "final_issue_type_label": _issue_type_label(final_type),
         "ensemble_confidence": ensemble_confidence,
@@ -917,7 +928,6 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
             "context_id": record.get("context_id", ""),
             "context_ids": record.get("context_ids", []),
             "needs_context": record.get("needs_context"),
-            "resolution_status": record.get("resolution_status", ""),
         },
     }
 
@@ -1178,7 +1188,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_LIST_KEYS),
         help="comma/space separated JSON list keys to classify. Default: issues",
     )
-    parser.add_argument("--batch-size", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_BATCH_SIZE", "10")))
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(
+            os.getenv(
+                "VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE",
+                os.getenv("ISSUE_TYPE_CLASSIFIER_BATCH_SIZE", "20"),
+            )
+        ),
+    )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_TOKENS", "8192")))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("ISSUE_TYPE_CLASSIFIER_MAX_WORKERS", "1")))
     parser.add_argument("--current-date", default=os.getenv("ISSUE_TYPE_CLASSIFIER_CURRENT_DATE", "2026-05-12"))
