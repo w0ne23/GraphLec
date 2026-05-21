@@ -1144,25 +1144,14 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
         )
 
     def _claim_output_payload(claim: dict) -> dict:
-        context_ids = claim.get("context_ids")
-        if not isinstance(context_ids, list) or not context_ids:
-            context_ids = [claim.get("context_id")]
-        context_ids = [str(item) for item in context_ids if str(item or "").strip()]
-
-        context_id = str(claim.get("context_id") or (context_ids[0] if context_ids else "")).strip()
+        context_id = str(claim.get("context_id") or "").strip()
         payload = {
             "claim_id": claim.get("claim_id", ""),
+            "context_id": context_id,
             "claim_text": claim.get("claim_text", ""),
+            "source_slice": claim.get("source_slice", ""),
             "resolved_claim": claim.get("resolved_claim", ""),
             "claim_type": claim.get("claim_type", ""),
-            "context_id": context_id,
-            "context_ids": context_ids,
-            "antecedent_context_ids": claim.get("antecedent_context_ids", []),
-            "claim_fingerprint": claim.get("claim_fingerprint", ""),
-            "is_approximate": bool(claim.get("is_approximate")),
-            "needs_context": bool(claim.get("needs_context")),
-            "resolution_status": claim.get("resolution_status", ""),
-            "context_note": claim.get("context_note", ""),
         }
         return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
