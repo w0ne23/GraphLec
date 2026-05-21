@@ -40,24 +40,15 @@ def _resolve_stage_model(stage: str) -> str:
     base = os.getenv("VERIFIER_MODEL", VERIFIER_MODEL).strip() or VERIFIER_MODEL
     extract_model = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", VERIFIER_CLAIM_EXTRACT_MODEL).strip()
     judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
-    issue_classifier_model = os.getenv("VERIFIER_ISSUE_CLASSIFIER_MODEL", "").strip()
-    cross_recheck_model = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", VERIFIER_CROSS_RECHECK_MODEL).strip()
-    slide_typo_model = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", VERIFIER_SLIDE_TYPO_MODEL).strip()
-    grounding_model = os.getenv("VERIFIER_GROUNDING_MODEL", VERIFIER_GROUNDING_MODEL).strip()
+    slide_error_model = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", VERIFIER_SLIDE_ERROR_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
 
     if stage == "extract":
         return extract_model or base
     if stage == "judge":
         return strong
-    if stage in {"issue_classification", "issue_classifier"}:
-        return issue_classifier_model or strong
-    if stage == "cross_recheck":
-        return cross_recheck_model or strong
-    if stage == "slide_typo":
-        return slide_typo_model or strong
-    if stage == "grounding":
-        return grounding_model or strong
+    if stage == "slide_error":
+        return slide_error_model or strong
     return base
 
 
@@ -87,9 +78,7 @@ def _is_anthropic_model(model: str) -> bool:
         spec.startswith("claude")
         or spec in {
             "haiku-4.5",
-            "haiku4.5",
             "claude-haiku-4.5",
-            "claude-haiku4.5",
             "claude-haiku-4-5",
             "sonnet-4.5",
             "claude-sonnet-4.5",
@@ -103,7 +92,7 @@ def _is_anthropic_model(model: str) -> bool:
 
 def _is_xai_model(model: str) -> bool:
     spec = str(model or "").strip().lower()
-    return spec.startswith("grok") or spec.startswith("xai:") or spec.startswith("xai/")
+    return spec.startswith("grok") or spec.startswith("xai:")
 
 
 def _is_deepseek_model(model: str) -> bool:
@@ -114,12 +103,6 @@ def _is_deepseek_model(model: str) -> bool:
 def _resolve_xai_model(model: str) -> str:
     spec = str(model or "").strip()
     lowered = spec.lower()
-    if lowered in {"grok", "grok-default", "xai", "xai-default"}:
-        return (
-            os.getenv("VERIFIER_XAI_DEFAULT_MODEL", "").strip()
-            or os.getenv("XAI_DEFAULT_MODEL", "").strip()
-            or "grok-4.3"
-        )
     if lowered.startswith("xai:"):
         return spec.split(":", 1)[1].strip()
     if lowered.startswith("xai/"):
@@ -131,14 +114,6 @@ def _resolve_deepseek_model(model: str) -> str:
     spec = str(model or "").strip()
     lowered = spec.lower()
     if lowered in {"deepseek", "deepseek-default"}:
-        return (
-            os.getenv("VERIFIER_DEEPSEEK_DEFAULT_MODEL", "").strip()
-            or os.getenv("DEEPSEEK_DEFAULT_MODEL", "").strip()
-            or "deepseek-v4-flash"
-        )
-    if lowered in {"deepseek-pro", "deepseek-v4", "deepseek-v4-default"}:
-        return "deepseek-v4-pro"
-    if lowered in {"deepseek-flash", "deepseek-v4-flash"}:
         return "deepseek-v4-flash"
     if lowered.startswith("deepseek:"):
         return spec.split(":", 1)[1].strip()
@@ -153,122 +128,11 @@ def _supports_json_object_response_format(model: str) -> bool:
         lowered.startswith(("gpt", "o1", "o3"))
         or lowered.startswith("grok")
         or lowered.startswith(("xai:", "xai/"))
-        or lowered in {"xai", "xai-default"}
         or lowered.startswith("deepseek")
-        or _is_anthropic_model(lowered)
     )
 
 
-def _anthropic_json_tool_input_schema(stage: str) -> dict:
-    if stage == "judge":
-        return {
-            "type": "object",
-            "properties": {
-                "issues": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "claim_id": {"type": "string"},
-                            "candidate_confidence": {"type": "number"},
-                        },
-                        "required": [
-                            "claim_id",
-                            "candidate_confidence",
-                        ],
-                    },
-                }
-            },
-            "required": ["issues"],
-        }
-    if stage in {"issue_classification", "issue_classifier"}:
-        return {
-            "type": "object",
-            "properties": {
-                "classifications": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "issue_id": {"type": "string"},
-                            "type_scores": {
-                                "type": "object",
-                                "properties": {
-                                    "A": {"type": "number"},
-                                    "B": {"type": "number"},
-                                    "C": {"type": "number"},
-                                    "D": {"type": "number"},
-                                },
-                                "required": ["A", "B", "C", "D"],
-                            },
-                            "primary_type_code": {"type": "string"},
-                            "primary_type_reason": {"type": "string"},
-                        },
-                        "required": ["issue_id", "type_scores", "primary_type_code", "primary_type_reason"],
-                    },
-                }
-            },
-            "required": ["classifications"],
-        }
-    if stage == "cross_recheck":
-        return {
-            "type": "object",
-            "properties": {
-                "results": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "issue_id": {"type": "string"},
-                            "status": {"type": "string"},
-                            "checked_type_code": {"type": "string"},
-                            "type_gate_passed": {"type": "boolean"},
-                            "issue_type": {"type": "string"},
-                            "issue_type_code": {"type": "string"},
-                            "issue_score": {"type": "number"},
-                            "reason": {"type": "string"},
-                            "context_issue_summary": {"type": "string"},
-                            "context_resolution": {"type": "string"},
-                            "context_resolution_reason": {"type": "string"},
-                            "correction_hint": {"type": "string"},
-                            "context_issue_id": {"type": "string"},
-                            "merged_into_issue_id": {"type": "string"},
-                        },
-                        "required": [
-                            "issue_id",
-                            "status",
-                            "checked_type_code",
-                            "type_gate_passed",
-                            "issue_type",
-                            "issue_type_code",
-                            "issue_score",
-                            "reason",
-                            "context_issue_summary",
-                            "context_resolution",
-                            "context_resolution_reason",
-                            "correction_hint",
-                            "context_issue_id",
-                            "merged_into_issue_id",
-                        ],
-                    },
-                }
-            },
-            "required": ["results"],
-        }
-    return {
-        "type": "object",
-        "additionalProperties": True,
-    }
-
-
-TOKEN_USAGE_STAGES = (
-    "extract",
-    "judge",
-    "issue_classification",
-    "slide_typo",
-    "grounding",
-    "cross_recheck",
-)
+TOKEN_USAGE_STAGES = ("extract", "judge", "slide_error")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -359,30 +223,6 @@ def _anthropic_prompt_cache_control() -> dict | None:
     return control
 
 
-def _anthropic_tool_input_to_json_text(tool_input) -> str:
-    """Anthropic SDK versions may expose tool input as dict, string, or model object."""
-    if tool_input is None:
-        return ""
-    if isinstance(tool_input, str):
-        return tool_input.strip()
-    if isinstance(tool_input, dict):
-        return json.dumps(tool_input, ensure_ascii=False)
-    for method_name in ("model_dump", "dict"):
-        method = getattr(tool_input, method_name, None)
-        if not callable(method):
-            continue
-        try:
-            dumped = method()
-        except TypeError:
-            dumped = method
-        if isinstance(dumped, dict):
-            return json.dumps(dumped, ensure_ascii=False)
-    try:
-        return json.dumps(tool_input, ensure_ascii=False)
-    except TypeError:
-        return str(tool_input or "").strip()
-
-
 def _deepseek_thinking_extra_body() -> dict | None:
     raw = (
         os.getenv("VERIFIER_DEEPSEEK_THINKING", "")
@@ -432,23 +272,11 @@ def _deepseek_request_timeout() -> float:
         return 180.0
 
 
-def _xai_request_timeout() -> float:
-    raw = (
-        os.getenv("VERIFIER_XAI_TIMEOUT_SEC", "")
-        or os.getenv("XAI_TIMEOUT_SEC", "")
-        or "180"
-    )
-    try:
-        return max(30.0, float(raw))
-    except (TypeError, ValueError):
-        return 180.0
-
-
 def _deepseek_api_retry_config() -> tuple[int, float]:
     try:
-        max_retries = int(os.getenv("VERIFIER_DEEPSEEK_API_MAX_RETRIES", "1") or "1")
+        max_retries = int(os.getenv("VERIFIER_DEEPSEEK_API_MAX_RETRIES", "4") or "4")
     except ValueError:
-        max_retries = 1
+        max_retries = 4
     try:
         initial_wait = float(os.getenv("VERIFIER_DEEPSEEK_API_INITIAL_WAIT", "5") or "5")
     except ValueError:
@@ -618,17 +446,15 @@ def _call_llm(
     temperature: float = None,
     image_bytes: bytes = None,
     image_bytes_list: list[bytes] = None,
-    use_grounding: bool = False,
     thinking_budget: int = 1024,
     thinking_level: str = None,
     response_format: dict = None,
     stage: str = "default",
-    model_spec_override: str | None = None,
 ) -> tuple[str, dict]:
     """모델에 무관한 단일 LLM 호출. (응답 텍스트, usage)를 반환."""
     temp = temperature if temperature is not None else VERIFIER_TEMPERATURE
 
-    model_spec = str(model_spec_override or "").strip() or _resolve_stage_model(stage)
+    model_spec = _resolve_stage_model(stage)
     model, reasoning_effort = _parse_openai_model_spec(model_spec)
 
     # ── OpenAI ──────────────────────────────────────────────
@@ -726,7 +552,7 @@ def _call_llm(
             )
             if response_format is not None:
                 kwargs["response_format"] = response_format
-            return client.chat.completions.create(**kwargs, timeout=_xai_request_timeout())
+            return client.chat.completions.create(**kwargs, timeout=_deepseek_request_timeout())
 
         resp = api_call_with_retry(call_api)
         return resp.choices[0].message.content or "", _extract_xai_usage(resp, resolved_model, stage)
@@ -823,15 +649,6 @@ def _call_llm(
                 temperature=temp,
                 messages=[{"role": "user", "content": content}],
             )
-            if response_format is not None:
-                kwargs["tools"] = [
-                    {
-                        "name": "json_response",
-                        "description": "Return the requested response as a single JSON object.",
-                        "input_schema": _anthropic_json_tool_input_schema(stage),
-                    }
-                ]
-                kwargs["tool_choice"] = {"type": "tool", "name": "json_response"}
             if system_prompt:
                 system_block = {"type": "text", "text": system_prompt}
                 cache_control = _anthropic_prompt_cache_control()
@@ -841,15 +658,6 @@ def _call_llm(
             return client.messages.create(**kwargs)
 
         resp = api_call_with_retry(call_api)
-        tool_inputs = [
-            getattr(block, "input", None)
-            for block in getattr(resp, "content", []) or []
-            if getattr(block, "type", "") == "tool_use"
-        ]
-        for tool_input in tool_inputs:
-            tool_json_text = _anthropic_tool_input_to_json_text(tool_input)
-            if tool_json_text:
-                return tool_json_text, _extract_anthropic_usage(resp, resolved_model, stage)
         text_blocks = [
             getattr(block, "text", "")
             for block in getattr(resp, "content", []) or []
@@ -868,14 +676,11 @@ def _call_llm(
     contents.append(types.Part.from_text(text=_join_system_and_prompt(system_prompt, prompt)))
 
     cfg_kwargs: dict = dict(temperature=temp, max_output_tokens=max_tokens)
-    if use_grounding:
-        cfg_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
+    if thinking_level is not None:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
     else:
-        if thinking_level is not None:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
-        else:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-        cfg_kwargs["response_mime_type"] = "application/json"
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+    cfg_kwargs["response_mime_type"] = "application/json"
 
     client_sequence = get_gemini_client_sequence()
     if len(client_sequence) == 1:
@@ -919,123 +724,65 @@ BATCH_SIZE = int(os.getenv("VERIFIER_BATCH_SIZE", "15"))
 VERIFIER_MODEL = os.getenv("VERIFIER_MODEL", "gemini-2.5-flash")
 VERIFIER_CLAIM_EXTRACT_MODEL = os.getenv("VERIFIER_CLAIM_EXTRACT_MODEL", "")
 VERIFIER_CLAIM_JUDGE_MODEL = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", "")
-VERIFIER_CROSS_RECHECK_MODEL = os.getenv("VERIFIER_CROSS_RECHECK_MODEL", "")
-VERIFIER_SLIDE_TYPO_MODEL = os.getenv("VERIFIER_SLIDE_TYPO_MODEL", "")
-VERIFIER_GROUNDING_MODEL = os.getenv("VERIFIER_GROUNDING_MODEL", "")
+VERIFIER_SLIDE_ERROR_MODEL = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", "")
 VERIFIER_TEMPERATURE = float(os.getenv("VERIFIER_TEMPERATURE", "0.0"))
 ISSUE_TYPE_LABELS = {
     "factual_error": "발언 자체 오류",
-    "temporal_error": "시간적 오류",
-    "scope_overclaim": "범위 과잉 단정",
+    "temporal_error": "시대적 오류",
     "confusing_explanation": "혼동 가능 설명",
+    "scope_overclaim": "범위 과잉 단정",
 }
-ISSUE_TYPE_ORDER = (
-    "factual_error",
-    "temporal_error",
-    "scope_overclaim",
-    "confusing_explanation",
-)
-ISSUE_TYPE_CODES = {
-    "factual_error": "A",
-    "temporal_error": "B",
-    "scope_overclaim": "C",
-    "confusing_explanation": "D",
-}
-ISSUE_CODE_TO_TYPE = {code: issue_type for issue_type, code in ISSUE_TYPE_CODES.items()}
-FACT_GROUNDED_ISSUE_TYPES = {"factual_error"}
-PEDAGOGICAL_ISSUE_TYPES = {"confusing_explanation"}
-ALLOWED_ISSUE_TYPES = set(ISSUE_TYPE_LABELS)
 VERIFIER_PARSE_RETRIES = int(os.getenv("VERIFIER_PARSE_RETRIES", "2"))
 VERIFIER_BATCH_RECOVERY_RETRIES = int(os.getenv("VERIFIER_BATCH_RECOVERY_RETRIES", "1"))
 VERIFIER_REQUIRE_COMPLETE = os.getenv("VERIFIER_REQUIRE_COMPLETE", "1") != "0"
-JUDGE_CONTEXT_MODES = {"batch"}
-
-
-def normalize_judge_context_mode(value: str | None = None) -> str:
-    raw = str(
-        value
-        if value is not None
-        else os.getenv("VERIFIER_JUDGE_CONTEXT_MODE", "batch")
-    ).strip().lower()
-    aliases = {
-        "": "batch",
-        "default": "batch",
-        "full": "batch",
-        "context": "batch",
-        "with_context": "batch",
-        "utterance": "batch",
-        "utterance_batch": "batch",
-        "no": "batch",
-        "false": "batch",
-        "off": "batch",
-        "0": "batch",
-        "no_context": "batch",
-        "without_context": "batch",
-    }
-    mode = aliases.get(raw, raw)
-    return mode if mode in JUDGE_CONTEXT_MODES else "batch"
 
 
 def normalize_issue_type(value: str) -> str:
-    raw = str(value or "").strip().lower()
-    upper = raw.upper()
-    if upper in ISSUE_CODE_TO_TYPE:
-        return ISSUE_CODE_TO_TYPE[upper]
-    if len(raw) >= 2 and raw[0].upper() in ISSUE_CODE_TO_TYPE and raw[1] in {".", ":", ")", "-"}:
-        return ISSUE_CODE_TO_TYPE[raw[0].upper()]
-    aliases = {
-        "outdated": "temporal_error",
-        "currentness_error": "temporal_error",
-        "temporal": "temporal_error",
-        "missing_condition": "scope_overclaim",
-        "clarification_needed": "scope_overclaim",
-        "needs_clarification": "scope_overclaim",
-        "overgeneralization": "scope_overclaim",
-        "overclaim": "scope_overclaim",
-        "ambiguous_expression": "confusing_explanation",
-        "misleading_explanation": "confusing_explanation",
-        "misconception_risk": "confusing_explanation",
-        "ambiguous": "confusing_explanation",
-        "ambiguity": "confusing_explanation",
-        "misleading": "confusing_explanation",
-        "misunderstanding_risk": "confusing_explanation",
-        "student_misunderstanding": "confusing_explanation",
-    }
-    return aliases.get(raw, raw)
+    return str(value or "").strip().lower()
 
 
 def issue_type_label(issue_type: str) -> str:
     return ISSUE_TYPE_LABELS.get(normalize_issue_type(issue_type), str(issue_type or "unknown"))
 
 
-def issue_type_code(issue_type: str) -> str:
-    return ISSUE_TYPE_CODES.get(normalize_issue_type(issue_type), "")
+def _strip_json_fence(text: str) -> str:
+    text = (text or "").strip()
+    if "```json" in text:
+        return text.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```" in text:
+        return text.split("```", 1)[1].split("```", 1)[0].strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    return text.strip()
 
 
-def issue_type_code_label(issue_type: str) -> str:
-    normalized = normalize_issue_type(issue_type)
-    code = issue_type_code(normalized)
-    label = issue_type_label(normalized)
-    return f"{code}. {label}" if code else label
+def build_verification_question(claim: dict) -> str:
+    """후속 판정에서 살아남은 claim에만 짧은 검증 질문을 생성."""
+    text = str(
+        claim.get("resolved_claim")
+        or claim.get("claim_text")
+        or claim.get("problematic_content")
+        or ""
+    ).strip()
+    if not text:
+        return ""
 
+    text = " ".join(text.split()).strip(" \t\r\n.。?？!！")
+    if not text:
+        return ""
 
-def normalize_issue_metadata(issue: dict, issue_type: str | None = None) -> dict:
-    """Keep the issue contract stable without generating legacy metadata fields."""
-    if not isinstance(issue, dict):
-        issue = {}
-    normalized_type = normalize_issue_type(issue_type if issue_type is not None else issue.get("type", ""))
-    if normalized_type in ALLOWED_ISSUE_TYPES:
-        issue["type"] = normalized_type
-        issue["issue_type"] = normalized_type
-        issue["issue_type_code"] = issue_type_code(normalized_type)
-        issue["feedback_type"] = normalized_type
-        issue["feedback_label"] = issue_type_label(normalized_type)
-    return issue
+    claim_type = str(claim.get("claim_type", "") or "").strip()
+    if claim_type == "numeric":
+        return f"'{text}'라는 수치나 기준이 정확한가?"
+    if claim_type == "causal":
+        return f"'{text}'라는 인과 또는 작동 방식 설명이 타당한가?"
+    if claim_type == "relationship":
+        return f"'{text}'라는 개념 간 관계 설명이 타당한가?"
+    if claim_type == "currentness":
+        return f"'{text}'라는 현행성 설명이 현재 기준으로 타당한가?"
+    return f"'{text}'라는 설명이 타당한가?"
 
-
-def is_fact_grounded_issue(issue: dict) -> bool:
-    normalize_issue_metadata(issue)
-    return normalize_issue_type(issue.get("type", "")) in FACT_GROUNDED_ISSUE_TYPES
 
 # ── 도메인 힌트 ──────────────────────────────────────────
 
@@ -1075,17 +822,11 @@ def _compact_text(value: str) -> str:
 
 
 def _issue_key(issue: dict) -> tuple:
-    text = (
-        issue.get("source_text")
-        or issue.get("claim_context_text")
-        or issue.get("claim_text")
-        or ""
-    )
     return (
         issue.get("type", ""),
         int(issue.get("slide_number", 0) or 0),
         int(round(float(issue.get("start_time", 0) or 0))),
-        _compact_text(str(text))[:60],
+        _compact_text(str(issue.get("problematic_content", "") or ""))[:60],
     )
 
 
@@ -1108,23 +849,16 @@ def _normalize_severity(issue: dict) -> None:
     issue["severity"] = severity
 
 
-def _is_asr_artifact(issue: dict, utt_map: dict) -> bool:
-    uid = issue.get("utterance_id", "")
-    ref = utt_map.get(uid)
+def _is_asr_artifact(issue: dict, context_map: dict) -> bool:
+    cid = issue.get("context_id", "")
+    ref = context_map.get(cid)
     if not ref:
         return False
     orig = _compact_text(ref.get("text_original", ""))
     corr = _compact_text(ref.get("text_corrected", ""))
     if not orig or not corr or orig == corr:
         return False
-    snippet = _compact_text(
-        str(
-            issue.get("source_text")
-            or issue.get("claim_context_text")
-            or issue.get("claim_text")
-            or ""
-        )
-    )
+    snippet = _compact_text(str(issue.get("problematic_content", "") or ""))
     if len(snippet) < 6:
         return False
     if snippet in corr:
@@ -1169,11 +903,11 @@ def merge_multiple_runs(
     issues_by_key = {}
     for result in run_results:
         for issue in result.get("issues", []):
-            # ② claim_id 기반 매칭: utterance_id + claim_text 우선, fallback으로 기존 fuzzy key
+            # ② claim_id 기반 매칭: context_id + claim_text 우선, fallback으로 기존 fuzzy key
             claim_text = _compact_text(str(issue.get("claim_text", "") or ""))
-            uid = issue.get("utterance_id", "")
-            if uid and claim_text:
-                key = (uid, claim_text[:80])
+            cid = issue.get("context_id", "")
+            if cid and claim_text:
+                key = (cid, claim_text[:80])
             else:
                 start = float(issue.get("start_time", 0) or 0)
                 bucket = round(start / time_window_sec) * time_window_sec
@@ -1181,14 +915,7 @@ def merge_multiple_runs(
                     issue.get("type", ""),
                     int(issue.get("slide_number", 0) or 0),
                     bucket,
-                    _compact_text(
-                        str(
-                            issue.get("source_text")
-                            or issue.get("claim_context_text")
-                            or issue.get("claim_text")
-                            or ""
-                        )
-                    )[:60],
+                    _compact_text(str(issue.get("problematic_content", "") or ""))[:60],
                 )
             if key not in issues_by_key:
                 issues_by_key[key] = {
@@ -1234,278 +961,97 @@ def merge_multiple_runs(
     }
 
 
-def _strip_json_fence(text: str) -> str:
-    if "```json" in text:
-        return text.split("```json")[1].split("```")[0].strip()
-    if "```" in text:
-        return text.split("```")[1].split("```")[0].strip()
-    return text.strip()
+# ── context 수집 + 슬라이드 맥락 ────────────────────────────
 
-
-def _extract_first_json_object(text: str) -> str:
-    """응답 문자열에서 첫 JSON object 블록을 안전하게 추출."""
-    s = text or ""
-    start = s.find("{")
-    if start < 0:
-        return ""
-
-    depth = 0
-    in_string = False
-    escaped = False
-    for i in range(start, len(s)):
-        ch = s[i]
-        if escaped:
-            escaped = False
-            continue
-        if ch == "\\" and in_string:
-            escaped = True
-            continue
-        if ch == '"':
-            in_string = not in_string
-            continue
-        if in_string:
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                return s[start:i + 1]
-    return ""
-
-
-def _extract_json_like_string_field(text: str, key: str) -> str:
-    """불완전 JSON에서도 key의 string 값을 최대한 복구."""
-    m = re.search(rf'"{re.escape(key)}"\s*:\s*', text)
-    if not m:
-        return ""
-    i = m.end()
-    while i < len(text) and text[i].isspace():
-        i += 1
-    if i >= len(text):
-        return ""
-
-    if text[i] == '"':
-        i += 1
-        out = []
-        escaped = False
-        while i < len(text):
-            ch = text[i]
-            if escaped:
-                out.append(ch)
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                break
-            else:
-                out.append(ch)
-            i += 1
-        return "".join(out).strip()
-
-    j = i
-    while j < len(text) and text[j] not in ",}\n\r":
-        j += 1
-    return text[i:j].strip()
-
-
-def _extract_json_like_bool_field(text: str, keys: list[str]) -> Optional[bool]:
-    for key in keys:
-        m = re.search(rf'"{re.escape(key)}"\s*:\s*(true|false)', text, flags=re.IGNORECASE)
-        if m:
-            return m.group(1).lower() == "true"
-    return None
-
-
-def _extract_urls(text: str) -> list[str]:
-    urls = re.findall(r'https?://[^\s"\'<>]+', text or "")
-    return list(dict.fromkeys(urls))
-
-
-def _parse_grounding_payload(text: str) -> dict:
-    """
-    grounding 응답을 최대한 복구해서 파싱.
-    1) strict JSON
-    2) object 블록 추출 + trailing comma 정리
-    3) 최소 필드(is_valid/reason/evidence_sources) regex 복구
-    """
-    cleaned = _strip_json_fence((text or "").strip())
-    candidates = [cleaned]
-
-    obj = _extract_first_json_object(cleaned)
-    if obj and obj not in candidates:
-        candidates.append(obj)
-
-    for candidate in candidates:
-        if not candidate:
-            continue
-        try:
-            payload = json.loads(candidate)
-            if isinstance(payload, dict):
-                return payload
-        except json.JSONDecodeError:
-            fixed = re.sub(r",\s*([}\]])", r"\1", candidate)
-            try:
-                payload = json.loads(fixed)
-                if isinstance(payload, dict):
-                    return payload
-            except json.JSONDecodeError:
-                pass
-
-    recovered = {}
-    is_valid = _extract_json_like_bool_field(
-        cleaned,
-        ["is_valid", "issue_is_valid", "claim_is_true", "claim_is_valid"],
-    )
-    if is_valid is not None:
-        recovered["is_valid"] = is_valid
-
-    reason = _extract_json_like_string_field(cleaned, "reason")
-    if reason:
-        recovered["reason"] = reason
-
-    sources = _extract_urls(cleaned)
-    if sources:
-        recovered["evidence_sources"] = sources
-
-    if recovered:
-        return recovered
-    raise ValueError("grounding_response_parse_failed")
-
-
-# ── 발화 수집 + 슬라이드 맥락 ────────────────────────────
-
-def _collect_utterances(slides: list[dict]) -> list[dict]:
+def _collect_contexts(slides: list[dict]) -> list[dict]:
+    contexts = []
     has_contexts = any(slide.get("contexts") for slide in slides)
     if has_contexts:
-        all_segments = [
-            seg
-            for slide in slides
-            for seg in (slide.get("transcript_segments", []) or [])
-            if isinstance(seg, dict)
-        ]
-
-        def _segment_text_for_analyzer(seg: dict) -> str:
-            return str(
-                seg.get("text_corrected")
-                or seg.get("text")
-                or seg.get("text_original")
-                or ""
-            ).strip()
-
-        def _context_text_for_analyzer(ctx: dict, fallback: str) -> tuple[str, bool]:
-            if (
-                bool(ctx.get("analyzer_text_locked"))
-                or bool(ctx.get("locked_text"))
-                or str(ctx.get("text_source", "") or "").strip()
-                in {"locked_context_text", "fake_transcript_context", "input_context_text"}
-            ):
-                return fallback, False
-
-            indices = list(ctx.get("source_segment_indices") or ctx.get("segment_indices") or [])
-            if not indices:
-                return fallback, False
-            pieces = []
-            changed = False
-            for raw_idx in indices:
-                try:
-                    seg = all_segments[int(raw_idx)]
-                except (TypeError, ValueError, IndexError):
-                    continue
-                text = _segment_text_for_analyzer(seg)
-                if text:
-                    pieces.append(text)
-                original = str(seg.get("text", "") or "").strip()
-                if text and original and text != original:
-                    changed = True
-            rebuilt = " ".join(pieces).strip()
-            return rebuilt or fallback, changed
-
-        contexts = []
         for slide in slides:
-            slide_no = int(slide.get("slide_number", 0) or 0)
-            for idx, ctx in enumerate(slide.get("contexts", []) or []):
-                original_context_text = str(ctx.get("text", "") or "").strip()
-                text, text_rebuilt_from_corrected_segments = _context_text_for_analyzer(ctx, original_context_text)
+            slide_no = int(slide.get("slide_number") or slide.get("slide_index") or 0)
+            for fallback_context_index, ctx in enumerate(slide.get("contexts", []) or [], start=1):
+                text = str(ctx.get("text", "") or "").strip()
                 if not text:
                     continue
-                scene_index = ctx.get("scene_index", slide.get("scene_index"))
-                context_index = ctx.get("context_index", idx)
-                try:
-                    scene_part = int(scene_index) + 1 if scene_index is not None else 0
-                except (TypeError, ValueError):
-                    scene_part = 0
-                try:
-                    context_part = int(context_index) + 1
-                except (TypeError, ValueError):
-                    context_part = idx + 1
-                context_id = str(ctx.get("context_id") or "").strip()
+                context_id = str(ctx.get("context_id", "") or "").strip()
                 if not context_id:
-                    context_id = f"S{slide_no:03d}V{scene_part:02d}C{context_part:02d}"
+                    raw_context_index = ctx.get("context_index")
+                    if raw_context_index is not None:
+                        context_index = int(raw_context_index) + 1
+                    else:
+                        context_index = fallback_context_index
+                    context_id = f"S{slide_no:03d}-C{context_index:03d}"
                 contexts.append({
-                    "utterance_id": context_id,
                     "context_id": context_id,
                     "slide_number": slide_no,
-                    "scene_index": scene_index,
-                    "context_index": context_index,
-                    "start_time": float(ctx.get("start", ctx.get("start_time", 0)) or 0),
-                    "end_time": float(ctx.get("end", ctx.get("end_time", 0)) or 0),
+                    "scene_index": ctx.get("scene_index"),
+                    "context_index": ctx.get("context_index"),
+                    "start_time": float(ctx.get("start_time", ctx.get("start", 0)) or 0),
+                    "end_time": float(ctx.get("end_time", ctx.get("end", ctx.get("start", 0))) or 0),
                     "text": text,
                     "text_corrected": text,
-                    "text_original": original_context_text or text,
-                    "correction_status": (
-                        "context_corrected"
-                        if text_rebuilt_from_corrected_segments
-                        else str(ctx.get("correction_status", "context") or "context").strip()
-                    ),
-                    "correction_risk": str(ctx.get("correction_risk", "") or "").strip(),
-                    "correction_reason": str(ctx.get("correction_reason", "") or "").strip(),
-                    "source_segment_indices": list(
-                        ctx.get("source_segment_indices", ctx.get("segment_indices", [])) or []
-                    ),
-                    "source_segments": list(ctx.get("source_segments") or ctx.get("segments") or []),
+                    "text_original": "",
+                    "text_corrected_candidate": "",
+                    "correction_status": "context",
+                    "correction_risk": "",
+                    "correction_reason": "",
+                    "source_segment_indices": ctx.get("source_segment_indices", []),
                 })
-        contexts.sort(key=lambda u: (u["start_time"], str(u.get("utterance_id") or "")))
+        contexts.sort(key=lambda u: u["start_time"])
         return contexts
 
-    utterances = []
     for slide in slides:
-        slide_no = int(slide.get("slide_number", 0) or 0)
+        slide_no = int(slide.get("slide_number") or slide.get("slide_index") or 0)
         for seg in slide.get("transcript_segments", []) or []:
             corr = str(seg.get("text", "") or "").strip()
             orig = str(seg.get("text_original", "") or "").strip()
-            status = str(seg.get("correction_status", "") or "").strip()
-            if status not in {"applied", "unchanged"}:
-                status = "unchanged"
+            candidate = str(seg.get("text_corrected_candidate", "") or "").strip()
             text = corr or orig
             if not text:
                 continue
-            utterances.append({
+            contexts.append({
                 "slide_number": slide_no,
                 "start_time": float(seg.get("start", 0) or 0),
                 "text": text,
                 "text_corrected": corr,
                 "text_original": orig,
-                "correction_status": status,
+                "text_corrected_candidate": candidate,
+                "correction_status": str(seg.get("correction_status", "") or "").strip(),
                 "correction_risk": str(seg.get("correction_risk", "") or "").strip(),
                 "correction_reason": str(seg.get("correction_reason", "") or "").strip(),
             })
-    utterances.sort(key=lambda u: u["start_time"])
-    for i, u in enumerate(utterances, start=1):
-        u["utterance_id"] = f"U{i:04d}"
-    return utterances
+    contexts.sort(key=lambda u: u["start_time"])
+    for i, u in enumerate(contexts, start=1):
+        slide_no = int(u.get("slide_number", 0) or 0)
+        u["context_id"] = f"S{slide_no:03d}-SEG{i:04d}"
+    return contexts
 
 
 def _build_slide_context_map(slides: list[dict]) -> dict:
     """slides 데이터에서 slide_number → {title, time_range, slide_text} 매핑."""
     ctx = {}
     for slide in slides:
-        sn = int(slide.get("slide_number", 0) or 0)
+        sn = int(slide.get("slide_number") or slide.get("slide_index") or 0)
         if sn <= 0:
             continue
         ctx[sn] = {
             "title": str(slide.get("title", "") or ""),
             "time_range": str(slide.get("time_range", "") or ""),
-            "slide_text": str(slide.get("slide_text", "") or "").strip(),
+            "slide_text": str(slide.get("slide_text") or slide.get("text") or "").strip(),
         }
     return ctx
+
+
+def _format_context_for_prompt(u: dict) -> str:
+    cid = u["context_id"]
+    ts = f"{u['start_time']:.1f}s"
+    corr = str(u.get("text_corrected", "") or "").strip()
+    orig = str(u.get("text_original", "") or "").strip()
+
+    if str(u.get("correction_status", "") or "").strip() == "candidate_only":
+        return f"{cid} | {ts} | {orig or u.get('text', '')}"
+
+    if corr and orig and corr != orig:
+        return f"{cid} | {ts} | 교정: {corr} | 원문: {orig}"
+
+    return f"{cid} | {ts} | {u['text']}"

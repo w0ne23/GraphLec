@@ -219,7 +219,13 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
     _save_json(scene_slide_map_path, build_scene_slide_map(metadata))
     _save_json(canonical_slide_annotations_path, build_canonical_slide_annotations(metadata))
 
-    scene_count = len({m["scene_index"] for m in metadata if m.get("scene_index") is not None})
+    scene_count = len({
+        idx for idx in (
+            m.get("scene_index") if m.get("scene_index") is not None else m.get("slide_index")
+            for m in metadata
+        )
+        if idx is not None
+    })
     _done(f"scene {scene_count}개, 프레임 {len(metadata)}개 추출", elapsed)
     return {
         "meta_path": str(meta_path),
@@ -382,13 +388,16 @@ def stage3b_audio(
     emphasis_path = output_dir / f"{stem}_emphasis.json"
     by_scene_path = output_dir / f"{stem}_by_scene.json"
 
-    def _scene_audio_has_emphasis_schema(path: Path) -> bool:
+    def _by_scene_has_context_schema(path: Path) -> bool:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
+            scenes = payload.get("scenes", [])
+            if not scenes:
+                return False
             has_contexts = False
-            for scene in payload.get("scenes", []):
-                for ctx in scene.get("contexts", []):
+            for scene in scenes:
+                for ctx in scene.get("contexts", []) or []:
                     has_contexts = True
                     if "audio_emphasis" not in ctx:
                         return False
@@ -396,8 +405,7 @@ def stage3b_audio(
         except Exception:
             return False
 
-    # 세그먼트만 있고 scene 오디오 구조가 없으면(파일 삭제·불완전 실행)
-    # 스킵 시 Stage 4B·5가 깨지므로 Stage 3B 전체 재실행
+    # 세그먼트만 있고 by_scene이 없으면 context-first verifier 입력을 복원할 수 없으므로 재실행
     seg_ok = (
         not args.force
         and segments_path.exists()
@@ -408,7 +416,7 @@ def stage3b_audio(
     by_scene_ok = (
         by_scene_path.exists()
         and by_scene_path.stat().st_size > 0
-        and _scene_audio_has_emphasis_schema(by_scene_path)
+        and _by_scene_has_context_schema(by_scene_path)
     )
     if seg_ok and silences_ok and emphasis_ok and by_scene_ok:
         print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
@@ -416,12 +424,11 @@ def stage3b_audio(
         print(f"     {by_scene_path}")
         print("─" * 70)
         # in-memory 데이터를 저장된 파일에서 복원
-        scenes_structure = None
+        slides_structure = None
         if by_scene_path.exists():
             try:
                 with open(by_scene_path) as f:
-                    payload = json.load(f)
-                    scenes_structure = payload.get("scenes")
+                    slides_structure = json.load(f).get("scenes")
             except Exception:
                 pass
 
@@ -433,11 +440,11 @@ def stage3b_audio(
             pass
 
         slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
-        if on_contexts_ready and Path(segments_path).is_file() and scenes_structure:
+        if on_contexts_ready and slides_structure:
             try:
                 on_contexts_ready({
                     "segments_path": str(segments_path),
-                    "slides_structure": scenes_structure,
+                    "slides_structure": slides_structure,
                     "slide_ranges": slide_ranges,
                     "duration": duration,
                 })
@@ -450,7 +457,7 @@ def stage3b_audio(
             "emphasis_path": str(emphasis_path),
             "annotated_segments": annotated_segments,
             "annotated_groups": [],
-            "scenes_structure": scenes_structure,
+            "scenes_structure": slides_structure,
             "slide_ranges": slide_ranges,
             "duration": duration,
         }
@@ -518,7 +525,6 @@ def stage3b_audio(
         "segments": segments_clean,
     })
     print(f"    ✓ 교정 완료  ({time.time()-t0:.1f}초)")
-
     # [3B-3] 침묵 구간 저장 (transcriber가 ffmpeg silencedetect로 사전 감지)
     print("  [3B-3] 침묵 구간 저장...")
     MIN_SILENCE_SEC = 0.6
@@ -875,44 +881,18 @@ def stage9_build_analyzer_merged_clean(
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
     merged_clean_path = analyzer_dir / f"{stem}_merged_clean.json"
-    by_scene_path = output_dir / f"{stem}_by_scene.json"
-    legacy_by_slide_path = output_dir / f"{stem}_by_slide.json"
-
-    if slides_structure is None:
-        context_structure_path = (
-            by_scene_path
-            if by_scene_path.exists() and by_scene_path.stat().st_size > 0
-            else legacy_by_slide_path
-        )
-        try:
-            with open(context_structure_path, "r", encoding="utf-8") as f:
-                by_scene_payload = json.load(f)
-            loaded_scenes = by_scene_payload.get("scenes") or by_scene_payload.get("slides") or []
-            if any(scene.get("contexts") for scene in loaded_scenes if isinstance(scene, dict)):
-                slides_structure = loaded_scenes
-                print(f"  ✓ Stage 9A context 입력: 기존 context 구조 사용 ({context_structure_path.name})")
-        except Exception as exc:
-            log.warning(f"Stage 9A 기존 context 구조 로드 실패, fallback 사용: {exc}")
 
     if not args.force and merged_clean_path.exists() and merged_clean_path.stat().st_size > 0:
-        can_skip = True
         try:
             with open(merged_clean_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-            can_skip = (
-                existing.get("analyzer_transcript_policy")
-                in {"locked_context_text_from_stage9", "locked_context_text_from_input"}
-                and any(slide.get("contexts") for slide in existing.get("slides", []))
-            )
+            if any(slide.get("contexts") for slide in existing.get("slides", [])):
+                print(f"\n  ⏭  Stage 9A analyzer 입력 생성 — context 입력 파일 존재, 스킵")
+                print(f"     {merged_clean_path}")
+                print("─" * 70)
+                return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
         except Exception:
-            can_skip = False
-        if can_skip:
-            print(f"\n  ⏭  Stage 9A analyzer 입력 생성 — 출력 파일 존재, 스킵")
-            print(f"     {merged_clean_path}")
-            print("─" * 70)
-            return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
-        print("\n  ⚠️  기존 analyzer 입력이 context-lock 형식이 아니어서 Stage 9A를 재생성합니다.")
-        print("─" * 70)
+            pass
 
     _banner("Stage 9A  —  analyzer 입력용 merged_clean 생성")
     t0 = time.time()
@@ -922,67 +902,6 @@ def stage9_build_analyzer_merged_clean(
     with open(segments_path, "r", encoding="utf-8") as f:
         segment_payload = json.load(f)
     segments = segment_payload.get("segments", [])
-    segments_by_index = {idx: seg for idx, seg in enumerate(segments)}
-
-    def _analyzer_segment_text(seg: dict) -> str:
-        # analyzer 입력은 최종 확정 전사 `text`를 기준으로 잠근다.
-        # text_corrected_candidate 같은 후보 텍스트는 이 단계 이후로 넘기지 않는다.
-        return str(
-            seg.get("text")
-            or seg.get("text_corrected")
-            or seg.get("text_original")
-            or ""
-        ).strip()
-
-    def _clean_analyzer_segment(seg: dict, source_index: int | None = None) -> dict | None:
-        text = _analyzer_segment_text(seg)
-        if not text:
-            return None
-        start = float(seg.get("start", seg.get("start_time", 0.0)) or 0.0)
-        end = float(seg.get("end", seg.get("end_time", start)) or start)
-        cleaned = {
-            "start": start,
-            "end": end,
-            "text": text,
-            "text_corrected": text,
-            "correction_status": str(seg.get("correction_status") or "locked_input"),
-        }
-        for key in ("correction_risk", "correction_reason"):
-            value = seg.get(key)
-            if value not in (None, "", []):
-                cleaned[key] = value
-        if source_index is not None:
-            cleaned["_source_segment_index"] = int(source_index)
-        return cleaned
-
-    def _public_segment(seg: dict) -> dict:
-        public = dict(seg)
-        public.pop("_source_segment_index", None)
-        return public
-
-    clean_segments_by_index = {
-        idx: cleaned
-        for idx, seg in enumerate(segments)
-        if (cleaned := _clean_analyzer_segment(seg, idx)) is not None
-    }
-
-    def _context_text_for_analyzer(raw_ctx: dict, fallback: str) -> str:
-        indices = list(
-            raw_ctx.get("source_segment_indices")
-            or raw_ctx.get("segment_indices")
-            or []
-        )
-        pieces = []
-        for idx in indices:
-            try:
-                seg = segments_by_index[int(idx)]
-            except (TypeError, ValueError, KeyError, IndexError):
-                continue
-            text = _analyzer_segment_text(seg)
-            if text:
-                pieces.append(text)
-        return " ".join(pieces).strip() or fallback
-
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
     metadata = []
     if meta_path and Path(meta_path).is_file():
@@ -1035,62 +954,43 @@ def stage9_build_analyzer_merged_clean(
                 slide_meta_by_no[slide_no] = candidate_meta
 
     segs_by_logical_slide: dict[int, list[dict]] = {}
-    for source_idx, seg in enumerate(segments):
+    for seg in segments:
         slide_no = seg.get("slide_number")
         if isinstance(slide_no, int):
-            seg_copy = _clean_analyzer_segment(seg, source_idx)
-            if not seg_copy:
-                continue
+            seg_copy = {
+                "start": float(seg.get("start", 0.0) or 0.0),
+                "end": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
+                "text": str(seg.get("text", "") or "").strip(),
+            }
             segs_by_logical_slide.setdefault(slide_no, []).append(seg_copy)
 
     contexts_by_slide: dict[int, list[dict]] = {}
     context_count = 0
     for slide_ctx in slides_structure or []:
-        scene_idx = slide_ctx.get("scene_index", slide_ctx.get("slide_index"))
+        scene_idx = slide_ctx.get("slide_index", slide_ctx.get("scene_index"))
         scene_info = scene_meta_by_index.get(scene_idx if isinstance(scene_idx, int) else -1, {})
-        slide_no = scene_info.get("slide_number", slide_ctx.get("slide_number", slide_ctx.get("slide_index", scene_idx)))
+        slide_no = scene_info.get("slide_number", scene_idx)
         if not isinstance(slide_no, int):
             continue
-        visit_order = int(scene_info.get("slide_visit_order", slide_ctx.get("slide_visit_order", 1)) or 1)
+        visit_order = int(scene_info.get("slide_visit_order", 1) or 1)
         for raw_ctx in slide_ctx.get("contexts", []) or []:
-            fallback_text = str(raw_ctx.get("text", "") or "").strip()
-            text = _context_text_for_analyzer(raw_ctx, fallback_text)
+            text = str(raw_ctx.get("text", "") or "").strip()
             if not text:
                 continue
             context_index = int(raw_ctx.get("context_index", 0) or 0)
-            source_segment_indices = list(
-                raw_ctx.get("source_segment_indices")
-                or raw_ctx.get("segment_indices")
-                or []
-            )
-            source_segments = []
-            normalized_source_indices = []
-            for idx in source_segment_indices:
-                try:
-                    source_idx = int(idx)
-                except (TypeError, ValueError):
-                    continue
-                if source_idx not in clean_segments_by_index:
-                    continue
-                normalized_source_indices.append(source_idx)
-                source_segments.append(_public_segment(clean_segments_by_index[source_idx]))
             context_count += 1
             scene_token = int(scene_idx) if isinstance(scene_idx, int) else context_count
+            context_id = f"S{slide_no:03d}-SC{scene_token:04d}-C{context_index + 1:03d}"
             context_payload = {
-                "context_id": f"S{slide_no:03d}-SC{scene_token:04d}-C{context_index + 1:03d}",
+                "context_id": context_id,
                 "slide_number": slide_no,
                 "scene_index": scene_idx,
                 "visit_order": visit_order,
                 "context_index": context_index,
-                "start_time": float(raw_ctx.get("start", raw_ctx.get("start_time", 0.0)) or 0.0),
-                "end_time": float(
-                    raw_ctx.get("end", raw_ctx.get("end_time", raw_ctx.get("start", 0.0))) or 0.0
-                ),
+                "start_time": float(raw_ctx.get("start", 0.0) or 0.0),
+                "end_time": float(raw_ctx.get("end", raw_ctx.get("start", 0.0)) or 0.0),
                 "text": text,
-                "text_source": "locked_context_text",
-                "analyzer_text_locked": True,
-                "source_segment_indices": normalized_source_indices,
-                "source_segments": source_segments,
+                "source_segment_indices": raw_ctx.get("segment_indices", []),
             }
             contexts_by_slide.setdefault(slide_no, []).append(context_payload)
 
@@ -1101,8 +1001,6 @@ def stage9_build_analyzer_merged_clean(
                 text = str(seg.get("text", "") or "").strip()
                 if not text:
                     continue
-                source_idx = seg.get("_source_segment_index")
-                source_segment_indices = [int(source_idx)] if source_idx is not None else []
                 context_count += 1
                 contexts_by_slide.setdefault(slide_no, []).append({
                     "context_id": f"S{slide_no:03d}-V01-C{idx + 1:03d}",
@@ -1113,10 +1011,7 @@ def stage9_build_analyzer_merged_clean(
                     "start_time": float(seg.get("start", 0.0) or 0.0),
                     "end_time": float(seg.get("end", seg.get("start", 0.0)) or 0.0),
                     "text": text,
-                    "text_source": "locked_context_text",
-                    "analyzer_text_locked": True,
-                    "source_segment_indices": source_segment_indices,
-                    "source_segments": [_public_segment(seg)],
+                    "source_segment_indices": [],
                 })
 
     slide_titles = [slide_meta_by_no.get(slide_no, {}).get("title", "") for slide_no in sorted(slide_meta_by_no)]
@@ -1151,10 +1046,7 @@ def stage9_build_analyzer_merged_clean(
     slides = []
     for slide_no in all_slide_numbers:
         slide_meta = slide_meta_by_no.get(slide_no, {})
-        transcript_segments = [
-            _public_segment(seg)
-            for seg in sorted(segs_by_logical_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
-        ]
+        transcript_segments = sorted(segs_by_logical_slide.get(slide_no, []), key=lambda item: item.get("start", 0.0))
         occurrences = sorted(
             occurrences_by_logical_slide.get(slide_no, []),
             key=lambda item: (item["start_sec"], item["scene_index"]),
@@ -1179,9 +1071,6 @@ def stage9_build_analyzer_merged_clean(
             "total_duration": round(total_duration_sec, 1),
             "occurrences": occurrences,
             "slide_text": slide_meta.get("slide_text", ""),
-            "transcript_segments": transcript_segments,
-            "transcript": " ".join(str(seg.get("text", "") or "") for seg in transcript_segments).strip(),
-            "segment_count": len(transcript_segments),
             "contexts": sorted(contexts_by_slide.get(slide_no, []), key=lambda item: item.get("start_time", 0.0)),
             "context_count": len(contexts_by_slide.get(slide_no, [])),
         }
@@ -1208,11 +1097,9 @@ def stage9_build_analyzer_merged_clean(
 
     result = {
         "description": "슬라이드+전사 통합 JSON (교정 완료, 검증용)",
-        "analyzer_transcript_policy": "locked_context_text_from_stage9",
         "domain": domain_info.get("domain", ""),
         "subdomain": domain_info.get("subdomain", ""),
         "total_slides": len(slides),
-        "total_transcript_segments": len(segments),
         "total_contexts": context_count,
         "total_duration_formatted": _fmt_ts(total_duration),
         "slides": slides,
@@ -1224,40 +1111,7 @@ def stage9_build_analyzer_merged_clean(
     return {"merged_clean_path": str(merged_clean_path), "elapsed": elapsed}
 
 
-def stage10_run_analyzers(args, merged_clean_path: str, output_dir: Path) -> dict:
-    from .analyzer.run_all import run_all_analyzers
-
-    stem = Path(args.input).stem
-    analyzer_dir = output_dir / f"{stem}_analyzer"
-    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
-    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
-
-    if (
-        not args.force
-        and _claim_output_is_cross_verification(claim_output_path)
-        and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
-    ):
-        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
-        print(f"     {claim_output_path}")
-        print("─" * 70)
-        return {
-            "claim_output": str(claim_output_path),
-            "claim_report": "",
-            "elapsed": 0.0,
-        }
-
-    _banner("Stage 10  —  verifier 실행")
-    t0 = time.time()
-    result = run_all_analyzers(
-        merged_clean_path,
-        output_dir=str(analyzer_dir),
-    )
-    elapsed = time.time() - t0
-    _done("verifier 실행", elapsed)
-    return {"claim_output": str(claim_output_path), "elapsed": elapsed, **result}
-
-
-def _claim_output_is_cross_verification(claim_output_path: Path) -> bool:
+def _claim_output_is_final_verification(claim_output_path: Path) -> bool:
     if not claim_output_path.exists():
         return False
     try:
@@ -1265,20 +1119,143 @@ def _claim_output_is_cross_verification(claim_output_path: Path) -> bool:
             payload = json.load(f)
     except Exception:
         return False
-    return payload.get("mode") == "cross_verification"
+    return payload.get("mode") == "classified_issue_verifier"
+
+
+def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> dict:
+    from .analyzer.claim_extractor import (
+        _claim_extract_batch_mode,
+        _claim_extract_context_window,
+        extract_claims_only,
+    )
+    from .analyzer.claim_pipeline import prepare_verification
+    from .analyzer.verifier_utils import _write_claims_jsonl
+
+    def _claim_cache_matches(path: Path, batch_mode: str, context_window: tuple[int, int]) -> bool:
+        if not path.exists() or path.stat().st_size <= 0:
+            return False
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        return (
+            payload.get("claim_batch_mode") == batch_mode
+            and tuple(payload.get("claim_context_window", [])) == context_window
+        )
+
+    def _claim_output_payload(claim: dict) -> dict:
+        context_id = str(claim.get("context_id") or "").strip()
+        payload = {
+            "claim_id": claim.get("claim_id", ""),
+            "context_id": context_id,
+            "claim_text": claim.get("claim_text", ""),
+            "source_slice": claim.get("source_slice", ""),
+            "resolved_claim": claim.get("resolved_claim", ""),
+            "claim_type": claim.get("claim_type", ""),
+        }
+        return {key: value for key, value in payload.items() if value not in ("", [], None)}
+
+    stem = Path(args.input).stem
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+    analyzer_dir.mkdir(parents=True, exist_ok=True)
+    claim_stub_path = analyzer_dir / f"{stem}_verification_final.json"
+    claims_jsonl_path = analyzer_dir / f"{stem}_claims.jsonl"
+    claims_json_path = analyzer_dir / f"{stem}_claims.json"
+    merged_file = Path(merged_clean_path)
+    claim_batch_mode = _claim_extract_batch_mode()
+    claim_context_window = _claim_extract_context_window()
+
+    if (
+        not args.force
+        and claims_jsonl_path.exists()
+        and _claim_cache_matches(claims_json_path, claim_batch_mode, claim_context_window)
+        and claims_jsonl_path.stat().st_mtime >= merged_file.stat().st_mtime
+    ):
+        print(f"\n  ⏭  Stage 10A claim 추출 — 출력 파일 존재, 스킵")
+        print(f"     {claims_jsonl_path}")
+        print("─" * 70)
+        return {
+            "claims_jsonl": str(claims_jsonl_path),
+            "claims_json": str(claims_json_path),
+            "claim_count": 0,
+            "elapsed": 0.0,
+            "skipped": True,
+        }
+
+    _banner("Stage 10A  —  claim 추출")
+    t0 = time.time()
+    ctx = prepare_verification(str(merged_file))
+    claims_by_batch, api_calls, token_usage = extract_claims_only(
+        ctx["contexts"],
+        ctx["current_date"],
+        ctx["hint"],
+        ctx["slide_ctx"],
+    )
+    claims: list[dict] = []
+    for _, batch_claims in claims_by_batch:
+        claims.extend(_claim_output_payload(claim) for claim in batch_claims)
+
+    claims_log_path = _write_claims_jsonl(claims, claim_stub_path)
+    claims_json_path.write_text(
+        json.dumps(
+            {
+                "mode": "claim_extraction",
+                "claim_batch_mode": claim_batch_mode,
+                "claim_context_window": list(claim_context_window),
+                "merged_path": str(merged_file),
+                "claims_log_path": claims_log_path,
+                "claim_count": len(claims),
+                "api_calls": api_calls,
+                "token_usage": token_usage,
+                "claims": claims,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    elapsed = time.time() - t0
+    _done(f"claim {len(claims)}개 추출", elapsed)
+    return {
+        "claims_jsonl": str(claims_jsonl_path),
+        "claims_json": str(claims_json_path),
+        "claim_count": len(claims),
+        "api_calls": api_calls,
+        "elapsed": elapsed,
+    }
+
+
+def stage10_issue_judge(args, merged_clean_path: str, output_dir: Path, claims_jsonl: str) -> dict:
+    from .analyzer.run_all import run_issue_judge_only
+
+    stem = Path(args.input).stem
+    analyzer_dir = output_dir / f"{stem}_analyzer"
+    analyzer_dir.mkdir(parents=True, exist_ok=True)
+
+    _banner("Stage 10B  —  1차 issue judge")
+    t0 = time.time()
+    result = run_issue_judge_only(
+        merged_clean_path,
+        output_dir=str(analyzer_dir),
+        claims_jsonl=claims_jsonl,
+        issue_judge_min_confidence=getattr(args, "issue_judge_min_confidence", None),
+    )
+    elapsed = time.time() - t0
+    _done("1차 issue judge", elapsed)
+    return {"elapsed": elapsed, **result}
 
 
 def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
-    claim_output_path = analyzer_dir / f"{stem}_content_verification.json"
-    claim_report_path = analyzer_dir / f"{stem}_content_verification_report.txt"
+    claim_output_path = analyzer_dir / f"{stem}_verification_final.json"
+    claim_report_path = analyzer_dir / f"{stem}_report.txt"
     analyzer_log_path = analyzer_dir / f"{stem}_analyzer.log"
 
     if (
         not args.force
-        and _claim_output_is_cross_verification(claim_output_path)
+        and _claim_output_is_final_verification(claim_output_path)
         and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
     ):
         print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
@@ -1312,7 +1289,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         )
         log_fp.write(f"cwd       : {pkg_root}\n")
         log_fp.write(f"cmd       : {' '.join(cmd)}\n")
-        log_fp.write("mode      : cross_verification (forced)\n")
+        log_fp.write("mode      : classified_issue_pipeline\n")
         log_fp.flush()
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
@@ -1329,7 +1306,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
     elapsed = time.time() - t0
     print(f"\n  ✓ verifier 백그라운드 시작  ({elapsed:.1f}초)")
     print(f"     PID : {proc.pid}")
-    print("     mode: cross_verification (forced)")
+    print("     mode: classified_issue_pipeline")
     print(f"     로그: {analyzer_log_path}")
     print("─" * 70)
     return {
@@ -1484,6 +1461,10 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     entities_path = output_graph_dir / "entities.parquet"
     relationships_path = output_graph_dir / "relationships.parquet"
     input_path = input_dir / f"{stem}.txt"
+    metrics_path = workspace_dir / "graphrag_index_metrics.json"
+    model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4")
+    embedding_model = os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small")
+    method_name = getattr(args, "graphrag_method", "standard")
 
     if (
         not args.force
@@ -1526,7 +1507,26 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
 
     env = os.environ.copy()
     env["GRAPHRAG_API_KEY"] = api_key
+    env["PYTHONUNBUFFERED"] = "1"
     _write_graphrag_env(workspace_dir, api_key)
+
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "running",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "started_at_epoch": t0,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     settings_path = workspace_dir / "settings.yaml"
     if not settings_path.exists():
@@ -1537,9 +1537,9 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
                 "--root",
                 str(workspace_dir),
                 "--model",
-                os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-4.1-mini"),
+                model_name,
                 "--embedding",
-                os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small"),
+                embedding_model,
             ],
             check=True,
             env=env,
@@ -1558,13 +1558,35 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
             "--root",
             str(workspace_dir),
             "--method",
-            getattr(args, "graphrag_method", "standard"),
+            method_name,
         ],
         check=True,
         env=env,
     )
 
     elapsed = time.time() - t0
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "stem": stem,
+                "status": "done",
+                "model": model_name,
+                "embedding_model": embedding_model,
+                "method": method_name,
+                "started_at_epoch": t0,
+                "finished_at_epoch": time.time(),
+                "elapsed": elapsed,
+                "elapsed_sec": elapsed,
+                "workspace_dir": str(workspace_dir),
+                "input_path": str(input_path),
+                "entities_parquet": str(entities_path),
+                "relationships_parquet": str(relationships_path),
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
     _done("GraphRAG 인덱스 생성", elapsed)
     return {
         "elapsed": elapsed,
@@ -1572,6 +1594,7 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
         "input_path": str(input_path),
         "entities_parquet": str(entities_path),
         "relationships_parquet": str(relationships_path),
+        "metrics_path": str(metrics_path),
     }
 
 
@@ -1634,6 +1657,7 @@ def stage11_build_recommender_index(args) -> dict:
 def run_pipeline(args, progress_callback=None):
     total_start = time.time()
     timings: dict[str, float] = {}
+    stage_status: dict[str, str] = {}
     
     def notify_stage(stage_key, status):
         if progress_callback:
@@ -1649,6 +1673,29 @@ def run_pipeline(args, progress_callback=None):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
     slides_dir.mkdir(parents=True, exist_ok=True)
+    timing_path = output_dir / "pipeline_timings.json"
+
+    def write_timings(current_stage: str | None = None) -> None:
+        payload = {
+            "stem": stem,
+            "status": "running",
+            "current_stage": current_stage,
+            "started_at_epoch": total_start,
+            "updated_at_epoch": time.time(),
+            "elapsed_total_sec": time.time() - total_start,
+            "timings": timings,
+            "stage_status": stage_status,
+        }
+        tmp_path = timing_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(timing_path)
+
+    def record_timing(stage: str, elapsed: float, status: str = "done") -> None:
+        timings[stage] = elapsed
+        stage_status[stage] = status
+        write_timings(stage)
+
+    write_timings("pipeline_start")
 
     paths = output_paths(stem, output_dir, slides_dir)
     try:
@@ -1671,6 +1718,8 @@ def run_pipeline(args, progress_callback=None):
     try:
         r9: dict = {}
         r10: dict = {}
+        r10a: dict = {}
+        r10b: dict = {}
         r7b: dict = {}
 
         # ── Stage 1 (병렬 A/B) ──
@@ -1761,7 +1810,25 @@ def run_pipeline(args, progress_callback=None):
                 )
                 timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
                 r9.update(local_r9)
-                if getattr(args, "skip_analyzer", False):
+                if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
+                    local_r10a = stage10_extract_claims(
+                        args,
+                        merged_clean_path=local_r9["merged_clean_path"],
+                        output_dir=output_dir,
+                    )
+                    timings["Stage 10A claim 추출"] = local_r10a["elapsed"]
+                    r10a.update(local_r10a)
+                    if getattr(args, "stop_after_issue_judge", False):
+                        local_r10b = stage10_issue_judge(
+                            args,
+                            merged_clean_path=local_r9["merged_clean_path"],
+                            output_dir=output_dir,
+                            claims_jsonl=local_r10a["claims_jsonl"],
+                        )
+                        timings["Stage 10B 1차 issue judge"] = local_r10b["elapsed"]
+                        r10b.update(local_r10b)
+                    timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+                elif getattr(args, "skip_analyzer", False):
                     timings["Stage 10 verifier 백그라운드 시작"] = 0.0
                 else:
                     local_r10 = stage10_spawn_analyzers_subprocess(
@@ -1798,6 +1865,36 @@ def run_pipeline(args, progress_callback=None):
 
         print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
         print("─" * 70)
+
+        if (
+            getattr(args, "stop_after_claim_extract", False)
+            or getattr(args, "stop_after_issue_judge", False)
+            or getattr(args, "stop_after_verifier_start", False)
+        ):
+            if getattr(args, "stop_after_issue_judge", False):
+                option_name = "--stop-after-issue-judge"
+            elif getattr(args, "stop_after_claim_extract", False):
+                option_name = "--stop-after-claim-extract"
+            else:
+                option_name = "--stop-after-verifier-start"
+            print(f"\n  ⏹  {option_name}: 요청한 analyzer 단계 후 파이프라인을 종료합니다.")
+            print("  생성된 analyzer 관련 파일:")
+            for path_str in (
+                r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
+                r10a.get("claims_jsonl", ""),
+                r10a.get("claims_json", ""),
+                r10b.get("issue_judge_summary", ""),
+                r10b.get("issue_judge_comparison", ""),
+                *list((r10b.get("issue_judge_paths") or {}).values()),
+                r10.get("claim_output", ""),
+                r10.get("log_path", ""),
+            ):
+                if path_str:
+                    p = Path(path_str)
+                    print(f"    {'✓' if p.exists() else '…'}  {p}")
+            if r10.get("spawned"):
+                print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
+            return
 
         # ── Stage 4 (병렬 C/D) ──
         _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
@@ -1866,10 +1963,12 @@ def run_pipeline(args, progress_callback=None):
         if getattr(args, "skip_graphrag_index", False):
             print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
             print("─" * 70)
-            timings["Stage 7B GraphRAG 인덱스"] = 0.0
+            record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
         else:
+            stage_status["Stage 7B GraphRAG 인덱스"] = "run"
+            write_timings("Stage 7B GraphRAG 인덱스")
             r7b = stage7b_graphrag_index(args, output_dir)
-            timings["Stage 7B GraphRAG 인덱스"] = r7b.get("elapsed", 0.0)
+            record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
 
         # ── Stage 8 (직렬): 메타데이터 생성 ──  ← 여기 추가
         r8: dict = {}
@@ -1885,6 +1984,12 @@ def run_pipeline(args, progress_callback=None):
             timings["Stage 9 analyzer 입력 생성"] = 0.0
         if "Stage 10 verifier 백그라운드 시작" not in timings:
             timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        if "Stage 10A claim 추출" not in timings and (
+            getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False)
+        ):
+            timings["Stage 10A claim 추출"] = 0.0
+        if "Stage 10B 1차 issue judge" not in timings and getattr(args, "stop_after_issue_judge", False):
+            timings["Stage 10B 1차 issue judge"] = 0.0
 
         # ── Stage 11 (직렬): 추천 인덱스 생성 ──
         if getattr(args, "skip_recommender_index", False):
@@ -1916,6 +2021,11 @@ def run_pipeline(args, progress_callback=None):
             r8.get("metadata_path", ""),
             str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
             r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
+            r10a.get("claims_jsonl", ""),
+            r10a.get("claims_json", ""),
+            r10b.get("issue_judge_summary", ""),
+            r10b.get("issue_judge_comparison", ""),
+            *list((r10b.get("issue_judge_paths") or {}).values()),
             r10.get("log_path", ""),
         ]
         for analyzer_path in (
@@ -1946,7 +2056,7 @@ def run_pipeline(args, progress_callback=None):
                 stem=stem,
                 output_dir=output_dir,
                 timings=timings,
-                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
+                analyzer_output_path=output_dir / f"{stem}_analyzer" / f"{stem}_verification_final.json",
             )
             print(f"\n  ✓ 비용 리포트 저장: {cost_report_path}")
         except Exception as e:
@@ -1954,6 +2064,22 @@ def run_pipeline(args, progress_callback=None):
 
         # 성공/실패 무관하게 항상 타이밍 출력
         total_elapsed = time.time() - total_start
+        try:
+            final_payload = {
+                "stem": stem,
+                "status": "finished",
+                "current_stage": "finished",
+                "started_at_epoch": total_start,
+                "updated_at_epoch": time.time(),
+                "elapsed_total_sec": total_elapsed,
+                "timings": timings,
+                "stage_status": stage_status,
+            }
+            tmp_path = timing_path.with_suffix(".json.tmp")
+            tmp_path.write_text(json.dumps(final_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp_path.replace(timing_path)
+        except Exception as e:
+            print(f"\n  ⚠️ 타이밍 파일 저장 실패: {e}")
         print("\n" + "═" * 70)
         print("  단계별 소요 시간 (현재까지)")
         print("═" * 70)
@@ -2052,6 +2178,27 @@ def get_parser():
                         help="Stage 8 메타데이터 생성 스킵")
     parser.add_argument("--skip-analyzer", action="store_true",
                         help="Stage 10 verifier 실행 스킵")
+    parser.add_argument(
+        "--stop-after-verifier-start",
+        action="store_true",
+        help="Stage 3B context 기반 analyzer 입력 생성 및 verifier 시작 후 종료",
+    )
+    parser.add_argument(
+        "--stop-after-claim-extract",
+        action="store_true",
+        help="Stage 3B context 기반 analyzer 입력 생성 및 claim 추출 후 종료",
+    )
+    parser.add_argument(
+        "--stop-after-issue-judge",
+        action="store_true",
+        help="Stage 3B context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
+    )
+    parser.add_argument(
+        "--issue-judge-min-confidence",
+        type=float,
+        default=None,
+        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 환경변수 또는 0.8",
+    )
     parser.add_argument("--skip-recommender-index", action="store_true",
                         help="Stage 11 추천 인덱스 생성(build_index) 스킵")
     parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
