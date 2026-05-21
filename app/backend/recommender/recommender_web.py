@@ -100,7 +100,6 @@ class ScoreDetail(BaseModel):
     speech_rate_score: float = 0.0
     slow_speech_preference: bool = False
     domain_score:      float
-    difficulty_match:  float
     depth_score:       float
     combined_boost:    float
     duration_score:    float
@@ -193,7 +192,6 @@ def recommend(req: RecommendRequest):
                     speech_rate_score = r.score_detail.get("speech_rate_score", 0.0),
                     slow_speech_preference = r.score_detail.get("slow_speech_preference", False),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
-                    difficulty_match  = r.score_detail.get("difficulty_match",   0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
                     combined_boost    = r.score_detail.get("combined_boost",     1.0),
                     duration_score    = r.score_detail.get("duration_score",     1.0),

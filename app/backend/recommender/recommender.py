@@ -655,7 +655,7 @@ class CommunityIndex:
 def _fast_list_by_domain_analysis(
     query: str,
     available_domains: list[str],
-) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str], dict]]:
+) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]]:
     normalized = _normalize_term(query)
     has_list_signal = any(
         signal in normalized
@@ -674,11 +674,11 @@ def _fast_list_by_domain_analysis(
         return None
 
     if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "list_by_domain", query, [], [], None, None, None, None, {}
+        return "list_by_domain", query, [], [], None, None, None, {}
 
     for alias, domain in _DOMAIN_ALIASES.items():
         if alias in normalized and domain in available_domains:
-            return "list_by_domain", query, [], [], domain, None, None, None, {}
+            return "list_by_domain", query, [], [], domain, None, None, {}
 
     return None
 
@@ -1095,7 +1095,7 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
-) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str], dict]:
+) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]:
     """
     질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec 추출.
 
@@ -1192,7 +1192,6 @@ def analyze_query(
     domain            = parsed.get("domain") or None
     focus_concept     = parsed.get("focus_concept") or None
     duration_max_sec  = parsed.get("duration_max_sec") or None
-    difficulty_hint   = parsed.get("difficulty_hint") or None
     conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
 
     normalized_conditions = {
@@ -1218,9 +1217,6 @@ def analyze_query(
             duration_max_sec = int(duration_max_sec)
         except (ValueError, TypeError):
             duration_max_sec = None
-    # 학습 수준은 현재 추천 조건 범위에서 제외한다. LLM이 "천천히" 등을
-    # beginner로 오해해 도메인 내 무관 강의가 boost되는 것을 방지한다.
-    difficulty_hint = None
     if intent not in ("recommend", "list_by_domain", "list_by_topic"):
         intent = "recommend"
 
@@ -1232,7 +1228,6 @@ def analyze_query(
         domain,
         focus_concept,
         duration_max_sec,
-        difficulty_hint,
         normalized_conditions,
     )
 
@@ -1266,7 +1261,6 @@ class QueryContext:
     domain:            Optional[str]
     focus_concept:     Optional[str]
     duration_max_sec:  Optional[int]
-    difficulty_hint:   Optional[str]
     comparison_intent: bool
     issue_free_preference: bool
     visual_preference: bool
@@ -1402,9 +1396,9 @@ class Recommender:
         print(f"[질의 분석] {query}")
         fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains)
         if fast_analysis:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint, conditions = fast_analysis
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = fast_analysis
         else:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint, conditions = analyze_query(
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = analyze_query(
                 query, self._available_domains, self._available_keywords
             )
         inferred_keywords = _append_topic_expansions(
@@ -1425,7 +1419,6 @@ class Recommender:
         print(f"[확장 키워드] {inferred_keywords}")
         print(f"[추론 도메인] {domain or '미확정'}")
         print(f"[깊이 개념]   {focus_concept or '없음'}")
-        print(f"[난이도 힌트] {difficulty_hint or '없음'}")
         print(f"[비교 의도]   {'있음' if comparison_intent else '없음'}")
         print(f"[검증 조건]   {'있음' if issue_free_preference else '없음'}")
         print(f"[시각 선호]   {'있음' if visual_preference else '없음'}")
@@ -1445,7 +1438,6 @@ class Recommender:
             domain            = domain,
             focus_concept     = focus_concept,
             duration_max_sec  = duration_max_sec,
-            difficulty_hint   = difficulty_hint,
             comparison_intent = comparison_intent,
             issue_free_preference = issue_free_preference,
             visual_preference = visual_preference,
@@ -1995,7 +1987,6 @@ class Recommender:
             "domain_score":         round(domain_score, 4),
             "q_kw_matched":         dm.get("q_kw_matched", True),
             "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
-            "difficulty_match":     0.0,
             "graph_score":          round(graph_score, 4),
             "community_score":      round(community_score, 4),
             "visual_score":         round(visual_score, 4),
