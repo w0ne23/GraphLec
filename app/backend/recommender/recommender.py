@@ -250,6 +250,7 @@ class LectureMetadata:
     concept_relations: list[dict]
     communities:       list[dict]
     pedagogy:          dict
+    diagnostics:       dict
     visual_concept_terms: list[str]
 
 
@@ -323,6 +324,7 @@ class MetadataCollection:
                     concept_relations = item.get("concept_relations", []),
                     communities       = item.get("communities", []),
                     pedagogy          = item.get("pedagogy", {}),
+                    diagnostics       = item.get("diagnostics", {}),
                     visual_concept_terms = (
                         item.get("visual_concept_terms")
                         or item.get("pedagogy", {}).get("visual_concept_terms", [])
