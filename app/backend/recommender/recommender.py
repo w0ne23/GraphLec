@@ -214,6 +214,10 @@ class RecommenderConfig:
     W_DOMAIN_BOOST:      float = 0.20
     # difficulty boost 강도 (질의 난이도 힌트 일치 시)
     W_DIFFICULTY_BOOST:  float = 0.15
+    W_DURATION_BOOST:    float = 0.08
+    W_APPLICATION_BOOST: float = 0.10
+    W_LISTENABILITY_BOOST: float = 0.08
+    W_SPEECH_RATE_BOOST: float = 0.07
     # BM25 후보 검색 파라미터
     BM25_K1:             float = 1.2
     BM25_B:              float = 0.75
@@ -653,7 +657,7 @@ class CommunityIndex:
 def _fast_list_by_domain_analysis(
     query: str,
     available_domains: list[str],
-) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]]:
+) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str], dict]]:
     normalized = _normalize_term(query)
     has_list_signal = any(
         signal in normalized
@@ -672,11 +676,11 @@ def _fast_list_by_domain_analysis(
         return None
 
     if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "list_by_domain", query, [], [], None, None, None, None
+        return "list_by_domain", query, [], [], None, None, None, None, {}
 
     for alias, domain in _DOMAIN_ALIASES.items():
         if alias in normalized and domain in available_domains:
-            return "list_by_domain", query, [], [], domain, None, None, None
+            return "list_by_domain", query, [], [], domain, None, None, None, {}
 
     return None
 
@@ -992,14 +996,6 @@ _COMPARISON_SIGNALS = frozenset({
     "구분", "다른점", "차이를", "비교해", "비교한",
 })
 
-# ── 시각 자료 선호 감지 신호 ───────────────────────────────────────
-_VISUAL_SIGNALS = frozenset({
-    "그림", "그림으로", "그림 위주", "도식", "도식으로", "도표",
-    "다이어그램", "시각적", "시각적으로", "시각화", "이미지",
-    "표로", "표 형태", "표 위주", "차트", "그래프",
-})
-
-
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
     """
     강의 내 대조·비교형 concept_relations 비율.
@@ -1024,16 +1020,6 @@ def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
     return (
         any(sig in q for sig in _COMPARISON_SIGNALS) or
         any(kw in _COMPARISON_SIGNALS for kw in (query_keywords or []))
-    )
-
-
-def _detect_visual_preference(query_keywords: list[str], query: str) -> bool:
-    """질의에 그림/도식/표 기반 설명 선호가 있는지 감지"""
-    q = query.lower()
-    keywords = {str(kw).lower() for kw in (query_keywords or [])}
-    return (
-        any(sig in q for sig in _VISUAL_SIGNALS) or
-        any(kw in _VISUAL_SIGNALS for kw in keywords)
     )
 
 
@@ -1068,7 +1054,7 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
-) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
+) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str], dict]:
     """
     질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
 
@@ -1081,6 +1067,7 @@ def analyze_query(
       focus_concept      : 깊이를 측정할 핵심 개념, 없으면 None
       duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
       difficulty_hint    : "beginner" | "intermediate" | "advanced" | None
+      conditions         : 조건 질의 플래그
     """
     domain_list  = ", ".join(available_domains)
     keyword_list = ", ".join(available_keywords)
@@ -1097,7 +1084,14 @@ def analyze_query(
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
-  "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null
+  "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null,
+  "conditions": {{
+    "issue_free": true 또는 false,
+    "prefers_visual": true 또는 false,
+    "prefers_application": true 또는 false,
+    "prefers_slow_speech": true 또는 false,
+    "prefers_listenability": true 또는 false
+  }}
 }}
 
 [intent]: 질의 목적 분류
@@ -1142,6 +1136,13 @@ def analyze_query(
   - "응용", "실습", "프로젝트" 등 중급 신호 → "intermediate"
   - 난이도·범위 표현 없으면 → null
 
+[conditions]: 내용 조건이 아니라 강의 상태/형식에 대한 선호를 의미 단위로 추출
+  - issue_free: "오류 없는", "검증된", "이슈 없는", "틀린 내용 없는" 등
+  - prefers_visual: "그림/도식/표/그래프/시각 자료 위주", "시각적으로 설명" 등
+  - prefers_application: "예제/사례/문제풀이/실습/시연/데모/적용/활용 중심", "이론만 말고" 등
+  - prefers_slow_speech: "말이 느렸으면", "급하게 설명하지 않는", "여유있게 진행", "빠르지 않은" 등
+  - prefers_listenability: "음질 좋은", "잘 들리는", "듣기 편한", "녹음 상태 좋은", "전달이 명료한" 등
+
 [키워드 목록]: {keyword_list}"""
 
     response = _client.models.generate_content(
@@ -1159,6 +1160,7 @@ def analyze_query(
     focus_concept     = parsed.get("focus_concept") or None
     duration_max_sec  = parsed.get("duration_max_sec") or None
     difficulty_hint   = parsed.get("difficulty_hint") or None
+    conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
 
     # 벡터 임베딩용 search_text — 전체 합산
     search_text = " ".join(query_keywords + inferred_keywords) or query
@@ -1178,7 +1180,25 @@ def analyze_query(
     if intent not in ("recommend", "list_by_domain", "list_by_topic"):
         intent = "recommend"
 
-    return intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint
+    normalized_conditions = {
+        "issue_free": bool(conditions.get("issue_free")),
+        "prefers_visual": bool(conditions.get("prefers_visual")),
+        "prefers_application": bool(conditions.get("prefers_application")),
+        "prefers_slow_speech": bool(conditions.get("prefers_slow_speech")),
+        "prefers_listenability": bool(conditions.get("prefers_listenability")),
+    }
+
+    return (
+        intent,
+        search_text,
+        query_keywords,
+        inferred_keywords,
+        domain,
+        focus_concept,
+        duration_max_sec,
+        difficulty_hint,
+        normalized_conditions,
+    )
 
 
 # ============================================================================
@@ -1212,7 +1232,11 @@ class QueryContext:
     duration_max_sec:  Optional[int]
     difficulty_hint:   Optional[str]
     comparison_intent: bool
+    issue_free_preference: bool
     visual_preference: bool
+    application_preference: bool
+    listenability_preference: bool
+    slow_speech_preference: bool
 
 
 def _build_reason(detail: dict, tier: str = "direct") -> str:
@@ -1245,6 +1269,14 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
         parts.append(f"개념 깊이 {detail['depth_score']:.0%}")
     if detail.get("contrast_bonus", 0) > 0:
         parts.append("비교 분석형")
+    if detail.get("application_preference") and detail.get("application_score", 0) > 0:
+        parts.append(f"예제/시연 지향 {detail['application_score']:.0%}")
+    if detail.get("listenability_preference") and detail.get("listenability_score", 0) > 0:
+        parts.append(f"청취 품질 {detail['listenability_score']:.0%}")
+    if detail.get("slow_speech_preference") and detail.get("speech_rate_score", 0) > 0:
+        parts.append(f"발화 속도 적합 {detail['speech_rate_score']:.0%}")
+    for warning in detail.get("condition_warnings", [])[:2]:
+        parts.append(f"주의: {warning}")
     if detail.get("sim_keyword", 0) >= 0.6:
         parts.append(f"키워드 유사도 {detail['sim_keyword']:.0%}")
     if detail.get("dm_keyword", 0) > 0.1:
@@ -1336,9 +1368,9 @@ class Recommender:
         print(f"[질의 분석] {query}")
         fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains)
         if fast_analysis:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = fast_analysis
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint, conditions = fast_analysis
         else:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint, conditions = analyze_query(
                 query, self._available_domains, self._available_keywords
             )
         inferred_keywords = _append_topic_expansions(
@@ -1348,7 +1380,11 @@ class Recommender:
         )
         search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
-        visual_preference = _detect_visual_preference(query_keywords, query)
+        issue_free_preference = bool(conditions.get("issue_free"))
+        visual_preference = bool(conditions.get("prefers_visual"))
+        application_preference = bool(conditions.get("prefers_application"))
+        listenability_preference = bool(conditions.get("prefers_listenability"))
+        slow_speech_preference = bool(conditions.get("prefers_slow_speech"))
 
         print(f"[질의 의도]   {intent}")
         print(f"[원본 키워드] {query_keywords}")
@@ -1357,9 +1393,13 @@ class Recommender:
         print(f"[깊이 개념]   {focus_concept or '없음'}")
         print(f"[난이도 힌트] {difficulty_hint or '없음'}")
         print(f"[비교 의도]   {'있음' if comparison_intent else '없음'}")
+        print(f"[검증 조건]   {'있음' if issue_free_preference else '없음'}")
         print(f"[시각 선호]   {'있음' if visual_preference else '없음'}")
+        print(f"[적용/시연]   {'있음' if application_preference else '없음'}")
+        print(f"[청취 품질]   {'있음' if listenability_preference else '없음'}")
+        print(f"[발화 속도]   {'빠르지 않음 선호' if slow_speech_preference else '없음'}")
         if duration_max_sec:
-            print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 소프트 패널티 적용")
+            print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 조건 boost + warning 적용")
         print()
 
         return QueryContext(
@@ -1373,7 +1413,11 @@ class Recommender:
             duration_max_sec  = duration_max_sec,
             difficulty_hint   = difficulty_hint,
             comparison_intent = comparison_intent,
+            issue_free_preference = issue_free_preference,
             visual_preference = visual_preference,
+            application_preference = application_preference,
+            listenability_preference = listenability_preference,
+            slow_speech_preference = slow_speech_preference,
         )
 
     def _all_candidate_ids(self) -> list[str]:
@@ -1463,7 +1507,7 @@ class Recommender:
             ):
                 continue
 
-            preferred.add(video_id)
+            preferred.add(lec.video_id)
 
         return preferred or None
 
@@ -1577,6 +1621,7 @@ class Recommender:
     @staticmethod
     def _visual_density_score(lec: LectureMetadata) -> float:
         pedagogy = lec.pedagogy or {}
+        teaching_style = (lec.diagnostics or {}).get("teaching_style", {})
 
         def as_float(value) -> float:
             try:
@@ -1585,9 +1630,34 @@ class Recommender:
             except (TypeError, ValueError):
                 return 0.0
 
-        visual_ratio = as_float(pedagogy.get("visual_ratio"))
+        visual_ratio = as_float(teaching_style.get("visual_ratio", pedagogy.get("visual_ratio")))
         structure_ratio = as_float(pedagogy.get("structure_ratio"))
         return round(min(max(0.5 * visual_ratio + 0.5 * structure_ratio, 0.0), 1.0), 4)
+
+    @staticmethod
+    def _diagnostic_score(lec: LectureMetadata, section: str, key: str) -> float:
+        value = ((lec.diagnostics or {}).get(section, {}) or {}).get(key)
+        try:
+            parsed = float(value)
+            return min(max(parsed, 0.0), 1.0) if math.isfinite(parsed) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _speech_rate_fit_score(lec: LectureMetadata) -> float:
+        delivery = ((lec.diagnostics or {}).get("delivery", {}) or {})
+        try:
+            spm = float(delivery.get("speech_rate_spm"))
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(spm) or spm <= 0:
+            return 0.0
+        # 한국어 SPM 기준은 데이터 분포로 확정 예정. 우선 빠른 발화 감쇄용 완만한 프록시만 사용한다.
+        if spm <= 330:
+            return 1.0
+        if spm >= 450:
+            return 0.0
+        return round(1.0 - ((spm - 330) / 120), 4)
 
     @staticmethod
     def _visual_concept_score(lec: LectureMetadata, query_terms: Counter) -> float:
@@ -1729,18 +1799,20 @@ class Recommender:
         query_terms: Counter,
         weights: dict[str, float],
     ) -> dict:
-        # ── 길이 소프트 패널티 ────────────────────────────────────
-        # 기준 ±5분(300초) 이내 → 1.0
-        # 초과량에 따라 선형 감쇄 → 최소 0.1
+        # ── 길이 조건 boost + warning ─────────────────────────────
+        # 내용 적합성을 깎지 않고, 요청 길이(+grace)를 만족하는 후보만 boost한다.
+        condition_warnings: list[str] = []
         if ctx.duration_max_sec:
-            over_sec = lec.duration_sec - (ctx.duration_max_sec + 300)
-            if over_sec <= 0:
-                duration_score = 1.0
-            else:
-                # 300초(5분) 초과부터 감쇄, 1200초(20분) 초과 시 0.1
-                duration_score = max(1.0 - (over_sec / 1200) * 0.9, 0.1)
+            duration_fit_score = (
+                1.0
+                if lec.duration_sec <= ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
+                else 0.0
+            )
+            if lec.duration_sec > ctx.duration_max_sec:
+                over_min = math.ceil((lec.duration_sec - ctx.duration_max_sec) / 60.0)
+                condition_warnings.append(f"요청한 길이보다 약 {over_min}분 깁니다.")
         else:
-            duration_score = 1.0
+            duration_fit_score = 0.0
 
         # 필드별 코사인 유사도. LanceDB row가 없으면 벡터 성분만 0으로 둔다.
         has_vector_row = row is not None and bool(query_vec)
@@ -1810,17 +1882,44 @@ class Recommender:
             ctx,
             query_terms,
         )
+        application_score = self._diagnostic_score(
+            lec,
+            "teaching_style",
+            "application_orientation_score",
+        )
+        listenability_score = self._diagnostic_score(
+            lec,
+            "delivery",
+            "listenability_score",
+        )
+        speech_rate_score = self._speech_rate_fit_score(lec)
+        if ctx.visual_preference and visual_density_score < 0.3:
+            condition_warnings.append("시각 자료 비중이 높지 않습니다.")
+        if ctx.application_preference and application_score < 0.2:
+            condition_warnings.append("예제/시연 지향 신호가 약합니다.")
+        if ctx.listenability_preference and listenability_score < 0.7:
+            condition_warnings.append("청취 품질 신호가 높지 않습니다.")
+        if ctx.slow_speech_preference and speech_rate_score < 0.6:
+            condition_warnings.append("발화 속도가 빠른 편일 수 있습니다.")
 
         # ── 가중합 구조 점수 ──────────────────────────────────
         MAX_BOOST = (
             self.cfg.W_DOMAIN_BOOST +
             self.cfg.W_DIFFICULTY_BOOST +
-            self.cfg.W_DEPTH_BOOST
+            self.cfg.W_DEPTH_BOOST +
+            (self.cfg.W_DURATION_BOOST if ctx.duration_max_sec else 0.0) +
+            (self.cfg.W_APPLICATION_BOOST if ctx.application_preference else 0.0) +
+            (self.cfg.W_LISTENABILITY_BOOST if ctx.listenability_preference else 0.0) +
+            (self.cfg.W_SPEECH_RATE_BOOST if ctx.slow_speech_preference else 0.0)
         )
         raw_boost = (
             self.cfg.W_DOMAIN_BOOST     * domain_score    +
             self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
-            self.cfg.W_DEPTH_BOOST      * depth_score
+            self.cfg.W_DEPTH_BOOST      * depth_score +
+            (self.cfg.W_DURATION_BOOST * duration_fit_score if ctx.duration_max_sec else 0.0) +
+            (self.cfg.W_APPLICATION_BOOST * application_score if ctx.application_preference else 0.0) +
+            (self.cfg.W_LISTENABILITY_BOOST * listenability_score if ctx.listenability_preference else 0.0) +
+            (self.cfg.W_SPEECH_RATE_BOOST * speech_rate_score if ctx.slow_speech_preference else 0.0)
         )
         boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0
 
@@ -1828,7 +1927,7 @@ class Recommender:
         frag = _compute_fragmentation_penalty(lec.concept_roles)
 
         total = max(
-            weights["content"] * content_score * duration_score
+            weights["content"] * content_score
             + weights["graph"] * graph_score
             + weights["community"] * community_score
             + weights["visual"] * visual_score
@@ -1886,6 +1985,12 @@ class Recommender:
             "visual_density_score": round(visual_density_score, 4),
             "visual_concept_score": round(visual_concept_score, 4),
             "visual_preference":    ctx.visual_preference,
+            "application_score":    round(application_score, 4),
+            "application_preference": ctx.application_preference,
+            "listenability_score":  round(listenability_score, 4),
+            "listenability_preference": ctx.listenability_preference,
+            "speech_rate_score":    round(speech_rate_score, 4),
+            "slow_speech_preference": ctx.slow_speech_preference,
             "weight_content":       round(weights["content"], 4),
             "weight_graph":         round(weights["graph"], 4),
             "weight_community":     round(weights["community"], 4),
@@ -1896,8 +2001,10 @@ class Recommender:
             "contrast_bonus":       round(contrast_bonus, 4),
             "boost_signal":         round(boost_signal, 4),
             "combined_boost":       round(boost_signal, 4),
-            "duration_score":       round(duration_score, 4),
-            "duration_mismatch":    duration_score < 1.0,
+            "duration_score":       round(duration_fit_score, 4),
+            "duration_fit_score":   round(duration_fit_score, 4),
+            "duration_mismatch":    bool(ctx.duration_max_sec and lec.duration_sec > ctx.duration_max_sec),
+            "condition_warnings":   condition_warnings,
             "frag_penalty":         round(frag, 4),
         }
 
