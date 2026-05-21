@@ -22,6 +22,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
 
   const durationMin      = lecture.duration_sec ? Math.round(lecture.duration_sec / 60) : null
   const durationMismatch = detail.duration_mismatch === true
+  const conditionWarnings = Array.isArray(detail.condition_warnings)
+    ? detail.condition_warnings.filter(Boolean)
+    : []
 
   return (
     <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${hasSupportTier ? ' rec-item--related' : ''}${isBackground ? ' rec-item--background' : ''}`}>
@@ -52,7 +55,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
           </div>
           {lecture.video_id && <div className="rec-sub">{lecture.video_id}</div>}
           {durationMismatch && durationMin && (
-            <span className="rec-duration-warn">⚠ {durationMin}분 · 시간 범위 초과</span>
+            <span className="rec-condition-warning rec-condition-warning--inline">
+              {durationMin}분 · 시간 범위 초과
+            </span>
           )}
         </div>
 
@@ -88,6 +93,15 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             {lecture.reason && (
               <p className="rec-sub" style={{ marginBottom: 8 }}>{lecture.reason}</p>
             )}
+            {conditionWarnings.length > 0 && (
+              <div className="rec-condition-warnings">
+                {conditionWarnings.map((warning, i) => (
+                  <div key={i} className="rec-condition-warning">
+                    {warning}
+                  </div>
+                ))}
+              </div>
+            )}
             {lecture.summary && (
               <p className="rec-sub" style={{ marginBottom: 10 }}>{lecture.summary}</p>
             )}
@@ -106,6 +120,15 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
                   <DetailScoreBar label="커뮤니티 점수" score={pct(detail.community_score)} color="#14b8a6" />
                   {detail.visual_preference && (
                     <DetailScoreBar label="시각 자료" score={pct(detail.visual_score)} color="#ec4899" />
+                  )}
+                  {detail.application_preference && (
+                    <DetailScoreBar label="예제/시연" score={pct(detail.application_score)} color="#f97316" />
+                  )}
+                  {detail.listenability_preference && (
+                    <DetailScoreBar label="청취 품질" score={pct(detail.listenability_score)} color="#06b6d4" />
+                  )}
+                  {detail.slow_speech_preference && (
+                    <DetailScoreBar label="발화 속도" score={pct(detail.speech_rate_score)} color="#84cc16" />
                   )}
                   <DetailScoreBar label="조건 부스트" score={pct(detail.combined_boost)} color="#64748b" />
                 </div>

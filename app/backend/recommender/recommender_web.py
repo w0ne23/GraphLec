@@ -93,12 +93,19 @@ class ScoreDetail(BaseModel):
     visual_density_score: float
     visual_concept_score: float
     visual_preference: bool
+    application_score: float = 0.0
+    application_preference: bool = False
+    listenability_score: float = 0.0
+    listenability_preference: bool = False
+    speech_rate_score: float = 0.0
+    slow_speech_preference: bool = False
     domain_score:      float
     difficulty_match:  float
     depth_score:       float
     combined_boost:    float
     duration_score:    float
     duration_mismatch: bool
+    condition_warnings: list[str] = []
     frag_penalty:      float
 
 
@@ -179,12 +186,19 @@ def recommend(req: RecommendRequest):
                     visual_density_score = r.score_detail.get("visual_density_score", 0.0),
                     visual_concept_score = r.score_detail.get("visual_concept_score", 0.0),
                     visual_preference = r.score_detail.get("visual_preference",  False),
+                    application_score = r.score_detail.get("application_score", 0.0),
+                    application_preference = r.score_detail.get("application_preference", False),
+                    listenability_score = r.score_detail.get("listenability_score", 0.0),
+                    listenability_preference = r.score_detail.get("listenability_preference", False),
+                    speech_rate_score = r.score_detail.get("speech_rate_score", 0.0),
+                    slow_speech_preference = r.score_detail.get("slow_speech_preference", False),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     difficulty_match  = r.score_detail.get("difficulty_match",   0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
                     combined_boost    = r.score_detail.get("combined_boost",     1.0),
                     duration_score    = r.score_detail.get("duration_score",     1.0),
                     duration_mismatch = r.score_detail.get("duration_mismatch",  False),
+                    condition_warnings = r.score_detail.get("condition_warnings", []),
                     frag_penalty      = r.score_detail.get("frag_penalty",       0.0),
                 ),
             )

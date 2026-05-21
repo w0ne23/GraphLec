@@ -153,7 +153,6 @@
   padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r);
 }
 .rec-related-notice--background { color: var(--t3); background: var(--card); }
-.rec-duration-warn { font-size: 10px; color: var(--amber); }
 
 /* 모바일 */
 @media (max-width: 768px) {
@@ -285,4 +284,18 @@
 .rec-tier-badge--background { background: var(--card); color: var(--t3); }
 .rec-related-notice { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
 .rec-related-notice--background { color: var(--t3); background: var(--card); }
-.rec-duration-warn { font-size: 10px; color: var(--amber); }
+.rec-condition-warnings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.rec-condition-warning {
+  font-size: 11px;
+  color: var(--amber);
+  padding: 6px 10px;
+  background: var(--amber-bg);
+  border-radius: var(--r);
+}
+.rec-condition-warning--inline {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  font-size: 10px;
+  padding: 2px 6px;
+}

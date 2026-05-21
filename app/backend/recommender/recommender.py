@@ -212,8 +212,6 @@ class RecommenderConfig:
     DB_DIR:                  str   = DEFAULT_DB_DIR
     # domain boost 강도
     W_DOMAIN_BOOST:      float = 0.20
-    # difficulty boost 강도 (질의 난이도 힌트 일치 시)
-    W_DIFFICULTY_BOOST:  float = 0.15
     W_DURATION_BOOST:    float = 0.08
     W_APPLICATION_BOOST: float = 0.10
     W_LISTENABILITY_BOOST: float = 0.08
@@ -996,6 +994,49 @@ _COMPARISON_SIGNALS = frozenset({
     "구분", "다른점", "차이를", "비교해", "비교한",
 })
 
+
+_VISUAL_CONDITION_TERMS = frozenset({
+    "그림", "도식", "도표", "시각", "시각자료", "시각 자료",
+    "이미지", "다이어그램", "위주",
+})
+
+_APPLICATION_CONDITION_TERMS = frozenset({
+    "예제", "예시", "사례", "실습", "시연", "데모", "적용", "활용",
+    "문제풀이", "풀이", "이론만 말고",
+})
+
+_DELIVERY_CONDITION_TERMS = frozenset({
+    "음질", "녹음", "청취", "듣기", "발화", "말", "빠르지", "느리",
+    "천천히", "천천", "여유", "명료",
+})
+
+
+def _content_terms_only(terms: list[str], conditions: dict) -> list[str]:
+    """
+    LLM이 조건 표현(그림/도식/음질/예제 등)을 query_keywords에 넣어도
+    원본 키워드 미매칭 패널티가 내용 검색을 죽이지 않도록 제거한다.
+    조건 감지는 LLM에 맡기고, 여기서는 이미 감지된 조건의 수식어만 정리한다.
+    """
+    blocked: set[str] = set()
+    if conditions.get("prefers_visual"):
+        blocked.update(_VISUAL_CONDITION_TERMS)
+    if conditions.get("prefers_application"):
+        blocked.update(_APPLICATION_CONDITION_TERMS)
+    if conditions.get("prefers_slow_speech") or conditions.get("prefers_listenability"):
+        blocked.update(_DELIVERY_CONDITION_TERMS)
+    if not blocked:
+        return terms
+
+    normalized_blocked = {_normalize_term(term) for term in blocked}
+    cleaned = []
+    for term in terms or []:
+        normalized = _normalize_term(term)
+        if not normalized or normalized in normalized_blocked:
+            continue
+        cleaned.append(term)
+    return cleaned
+
+
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
     """
     강의 내 대조·비교형 concept_relations 비율.
@@ -1056,7 +1097,7 @@ def analyze_query(
     available_keywords: list[str],
 ) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str], dict]:
     """
-    질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
+    질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec 추출.
 
     반환:
       intent             : "recommend" | "list_by_domain" | "list_by_topic"
@@ -1066,7 +1107,6 @@ def analyze_query(
       domain             : available_domains 중 하나, 없으면 None
       focus_concept      : 깊이를 측정할 핵심 개념, 없으면 None
       duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
-      difficulty_hint    : "beginner" | "intermediate" | "advanced" | None
       conditions         : 조건 질의 플래그
     """
     domain_list  = ", ".join(available_domains)
@@ -1084,7 +1124,6 @@ def analyze_query(
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
-  "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null,
   "conditions": {{
     "issue_free": true 또는 false,
     "prefers_visual": true 또는 false,
@@ -1130,12 +1169,6 @@ def analyze_query(
   - "짧은", "빠르게" 등 모호한 표현 → 1800
   - 길이 언급 없으면 → null
 
-[difficulty_hint]: 질의에서 난이도·범위 표현을 감지하여 추출
-  - "입문", "기초", "개론", "개요", "훑어주는", "전반", "처음", "쉽게" 등 → "beginner"
-  - "심화", "자세히", "깊게", "원리", "내부 동작" 등 → "advanced"
-  - "응용", "실습", "프로젝트" 등 중급 신호 → "intermediate"
-  - 난이도·범위 표현 없으면 → null
-
 [conditions]: 내용 조건이 아니라 강의 상태/형식에 대한 선호를 의미 단위로 추출
   - issue_free: "오류 없는", "검증된", "이슈 없는", "틀린 내용 없는" 등
   - prefers_visual: "그림/도식/표/그래프/시각 자료 위주", "시각적으로 설명" 등
@@ -1162,6 +1195,16 @@ def analyze_query(
     difficulty_hint   = parsed.get("difficulty_hint") or None
     conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
 
+    normalized_conditions = {
+        "issue_free": bool(conditions.get("issue_free")),
+        "prefers_visual": bool(conditions.get("prefers_visual")),
+        "prefers_application": bool(conditions.get("prefers_application")),
+        "prefers_slow_speech": bool(conditions.get("prefers_slow_speech")),
+        "prefers_listenability": bool(conditions.get("prefers_listenability")),
+    }
+    query_keywords = _content_terms_only(query_keywords, normalized_conditions)
+    inferred_keywords = _content_terms_only(inferred_keywords, normalized_conditions)
+
     # 벡터 임베딩용 search_text — 전체 합산
     search_text = " ".join(query_keywords + inferred_keywords) or query
 
@@ -1175,18 +1218,11 @@ def analyze_query(
             duration_max_sec = int(duration_max_sec)
         except (ValueError, TypeError):
             duration_max_sec = None
-    if difficulty_hint not in ("beginner", "intermediate", "advanced"):
-        difficulty_hint = None
+    # 학습 수준은 현재 추천 조건 범위에서 제외한다. LLM이 "천천히" 등을
+    # beginner로 오해해 도메인 내 무관 강의가 boost되는 것을 방지한다.
+    difficulty_hint = None
     if intent not in ("recommend", "list_by_domain", "list_by_topic"):
         intent = "recommend"
-
-    normalized_conditions = {
-        "issue_free": bool(conditions.get("issue_free")),
-        "prefers_visual": bool(conditions.get("prefers_visual")),
-        "prefers_application": bool(conditions.get("prefers_application")),
-        "prefers_slow_speech": bool(conditions.get("prefers_slow_speech")),
-        "prefers_listenability": bool(conditions.get("prefers_listenability")),
-    }
 
     return (
         intent,
@@ -1275,8 +1311,6 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
         parts.append(f"청취 품질 {detail['listenability_score']:.0%}")
     if detail.get("slow_speech_preference") and detail.get("speech_rate_score", 0) > 0:
         parts.append(f"발화 속도 적합 {detail['speech_rate_score']:.0%}")
-    for warning in detail.get("condition_warnings", [])[:2]:
-        parts.append(f"주의: {warning}")
     if detail.get("sim_keyword", 0) >= 0.6:
         parts.append(f"키워드 유사도 {detail['sim_keyword']:.0%}")
     if detail.get("dm_keyword", 0) > 0.1:
@@ -1424,24 +1458,13 @@ class Recommender:
         return [lec.video_id for lec in self.collection.all()]
 
     def _list_by_domain_results(self, ctx: QueryContext, top_k: int) -> list[RecommendResult]:
-        difficulty_order = {
-            "beginner": 0,
-            "intermediate": 1,
-            "advanced": 2,
-            "unknown": 3,
-        }
         lectures = []
         for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
                 continue
             lectures.append(lec)
 
-        lectures.sort(
-            key=lambda lec: (
-                difficulty_order.get(lec.difficulty, 3),
-                lec.title or lec.video_id,
-            )
-        )
+        lectures.sort(key=lambda lec: lec.title or lec.video_id)
 
         scope = _DOMAIN_LABELS.get(ctx.domain, ctx.domain) if ctx.domain else "전체"
         reason = "전체 강의 목록입니다." if not ctx.domain else f"{scope} 분야 강의 목록입니다."
@@ -1493,14 +1516,12 @@ class Recommender:
         """
         if not self.cfg.USE_METADATA_PREFILTER:
             return None
-        if not (ctx.domain or ctx.difficulty_hint or ctx.duration_max_sec):
+        if not (ctx.domain or ctx.duration_max_sec):
             return None
 
         preferred = set()
         for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
-                continue
-            if ctx.difficulty_hint and lec.difficulty != ctx.difficulty_hint:
                 continue
             if ctx.duration_max_sec and lec.duration_sec > (
                 ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
@@ -1652,12 +1673,13 @@ class Recommender:
             return 0.0
         if not math.isfinite(spm) or spm <= 0:
             return 0.0
-        # 한국어 SPM 기준은 데이터 분포로 확정 예정. 우선 빠른 발화 감쇄용 완만한 프록시만 사용한다.
-        if spm <= 330:
+        # "천천히/빠르지 않게" 조건은 낮은 SPM일수록 더 적합하게 본다.
+        # 임계값은 더미 데이터 분포 기준 임시값이며, 실제 데이터 분포로 재보정한다.
+        if spm <= 240:
             return 1.0
-        if spm >= 450:
+        if spm >= 330:
             return 0.0
-        return round(1.0 - ((spm - 330) / 120), 4)
+        return round(1.0 - ((spm - 240) / 90), 4)
 
     @staticmethod
     def _visual_concept_score(lec: LectureMetadata, query_terms: Counter) -> float:
@@ -1689,7 +1711,7 @@ class Recommender:
         density_score = self._visual_density_score(lec)
         concept_score = self._visual_concept_score(lec, query_terms)
         if ctx.visual_preference:
-            visual_score = 0.4 * density_score + 0.6 * concept_score
+            visual_score = 0.65 * density_score + 0.35 * concept_score
         else:
             visual_score = 0.5 * density_score
         return (
@@ -1861,9 +1883,6 @@ class Recommender:
         # domain boost 신호
         domain_score = 1.0 if (ctx.domain and lec.domain == ctx.domain) else 0.0
 
-        # difficulty boost 신호
-        difficulty_match = 1.0 if (ctx.difficulty_hint and lec.difficulty == ctx.difficulty_hint) else 0.0
-
         # depth boost 신호 — BFS 홉 거리 기반
         depth_score = _compute_depth_score(ctx.focus_concept, lec) if ctx.focus_concept else 0.0
 
@@ -1905,7 +1924,6 @@ class Recommender:
         # ── 가중합 구조 점수 ──────────────────────────────────
         MAX_BOOST = (
             self.cfg.W_DOMAIN_BOOST +
-            self.cfg.W_DIFFICULTY_BOOST +
             self.cfg.W_DEPTH_BOOST +
             (self.cfg.W_DURATION_BOOST if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST if ctx.application_preference else 0.0) +
@@ -1914,7 +1932,6 @@ class Recommender:
         )
         raw_boost = (
             self.cfg.W_DOMAIN_BOOST     * domain_score    +
-            self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
             self.cfg.W_DEPTH_BOOST      * depth_score +
             (self.cfg.W_DURATION_BOOST * duration_fit_score if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST * application_score if ctx.application_preference else 0.0) +
@@ -1978,7 +1995,7 @@ class Recommender:
             "domain_score":         round(domain_score, 4),
             "q_kw_matched":         dm.get("q_kw_matched", True),
             "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
-            "difficulty_match":     round(difficulty_match, 4),
+            "difficulty_match":     0.0,
             "graph_score":          round(graph_score, 4),
             "community_score":      round(community_score, 4),
             "visual_score":         round(visual_score, 4),
@@ -2002,7 +2019,6 @@ class Recommender:
             "boost_signal":         round(boost_signal, 4),
             "combined_boost":       round(boost_signal, 4),
             "duration_score":       round(duration_fit_score, 4),
-            "duration_fit_score":   round(duration_fit_score, 4),
             "duration_mismatch":    bool(ctx.duration_max_sec and lec.duration_sec > ctx.duration_max_sec),
             "condition_warnings":   condition_warnings,
             "frag_penalty":         round(frag, 4),

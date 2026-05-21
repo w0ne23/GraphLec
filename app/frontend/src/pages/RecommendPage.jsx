@@ -77,7 +77,7 @@ export default function RecommendPage() {
           <input
             ref={inputRef}
             className="rec-searchbar-input"
-            placeholder="강의 내용, 주제, 난이도 등을 자유롭게 입력하세요"
+            placeholder="강의 내용, 주제, 조건 등을 자유롭게 입력하세요"
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => {
