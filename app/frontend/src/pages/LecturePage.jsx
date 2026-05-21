@@ -22,7 +22,7 @@ export default function LecturePage() {
   const navigate = useNavigate()
 
   const { chatWidth, handleResizerMouseDown } = useResizer(300)
-  const { messages: chatMessages, setMessages: setChatMessages, input: chatInput, setInput: setChatInput, loading: chatLoading, setLoading: setChatLoading } = useChatSession(id)
+  const { messages: chatMessages, setMessages: setChatMessages, input: chatInput, setInput: setChatInput, loading: chatLoading, setLoading: setChatLoading, sessionId: chatSessionId } = useChatSession(id)
   useGraphSession(id)
 
   const [lecture, setLecture] = useState(null)
@@ -91,10 +91,12 @@ export default function LecturePage() {
   const scenes = lecture?.scenes ?? []
   const chatContext = { type: 'watch', lecture_id: id }
 
-  function handleJumpToScene(idx, seconds = null) {
+  function handleJumpToScene(idx, seconds = null, options = {}) {
+    const autoPlay = options.autoPlay ?? true
+    const offsetSec = Number.isFinite(Number(options.offsetSec)) ? Number(options.offsetSec) : 0
     if (Number.isInteger(idx) && idx >= 0) {
       setCurrentScene(idx)
-      setSeekTo({ index: idx, time: Date.now() })
+      setSeekTo({ index: idx, time: Date.now(), autoPlay, offsetSec })
     }
     if (seconds !== null && Number.isFinite(Number(seconds))) {
       setSeekToSeconds({ seconds: Number(seconds), time: Date.now() })
@@ -191,6 +193,7 @@ export default function LecturePage() {
           <ChatPanel
             context={chatContext}
             lecture={lecture}
+            currentSceneIndex={currentScene}
             onJumpToScene={handleJumpToScene}
             onClose={toggleChat}
             mode="sidebar"
@@ -200,6 +203,7 @@ export default function LecturePage() {
             setInput={setChatInput}
             loading={chatLoading}
             setLoading={setChatLoading}
+            chatSessionId={chatSessionId}
           />
           </div>
         </div>

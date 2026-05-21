@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { listActiveJobs, listUploadedLectures, uploadLecture, deleteLecture, retryLecture } from '../lib/api'
 
 import '../styles/upload.css'
@@ -23,6 +24,8 @@ const THUMB_ICON = {
 }
 
 export default function UploadPage() {
+  const navigate = useNavigate()
+
   const [lectures,    setLectures]    = useState([])
   const [title,       setTitle]       = useState('')
   const [category,    setCategory]    = useState('컴퓨터 과학')
@@ -155,18 +158,17 @@ export default function UploadPage() {
 
   // 처음 로드 시
   useEffect(() => {
-    setLoadingLectures(true)
     Promise.all([
       listActiveJobs(),
       listUploadedLectures({ page: 1, limit: 12 }),
     ]).then(([activeJobs, result]) => {
-      setError('')
       setLectures([...activeJobs, ...result.items])
       setTotalPages(result.totalPages)
       activeJobs.forEach(lec => {
         setupSSEForJob(lec.id, lec.job_id)
       })
-    }).catch(e => setError(String(e.message || e)))
+    })
+      .catch(e => setError(String(e.message || e)))
       .finally(() => setLoadingLectures(false))
 
     return () => {

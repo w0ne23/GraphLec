@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import shutil
 import logging
 import json
@@ -16,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession
+from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file__).resolve().parents[4]
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
+CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
@@ -94,6 +96,241 @@ def _str_cell(x: Any) -> str:
     except Exception:
         pass
     return str(x)
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        if path.exists() and path.stat().st_size > 0:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _first_existing_json(paths: list[Path]) -> dict:
+    for path in paths:
+        data = _read_json_file(path)
+        if data:
+            return data
+    return {}
+
+
+def _float_val(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _format_mmss(seconds: Any) -> str:
+    sec = max(0, int(_float_val(seconds)))
+    return f"{sec // 60:02d}:{sec % 60:02d}"
+
+
+def _keyword_label(item: Any) -> str:
+    if isinstance(item, dict):
+        return _str_cell(item.get("keyword") or item.get("name") or item.get("text"))
+    return _str_cell(item)
+
+
+def _context_emphasis_score(ctx: dict) -> float:
+    score = ctx.get("emphasis_score") or {}
+    if isinstance(score, dict):
+        return _float_val(score.get("total"))
+    return _float_val(score)
+
+
+def _read_video_domain(output_dir: Path, stem: str) -> tuple[str, str]:
+    nodes_path = output_dir / f"{stem}_nodes.parquet"
+    if not nodes_path.is_file():
+        return "", ""
+    try:
+        ndf = pd.read_parquet(nodes_path)
+        video_id = f"lecture_video/{stem}"
+        for _, row in ndf.iterrows():
+            if _str_cell(row.get("node_id")) != video_id:
+                continue
+            props = json.loads(_str_cell(row.get("properties_json")) or "{}")
+            if not isinstance(props, dict):
+                return "", ""
+            return _str_cell(props.get("domain")), _str_cell(props.get("subdomain"))
+    except Exception:
+        return "", ""
+    return "", ""
+
+
+def _format_domain_label(domain: str, subdomain: str, fallback: str) -> str:
+    domain = _str_cell(domain).strip()
+    subdomain = _str_cell(subdomain).strip()
+    if domain and subdomain:
+        return f"{domain} / {subdomain}"
+    if domain:
+        return domain
+    return _str_cell(fallback) or "기타"
+
+
+def _visual_asset_stats_from_fused(fused: dict) -> dict:
+    entries = fused.get("slides") if isinstance(fused.get("slides"), list) and fused.get("slides") else fused.get("scenes")
+    if not isinstance(entries, list) or not entries:
+        return {"visual_percent": 0, "visual_count": 0, "total_count": 0}
+
+    visual_asset_types = {"diagram", "table", "chart", "figure", "image"}
+    total_count = 0
+    visual_count = 0
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        total_count += 1
+        visual_assets = item.get("visual_assets")
+        has_visual_asset = False
+        has_asset_metadata = isinstance(visual_assets, list) and len(visual_assets) > 0
+        if isinstance(visual_assets, list):
+            for asset in visual_assets:
+                if not isinstance(asset, dict):
+                    continue
+                asset_type = _str_cell(asset.get("asset_type") or asset.get("type")).strip().lower()
+                if asset_type in visual_asset_types:
+                    has_visual_asset = True
+                    break
+        slide_type = _str_cell(item.get("slide_type")).strip().lower()
+        if has_visual_asset or slide_type in {"image_only", "diagram", "chart", "figure"}:
+            visual_count += 1
+
+    visual_percent = round((visual_count / total_count) * 100) if total_count else 0
+    return {
+        "visual_percent": visual_percent,
+        "visual_count": visual_count,
+        "total_count": total_count,
+    }
+
+
+def _format_percent(value: Any) -> str:
+    try:
+        return f"{int(round(float(value)))}%"
+    except (TypeError, ValueError):
+        return "0%"
+
+
+def _split_sentences(text: str) -> list[str]:
+    compact = re.sub(r"\s+", " ", _str_cell(text)).strip()
+    if not compact:
+        return []
+    pattern = r".+?(?:[.!?。！？]+|(?:다|요|죠|니다|습니다|어요|예요|에요)(?=\s|$))"
+    sentences = [m.group(0).strip() for m in re.finditer(pattern, compact)]
+    consumed = sum(len(s) for s in sentences)
+    if consumed < len(compact):
+        rest = compact[consumed:].strip()
+        if rest:
+            sentences.append(rest)
+    return [s for s in sentences if s]
+
+
+def _trim_at_word_boundary(text: str, max_chars: int) -> str:
+    text = re.sub(r"\s+", " ", _str_cell(text)).strip()
+    if len(text) <= max_chars:
+        return text
+    clipped = text[:max_chars].rstrip()
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0].rstrip()
+    return f"{clipped}..."
+
+
+def _highlight_excerpt(text: str, min_chars: int = 35, max_chars: int = 120, max_sentences: int = 3) -> str:
+    sentences = _split_sentences(text)
+    if not sentences:
+        return ""
+    picked: list[str] = []
+    for sentence in sentences[:max_sentences]:
+        candidate = " ".join(picked + [sentence]).strip()
+        if picked and len(candidate) > max_chars:
+            break
+        picked.append(sentence)
+        if len(candidate) >= min_chars:
+            break
+    return _trim_at_word_boundary(" ".join(picked), max_chars)
+
+
+def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> dict:
+    metadata = _first_existing_json([
+        output_dir / "metadata" / f"{stem}_metadata.json",
+        output_dir / f"{stem}_metadata.json",
+    ])
+    fused = _first_existing_json([output_dir / f"{stem}_fused.json"])
+
+    summary = _str_cell(metadata.get("summary"))
+    graph_domain = _str_cell(metadata.get("graph_domain"))
+    graph_subdomain = _str_cell(metadata.get("graph_subdomain"))
+    if not graph_domain:
+        graph_domain, graph_subdomain = _read_video_domain(output_dir, stem)
+    domain = _format_domain_label(graph_domain, graph_subdomain, fallback_category)
+    visual_stats = _visual_asset_stats_from_fused(fused)
+    keywords = [
+        kw for kw in (_keyword_label(item) for item in (metadata.get("keywords") or []))
+        if kw
+    ][:8]
+
+    scenes = fused.get("scenes") if isinstance(fused.get("scenes"), list) else []
+    contexts: list[dict] = []
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        for ctx in scene.get("contexts") or []:
+            if not isinstance(ctx, dict):
+                continue
+            contexts.append({
+                "score": _context_emphasis_score(ctx),
+                "start_sec": ctx.get("start"),
+                "text": _str_cell(ctx.get("text")),
+                "scene_number": scene.get("scene_number") or scene.get("scene_index"),
+                "slide_number": scene.get("slide_number"),
+            })
+
+    scored_contexts = [ctx for ctx in contexts if ctx["score"] > 0]
+    scored_contexts.sort(key=lambda x: x["score"], reverse=True)
+    if scored_contexts:
+        top_20_idx = min(len(scored_contexts) - 1, max(0, int(len(scored_contexts) * 0.2) - 1))
+        threshold = max(0.8, scored_contexts[top_20_idx]["score"])
+        emphasis_context_count = sum(1 for ctx in scored_contexts if ctx["score"] >= threshold)
+    else:
+        threshold = 0.8
+        emphasis_context_count = 0
+
+    highlights = []
+    for ctx in sorted(scored_contexts[:3], key=lambda x: _float_val(x.get("start_sec"))):
+        text = _highlight_excerpt(ctx["text"])
+        highlights.append({
+            "timestamp": _format_mmss(ctx.get("start_sec")),
+            "start_sec": _float_val(ctx.get("start_sec")),
+            "text": text,
+            "score": round(ctx["score"], 3),
+            "scene_number": ctx.get("scene_number"),
+            "slide_number": ctx.get("slide_number"),
+        })
+
+    scene_count = len(scenes)
+    return {
+        "summary": summary,
+        "domain": domain,
+        "graph_domain": graph_domain,
+        "graph_subdomain": graph_subdomain,
+        "visual_asset_percent": visual_stats["visual_percent"],
+        "visual_asset_label": _format_percent(visual_stats["visual_percent"]),
+        "visual_asset_count": visual_stats["visual_count"],
+        "visual_asset_total": visual_stats["total_count"],
+        "keywords": keywords,
+        "highlights": highlights,
+        "stats": {
+            "scene_count": scene_count,
+            "emphasis_contexts": emphasis_context_count,
+            "emphasis_threshold": round(threshold, 3),
+            "visual_asset_percent": visual_stats["visual_percent"],
+            "visual_asset_count": visual_stats["visual_count"],
+            "visual_asset_total": visual_stats["total_count"],
+        },
+    }
 
 
 # ── ProcessingJob CRUD ───────────────────────────────────────────────────────
@@ -297,13 +534,30 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         return None
     lecture, job = row
     stem = str(lecture.id)
+    output_dir = Path(lecture.output_dir) if lecture.output_dir else None
+    info = _build_lecture_info(output_dir, stem, lecture.category or "기타") if output_dir else {
+        "summary": "",
+        "domain": lecture.category or "기타",
+        "keywords": [],
+        "highlights": [],
+        "stats": {
+            "scene_count": 0,
+            "scene_transitions": 0,
+            "emphasis_contexts": 0,
+            "stt_confidence": 94,
+        },
+    }
     return {
         "id": str(lecture.id),
         "job_id": str(job.id) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
-        "category": lecture.category or "기타",
+        "category": info.get("domain") or lecture.category or "기타",
         "description": lecture.description,
+        "summary": info.get("summary") or "",
+        "keywords": info.get("keywords") or [],
+        "domain": info.get("domain") or lecture.category or "기타",
+        "info": info,
         "stem": stem,
         "video_url": make_file_url(lecture.video_path),
         "output_dir": lecture.output_dir,
@@ -337,6 +591,76 @@ async def _get_lecture(db: AsyncSession, lecture_id: str) -> Optional[Lecture]:
         return None
     result = await db.execute(select(Lecture).where(Lecture.id == ident_uuid))
     return result.scalar_one_or_none()
+
+
+def classify_query_taxonomy(question: str) -> dict[str, str]:
+    q = (question or "").replace(" ", "").lower()
+    visual_terms = ("시각자료", "그림", "이미지", "표", "도표", "비교표", "다이어그램", "구조도", "화살표")
+    location_terms = ("어디", "어디서", "위치", "몇슬라이드", "슬라이드", "장면", "씬", "구간", "언제")
+    if any(t in q for t in visual_terms):
+        if any(t in q for t in location_terms):
+            return {"major": "C", "minor": "1", "label": "시각 질의/슬라이드 탐색"}
+        return {"major": "C", "minor": "2", "label": "시각 질의/시각 해석"}
+    if "강조" in q or "중요" in q or "핵심" in q:
+        return {"major": "B", "minor": "3", "label": "탐색 질의/강조"}
+    if any(t in q for t in ("요약", "개관", "전체", "흐름", "정리")):
+        return {"major": "B", "minor": "2", "label": "탐색 질의/요약/개관"}
+    if any(t in q for t in location_terms):
+        return {"major": "B", "minor": "1", "label": "탐색 질의/위치"}
+    if any(t in q for t in ("차이", "비교", "다른점", "반면", "vs", "versus")):
+        return {"major": "A", "minor": "2", "label": "내용 질의/비교"}
+    if any(t in q for t in ("관계", "절차", "과정", "순서", "연결", "왜", "이유", "어떻게", "원리")):
+        return {"major": "A", "minor": "3", "label": "내용 질의/관계/절차"}
+    return {"major": "A", "minor": "1", "label": "내용 질의/개념"}
+
+
+async def _get_or_create_chat_session(
+    db: AsyncSession,
+    lecture_id,
+    session_id: str,
+) -> ChatSession:
+    clean_id = (session_id or "").strip() or "default"
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.lecture_id == lecture_id,
+            ChatSession.session_id == clean_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing:
+        return existing
+    row = ChatSession(lecture_id=lecture_id, session_id=clean_id)
+    db.add(row)
+    await db.flush()
+    return row
+
+
+async def _recent_chat_history(db: AsyncSession, chat_session: ChatSession, limit: int = CHAT_HISTORY_TURNS) -> list[dict[str, str]]:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_session_id == chat_session.id)
+        .order_by(ChatMessage.turn_index.desc(), ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    rows = list(reversed(result.scalars().all()))
+    history: list[dict[str, str]] = []
+    for row in rows:
+        if row.question:
+            history.append({"role": "user", "content": row.question})
+        if row.answer:
+            history.append({"role": "assistant", "content": row.answer})
+    return history
+
+
+async def _next_chat_turn_index(db: AsyncSession, chat_session: ChatSession) -> int:
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.chat_session_id == chat_session.id)
+        .order_by(ChatMessage.turn_index.desc())
+        .limit(1)
+    )
+    last = result.scalar_one_or_none()
+    return int(last.turn_index) + 1 if last else 0
 
 
 # ── GraphSession 헬퍼 ────────────────────────────────────────────────────────
@@ -563,35 +887,92 @@ async def graph_status(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     }
 
 
-async def ask_question(db: AsyncSession, lecture_id: str, question: str) -> Dict[str, Any]:
+async def ask_question(
+    db: AsyncSession,
+    lecture_id: str,
+    question: str,
+    chat_session_id: str = "default",
+    current_scene_number: Any = None,
+    current_slide_number: Any = None,
+) -> Dict[str, Any]:
     lecture = await _get_lecture(db, lecture_id)
     if not lecture:
         raise HTTPException(status_code=404, detail="Lecture not found")
 
     stem = str(lecture.id)
+    chat_session = await _get_or_create_chat_session(db, lecture.id, chat_session_id)
+    conversation_history = await _recent_chat_history(db, chat_session)
+    query_type = classify_query_taxonomy(question)
     query_url = os.getenv("QUERY_SERVICE_URL", "http://query_service:8001")
     stem_lock = await get_stem_load_lock(stem)
     loop = asyncio.get_running_loop()
     async with stem_lock:
         await loop.run_in_executor(None, _ensure_stem_loaded, stem, lecture.output_dir)
 
-    try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{query_url}/internal/query",
-                json={"stem": stem, "question": question},
-            )
+    last_err: tuple | None = None
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=40.0) as client:
+                resp = await client.post(
+                    f"{query_url}/internal/query",
+                    json={
+                        "stem": stem,
+                        "question": question,
+                        "current_scene_number": current_scene_number,
+                        "current_slide_number": current_slide_number,
+                        "conversation_history": conversation_history,
+                    },
+                )
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")
             qr = resp.json()
+            turn_index = await _next_chat_turn_index(db, chat_session)
+            db.add(ChatMessage(
+                lecture_id=lecture.id,
+                chat_session_id=chat_session.id,
+                turn_index=turn_index,
+                question=question,
+                answer=qr.get("answer") or "",
+                query_major=query_type["major"],
+                query_minor=query_type["minor"],
+                query_type_label=query_type["label"],
+                source_mode=qr.get("source_mode", "default"),
+                related_slides=qr.get("related_slides", []),
+                retrieved_chunks=qr.get("retrieved_chunks", []),
+                core_graph=qr.get("core_graph", {"nodes": [], "edges": []}),
+            ))
+            await db.commit()
             return {
                 "answer": qr.get("answer"),
                 "timestamps": qr.get("timestamps", []),
                 "graph": qr.get("graph", {"nodes": [], "edges": []}),
+                "core_graph": qr.get("core_graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
+                "related_slides": qr.get("related_slides", []),
+                "source_mode": qr.get("source_mode", "default"),
+                "chat_session_id": chat_session.session_id,
+                "query_type": query_type,
             }
-    except httpx.HTTPError:
-        raise HTTPException(status_code=503, detail="Query service unreachable")
+        except HTTPException:
+            raise
+        except httpx.TimeoutException as exc:
+            last_err = ("timeout", exc)
+        except httpx.ConnectError as exc:
+            last_err = ("connect", exc)
+        except httpx.HTTPError as exc:
+            last_err = ("http", exc)
+        if attempt == 0:
+            await asyncio.sleep(1)
+
+    if last_err and last_err[0] == "timeout":
+        raise HTTPException(
+            status_code=504,
+            detail="QnA 서비스 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+        )
+    raise HTTPException(
+        status_code=503,
+        detail="QnA 서비스에 연결할 수 없습니다. 서버 상태를 확인해 주세요.",
+    )
 
 
 async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]]:
@@ -612,11 +993,17 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
         scenes = []
         for s in data.get("scenes", []):
             img_url = make_file_url(s.get("image_path"))
-            ts = s.get("timestamp_formatted", "00:00").split(".")[0]
+            timestamp_sec = s.get("timestamp")
+            try:
+                timestamp_sec = float(timestamp_sec)
+            except (TypeError, ValueError):
+                timestamp_sec = 0.0
+            ts = s.get("timestamp_formatted", "00:00")
             if ts.startswith("00:"): ts = ts[3:]
 
             scenes.append({
                 "timestamp":    ts,
+                "timestamp_sec": timestamp_sec,
                 "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
                 "text":         s.get("title") or f"Slide {s.get('slide_number')}",
                 "image_url":    img_url,
@@ -657,11 +1044,19 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
             label = _str_cell(row.get("label")) or nid
             props = _str_cell(row.get("properties_json")) or "{}"
             try:
-                ntype = json.loads(props).get("type", "node")
+                props_dict = json.loads(props)
+                ntype = props_dict.get("type") or label or "node"
             except:
-                ntype = "node"
+                props_dict = {}
+                ntype = label or "node"
+            if label == "Domain" or ntype == "Domain" or nid == "lecture_video" or nid.startswith("domain/"):
+                continue
             nodes_out.append({
                 "id": nid, "label": label[:120], "title": props[:800],
+                "name": _str_cell(props_dict.get("name")) or _str_cell(props_dict.get("title")),
+                "text": _str_cell(props_dict.get("text")) or _str_cell(props_dict.get("target_content")),
+                "asset_type": _str_cell(props_dict.get("asset_type")),
+                "description": _str_cell(props_dict.get("description")),
                 "type": ntype, "color": _hex_color(label),
             })
 
@@ -671,7 +1066,16 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
             src, tgt = _str_cell(row.get("src_id")), _str_cell(row.get("tgt_id"))
             if not src or not tgt:
                 continue
-            edges_out.append({"from": src, "to": tgt, "label": _str_cell(row.get("rel_type")) or "related"})
+            rel_type = _str_cell(row.get("rel_type")) or "related"
+            if (
+                rel_type == "HAS_DOMAIN"
+                or src == "lecture_video"
+                or tgt == "lecture_video"
+                or src.startswith("domain/")
+                or tgt.startswith("domain/")
+            ):
+                continue
+            edges_out.append({"from": src, "to": tgt, "label": rel_type})
             for x in (src, tgt):
                 if x not in seen_ids:
                     seen_ids.add(x)
@@ -685,23 +1089,16 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
 
-
-def _filter_served_slide_typos(items: list[dict]) -> list[dict]:
-    try:
-        from pipeline.analyzer.slide_typo_checker import is_reportable_slide_typo
-    except Exception:
-        return items
-
+def _filter_served_slide_errors(items: list[dict]) -> list[dict]:
     filtered = []
     for item in items or []:
         if not isinstance(item, dict):
             continue
-        if is_reportable_slide_typo(
-            str(item.get("problematic_text", "") or ""),
-            str(item.get("corrected_text", "") or ""),
-            str(item.get("reason", "") or ""),
-        ):
-            filtered.append(item)
+        problematic = str(item.get("problematic_text", "") or "").strip()
+        corrected = str(item.get("corrected_text", "") or "").strip()
+        if not problematic or not corrected or problematic == corrected:
+            continue
+        filtered.append(item)
     return filtered
 
 
@@ -735,7 +1132,13 @@ def _load_slide_image_url_map(output_dir: Path) -> dict[str, dict[Any, str]]:
             logger.warning("Failed to read slide image metadata: %s", classified_path, exc_info=True)
             continue
 
-        for slide in data.get("slides", []) or []:
+        slides = []
+        if isinstance(data.get("slides"), list):
+            slides.extend(data.get("slides") or [])
+        if isinstance(data.get("scenes"), list):
+            slides.extend(data.get("scenes") or [])
+
+        for slide in slides:
             if not isinstance(slide, dict):
                 continue
 
@@ -767,6 +1170,8 @@ def _attach_slide_image_urls(items: list[dict], image_urls: dict[str, dict[Any, 
         slide_title = str(copied.get("slide_title") or "").strip()
         image_url = copied.get("slide_image_url") or copied.get("image_url")
         if not image_url:
+            image_url = make_file_url(copied.get("slide_image_path"))
+        if not image_url:
             image_url = by_title.get(slide_title)
             if not image_url and slide_number is not None:
                 image_url = by_number.get(slide_number)
@@ -786,13 +1191,13 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
 
     output_dir = Path(detail["output_dir"])
     stem = str(detail["stem"])
+    analyzer_dir = output_dir / f"{stem}_analyzer"
 
     candidate_paths = [
-        output_dir / f"{stem}_analyzer" / f"{stem}_content_verification.json",
-        output_dir / f"{stem}_content_verification.json",
+        analyzer_dir / f"{stem}_verification_final.json",
+        output_dir / f"{stem}_verification_final.json",
     ]
-    existing_paths = [path for path in candidate_paths if path.exists()]
-    verifier_path = max(existing_paths, key=lambda path: path.stat().st_mtime) if existing_paths else None
+    verifier_path = next((path for path in candidate_paths if path.exists()), None)
     if not verifier_path:
         raise HTTPException(status_code=404, detail="Content verification file not found")
 
@@ -818,19 +1223,16 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         item for item in feedback_items
         if isinstance(item, dict) and item.get("status") == "rejected"
     ]
-    final_claims = flow.get("final_confirmed_claims", []) or []
-    needs_review_claims = flow.get("needs_review_claims", []) or []
-    crosscheck_rejected_claims = flow.get("crosscheck_rejected_claims", []) or []
-    crosscheck_inconclusive_claims = flow.get("crosscheck_inconclusive_claims", []) or []
-    grounding_rejected_claims = flow.get("grounding_rejected_claims", []) or []
-    first_stage_rejected_claims = flow.get("first_stage_rejected_claims", []) or []
+    final_claims = flow.get("final_confirmed_claims", []) or data.get("final_confirmed_claims", []) or []
+    needs_review_claims = flow.get("needs_review_claims", []) or data.get("needs_review_claims", []) or []
+    verifier_rejected_claims = flow.get("verifier_rejected_claims", []) or data.get("verifier_rejected_claims", []) or []
     slide_image_urls = _load_slide_image_url_map(output_dir)
-    slide_typos = _attach_slide_image_urls(
-        _filter_served_slide_typos(data.get("slide_typos", []) or []),
+    slide_errors = _attach_slide_image_urls(
+        _filter_served_slide_errors(data.get("slide_errors", []) or []),
         slide_image_urls,
     )
-    slide_typo_needs_review = _attach_slide_image_urls(
-        _filter_served_slide_typos(data.get("slide_typo_needs_review", []) or []),
+    slide_error_needs_review = _attach_slide_image_urls(
+        _filter_served_slide_errors(data.get("slide_error_needs_review", []) or []),
         slide_image_urls,
     )
 
@@ -844,9 +1246,9 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "models": data.get("models", {}) or [],
         "pipeline_models": data.get("pipeline_models", {}) or {},
         "primary_model": data.get("primary_model", ""),
-        "crosscheck_source_models": data.get("crosscheck_source_models", []) or [],
-        "crosscheck_model_weights": data.get("crosscheck_model_weights", {}) or {},
-        "crosscheck_score_report": data.get("crosscheck_score_report", {}) or {},
+        "verifier_source_models": data.get("verifier_source_models", []) or [],
+        "verifier_model_weights": data.get("verifier_model_weights", {}) or {},
+        "severity_score_report": data.get("severity_score_report", {}) or {},
         "summary": content_summary,
         "overview": data.get("claim_decision_overview", []) or [],
         "counts": {
@@ -865,12 +1267,9 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
             "rejected": _safe_count(
                 content_summary.get("rejected_feedback_count", len(rejected_feedback_items))
             ),
-            "slide_typos": len(slide_typos),
-            "slide_typo_needs_review": len(slide_typo_needs_review),
-            "crosscheck_rejected": _safe_count(summary.get("crosscheck_rejected_claim_count", len(crosscheck_rejected_claims))),
-            "crosscheck_inconclusive": _safe_count(summary.get("crosscheck_inconclusive_claim_count", len(crosscheck_inconclusive_claims))),
-            "grounding_rejected": _safe_count(summary.get("grounding_rejected_claim_count", len(grounding_rejected_claims))),
-            "first_stage_rejected": _safe_count(summary.get("first_stage_rejected_claim_count", len(first_stage_rejected_claims))),
+            "slide_errors": _safe_count(content_summary.get("slide_error_count", len(slide_errors))),
+            "slide_error_needs_review": len(slide_error_needs_review),
+            "verifier_rejected": _safe_count(summary.get("verifier_rejected_claim_count", len(verifier_rejected_claims))),
         },
         "final_confirmed_claim_count": _safe_count(
             content_summary.get(
@@ -884,21 +1283,18 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "views": data.get("views", {}) or {},
         "final_confirmed_claims": final_claims,
         "needs_review_claims": needs_review_claims,
-        "crosscheck_rejected_claims": crosscheck_rejected_claims,
-        "crosscheck_inconclusive_claims": crosscheck_inconclusive_claims,
-        "grounding_rejected_claims": grounding_rejected_claims,
-        "first_stage_rejected_claims": first_stage_rejected_claims,
-        "unmatched_issue_records": flow.get("unmatched_issue_records", []) or [],
+        "verifier_rejected_claims": verifier_rejected_claims,
         "issues": data.get("issues", []) or [],
-        "slide_typos": slide_typos,
-        "slide_typo_needs_review": slide_typo_needs_review,
-        "slide_typo_consensus": data.get("slide_typo_consensus", {}) or {},
-        "slide_typo_status": data.get("slide_typo_status", ""),
-        "rejected_issues": data.get("rejected_issues", []) or [],
-        "crosscheck_rejected_issues": data.get("crosscheck_rejected_issues", []) or [],
-        "crosscheck_inconclusive_issues": data.get("crosscheck_inconclusive_issues", []) or [],
-        "grounding_rejected_issues": data.get("grounding_rejected_issues", []) or [],
+        "slide_errors": slide_errors,
+        "slide_error_needs_review": slide_error_needs_review,
+        "slide_error_consensus": data.get("slide_error_consensus", {}) or {},
+        "slide_error_status": data.get("slide_error_status", ""),
+        "slide_error_summary": data.get("slide_error_summary", {}) or {},
+        "slide_error_path": data.get("slide_error_path", ""),
         "claim_decision_flow_summary": summary,
+        "classified_issue_artifacts": data.get("classified_issue_artifacts", {}) or {},
+        "classified_issue_verifier_path": data.get("classified_issue_verifier_path", ""),
+        "classified_issue_verifier": (data.get("views", {}) or {}).get("classified_issue_verifier", {}),
     }
 
 

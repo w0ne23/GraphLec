@@ -207,9 +207,7 @@ def get_gemini_client_sequence():
 def resolve_anthropic_model(model_name: str) -> str:
     aliases = {
         "haiku-4.5": "claude-haiku-4-5-20251001",
-        "haiku4.5": "claude-haiku-4-5-20251001",
         "claude-haiku-4.5": "claude-haiku-4-5-20251001",
-        "claude-haiku4.5": "claude-haiku-4-5-20251001",
         "claude-haiku-4-5": "claude-haiku-4-5-20251001",
         "sonnet-4.5": "claude-sonnet-4-5-20250929",
         "claude-sonnet-4.5": "claude-sonnet-4-5-20250929",

@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { askQa } from '../../lib/api'
+import ChatGraphPreview, { graphStats } from './ChatGraphPreview'
 
 /**
  * src/components/chat/ChatPanel.jsx
@@ -11,6 +12,7 @@ import { askQa } from '../../lib/api'
 
 export default function ChatPanel({ 
   lecture, 
+  currentSceneIndex = 0,
   onJumpToScene, 
   onClose,
   messages,
@@ -18,11 +20,15 @@ export default function ChatPanel({
   input,
   setInput,
   loading,
-  setLoading
+  setLoading,
+  chatSessionId,
 }) {
   const bottomRef = useRef(null)
   // 인덱스별 펼침 상태를 관리하는 배열
   const [expandedIndices, setExpandedIndices] = useState([])
+  const [expandedGraphIndices, setExpandedGraphIndices] = useState([])
+  const [slowHint, setSlowHint] = useState(false)
+  const slowTimerRef = useRef(null)
 
   const toggleExpand = (idx) => {
     setExpandedIndices(prev => {
@@ -32,7 +38,26 @@ export default function ChatPanel({
     })
   }
 
+  const toggleGraphExpand = (idx) => {
+    setExpandedGraphIndices(prev => {
+      const next = [...prev]
+      next[idx] = !next[idx]
+      return next
+    })
+  }
+
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages, loading])
+
+  useEffect(() => {
+    if (loading) {
+      setSlowHint(false)
+      slowTimerRef.current = setTimeout(() => setSlowHint(true), 20000)
+    } else {
+      setSlowHint(false)
+      clearTimeout(slowTimerRef.current)
+    }
+    return () => clearTimeout(slowTimerRef.current)
+  }, [loading])
 
   function formatTime(seconds) {
     if (seconds == null || Number.isNaN(Number(seconds))) return null
@@ -43,6 +68,7 @@ export default function ChatPanel({
   }
 
   function parseTimestamp(value) {
+    if (Number.isFinite(Number(value))) return Number(value)
     if (value == null) return null
     const parts = String(value).split(':').map(v => Number(v))
     if (parts.some(Number.isNaN)) return null
@@ -53,7 +79,20 @@ export default function ChatPanel({
 
   function sourceLabel(text) {
     const compact = String(text || '').replace(/\s+/g, ' ').trim()
+    if (!compact || compact.startsWith('{') || compact.startsWith('[')) return ''
     return compact.length > 42 ? `${compact.slice(0, 42)}...` : compact
+  }
+
+  function videoRefLabel(chunk) {
+    const type = String(chunk?.chunk_type || '')
+    const text = String(chunk?.text || '').replace(/\s+/g, ' ').trim()
+    if (['segment', 'audio', 'structural_row'].includes(type)) {
+      return sourceLabel(text)
+    }
+    if (!text || text.startsWith('슬라이드') || text.includes('슬라이드 강조 점수')) {
+      return ''
+    }
+    return sourceLabel(text)
   }
 
   function refDedupeKey(ref) {
@@ -63,22 +102,25 @@ export default function ChatPanel({
   }
 
   function refsFromResponse(res) {
+    if (['visual_location', 'scene_location', 'overview'].includes(res.source_mode)) return []
     const chunks = Array.isArray(res.retrieved_chunks) ? res.retrieved_chunks : []
-    const rawRefs = chunks.length > 0
-      ? chunks.map(chunk => ({
+    const chunkRefs = chunks
+        .filter(chunk => chunk.start_sec != null && chunk.chunk_type !== 'slide')
+        .map(chunk => ({
           timestamp: formatTime(chunk.start_sec),
           startSec: chunk.start_sec,
-          slideNumber: chunk.slide_number,
           score: Number.isFinite(Number(chunk.score)) ? Number(chunk.score) : null,
-          label: sourceLabel(chunk.text || chunk.chunk_type),
+          label: videoRefLabel(chunk),
           text: chunk.text || '',
         }))
+    const rawRefs = chunkRefs.length > 0
+      ? chunkRefs
       : (res.timestamps || []).map(t => ({
           timestamp: formatTime(t.start),
           startSec: t.start,
           slideNumber: t.slide_number,
           score: null,
-          label: sourceLabel(t.label),
+          label: String(t.label || '').startsWith('슬라이드') ? '' : sourceLabel(t.label),
           text: t.label || '',
         }))
 
@@ -104,6 +146,46 @@ export default function ChatPanel({
       .slice(0, 8)
   }
 
+  function scenesFromSlideResponse(res) {
+    const slides = Array.isArray(res.related_slides) ? res.related_slides : []
+    const fallbackChunks = Array.isArray(res.retrieved_chunks) ? res.retrieved_chunks : []
+    const rawSlides = slides.length > 0
+      ? slides
+      : fallbackChunks
+        .filter(chunk => chunk.chunk_type === 'slide' && chunk.slide_number != null)
+        .map(chunk => ({
+          slide_number: chunk.slide_number,
+          start_sec: chunk.start_sec,
+          score: Number.isFinite(Number(chunk.score)) ? Number(chunk.score) : null,
+        }))
+
+    const bestBySlide = new Map()
+    rawSlides.forEach(item => {
+      const slideNumber = item.slide_number ?? item.slideNumber
+      if (slideNumber == null) return
+      const key = Number(slideNumber)
+      const prev = bestBySlide.get(key)
+      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : -Infinity
+      const prevScore = prev?.score ?? -Infinity
+      if (!prev || score > prevScore) {
+        bestBySlide.set(key, {
+          slideNumber: key,
+          startSec: item.start_sec ?? item.startSec ?? null,
+          score,
+          label: item.label || `슬라이드 ${key}`,
+        })
+      }
+    })
+
+    return Array.from(bestBySlide.values())
+      .sort((a, b) => {
+        const scoreGap = (b.score ?? -Infinity) - (a.score ?? -Infinity)
+        if (Number.isFinite(scoreGap) && Math.abs(scoreGap) > 1e-9) return scoreGap
+        return a.slideNumber - b.slideNumber
+      })
+      .slice(0, 4)
+  }
+
   function findRefSceneIndex(ref) {
     const scenes = lecture?.scenes || []
     if (!scenes.length) return -1
@@ -114,7 +196,7 @@ export default function ChatPanel({
       let bestSec = -1
       scenes.forEach((scene, idx) => {
         if (ref.slideNumber != null && Number(scene.slide_number) !== Number(ref.slideNumber)) return
-        const sec = parseTimestamp(scene.timestamp)
+        const sec = parseTimestamp(scene.timestamp_sec ?? scene.timestamp)
         if (sec == null) return
         if (sec <= targetSec && sec > bestSec) {
           bestSec = sec
@@ -136,30 +218,100 @@ export default function ChatPanel({
     return idx >= 0 || Number.isFinite(Number(ref.startSec))
   }
 
-  async function send() {
-    const question = input.trim()
-    if (!question || loading || !lecture?.id) return
-    setInput('')
-    // id를 제거하고 간결하게 변경
-    setMessages(prev => [...prev, { role: 'user', content: question, refs: [] }])
-    setLoading(true)
-    
-    try {
-      const res = await askQa(lecture.id, question)
+  function sceneLabel(ref) {
+    const idx = findRefSceneIndex(ref)
+    if (idx < 0) return null
+    const scene = idx >= 0 ? lecture?.scenes?.[idx] : null
+    const n = scene?.scene_number ?? idx + 1
+    if (ref.slideNumber != null) return `슬라이드 ${ref.slideNumber} · Scene${n}`
+    return `Scene${n}`
+  }
 
+  function renderAnswerContent(content) {
+    const lines = String(content || '').split('\n')
+    const nodes = []
+    let i = 0
+
+    const isTableLine = line => /^\s*\|.*\|\s*$/.test(line)
+    const isSeparatorLine = line => /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)
+
+    while (i < lines.length) {
+      if (isTableLine(lines[i]) && i + 1 < lines.length && isSeparatorLine(lines[i + 1])) {
+        const header = lines[i].trim().slice(1, -1).split('|').map(cell => cell.trim())
+        i += 2
+        const rows = []
+        while (i < lines.length && isTableLine(lines[i])) {
+          rows.push(lines[i].trim().slice(1, -1).split('|').map(cell => cell.trim()))
+          i += 1
+        }
+        nodes.push(
+          <div key={`tbl-${nodes.length}`} className="chat-table-wrap">
+            <table className="chat-answer-table">
+              <thead>
+                <tr>{header.map((cell, idx) => <th key={idx}>{cell}</th>)}</tr>
+              </thead>
+              <tbody>
+                {rows.map((row, rIdx) => (
+                  <tr key={rIdx}>{header.map((_, cIdx) => <td key={cIdx}>{row[cIdx] || ''}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+        continue
+      }
+
+      if (!lines[i].trim()) {
+        nodes.push(<br key={`br-${nodes.length}`} />)
+        i += 1
+        continue
+      }
+
+      nodes.push(<div key={`ln-${nodes.length}`}>{lines[i]}</div>)
+      i += 1
+    }
+
+    return nodes
+  }
+
+  async function sendQuestion(question) {
+    if (!question || loading || !lecture?.id) return
+    setLoading(true)
+    try {
+      const currentScene = lecture?.scenes?.[currentSceneIndex] || null
+      const res = await askQa(lecture.id, question, {
+        chat_session_id: chatSessionId,
+        current_scene_number: currentScene?.scene_number ?? null,
+        current_slide_number: currentScene?.slide_number ?? null,
+      })
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: res.answer || '답변을 생성하지 못했습니다.',
         refs: refsFromResponse(res),
+        scenes: scenesFromSlideResponse(res),
+        graph: res.graph || null,
+        coreGraph: res.core_graph || null,
+        sourceMode: res.source_mode || 'default',
       }])
     } catch (e) {
       setMessages(prev => [...prev, {
         role: 'assistant',
-        content: `오류: ${e.message}`, refs: [],
+        isError: true,
+        retryQuestion: question,
+        content: e.message || 'QnA 서비스 오류가 발생했습니다.',
+        refs: [],
       }])
     } finally {
       setLoading(false)
     }
+  }
+
+  function send() {
+    const question = input.trim()
+    if (!question || loading || !lecture?.id) return
+    setInput('')
+    setMessages(prev => [...prev, { role: 'user', content: question, refs: [] }])
+    sendQuestion(question)
   }
 
   return (
@@ -180,10 +332,25 @@ export default function ChatPanel({
           ) : (
             <div key={msgIdx} className="chat-msg-ai">
               <div className="chat-bubble-ai">
-                <div className="chat-answer-text">{msg.content}</div>
-                {msg.refs?.length > 0 && (
+                {msg.isError ? (
+                  <div className="chat-error-notice">
+                    <span className="chat-error-text">{msg.content}</span>
+                    <button
+                      className="chat-retry-btn"
+                      onClick={() => {
+                        setMessages(prev => prev.slice(0, -1))
+                        sendQuestion(msg.retryQuestion)
+                      }}
+                    >
+                      다시 시도
+                    </button>
+                  </div>
+                ) : (
+                <div className="chat-answer-text">{renderAnswerContent(msg.content)}</div>
+                )}
+                {!['visual_location', 'scene_location'].includes(msg.sourceMode) && msg.refs?.length > 0 && (
                   <div className="chat-refs-container">
-                    <div className="chat-refs-header">출처</div>
+                    <div className="chat-refs-header">영상 구간</div>
                     
                     {/* 첫 번째 출처 (단독 행) */}
                     <div className="chat-refs-first-row">
@@ -235,11 +402,70 @@ export default function ChatPanel({
                     )}
                   </div>
                 )}
+                {msg.scenes?.length > 0 && (
+                  <div className="chat-refs-container">
+                    <div className="chat-refs-header">
+                      {msg.sourceMode === 'visual_location'
+                        ? '확인 위치'
+                        : msg.sourceMode === 'overview'
+                          ? '관련 슬라이드'
+                          : '관련 장면'}
+                    </div>
+                    <div className="chat-refs-list">
+                      {msg.scenes.map((scene, i) => {
+                        const idx = findRefSceneIndex(scene)
+                        const label = sceneLabel(scene)
+                        if (!label) return null
+                        return (
+                          <button key={i} className="chat-scene-btn"
+                            title={`슬라이드 ${scene.slideNumber} 관련 장면`}
+                            onClick={() => onJumpToScene?.(idx, null, { autoPlay: false, offsetSec: 0.7 })}
+                          >
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                )}
+                {(() => {
+                  const previewGraph = msg.coreGraph || msg.graph
+                  const stats = graphStats(previewGraph)
+                  if (!stats.hasGraph) return null
+                  const open = Boolean(expandedGraphIndices[msgIdx])
+                  return (
+                    <div className="chat-refs-container chat-graph-container">
+                      <div className="chat-graph-header">
+                        <span className="chat-refs-header">근거 그래프</span>
+                        <button
+                          className="chat-refs-toggle-btn"
+                          onClick={() => toggleGraphExpand(msgIdx)}
+                          aria-expanded={open}
+                        >
+                          {open ? '그래프 접기' : `그래프 보기 (${stats.nodes} nodes · ${stats.edges} edges)`}
+                        </button>
+                      </div>
+                      {open && (
+                        <ChatGraphPreview
+                          graph={previewGraph}
+                          sourceMode={msg.sourceMode}
+                          relatedSlides={msg.scenes}
+                          refs={msg.refs}
+                        />
+                      )}
+                    </div>
+                  )
+                })()}
               </div>
             </div>
           )
         )}
-        {loading && <div className="chat-loading">답변 생성 중...</div>}
+        {loading && (
+          <div className="chat-loading">
+            답변 생성 중...
+            {slowHint && <span className="chat-loading-slow"> 응답이 오래 걸리고 있습니다. 잠시만 기다려 주세요.</span>}
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 

@@ -36,6 +36,7 @@ _RUNTIME_GRAPH_LABELS = {
     "Scene",
     "Segment",
     "Slide",
+    "VisualAsset",
     "Video",
 }
 
@@ -221,7 +222,11 @@ def clear_runtime_lecture_graphs() -> Dict[str, int]:
 def _is_stem_loaded(stem: str) -> bool:
     with neo4j_session() as session:
         record = session.run(
-            "MATCH (n {stem: $stem}) RETURN count(n) AS count",
+            """
+            MATCH (n {stem: $stem})
+            WHERE n:Slide OR n:Scene OR n:Segment OR n:VisualAsset OR n:Video
+            RETURN count(n) AS count
+            """,
             stem=stem,
         ).single()
         return bool(record and int(record["count"] or 0) > 0)

@@ -27,6 +27,16 @@ SCORE_FIELDS = (
     "slide_text_score",
 )
 
+SLIDE_LEVEL_FIELDS = (
+    "emphasized_keywords",
+    "annotation_highlights_summary",
+    "annotations_summary",
+    "slide_topic_keywords",
+    "slide_topic_keyword_scores",
+    "slide_topic_keyword_score",
+    "visual_assets",
+)
+
 
 def _clean_text(value: Any) -> str:
     text = "" if value is None else str(value)
@@ -38,6 +48,42 @@ def _clean_text(value: Any) -> str:
 
 def _clean_inline(value: Any) -> str:
     return re.sub(r"\s+", " ", _clean_text(value)).strip()
+
+
+def _format_visual_assets(slide: dict[str, Any]) -> str:
+    items: list[str] = []
+    for idx, asset in enumerate(slide.get("visual_assets") or [], start=1):
+        if isinstance(asset, str):
+            asset = {"description": asset}
+        if not isinstance(asset, dict):
+            continue
+        asset_type = _clean_inline(asset.get("asset_type") or asset.get("type") or "visual")
+        title = _clean_inline(asset.get("title"))
+        desc = _clean_text(asset.get("description"))
+        raw_text = _clean_text(asset.get("raw_text") or asset.get("text"))
+        elements = _clean_text(asset.get("visual_elements_text"))
+        relations = _clean_text(asset.get("visual_relations_text"))
+        layout = _clean_text(asset.get("layout_text"))
+        body = "\n".join(
+            part for part in [
+                desc,
+                raw_text,
+                f"시각 요소:\n{elements}" if elements else "",
+                f"시각 관계:\n{relations}" if relations else "",
+                f"배치:\n{layout}" if layout else "",
+            ]
+            if part
+        )
+        if not (title or body):
+            continue
+        label = f"{idx}. {asset_type or 'visual'}"
+        if title:
+            label += f" - {title}"
+        items.append(f"{label}\n{body}".strip())
+
+    if items:
+        return "\n\n".join(items)
+    return _clean_text(slide.get("t1_structure"))
 
 
 def _as_float(value: Any, default: float = 0.0) -> float:
@@ -62,6 +108,33 @@ def _keyword_score(entry: dict[str, Any]) -> float:
     if "score" in entry:
         return _as_float(entry.get("score"))
     return sum(_as_float(entry.get(field)) for field in SCORE_FIELDS if field != "score")
+
+
+def _index_slides_by_id(fused: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    indexed: dict[str, dict[str, Any]] = {}
+    for slide in fused.get("slides") or []:
+        slide_id = _clean_inline(slide.get("slide_id"))
+        if slide_id:
+            indexed[slide_id] = slide
+    return indexed
+
+
+def _with_slide_level_fields(
+    scene: dict[str, Any],
+    slide_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    slide_id = _clean_inline(scene.get("slide_id"))
+    slide = slide_by_id.get(slide_id)
+    if not slide:
+        return scene
+
+    merged = dict(scene)
+    for field in SLIDE_LEVEL_FIELDS:
+        if not merged.get(field) and slide.get(field):
+            merged[field] = slide.get(field)
+    if not merged.get("emphasis_score") and slide.get("emphasis_score"):
+        merged["emphasis_score"] = slide.get("emphasis_score")
+    return merged
 
 
 def _iter_context_texts(slide: dict[str, Any]) -> Iterable[str]:
@@ -194,6 +267,9 @@ def slide_to_block(
         slide_text = _clean_text(slide.get("slide_text"))
         if slide_text:
             lines.append("슬라이드 원문:\n" + slide_text)
+        structure_text = _format_visual_assets(slide)
+        if structure_text:
+            lines.append("시각자료 설명:\n" + structure_text)
 
     context_texts = list(_iter_context_texts(slide))
     if context_texts:
@@ -224,7 +300,7 @@ def fused_to_graphrag_text(
     keyword_min_score: float = 0.0,
     include_keyword_scores: bool = True,
 ) -> str:
-    slides = fused.get("scenes") or []
+    slides = fused.get("scenes") or fused.get("slides") or []
     metadata = fused.get("metadata") or {}
     lecture_name = stem or _clean_inline(metadata.get("stem")) or "lecture"
 
@@ -236,9 +312,10 @@ def fused_to_graphrag_text(
         ),
     ]
 
+    slide_by_id = _index_slides_by_id(fused)
     for slide in slides:
         block = slide_to_block(
-            slide,
+            _with_slide_level_fields(slide, slide_by_id),
             include_slide_text=include_slide_text,
             include_metadata=include_metadata,
             keyword_min_score=keyword_min_score,

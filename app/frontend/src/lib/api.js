@@ -76,8 +76,11 @@ async function _fetchResults(params) {
         error_message: lec.error_message,
         pipeline_stages: lec.pipeline_stages || [],
         tags: lec.tags || [],
+        is_dummy: lec.is_dummy || false,
+        source: lec.source || 'database',
       })),
       totalPages,
+      totalItems,
     }
   } catch (error) {
     console.error('_fetchResults error:', error)
@@ -134,7 +137,7 @@ export async function getLectureGraph(lectureId) {
 }
 
 export async function getLectureVerifier(lectureId) {
-  const res = await fetch(`${API_BASE}/results/${lectureId}/verifier`, { cache: 'no-store' });
+  const res = await fetch(`${API_BASE}/results/${lectureId}/verifier`);
   if (!res.ok) {
     if (res.status === 404) return null;
     throw new Error('Verifier fetch failed');
@@ -142,11 +145,11 @@ export async function getLectureVerifier(lectureId) {
   return res.json();
 }
 
-export async function askQa(lectureId, question) {
+export async function askQa(lectureId, question, context = {}) {
   const res = await fetch(`${API_BASE}/results/${lectureId}/query`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question })
+    body: JSON.stringify({ question, ...context })
   });
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
