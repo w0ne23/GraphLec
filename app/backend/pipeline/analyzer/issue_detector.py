@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-JUDGE_MIN_CONFIDENCE = 0.80
+JUDGE_MIN_CONFIDENCE = 0.6
 
 
 def issue_judge_min_confidence() -> float:
@@ -14,6 +15,18 @@ def issue_judge_min_confidence() -> float:
     except ValueError:
         return JUDGE_MIN_CONFIDENCE
     return max(0.0, min(1.0, value))
+
+
+def _issue_judge_batch_max_workers() -> int:
+    raw = (
+        os.getenv("VERIFIER_ISSUE_JUDGE_BATCH_MAX_WORKERS")
+        or os.getenv("VERIFIER_JUDGE_BATCH_MAX_WORKERS")
+        or "2"
+    )
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
 
 
 def _claim_id(claim: dict) -> str:
@@ -37,6 +50,12 @@ def _context_ids(claim: dict) -> list[str]:
             return ids
     cid = _context_id(claim)
     return [cid] if cid else []
+
+
+def _claim_needs_context(claim: dict) -> bool:
+    if "needs_context" in claim:
+        return bool(claim.get("needs_context"))
+    return str(claim.get("resolution_status") or "").strip().lower() == "unresolved"
 
 
 def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
@@ -84,22 +103,27 @@ def _build_issue_candidate_prompt(
         approx = " [근사치]" if c.get("is_approximate") else ""
         claim_id = _claim_id(c) or f"claim_{i}"
         context_id = _context_id(c)
-        resolved = str(c.get("resolved_claim") or c.get("claim_text") or "").strip()
+        claim_text = str(c.get("claim_text") or "").strip()
+        source_slice = str(c.get("source_slice") or "").strip()
+        resolved = str(c.get("resolved_claim") or "").strip()
         lines = [
             f"{i}. claim_id: {claim_id}",
             f"   context_id: {context_id}",
             f"   claim_type: {c.get('claim_type', '?')}{approx}",
-            f"   판정 대상 resolved_claim: {resolved}",
-            f"   원문 claim_text: {c.get('claim_text', '')}",
+            f"   claim_text: {claim_text}",
         ]
+        if source_slice and source_slice != claim_text:
+            lines.append(f"   source_slice: {source_slice}")
+        if resolved and resolved != claim_text:
+            lines.append(f"   resolved_claim: {resolved}")
         if c.get("context_ids"):
             lines.append(f"   context_ids: {', '.join(str(x) for x in c.get('context_ids') or [])}")
         if c.get("antecedent_context_ids"):
             lines.append(
                 f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
             )
-        if c.get("needs_context") or str(c.get("resolution_status") or "") == "unresolved":
-            lines.append(f"   해소상태: {c.get('resolution_status') or 'unresolved'}, 문맥필요: true")
+        if _claim_needs_context(c):
+            lines.append("   문맥필요: true")
             if c.get("context_note"):
                 lines.append(f"   문맥비고: {c.get('context_note', '')}")
         claim_lines.append("\n".join(lines))
@@ -119,38 +143,52 @@ def _build_issue_candidate_prompt(
 
 ### 판정 기준
 
-- 각 claim의 실제 판정 대상은 반드시 `resolved_claim`입니다.
-- `claim_text`는 원문 확인용입니다. issue 후보를 만들 때는 `resolved_claim`이 학생에게 남기는 명제를 기준으로 판단하세요.
-- 단, `resolved_claim`이 원문/문맥보다 과도하게 넓어진 것처럼 보이면 issue를 만들지 말고 보수적으로 제외하세요.
-- 제공된 주변 문맥이 이미 정정하거나 조건/예외를 충분히 보완했다면 issue로 출력하지 마세요.
-- 애매한 지시어를 특정 대상으로 강제 해석해야만 문제가 생기는 경우는 issue로 출력하지 마세요.
-- temporal/currentness/outdated 판단은 강의 녹화 시점이 아니라 업로드/검증 기준일({current_date})을 기준으로 하세요.
-- 강의자가 "현재", "요즘", "최신", "지원된다", "더 이상 사용하지 않는다"처럼 말한 경우, 학생이 업로드/검증 기준일에 그 정보를 현재 사실로 받아들일 수 있는지를 기준으로 판단하세요.
+이 단계는 최종 사실 판정이 아니라, 후속 issue classification과 crosscheck가 다시 볼 만한 **검증 후보**를 고르는 단계입니다.
+여기서 검증 후보란, LLM 자신의 일반적인 강의 도메인 지식으로 보았을 때 해당 claim이 틀렸거나 확인할 가치가 있어 보이는 후보를 뜻합니다.
+따라서 "확정 오류"가 아니라도 원문 문맥 안에 모델 지식 기준으로 의심스러운 명제가 실제로 남으면 후보로 출력하세요.
 
-다음 질문 중 1개 이상에 "예"라고 답할 수 있으면 issue 후보로 출력하세요.
-단, 제공된 문맥이 그 문제를 명확히 정정하거나 충분히 해소한 경우는 출력하지 마세요.
+입력 claim은 아래 순서로 해석하세요.
 
-1. 학생이 resolved_claim을 그대로 외웠을 때 생길 수 있는 구체적인 잘못된 명제가 있는가?
-2. 그 문제가 명확한 반례, 조건/범위 누락, 정의 차이, 현행성 확인 지점, 핵심 개념 혼동으로 설명될 수 있는가?
-3. 학생이 업로드/검증 기준일 현재 이 claim을 그대로 받아들였을 때 outdated/currentness 문제가 생길 수 있는가?
+1. 기본 판정 대상은 `resolved_claim`입니다.
+2. 먼저 `resolved_claim`이 `source_slice`, `claim_text`, 배치 공통 문맥에서 실제로 전달된 의미를 충실히 보존했는지 확인하세요.
+3. `resolved_claim`이 원문 context보다 주체, 대상, 분류명, 조건, 범위, 인과, 일반성을 과도하게 바꾸거나 넓혔다면 그 강해진 문장을 그대로 믿지 마세요.
+4. 이 경우 `source_slice`/`claim_text`와 배치 문맥에서 실제 전달된 더 좁은 명제를 기준으로 판단하세요.
+5. 배치 공통 문맥은 지시어, 생략, 즉시 정정 여부와 claim의 실제 의미 범위를 확인하는 보조 문맥입니다.
 
-### issue 후보로 볼 수 있는 보조 분류 기준
+다음 중 하나라도 구체적으로 남으면 issue 후보로 출력하세요.
 
-아래 분류는 판단 보조 기준입니다. 아래 분류에 하나라도 포함되는 claim은 issue 후보로 포함시키세요.
-응답 JSON에는 type이나 issue_type을 저장하지 마세요.
+- 정의, 분류, 포함 관계, 주체, 과정, 원인-결과, 작동 방식이 잘못 연결되었을 가능성
+- 수치, 순서, 조건, 가능/불가능, 전체/일부, 일시/영구 같은 범위가 뒤바뀌었을 가능성
+- 여러 구체 대상을 하나의 범주로 묶어 말했는데 그 범주명이 부정확할 가능성
+- 특정 조건에서만 맞는 말을 조건 없이 일반 사실처럼 말했을 가능성
+- 결과를 과장하여 잘못된 일반 규칙이나 배제 관계가 남을 가능성
+- 현재성, 최신성, 지원 여부, 사용 여부, 버전, 정책, 통계, 시장 상황처럼 업로드/검증 기준일({current_date}) 기준 확인이 필요한 가능성
+- "현재", "요즘", "최근", "최신", "지원된다", "더 이상 사용하지 않는다" 같은 표현이 시점 의존 사실처럼 전달되는 경우
+- 개념, 주체, 과정, 권한, 대상이 섞여 LLM 자신의 일반 도메인 지식 기준으로 확인할 가치가 있는 경우
 
-- factual_error: 객관 사실, 정의, 순서, 메커니즘이 틀린 경우
-- temporal_error: 업로드/검증 기준일({current_date}) 기준으로 현재성, 최신성, 지원 여부가 틀린 경우
-- confusing_explanation: 학생이 핵심 개념, 주체, 과정, 권한, 대상을 혼동할 구체적 위험이 있는 경우
-- scope_overclaim: 문맥을 함께 봐도 다른 가능성/조건/예외를 닫아버리는 과도한 단정이 남는 경우
+다음 경우는 issue 후보로 출력하지 마세요.
 
+- 제공된 배치 문맥이 같은 대상, 같은 관계, 같은 조건을 명확히 정정하거나 충분히 보완한 경우
+- 바로 뒤 문장이 앞 표현을 같은 의미로 정확히 풀어 최종 의미가 올바르게 좁혀진 경우
+- 애매한 지시어를 특정 대상으로 강제 해석해야만 문제가 생기는 경우
+- 단순 표현 취향, 더 좋은 설명 가능성, 강의 수준 밖의 매우 엄밀한 예외만 남는 경우
+- 단정을 하였지만, 일반적으로 통용하는 표현이거나, LLM 자신의 일반 도메인 지식으로 보았을 때 충분히 맞는 말로 보이는 경우
 
-### 출력하지 않는 경우
+confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후, LLM 자신의 일반 도메인 지식 기준으로 판단했을 때, 해당 claim이 틀렸거나 확인할 가치가 있어 보이는 정도를 0.0~1.0 사이의 숫자로 표현한 것입니다. 일반적으로 0.6 이상이면 후속 검증이 충분히 가치 있다고 판단한 경우입니다.
 
-- 앞뒤 문맥이나 슬라이드가 자연스럽게 조건/대상을 보완하는 경우
-- claim이 unresolved이고 선행사를 확정할 수 없어 문제 명제를 구체적으로 쓸 수 없는 경우
+- 0.00~0.39: 일반적으로 통용되는 설명이다
+- 0.40~0.59: 일반적으로 사용되나, 약간의 예외나 조건이 있을 수 있다
+- 0.60~0.79: 일반적으로 애매한 표현이며, 예외나 조건이 명확히 존재한다
+- 0.80~1.00: 일반적으로 맞지 않는 말이다.
 
 ### 응답 (JSON만)
+
+`basis_code`는 후속 검증이 필요한 주된 근거를 아래 코드 중 하나로만 쓰세요.
+- `definition_relation`: 정의, 분류, 포함 관계, 개념 관계가 의심됨
+- `mechanism_actor`: 주체, 과정, 원인-결과, 작동 방식이 의심됨
+- `scope_condition`: 조건, 범위, 전체/일부, 가능/불가능, 결과 과장이 의심됨
+- `currentness`: 현재성, 최신성, 지원 여부, 사용 여부, 버전/정책/통계 확인이 필요함
+- `terminology`: 용어 또는 분류명이 문맥상 다른 대상을 가리킬 가능성이 있음
 
 ```json
 {{
@@ -159,8 +197,7 @@ def _build_issue_candidate_prompt(
       "claim_id": "CL0001",
       "resolved_claim": "판정에 사용한 resolved_claim",
       "claim_text": "원문 claim_text",
-      "issue": "학생이 잘못 외울 수 있는 문제 요약",
-      "candidate_reason": "왜 1차 issue 후보인지",
+      "basis_code": "definition_relation",
       "confidence": 0.0
     }}
   ]
@@ -173,7 +210,9 @@ def _build_issue_candidate_prompt(
 3. type, issue_type, context_id는 출력하지 마세요.
 4. 같은 claim에서 같은 문제는 한 건만 출력하세요.
 5. 문제가 없으면 {{"issues": []}}만 출력하세요.
-6. JSON 외 텍스트를 출력하지 마세요.
+6. basis_code는 위 다섯 코드 중 하나만 출력하세요.
+7. issue, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
+8. JSON 외 텍스트를 출력하지 마세요.
 """
 
 
@@ -184,7 +223,7 @@ def _order_issue_candidate_fields(issue: dict) -> dict:
         "resolved_claim",
         "claim_text",
         "issue",
-        "candidate_reason",
+        "basis_code",
         "confidence",
         "context_id",
         "context_ids",
@@ -193,7 +232,6 @@ def _order_issue_candidate_fields(issue: dict) -> dict:
         "end_time",
         "claim_type",
         "needs_context",
-        "resolution_status",
     )
     ordered = {key: issue[key] for key in preferred if key in issue}
     ordered.update({key: value for key, value in issue.items() if key not in ordered})
@@ -268,7 +306,6 @@ def _judge_issue_candidates(
             ref = context_map.get(context_id, {})
             issue_key = (
                 claim_id,
-                cv._compact_text(str(raw_issue.get("issue", "") or ""))[:120],
             )
             if issue_key in seen:
                 continue
@@ -281,17 +318,14 @@ def _judge_issue_candidates(
                 or ""
             ).strip()
             claim_text = str(raw_issue.get("claim_text") or source_claim.get("claim_text") or "").strip()
+            source_issue_text = claim_text or resolved_claim
+            basis_code = str(raw_issue.get("basis_code") or "").strip()
             issue = {
                 "claim_id": claim_id,
                 "resolved_claim": resolved_claim,
                 "claim_text": claim_text,
-                "issue": str(raw_issue.get("issue", "") or raw_issue.get("candidate_reason", "") or "").strip(),
-                "candidate_reason": str(
-                    raw_issue.get("candidate_reason")
-                    or raw_issue.get("issue")
-                    or raw_issue.get("explanation")
-                    or ""
-                ).strip(),
+                "issue": source_issue_text,
+                "basis_code": basis_code,
                 "confidence": confidence,
                 "context_id": context_id,
                 "context_ids": _context_ids(source_claim),
@@ -299,8 +333,7 @@ def _judge_issue_candidates(
                 "start_time": ref.get("start_time", source_claim.get("start_time")),
                 "end_time": ref.get("end_time", source_claim.get("end_time")),
                 "claim_type": source_claim.get("claim_type", ""),
-                "needs_context": bool(source_claim.get("needs_context")),
-                "resolution_status": source_claim.get("resolution_status", ""),
+                "needs_context": _claim_needs_context(source_claim),
             }
             issues.append(_order_issue_candidate_fields(issue))
 
@@ -361,15 +394,18 @@ def judge_issue_candidates_only(
     all_issues = []
     prefix = f"[{log_prefix}] " if log_prefix else ""
     total_batches = sum(1 for _, claims in all_claims_by_batch if claims)
-    active_batch_idx = 0
+    jobs = []
 
     for batch_idx, (batch, claims) in enumerate(all_claims_by_batch, start=1):
         if not claims:
             continue
-        active_batch_idx += 1
         batch_map = {u["context_id"]: u for u in batch}
         ids = f"{batch[0]['context_id']}..{batch[-1]['context_id']}"
-        print(f"  {prefix}1차 issue judge ({active_batch_idx}/{total_batches}) {ids}", flush=True)
+        jobs.append((len(jobs) + 1, batch_idx, batch, claims, batch_map, ids))
+
+    def _run_job(job):
+        active_idx, batch_idx, batch, claims, batch_map, ids = job
+        print(f"  {prefix}1차 issue judge ({active_idx}/{total_batches}) {ids}", flush=True)
         issues, parse_failed, api_calls, token_usage, ok = recover_issue_candidate_judgement(
             claims,
             batch,
@@ -381,6 +417,28 @@ def judge_issue_candidates_only(
         )
         if not ok:
             print(f"    ⚠️ 1차 issue judge 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")
+        return active_idx, issues, api_calls, token_usage
+
+    worker_count = min(_issue_judge_batch_max_workers(), max(1, len(jobs)))
+    if worker_count > 1 and len(jobs) > 1:
+        print(f"  {prefix}1차 issue judge batch 병렬 처리: max_workers={worker_count}", flush=True)
+        print(f"  {prefix}cache warm-up: 첫 batch 선실행 후 나머지 병렬 처리", flush=True)
+        results = {}
+        warmup_result = _run_job(jobs[0])
+        results[warmup_result[0]] = warmup_result
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {executor.submit(_run_job, job): job[0] for job in jobs[1:]}
+            for future in as_completed(futures):
+                active_idx = futures[future]
+                try:
+                    results[active_idx] = future.result()
+                except Exception as e:
+                    raise RuntimeError(f"issue judge batch {active_idx} failed: {e}") from e
+        ordered_results = [results[job[0]] for job in jobs]
+    else:
+        ordered_results = [_run_job(job) for job in jobs]
+
+    for _active_idx, issues, api_calls, token_usage in ordered_results:
         all_issues.extend(issues)
         total_api += api_calls
         total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)

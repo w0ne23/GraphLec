@@ -48,6 +48,16 @@ def _load_json_file(path: Path) -> dict:
 
 
 DEFAULT_ISSUE_JUDGE_MAX_WORKERS = _env_int("ISSUE_JUDGE_MAX_WORKERS", 6)
+CLAIM_EXTRACT_BATCH_SIZE = _env_int(
+    "VERIFIER_CLAIM_EXTRACT_BATCH_SIZE",
+    _env_int("VERIFIER_BATCH_SIZE", 4),
+)
+ISSUE_DETECTOR_BATCH_SIZE = _env_int("VERIFIER_ISSUE_DETECTOR_BATCH_SIZE", 4)
+ISSUE_TYPE_CLASSIFIER_BATCH_SIZE = _env_int("VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE", 20)
+CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE = _env_int(
+    "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
+    _env_int("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", 5),
+)
 
 
 class _DockerLogTee:
@@ -153,6 +163,48 @@ def _is_anthropic_model(model: str) -> bool:
     return lowered.startswith("claude") or "sonnet" in lowered or "opus" in lowered or "haiku" in lowered
 
 
+def _issue_judge_min_confidence_for_model(model: str) -> float:
+    """Return the first-pass issue detector threshold for a judge model."""
+    def _bounded(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    model_key = re.sub(r"[^0-9A-Za-z]+", "_", str(model or "").strip()).strip("_").upper()
+    env_candidates = []
+    if model_key:
+        env_candidates.append(f"VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_{model_key}")
+    if _is_anthropic_model(model):
+        env_candidates.extend(
+            [
+                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_CLAUDE",
+                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_ANTHROPIC",
+            ]
+        )
+        default = 0.55
+    elif _is_openai_model(model):
+        env_candidates.extend(
+            [
+                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_GPT",
+                "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_OPENAI",
+            ]
+        )
+        default = 0.8
+    else:
+        try:
+            default = float(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", "0.8") or 0.8)
+        except ValueError:
+            default = 0.8
+
+    for key in env_candidates:
+        raw = os.getenv(key)
+        if raw is None:
+            continue
+        try:
+            return _bounded(float(str(raw).strip()))
+        except ValueError:
+            continue
+    return _bounded(default)
+
+
 def _missing_provider_key(model: str) -> str | None:
     if _is_openai_model(model) and not os.getenv("OPENAI_API_KEY"):
         return "OPENAI_API_KEY"
@@ -197,11 +249,13 @@ def _classified_issue_judge_worker(args_tuple):
     try:
         merged_path, model, claims_serialized, current_date, root, env_vars = args_tuple
         _setup_worker(root, env_vars, model)
+        min_confidence = _issue_judge_min_confidence_for_model(model)
+        os.environ["VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE"] = str(min_confidence)
         from analyzer.claim_pipeline import prepare_verification as _prepare_verification
         from analyzer.issue_detector import judge_issue_candidates_only
 
         ctx = _prepare_verification(merged_path, current_date=current_date)
-        print(f"\n  [{model}] 1차 issue judge 시작", flush=True)
+        print(f"\n  [{model}] 1차 issue judge 시작 (min_confidence={min_confidence:.2f})", flush=True)
 
         claims_by_batch = [(item["batch"], item["claims"]) for item in claims_serialized]
         issues, api_calls, token_usage = judge_issue_candidates_only(
@@ -274,7 +328,7 @@ def _issue_judge_payload(
             "resolved_claim": row.get("resolved_claim", ""),
             "claim_text": row.get("claim_text", ""),
             "issue": row.get("issue", ""),
-            "candidate_reason": row.get("candidate_reason", ""),
+            "basis_code": row.get("basis_code", ""),
             "confidence": row.get("confidence", 0),
             "context_id": row.get("context_id", ""),
             "context_ids": row.get("context_ids", []),
@@ -282,7 +336,6 @@ def _issue_judge_payload(
             "start_time": row.get("start_time"),
             "end_time": row.get("end_time"),
             "needs_context": row.get("needs_context", False),
-            "resolution_status": row.get("resolution_status", ""),
         }
         ordered.update({
             key: value
@@ -394,7 +447,7 @@ def _build_issue_judge_comparison(
                         {
                             "issue_id": issue.get("issue_id", ""),
                             "issue": issue.get("issue", ""),
-                            "candidate_reason": issue.get("candidate_reason", ""),
+                            "basis_code": issue.get("basis_code", ""),
                             "confidence": issue.get("confidence", 0),
                         }
                         for issue in model_issues
@@ -489,7 +542,7 @@ def _write_issue_judge_merged_output(
                 "model": model,
                 "issue_id": issue.get("issue_id", ""),
                 "issue": issue.get("issue", ""),
-                "candidate_reason": issue.get("candidate_reason", ""),
+                "basis_code": issue.get("basis_code", ""),
                 "confidence": issue.get("confidence", 0),
             }
             if claim_id in seen_by_claim:
@@ -505,7 +558,7 @@ def _write_issue_judge_merged_output(
                 except Exception:
                     new_conf = old_conf = 0.0
                 if new_conf > old_conf:
-                    for key in ("issue", "candidate_reason", "confidence"):
+                    for key in ("issue", "basis_code", "confidence"):
                         existing[key] = issue.get(key, existing.get(key))
                     existing["representative_model"] = model
                 continue
@@ -568,7 +621,7 @@ def run_issue_judge_only(
     output_dir: str | None = None,
     claims_jsonl: str | None = None,
     issue_judge_models: list[str] | None = None,
-    issue_judge_batch_size: int = 20,
+    issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
     current_date: str | None = None,
     issue_judge_min_confidence: float | None = None,
     issue_judge_max_workers: int = DEFAULT_ISSUE_JUDGE_MAX_WORKERS,
@@ -740,25 +793,14 @@ def run_issue_judge_only(
 
 
 def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
-    context_ids = claim.get("context_ids")
-    if not isinstance(context_ids, list) or not context_ids:
-        context_ids = [claim.get("context_id")]
-    context_ids = [str(item) for item in context_ids if str(item or "").strip()]
-
-    context_id = str(claim.get("context_id") or (context_ids[0] if context_ids else "")).strip()
+    context_id = str(claim.get("context_id") or "").strip()
     payload = {
         "claim_id": claim.get("claim_id", ""),
+        "context_id": context_id,
         "claim_text": claim.get("claim_text", ""),
+        "source_slice": claim.get("source_slice", ""),
         "resolved_claim": claim.get("resolved_claim", ""),
         "claim_type": claim.get("claim_type", ""),
-        "context_id": context_id,
-        "context_ids": context_ids,
-        "antecedent_context_ids": claim.get("antecedent_context_ids", []),
-        "claim_fingerprint": claim.get("claim_fingerprint", ""),
-        "is_approximate": bool(claim.get("is_approximate")),
-        "needs_context": bool(claim.get("needs_context")),
-        "resolution_status": claim.get("resolution_status", ""),
-        "context_note": claim.get("context_note", ""),
     }
     return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
@@ -770,6 +812,7 @@ def _extract_or_reuse_claims_for_classified_pipeline(
     claims_jsonl: str | None = None,
     reuse_claims: bool = False,
     current_date: str | None = None,
+    claim_batch_size: int = CLAIM_EXTRACT_BATCH_SIZE,
 ) -> dict:
     base_stem = _base_stem(merged_file)
     result_json_path = out_dir / f"{base_stem}_verification_final.json"
@@ -805,6 +848,7 @@ def _extract_or_reuse_claims_for_classified_pipeline(
         ctx["current_date"],
         ctx["hint"],
         ctx["slide_ctx"],
+        batch_size=claim_batch_size,
     )
     claims: list[dict] = []
     for _, batch_claims in claims_by_batch:
@@ -950,8 +994,10 @@ def run_classified_issue_pipeline(
     verifier_models: list[str] | None = None,
     issue_type_model_weights: str | None = None,
     verifier_model_weights: str | None = None,
-    issue_type_batch_size: int = 10,
-    verifier_batch_size: int = 4,
+    claim_batch_size: int = CLAIM_EXTRACT_BATCH_SIZE,
+    issue_judge_batch_size: int = ISSUE_DETECTOR_BATCH_SIZE,
+    issue_type_batch_size: int = ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
+    verifier_batch_size: int = CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
     max_workers: int = 1,
     max_tokens: int = 8192,
 ) -> dict:
@@ -975,6 +1021,7 @@ def run_classified_issue_pipeline(
         claims_jsonl=claims_jsonl,
         reuse_claims=reuse_claims,
         current_date=current_date,
+        claim_batch_size=claim_batch_size,
     )
     issue_judge_result = run_issue_judge_only(
         str(merged_file),
@@ -983,6 +1030,7 @@ def run_classified_issue_pipeline(
         issue_judge_models=issue_judge_models,
         current_date=current_date,
         issue_judge_min_confidence=issue_judge_min_confidence,
+        issue_judge_batch_size=issue_judge_batch_size,
         issue_judge_max_workers=max_workers,
     )
 
@@ -1156,13 +1204,38 @@ def main():
         default=None,
         help="1차 issue judge 모델 목록",
     )
-    parser.add_argument("--issue-judge-batch-size", type=int, default=20)
+    parser.add_argument(
+        "--claim-batch-size",
+        type=int,
+        default=CLAIM_EXTRACT_BATCH_SIZE,
+        help="Claim_extraction fallback 배치 크기. context 입력은 VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE(기본 4)를 우선 사용",
+    )
+    parser.add_argument(
+        "--issue-judge-batch-size",
+        type=int,
+        default=ISSUE_DETECTOR_BATCH_SIZE,
+        help="1차 Issue_detection core context 배치 크기. 기본 VERIFIER_ISSUE_DETECTOR_BATCH_SIZE 또는 4",
+    )
     parser.add_argument("--issue-judge-max-workers", type=int, default=DEFAULT_ISSUE_JUDGE_MAX_WORKERS)
+    parser.add_argument(
+        "--issue-type-batch-size",
+        type=int,
+        default=ISSUE_TYPE_CLASSIFIER_BATCH_SIZE,
+        help="Issue_type classification에서 한 prompt에 넣을 issue 후보 수. 기본 VERIFIER_ISSUE_CLASSIFIER_BATCH_SIZE 또는 20",
+    )
+    parser.add_argument(
+        "--verifier-batch-size",
+        "--cross-batch-size",
+        dest="verifier_batch_size",
+        type=int,
+        default=CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
+        help="Multi_LLM_Verification에서 한 prompt에 넣을 issue 수. 기본 VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH 또는 5",
+    )
     parser.add_argument(
         "--issue-judge-min-confidence",
         type=float,
         default=None,
-        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE 또는 0.8",
+        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 모델별로 GPT 0.8, Claude 0.55",
     )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()
@@ -1194,6 +1267,10 @@ def main():
         current_date=args.date,
         issue_judge_min_confidence=args.issue_judge_min_confidence,
         issue_judge_models=args.issue_judge_models,
+        claim_batch_size=args.claim_batch_size,
+        issue_judge_batch_size=args.issue_judge_batch_size,
+        issue_type_batch_size=args.issue_type_batch_size,
+        verifier_batch_size=args.verifier_batch_size,
         max_workers=args.issue_judge_max_workers,
         max_tokens=int(os.getenv("CLASSIFIED_ISSUE_PIPELINE_MAX_TOKENS", "8192")),
     )

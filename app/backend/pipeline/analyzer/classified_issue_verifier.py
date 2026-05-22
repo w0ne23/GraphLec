@@ -1018,7 +1018,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("CLASSIFIED_ISSUE_VERIFIER_MODEL_WEIGHTS", DEFAULT_MODEL_WEIGHTS),
         help="comma/space separated weights, e.g. gpt=0.4,claude=0.4,grok=0.2",
     )
-    parser.add_argument("--batch-size", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "4")))
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=int(
+            os.getenv(
+                "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
+                os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "5"),
+            )
+        ),
+    )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_TOKENS", "8192")))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "1")))
     parser.add_argument("--context-window", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW))))
