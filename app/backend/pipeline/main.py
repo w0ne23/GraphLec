@@ -1152,6 +1152,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
             "source_slice": claim.get("source_slice", ""),
             "resolved_claim": claim.get("resolved_claim", ""),
             "claim_type": claim.get("claim_type", ""),
+            "needs_context": bool(claim.get("needs_context", False)),
         }
         return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
