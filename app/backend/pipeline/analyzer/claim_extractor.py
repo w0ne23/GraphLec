@@ -308,7 +308,8 @@ def _build_extract_prompt(
 - "이것", "여기", "해당 항목", "얘", "이거", "그거" 같은 지시어는 단일 선행사가 확실할 때만 최소한으로 풀어 쓰세요.
 - 둘 이상의 합리적 해석이 가능하면 특정 대상으로 확정하지 말고 원문 지시어를 유지하세요.
 - 지시어 선행사가 제공된 문맥보다 앞에 있을 수 있어도, 현재 context에 검증 가능한 술어/정의/수치/관계가 있으면
-  claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두세요.
+  claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두고,
+  needs_context=tru로 표시하세요.
 - 슬라이드나 앞뒤 context가 보이더라도, 현재 context가 실제로 말하지 않은 관계를 resolved_claim에 추가하지 마세요.
 - 불완전한 조각 문장은 현재 context 안에서 검증 가능한 값/정의/관계가 완성되지 않으면 추출하지 마세요.
 - 복원 결과가 애매하다는 이유만으로 "이것은 X이다", "얘는 Y로 처리된다" 같은 원문 claim을 버리지 마세요.
@@ -341,7 +342,8 @@ def _build_extract_prompt(
       "claim_type": "definition",
       "claim_text": "현재 context에서 직접 가져온 claim 원문",
       "source_slice": "이 claim을 직접 만든 최소 원문 조각",
-      "resolved_claim": "원문 범위를 보존한 최소 정리문"
+      "resolved_claim": "원문 범위를 보존한 최소 정리문",
+      "needs_context": false
     }}
   ]
 }}
@@ -352,6 +354,7 @@ def _build_extract_prompt(
 - 하나의 context에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
 - source_slice는 claim_text를 만든 직접 원문 조각으로 쓰세요. 애매하면 claim_text와 동일하게 두세요.
+- needs_context는 claim_text/resolved_claim만으로 지시어, 생략된 주체, 조건, 대상이 충분히 해소되지 않아 후속 단계가 주변 문맥을 함께 봐야 하면 true, claim 자체로 의미가 충분히 분명하면 false로 쓰세요.
 - verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
@@ -394,6 +397,19 @@ def _normalize_claim_type(value: str) -> str | None:
     return "definition"
 
 
+def _coerce_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    raw = str(value).strip().lower()
+    if raw in {"1", "true", "yes", "y", "필요", "필요함"}:
+        return True
+    if raw in {"0", "false", "no", "n", "resolved", "해소", "불필요", "불필요함"}:
+        return False
+    return False
+
+
 def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
     """최종 추출 순서 기준으로 사람이 읽는 claim_id를 부여한다."""
     sequence = 1
@@ -412,6 +428,7 @@ def _order_claim_fields(claim: dict) -> None:
         "source_slice",
         "resolved_claim",
         "claim_type",
+        "needs_context",
     )
     ordered = {key: claim[key] for key in preferred_keys if key in claim}
     ordered.update({key: value for key, value in claim.items() if key not in ordered})
@@ -536,13 +553,13 @@ def _extract_claims(
                 c["claim_text"] = claim_text
                 c["source_slice"] = source_slice
                 c["resolved_claim"] = resolved_claim
+                c["needs_context"] = _coerce_bool(c.get("needs_context"))
                 c.pop("claim_id", None)
                 c["context_ids"] = [str(c.get("context_id") or "")]
                 c.pop("resolution_status", None)
                 c.pop("antecedent_context_ids", None)
                 c.pop("claim_fingerprint", None)
                 c.pop("is_approximate", None)
-                c.pop("needs_context", None)
                 c.pop("context_note", None)
                 c.pop("verification_question", None)
                 c.pop("verificationQuestion", None)
@@ -551,7 +568,7 @@ def _extract_claims(
             for claim in cleaned:
                 if not str(claim.get("source_slice") or "").strip():
                     claim["source_slice"] = str(claim.get("claim_text") or "").strip()
-                allowed = {"context_id", "claim_text", "source_slice", "resolved_claim", "claim_type"}
+                allowed = {"context_id", "claim_text", "source_slice", "resolved_claim", "claim_type", "needs_context"}
                 for key in list(claim.keys()):
                     if key not in allowed:
                         claim.pop(key, None)

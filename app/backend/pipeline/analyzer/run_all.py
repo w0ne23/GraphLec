@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 from . import claim_common as cv
@@ -27,6 +28,7 @@ STATUS_CONFIRMED = "confirmed"
 STATUS_PROFESSOR_CHECK = "professor_check"
 STATUS_REJECTED = "rejected"
 _DOCKER_LOG_TEE_ENABLED = False
+_ISSUE_JUDGE_FAILURE_MARKER = "ISSUE_JUDGE_FAILURE_JSON:"
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -37,8 +39,46 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return max(minimum, value)
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(os.getenv(name, str(default)) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, value)
+
+
 def _json_file_exists(path: Path) -> bool:
     return path.exists() and path.is_file() and path.stat().st_size > 0
+
+
+def _extract_issue_judge_failure(exc: BaseException | str | None) -> dict:
+    if exc is None:
+        return {}
+    if not isinstance(exc, str):
+        current = exc
+        seen = set()
+        while current and id(current) not in seen:
+            seen.add(id(current))
+            to_dict = getattr(current, "to_dict", None)
+            if callable(to_dict):
+                try:
+                    failure = to_dict()
+                    if isinstance(failure, dict):
+                        return failure
+                except Exception:
+                    pass
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+    text = str(exc)
+    marker_index = text.find(_ISSUE_JUDGE_FAILURE_MARKER)
+    if marker_index < 0:
+        return {}
+    payload_text = text[marker_index + len(_ISSUE_JUDGE_FAILURE_MARKER):].strip().splitlines()[0].strip()
+    try:
+        payload = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _load_json_file(path: Path) -> dict:
@@ -278,11 +318,48 @@ def _classified_issue_judge_worker(args_tuple):
         import traceback
 
         model = args_tuple[1] if len(args_tuple) > 1 else "unknown"
+        failure = _extract_issue_judge_failure(e)
+        if failure:
+            failure.setdefault("model", model)
         detail = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        marker = (
+            f"\n{_ISSUE_JUDGE_FAILURE_MARKER}{json.dumps(failure, ensure_ascii=False)}"
+            if failure
+            else ""
+        )
         raise RuntimeError(
             f"[{model}] classified issue judge worker failed: "
-            f"{type(e).__name__}: {e}\n{detail}"
+            f"{type(e).__name__}: {e}{marker}\n{detail}"
         ) from e
+
+
+def _classified_issue_judge_worker_with_retries(args_tuple):
+    model = args_tuple[1] if len(args_tuple) > 1 else "unknown"
+    retries = _env_int(
+        "VERIFIER_ISSUE_JUDGE_WORKER_RETRIES",
+        _env_int("ISSUE_JUDGE_WORKER_RETRIES", 1, minimum=0),
+        minimum=0,
+    )
+    retry_wait = _env_float(
+        "VERIFIER_ISSUE_JUDGE_WORKER_RETRY_WAIT_SEC",
+        _env_float("ISSUE_JUDGE_WORKER_RETRY_WAIT_SEC", 10.0, minimum=0.0),
+        minimum=0.0,
+    )
+    last_exc = None
+
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            print(f"  ↺ [{model}] 1차 issue judge worker 재시도 ({attempt}/{retries})", flush=True)
+            if retry_wait:
+                time.sleep(retry_wait)
+        try:
+            return _classified_issue_judge_worker(args_tuple)
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= retries:
+                raise
+
+    raise RuntimeError(f"[{model}] 1차 issue judge worker failed") from last_exc
 
 
 def _load_claims_jsonl(path: str | Path | None) -> list[dict]:
@@ -353,8 +430,10 @@ def _issue_judge_payload(
     }
     if not ok and result.get("error"):
         summary["error"] = str(result.get("error"))
+    if result.get("failure"):
+        summary["failure"] = result.get("failure")
 
-    return {
+    payload = {
         "schema_version": "issue_judge_model.v1",
         "stage": "claim_to_issue_judge",
         "model": model,
@@ -364,6 +443,9 @@ def _issue_judge_payload(
         "issues": issues,
         "token_usage": result.get("token_usage", _empty_token_usage()),
     }
+    if result.get("failure"):
+        payload["failure"] = result.get("failure")
+    return payload
 
 
 def _write_issue_judge_model_outputs(
@@ -655,10 +737,21 @@ def run_issue_judge_only(
         cached_summary = summary_payload.get("summary", {}) or {}
         cached_evaluated_count = int(cached_summary.get("evaluated_model_count", 0) or 0)
         cached_failed_models = cached_summary.get("failed_models", []) or []
-        if cached_evaluated_count == 0 and cached_failed_models:
+        cached_failures = summary_payload.get("failures", []) or []
+        if cached_failed_models:
             raise RuntimeError(
-                "캐시된 issue judge 결과가 전체 모델 실패 상태라 verifier를 계속 진행할 수 없습니다. "
+                "캐시된 issue judge 결과에 실패 모델이 있어 verifier를 계속 진행할 수 없습니다. "
                 f"summary={summary_path}, failed_models={cached_failed_models}"
+            )
+        if cached_failures:
+            raise RuntimeError(
+                "캐시된 issue judge 결과에 실패 기록이 있어 verifier를 계속 진행할 수 없습니다. "
+                f"summary={summary_path}, failures={cached_failures}"
+            )
+        if cached_evaluated_count == 0:
+            raise RuntimeError(
+                "캐시된 issue judge 결과에 평가 완료 모델이 없어 verifier를 계속 진행할 수 없습니다. "
+                f"summary={summary_path}"
             )
         return {
             "merged_path": str(merged_file),
@@ -702,7 +795,7 @@ def run_issue_judge_only(
     with ProcessPoolExecutor(max_workers=issue_judge_max_workers) as executor:
         futures = {
             executor.submit(
-                _classified_issue_judge_worker,
+                _classified_issue_judge_worker_with_retries,
                 (str(merged_file), model, claims_serialized, current_date, root, env_vars),
             ): model
             for model in models
@@ -713,10 +806,14 @@ def run_issue_judge_only(
                 judge_results[model] = future.result()
             except Exception as e:
                 print(f"  ❌ [{model}] 1차 issue judge 실패: {e}")
+                failure = _extract_issue_judge_failure(e)
+                if failure:
+                    failure.setdefault("model", model)
                 judge_results[model] = {
                     "model": model,
                     "ok": False,
                     "error": str(e),
+                    "failure": failure,
                     "issues": [],
                     "api_calls": 0,
                     "token_usage": _empty_token_usage(),
@@ -749,9 +846,12 @@ def run_issue_judge_only(
 
     total_token_usage = _empty_token_usage()
     token_usage_per_model = {}
+    failures = []
     for model, result in judge_results.items():
         token_usage_per_model[model] = result.get("token_usage", _empty_token_usage())
         total_token_usage = _merge_token_usage(total_token_usage, token_usage_per_model[model])
+        if result.get("failure"):
+            failures.append(result["failure"])
 
     summary = {
         "schema_version": "issue_judge_summary.v1",
@@ -767,18 +867,26 @@ def run_issue_judge_only(
         "token_usage_per_model": token_usage_per_model,
         "token_usage": total_token_usage,
     }
+    if failures:
+        summary["failure"] = failures[0]
+        summary["failures"] = failures
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     failed_models = summary.get("summary", {}).get("failed_models", []) or []
     evaluated_model_count = int(summary.get("summary", {}).get("evaluated_model_count", 0) or 0)
-    if evaluated_model_count == 0:
+    if failed_models:
         failure_details = "; ".join(
             f"{model}: {judge_results.get(model, {}).get('error', 'unknown error')}"
             for model in failed_models
         )
         raise RuntimeError(
-            "issue judge 전체 모델이 실패해서 verifier를 계속 진행할 수 없습니다. "
+            "issue judge 모델 실패가 있어 verifier를 계속 진행할 수 없습니다. "
             f"summary={summary_path}, failed_models={failed_models}. {failure_details}"
+        )
+    if evaluated_model_count == 0:
+        raise RuntimeError(
+            "issue judge 평가 완료 모델이 없어 verifier를 계속 진행할 수 없습니다. "
+            f"summary={summary_path}"
         )
 
     return {
@@ -801,6 +909,7 @@ def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
         "source_slice": claim.get("source_slice", ""),
         "resolved_claim": claim.get("resolved_claim", ""),
         "claim_type": claim.get("claim_type", ""),
+        "needs_context": bool(claim.get("needs_context", False)),
     }
     return {key: value for key, value in payload.items() if value not in ("", [], None)}
 
@@ -1059,6 +1168,11 @@ def run_classified_issue_pipeline(
         print(f"  ⏭  issue type classifier — 출력 파일 존재, 스킵")
         print(f"     {issue_type_output_path}")
         issue_type_result = _load_json_file(issue_type_output_path)
+        if (issue_type_result.get("summary", {}) or {}).get("failed_model_count", 0) or issue_type_result.get("failures"):
+            raise RuntimeError(
+                "캐시된 issue type classifier 결과에 실패 기록이 있어 verifier를 계속 진행할 수 없습니다. "
+                f"output={issue_type_output_path}"
+            )
         classified_input = _load_json_file(classified_input_path)
     else:
         issue_type_models = issue_type_models or _issue_type_default_models()
@@ -1075,6 +1189,11 @@ def run_classified_issue_pipeline(
             model_weights_spec=issue_type_model_weights,
         )
         issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        if (issue_type_result.get("summary", {}) or {}).get("failed_model_count", 0) or issue_type_result.get("failures"):
+            raise RuntimeError(
+                "issue type classifier 실패가 있어 verifier를 계속 진행할 수 없습니다. "
+                f"output={issue_type_output_path}, failures={issue_type_result.get('failures', [])}"
+            )
         classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
         classified_input_path.write_text(json.dumps(classified_input, ensure_ascii=False, indent=2), encoding="utf-8")
 
