@@ -8,6 +8,39 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 JUDGE_MIN_CONFIDENCE = 0.6
 
 
+class IssueJudgeBatchError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        batch_index: int,
+        active_index: int,
+        context_range: str,
+        claim_ids: list[str],
+        parse_failed: bool,
+    ):
+        self.batch_index = batch_index
+        self.active_index = active_index
+        self.context_range = context_range
+        self.claim_ids = claim_ids
+        self.parse_failed = parse_failed
+        super().__init__(
+            f"1차 issue judge batch 실패: {context_range} "
+            f"(batch_index={batch_index}, active_index={active_index}, parse_failed={parse_failed})"
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "stage": "issue_judge",
+            "batch_index": self.batch_index,
+            "active_index": self.active_index,
+            "context_range": self.context_range,
+            "claim_ids": self.claim_ids,
+            "parse_failed": self.parse_failed,
+            "retry_exhausted": True,
+            "error": str(self),
+        }
+
+
 def issue_judge_min_confidence() -> float:
     raw = str(os.getenv("VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE", str(JUDGE_MIN_CONFIDENCE)) or "").strip()
     try:
@@ -53,9 +86,10 @@ def _context_ids(claim: dict) -> list[str]:
 
 
 def _claim_needs_context(claim: dict) -> bool:
-    if "needs_context" in claim:
-        return bool(claim.get("needs_context"))
-    return str(claim.get("resolution_status") or "").strip().lower() == "unresolved"
+    value = claim.get("needs_context", False)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "필요", "필요함"}
 
 
 def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
@@ -282,9 +316,13 @@ def _judge_issue_candidates(
                 continue
             return [], True, api_calls, token_usage
 
+        if not isinstance(payload, dict) or "issues" not in payload or not isinstance(payload.get("issues"), list):
+            if attempt < cv.VERIFIER_PARSE_RETRIES:
+                print(f"    ↺ 1차 issue judge schema 재시도 ({attempt+1}/{cv.VERIFIER_PARSE_RETRIES})")
+                continue
+            return [], True, api_calls, token_usage
+
         raw = payload.get("issues", [])
-        if not isinstance(raw, list):
-            return [], False, api_calls, token_usage
 
         issues = []
         seen = set()
@@ -416,7 +454,13 @@ def judge_issue_candidates_only(
             f"1차 issue judge 배치 {batch_idx} {ids}",
         )
         if not ok:
-            print(f"    ⚠️ 1차 issue judge 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")
+            raise IssueJudgeBatchError(
+                batch_index=batch_idx,
+                active_index=active_idx,
+                context_range=ids,
+                claim_ids=[_claim_id(claim) for claim in claims if _claim_id(claim)],
+                parse_failed=parse_failed,
+            )
         return active_idx, issues, api_calls, token_usage
 
     worker_count = min(_issue_judge_batch_max_workers(), max(1, len(jobs)))
