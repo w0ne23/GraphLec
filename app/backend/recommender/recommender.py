@@ -111,6 +111,12 @@ _DOMAIN_LABELS = {
     "soc/edu": "교육학",
 }
 _TOPIC_EXPANSIONS = {
+    "파이썬": [
+        "Python",
+    ],
+    "python": [
+        "파이썬",
+    ],
     "웹": [
         "리액트",
         "컴포넌트",
@@ -195,14 +201,13 @@ class RecommenderConfig:
     # 이중 레이어 임계값
     DIRECT_RATIO:            float = 0.90
     RELATED_RATIO:           float = 0.55
-    BACKGROUND_RATIO:        float = 0.30
     ABS_MIN_SCORE:           float = 0.30
     ABS_DIRECT_FLOOR:        float = 0.50
-    ABS_BACKGROUND_FLOOR:    float = 0.18
+    CORE_MATCH_DIRECT_FLOOR: float = 0.35
     GAP_THRESHOLD:           float = 0.08
-    DM_KW_FLOOR_RELATED:     float = 0.03
-    BG_GRAPH_FLOOR:          float = 0.10
-    BG_SIM_KEYWORD_FLOOR:    float = 0.65
+    DIRECT_GRAPH_FLOOR:      float = 0.55
+    RELATED_GRAPH_FLOOR:     float = 0.25
+    RELATED_COMMUNITY_FLOOR: float = 0.20
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60  # 도메인 상위 카테고리 불일치
     Q_KW_MISMATCH_PENALTY:   float = 0.60  # 원본 query_keyword 완전 미매칭
@@ -815,6 +820,26 @@ def _concept_match(concept: str, focus: str) -> bool:
     return focus in concept or concept in focus
 
 
+def _append_terms(target: list[str], values) -> None:
+    """metadata의 list/dict/string 혼합 필드에서 문자열 term만 평탄화한다."""
+    if values is None:
+        return
+    if isinstance(values, str):
+        if values.strip():
+            target.append(values)
+        return
+    if isinstance(values, dict):
+        for value in values.values():
+            _append_terms(target, value)
+        return
+    if isinstance(values, (list, tuple, set)):
+        for value in values:
+            _append_terms(target, value)
+        return
+    if isinstance(values, (int, float)):
+        target.append(str(values))
+
+
 def _role_weight_for_concept(
     lec: LectureMetadata,
     concept: str,
@@ -847,6 +872,42 @@ def _role_weight_for_concept(
                 best = max(best, role_weights.get(cr.get("role", ""), 0.0))
 
     return best
+
+
+def _query_concept_in_role(
+    lec: LectureMetadata,
+    query_concepts: set[str],
+    target_role: str,
+) -> bool:
+    """질의 개념이 특정 concept_roles bucket에 포함되는지 확인한다."""
+    concepts = {
+        _normalize_term(concept)
+        for concept in query_concepts
+        if _normalize_term(concept)
+    }
+    if not concepts:
+        return False
+
+    role_terms: list[str] = []
+    concept_roles = lec.concept_roles
+    if isinstance(concept_roles, dict):
+        _append_terms(role_terms, concept_roles.get(target_role, []))
+    elif isinstance(concept_roles, list):
+        for item in concept_roles:
+            if not isinstance(item, dict) or item.get("role") != target_role:
+                continue
+            _append_terms(role_terms, item.get("concept"))
+
+    normalized_roles = [
+        _normalize_term(term)
+        for term in role_terms
+        if _normalize_term(term)
+    ]
+    return any(
+        _concept_match(role_term, query_term)
+        for role_term in normalized_roles
+        for query_term in concepts
+    )
 
 
 def _compute_graph_score(
@@ -1010,6 +1071,19 @@ _DELIVERY_CONDITION_TERMS = frozenset({
     "천천히", "천천", "여유", "명료",
 })
 
+_NON_CONTENT_QUERY_TERMS = frozenset({
+    "강의", "추천", "내용", "설명", "요약", "개념", "주제", "관련",
+    "기초", "입문", "초급", "쉬운", "쉽게", "쉬움", "설명이 쉬운",
+    "알려줘", "찾아줘", "보여줘", "내외", "이내", "이하", "정도",
+})
+
+
+def _strip_non_content_modifiers(term: str, blocked: set[str]) -> str:
+    cleaned = _normalize_term(term)
+    for blocked_term in sorted(blocked, key=len, reverse=True):
+        cleaned = cleaned.replace(blocked_term, " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
 
 def _content_terms_only(terms: list[str], conditions: dict) -> list[str]:
     """
@@ -1024,17 +1098,67 @@ def _content_terms_only(terms: list[str], conditions: dict) -> list[str]:
         blocked.update(_APPLICATION_CONDITION_TERMS)
     if conditions.get("prefers_slow_speech") or conditions.get("prefers_listenability"):
         blocked.update(_DELIVERY_CONDITION_TERMS)
-    if not blocked:
-        return terms
+    blocked.update(_NON_CONTENT_QUERY_TERMS)
 
     normalized_blocked = {_normalize_term(term) for term in blocked}
     cleaned = []
+    seen = set()
     for term in terms or []:
         normalized = _normalize_term(term)
         if not normalized or normalized in normalized_blocked:
             continue
-        cleaned.append(term)
+        stripped = _strip_non_content_modifiers(normalized, normalized_blocked)
+        if stripped and stripped not in normalized_blocked and stripped not in seen:
+            seen.add(stripped)
+            cleaned.append(stripped)
     return cleaned
+
+
+def _required_subject_terms(ctx) -> set[str]:
+    if ctx.intent != "recommend":
+        return set()
+    return {
+        _normalize_term(term)
+        for term in _expanded_topic_terms(ctx.query_keywords)
+        if _normalize_term(term)
+    }
+
+
+def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
+    terms: list[str] = []
+    _append_terms(terms, lec.title)
+    _append_terms(terms, lec.summary)
+    _append_terms(terms, [item.get("keyword", "") for item in (lec.keywords or []) if isinstance(item, dict)])
+    _append_terms(terms, lec.concept_roles)
+    for relation in lec.concept_relations or []:
+        if not isinstance(relation, dict):
+            continue
+        _append_terms(terms, relation.get("from"))
+        _append_terms(terms, relation.get("to"))
+        _append_terms(terms, relation.get("source"))
+        _append_terms(terms, relation.get("target"))
+    for community in lec.communities or []:
+        if not isinstance(community, dict):
+            continue
+        _append_terms(terms, community.get("title"))
+        _append_terms(terms, community.get("summary"))
+        _append_terms(terms, community.get("nodes"))
+    return [_normalize_term(term) for term in terms if _normalize_term(term)]
+
+
+def _has_required_subject_match(lec: LectureMetadata, required_terms: set[str]) -> bool:
+    """
+    길이/도메인/전달 조건이 내용 적합성을 대체하지 못하도록,
+    원본 질의의 명시 주제가 강의 메타데이터에 직접 걸리는지 확인한다.
+    """
+    if not required_terms:
+        return True
+    lecture_terms = _lecture_subject_terms(lec)
+    return any(
+        _concept_match(lecture_term, required_term)
+        for lecture_term in lecture_terms
+        for required_term in required_terms
+    )
 
 
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
@@ -1248,7 +1372,7 @@ class RecommendResult:
     score_detail: dict
     reason:       str
     summary:      str
-    tier:         str   # "direct" | "related" | "background"
+    tier:         str   # "direct" | "related"
 
 
 @dataclass
@@ -1270,17 +1394,6 @@ class QueryContext:
 
 
 def _build_reason(detail: dict, tier: str = "direct") -> str:
-    if tier == "background":
-        parts = []
-        if detail.get("graph_score", 0) >= 0.1:
-            parts.append(f"개념 그래프 {detail['graph_score']:.0%}")
-        if detail.get("sim_keyword", 0) >= 0.6:
-            parts.append(f"주제 근접 {detail['sim_keyword']:.0%}")
-        if detail.get("domain_score", 0) == 1.0:
-            parts.append("도메인 일치")
-        note = " · ".join(parts) if parts else "배경 개념 포함"
-        return f"직접 추천은 아니지만 이해에 도움이 되는 배경 강의입니다 ({note})"
-
     if tier == "related":
         parts = []
         if detail.get("dm_keyword", 0) > 0.1:
@@ -2023,6 +2136,7 @@ class Recommender:
     ) -> list[tuple[LectureMetadata, dict]]:
         query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         query_terms = self._query_lexical_terms(ctx)
+        required_subject_terms = _required_subject_terms(ctx)
         weights = self._resolve_rerank_weights(ctx)
         print(
             "[Rerank weights] "
@@ -2035,6 +2149,8 @@ class Recommender:
             row = self._row_by_video_id.get(video_id)
             lec = self.collection.get(video_id)
             if lec is None:
+                continue
+            if not _has_required_subject_match(lec, required_subject_terms):
                 continue
             detail = self._score_candidate(
                 row,
@@ -2097,40 +2213,47 @@ class Recommender:
             )
 
         related_threshold = max_score * self.cfg.RELATED_RATIO
-        background_threshold = max(
-            max_score * self.cfg.BACKGROUND_RATIO,
-            self.cfg.ABS_BACKGROUND_FLOOR,
-        )
         print(f"  [임계값] direct ≥ {direct_threshold:.3f} (floor={self.cfg.ABS_DIRECT_FLOOR})  "
-              f"related ≥ {related_threshold:.3f} (dm_kw ≥ {self.cfg.DM_KW_FLOOR_RELATED})  "
-              f"background ≥ {background_threshold:.3f}  "
+              f"core_direct_floor={self.cfg.CORE_MATCH_DIRECT_FLOOR:.2f}  "
+              f"related ≥ {related_threshold:.3f}  "
+              f"direct_graph ≥ {self.cfg.DIRECT_GRAPH_FLOOR:.2f}  "
+              f"related_graph/community ≥ {self.cfg.RELATED_GRAPH_FLOOR:.2f}/{self.cfg.RELATED_COMMUNITY_FLOOR:.2f}  "
               f"(top={max_score:.3f})\n")
 
+        query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         results = []
         for lec, detail in candidates:
             score      = detail["score"]
             dm_kw      = detail["dm_keyword"]
             graph_sc   = detail.get("graph_score", 0.0)
-            background_signal = (
-                not detail.get("domain_mismatch")
-                and (
-                    graph_sc >= self.cfg.BG_GRAPH_FLOOR
-                    or detail.get("sim_keyword", 0.0) >= self.cfg.BG_SIM_KEYWORD_FLOOR
-                )
+            community_sc = detail.get("community_score", 0.0)
+            core_match = _query_concept_in_role(lec, query_concepts, "core")
+            introduced_match = _query_concept_in_role(lec, query_concepts, "introduced")
+            strong_graph = graph_sc >= self.cfg.DIRECT_GRAPH_FLOOR
+            related_graph = graph_sc >= self.cfg.RELATED_GRAPH_FLOOR
+            related_community = community_sc >= self.cfg.RELATED_COMMUNITY_FLOOR
+            direct_threshold_for_candidate = (
+                min(direct_threshold, self.cfg.CORE_MATCH_DIRECT_FLOOR)
+                if core_match and detail.get("q_kw_matched", True)
+                else direct_threshold
             )
 
-            if score >= direct_threshold:
+            if score >= direct_threshold_for_candidate and (core_match or strong_graph):
                 tier = "direct"
-            elif score >= related_threshold and dm_kw >= self.cfg.DM_KW_FLOOR_RELATED:
-                # graph_score == 0: 구조적으로 쿼리 개념과 이웃 겹침이 없는 강의
-                # focus_concept 없을 때만 적용 (있을 때는 depth_bonus로 graph가 0일 수 있음)
-                if graph_sc == 0.0 and not ctx.focus_concept and ctx.intent != "list_by_topic":
-                    continue  # related에서도 제외
+                if core_match:
+                    detail["tier_reason"] = "core_match"
+                else:
+                    detail["tier_reason"] = "strong_graph"
+            elif score >= related_threshold and (introduced_match or related_graph or related_community):
                 tier = "related"
-            elif score >= background_threshold and background_signal:
-                tier = "background"
+                if introduced_match:
+                    detail["tier_reason"] = "introduced_match"
+                elif related_graph:
+                    detail["tier_reason"] = "related_graph"
+                else:
+                    detail["tier_reason"] = "related_community"
             else:
-                if score < background_threshold:
+                if score < related_threshold:
                     break
                 continue
 
@@ -2190,15 +2313,11 @@ class Recommender:
                 "ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE,
                 "Q_KW_MISMATCH_PENALTY": self.cfg.Q_KW_MISMATCH_PENALTY,
                 "RELATED_RATIO": self.cfg.RELATED_RATIO,
-                "BACKGROUND_RATIO": self.cfg.BACKGROUND_RATIO,
-                "DM_KW_FLOOR_RELATED": self.cfg.DM_KW_FLOOR_RELATED,
                 "HYBRID_CANDIDATE_TOP_N": self.cfg.HYBRID_CANDIDATE_TOP_N,
             }
             self.cfg.ABS_MIN_SCORE = 0.05
             self.cfg.Q_KW_MISMATCH_PENALTY = 1.0
             self.cfg.RELATED_RATIO = 0.35
-            self.cfg.BACKGROUND_RATIO = 0.15
-            self.cfg.DM_KW_FLOOR_RELATED = 0.0
             self.cfg.HYBRID_CANDIDATE_TOP_N = max(
                 self.cfg.HYBRID_CANDIDATE_TOP_N,
                 self.cfg.LIST_QUERY_TOP_K,
@@ -2253,7 +2372,6 @@ class Recommender:
                 tier_label = {
                     "direct": "✅ 직접 추천",
                     "related": "🔸 간접 관련",
-                    "background": "◻ 배경 강의",
                 }.get(r.tier, r.tier)
                 print(f"  {i}. [{r.video_id}] {r.title}  {tier_label}")
                 print(f"     점수:   {score_100}점  |  {r.reason}")
@@ -2276,7 +2394,6 @@ class Recommender:
             tier_label = {
                 "direct": "직접",
                 "related": "간접",
-                "background": "배경",
             }.get(r.tier, r.tier)
             marker = " ◀" if r in top else ""
             print(f"  {r.video_id:<12} {r.title[:20]:<22} {r.domain:<14} "

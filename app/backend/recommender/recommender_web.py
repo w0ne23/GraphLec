@@ -101,6 +101,7 @@ class ScoreDetail(BaseModel):
     slow_speech_preference: bool = False
     domain_score:      float
     depth_score:       float
+    tier_reason:       str = ""
     combined_boost:    float
     duration_score:    float
     duration_mismatch: bool
@@ -193,6 +194,7 @@ def recommend(req: RecommendRequest):
                     slow_speech_preference = r.score_detail.get("slow_speech_preference", False),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
+                    tier_reason      = r.score_detail.get("tier_reason", ""),
                     combined_boost    = r.score_detail.get("combined_boost",     1.0),
                     duration_score    = r.score_detail.get("duration_score",     1.0),
                     duration_mismatch = r.score_detail.get("duration_mismatch",  False),

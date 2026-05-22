@@ -10,11 +10,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const overallScore  = lecture.display_score ?? null
   const durationLabel = formatDuration(lecture.duration_sec)
 
-  // tier 판단: API 필드 우선, 없으면 reason 텍스트로 fallback
-  const isBackground = lecture.tier === 'background'
   const isRelated = lecture.tier === 'related'
-    || (typeof lecture.reason === 'string' && lecture.reason.includes('직접 일치하지 않지만'))
-  const hasSupportTier = isRelated || isBackground
   const showScore = overallScore != null
 
   // keywords 배열 우선 — reason 텍스트가 태그로 뽑히는 버그 방지
@@ -27,7 +23,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
     : []
 
   return (
-    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${hasSupportTier ? ' rec-item--related' : ''}${isBackground ? ' rec-item--background' : ''}`}>
+    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${isRelated ? ' rec-item--related' : ''}`}>
 
       {/* ── 메인 행 ── */}
       <div className="rec-item-main" onClick={() => setIsExpanded(v => !v)}>
@@ -64,13 +60,13 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
         {/* 점수 + 티어 배지 + 토글 */}
         <div className="rec-col rec-col-score">
           {showScore && (
-            <div className={`rec-overall-score${hasSupportTier ? ' rec-overall-score--related' : ''}${isBackground ? ' rec-overall-score--background' : ''}`}>
+            <div className={`rec-overall-score${isRelated ? ' rec-overall-score--related' : ''}`}>
               {overallScore}점
             </div>
           )}
-          {hasSupportTier && (
-            <span className={`rec-tier-badge${isBackground ? ' rec-tier-badge--background' : ''}`}>
-              {isBackground ? '배경 강의' : '간접 관련'}
+          {isRelated && (
+            <span className="rec-tier-badge">
+              간접 관련
             </span>
           )}
           <button className="rec-toggle-btn">
@@ -83,11 +79,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
       {isExpanded && (
         <div className="rec-item-details">
           <div className="rec-details-content">
-            {hasSupportTier && (
-              <p className={`rec-related-notice${isBackground ? ' rec-related-notice--background' : ''}`}>
-                {isBackground
-                  ? '이 강의는 직접 답변 강의는 아니지만, 주제를 이해하는 데 도움이 되는 배경 개념을 다룹니다.'
-                  : '이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.'}
+            {isRelated && (
+              <p className="rec-related-notice">
+                이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.
               </p>
             )}
             {lecture.reason && (
