@@ -30,6 +30,7 @@ import os
 import argparse
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter, defaultdict
@@ -111,6 +112,12 @@ _DOMAIN_LABELS = {
     "soc/edu": "교육학",
 }
 _TOPIC_EXPANSIONS = {
+    "파이썬": [
+        "Python",
+    ],
+    "python": [
+        "파이썬",
+    ],
     "웹": [
         "리액트",
         "컴포넌트",
@@ -195,14 +202,13 @@ class RecommenderConfig:
     # 이중 레이어 임계값
     DIRECT_RATIO:            float = 0.90
     RELATED_RATIO:           float = 0.55
-    BACKGROUND_RATIO:        float = 0.30
     ABS_MIN_SCORE:           float = 0.30
     ABS_DIRECT_FLOOR:        float = 0.50
-    ABS_BACKGROUND_FLOOR:    float = 0.18
+    CORE_MATCH_DIRECT_FLOOR: float = 0.35
     GAP_THRESHOLD:           float = 0.08
-    DM_KW_FLOOR_RELATED:     float = 0.03
-    BG_GRAPH_FLOOR:          float = 0.10
-    BG_SIM_KEYWORD_FLOOR:    float = 0.65
+    DIRECT_GRAPH_FLOOR:      float = 0.55
+    RELATED_GRAPH_FLOOR:     float = 0.25
+    RELATED_COMMUNITY_FLOOR: float = 0.20
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60  # 도메인 상위 카테고리 불일치
     Q_KW_MISMATCH_PENALTY:   float = 0.60  # 원본 query_keyword 완전 미매칭
@@ -212,8 +218,14 @@ class RecommenderConfig:
     DB_DIR:                  str   = DEFAULT_DB_DIR
     # domain boost 강도
     W_DOMAIN_BOOST:      float = 0.20
-    # difficulty boost 강도 (질의 난이도 힌트 일치 시)
-    W_DIFFICULTY_BOOST:  float = 0.15
+    W_DURATION_BOOST:    float = 0.08
+    W_APPLICATION_BOOST: float = 0.10
+    W_LISTENABILITY_BOOST: float = 0.08
+    W_SPEECH_RATE_BOOST: float = 0.07
+    W_RECENCY_BOOST_FAST: float = 0.10
+    W_RECENCY_BOOST_MEDIUM: float = 0.05
+    W_RECENCY_BOOST_SLOW: float = 0.02
+    RECENCY_HALF_LIFE_DAYS: float = 180.0
     # BM25 후보 검색 파라미터
     BM25_K1:             float = 1.2
     BM25_B:              float = 0.75
@@ -241,6 +253,7 @@ class LectureMetadata:
     video_id:          str
     title:             str
     instructor_id:     str
+    uploaded_at:       Optional[str]
     domain:            str
     difficulty:        str   # "beginner" | "intermediate" | "advanced"
     duration_sec:      float
@@ -250,6 +263,7 @@ class LectureMetadata:
     concept_relations: list[dict]
     communities:       list[dict]
     pedagogy:          dict
+    diagnostics:       dict
     visual_concept_terms: list[str]
 
 
@@ -314,6 +328,7 @@ class MetadataCollection:
                     video_id          = item["video_id"],
                     title             = item["title"],
                     instructor_id     = item.get("instructor_id", ""),
+                    uploaded_at       = item.get("uploaded_at"),
                     domain            = item.get("domain", "unknown"),
                     difficulty        = item.get("difficulty", "unknown"),
                     duration_sec      = item.get("duration_sec", 0.0),
@@ -323,6 +338,7 @@ class MetadataCollection:
                     concept_relations = item.get("concept_relations", []),
                     communities       = item.get("communities", []),
                     pedagogy          = item.get("pedagogy", {}),
+                    diagnostics       = item.get("diagnostics", {}),
                     visual_concept_terms = (
                         item.get("visual_concept_terms")
                         or item.get("pedagogy", {}).get("visual_concept_terms", [])
@@ -651,7 +667,7 @@ class CommunityIndex:
 def _fast_list_by_domain_analysis(
     query: str,
     available_domains: list[str],
-) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]]:
+) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]]:
     normalized = _normalize_term(query)
     has_list_signal = any(
         signal in normalized
@@ -670,11 +686,11 @@ def _fast_list_by_domain_analysis(
         return None
 
     if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "list_by_domain", query, [], [], None, None, None, None
+        return "list_by_domain", query, [], [], None, None, None, {}
 
     for alias, domain in _DOMAIN_ALIASES.items():
         if alias in normalized and domain in available_domains:
-            return "list_by_domain", query, [], [], domain, None, None, None
+            return "list_by_domain", query, [], [], domain, None, None, {}
 
     return None
 
@@ -811,6 +827,26 @@ def _concept_match(concept: str, focus: str) -> bool:
     return focus in concept or concept in focus
 
 
+def _append_terms(target: list[str], values) -> None:
+    """metadata의 list/dict/string 혼합 필드에서 문자열 term만 평탄화한다."""
+    if values is None:
+        return
+    if isinstance(values, str):
+        if values.strip():
+            target.append(values)
+        return
+    if isinstance(values, dict):
+        for value in values.values():
+            _append_terms(target, value)
+        return
+    if isinstance(values, (list, tuple, set)):
+        for value in values:
+            _append_terms(target, value)
+        return
+    if isinstance(values, (int, float)):
+        target.append(str(values))
+
+
 def _role_weight_for_concept(
     lec: LectureMetadata,
     concept: str,
@@ -843,6 +879,42 @@ def _role_weight_for_concept(
                 best = max(best, role_weights.get(cr.get("role", ""), 0.0))
 
     return best
+
+
+def _query_concept_in_role(
+    lec: LectureMetadata,
+    query_concepts: set[str],
+    target_role: str,
+) -> bool:
+    """질의 개념이 특정 concept_roles bucket에 포함되는지 확인한다."""
+    concepts = {
+        _normalize_term(concept)
+        for concept in query_concepts
+        if _normalize_term(concept)
+    }
+    if not concepts:
+        return False
+
+    role_terms: list[str] = []
+    concept_roles = lec.concept_roles
+    if isinstance(concept_roles, dict):
+        _append_terms(role_terms, concept_roles.get(target_role, []))
+    elif isinstance(concept_roles, list):
+        for item in concept_roles:
+            if not isinstance(item, dict) or item.get("role") != target_role:
+                continue
+            _append_terms(role_terms, item.get("concept"))
+
+    normalized_roles = [
+        _normalize_term(term)
+        for term in role_terms
+        if _normalize_term(term)
+    ]
+    return any(
+        _concept_match(role_term, query_term)
+        for role_term in normalized_roles
+        for query_term in concepts
+    )
 
 
 def _compute_graph_score(
@@ -990,12 +1062,148 @@ _COMPARISON_SIGNALS = frozenset({
     "구분", "다른점", "차이를", "비교해", "비교한",
 })
 
-# ── 시각 자료 선호 감지 신호 ───────────────────────────────────────
-_VISUAL_SIGNALS = frozenset({
-    "그림", "그림으로", "그림 위주", "도식", "도식으로", "도표",
-    "다이어그램", "시각적", "시각적으로", "시각화", "이미지",
-    "표로", "표 형태", "표 위주", "차트", "그래프",
+
+_VISUAL_CONDITION_TERMS = frozenset({
+    "그림", "도식", "도표", "시각", "시각자료", "시각 자료",
+    "이미지", "다이어그램", "위주",
 })
+
+_APPLICATION_CONDITION_TERMS = frozenset({
+    "예제", "예시", "사례", "실습", "시연", "데모", "적용", "활용",
+    "문제풀이", "풀이", "이론만 말고",
+})
+
+_DELIVERY_CONDITION_TERMS = frozenset({
+    "음질", "녹음", "청취", "듣기", "발화", "말", "빠르지", "느리",
+    "천천히", "천천", "여유", "명료",
+})
+
+_RECENCY_CONDITION_TERMS = frozenset({
+    "최근", "최신", "새로운", "새로", "새로 올라온", "업로드", "업데이트",
+    "요즘", "근래", "최근 업로드", "최신 강의",
+})
+
+_NON_CONTENT_QUERY_TERMS = frozenset({
+    "강의", "추천", "내용", "설명", "요약", "개념", "주제", "관련",
+    "기초", "입문", "초급", "쉬운", "쉽게", "쉬움", "설명이 쉬운",
+    "알려줘", "찾아줘", "보여줘", "내외", "이내", "이하", "정도",
+})
+
+
+def _strip_non_content_modifiers(term: str, blocked: set[str]) -> str:
+    cleaned = _normalize_term(term)
+    for blocked_term in sorted(blocked, key=len, reverse=True):
+        cleaned = cleaned.replace(blocked_term, " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _content_terms_only(terms: list[str], conditions: dict) -> list[str]:
+    """
+    LLM이 조건 표현(그림/도식/음질/예제 등)을 query_keywords에 넣어도
+    원본 키워드 미매칭 패널티가 내용 검색을 죽이지 않도록 제거한다.
+    조건 감지는 LLM에 맡기고, 여기서는 이미 감지된 조건의 수식어만 정리한다.
+    """
+    blocked: set[str] = set()
+    if conditions.get("prefers_visual"):
+        blocked.update(_VISUAL_CONDITION_TERMS)
+    if conditions.get("prefers_application"):
+        blocked.update(_APPLICATION_CONDITION_TERMS)
+    if conditions.get("prefers_slow_speech") or conditions.get("prefers_listenability"):
+        blocked.update(_DELIVERY_CONDITION_TERMS)
+    if conditions.get("prefers_recency"):
+        blocked.update(_RECENCY_CONDITION_TERMS)
+    blocked.update(_NON_CONTENT_QUERY_TERMS)
+
+    normalized_blocked = {_normalize_term(term) for term in blocked}
+    cleaned = []
+    seen = set()
+    for term in terms or []:
+        normalized = _normalize_term(term)
+        if not normalized or normalized in normalized_blocked:
+            continue
+        stripped = _strip_non_content_modifiers(normalized, normalized_blocked)
+        if stripped and stripped not in normalized_blocked and stripped not in seen:
+            seen.add(stripped)
+            cleaned.append(stripped)
+    return cleaned
+
+
+def _required_subject_terms(ctx) -> set[str]:
+    if ctx.intent != "recommend":
+        return set()
+    return {
+        _normalize_term(term)
+        for term in _expanded_topic_terms(ctx.query_keywords)
+        if _normalize_term(term)
+    }
+
+
+def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
+    terms: list[str] = []
+    _append_terms(terms, lec.title)
+    _append_terms(terms, lec.summary)
+    _append_terms(terms, [item.get("keyword", "") for item in (lec.keywords or []) if isinstance(item, dict)])
+    _append_terms(terms, lec.concept_roles)
+    for relation in lec.concept_relations or []:
+        if not isinstance(relation, dict):
+            continue
+        _append_terms(terms, relation.get("from"))
+        _append_terms(terms, relation.get("to"))
+        _append_terms(terms, relation.get("source"))
+        _append_terms(terms, relation.get("target"))
+    for community in lec.communities or []:
+        if not isinstance(community, dict):
+            continue
+        _append_terms(terms, community.get("title"))
+        _append_terms(terms, community.get("summary"))
+        _append_terms(terms, community.get("nodes"))
+    return [_normalize_term(term) for term in terms if _normalize_term(term)]
+
+
+def _has_required_subject_match(lec: LectureMetadata, required_terms: set[str]) -> bool:
+    """
+    길이/도메인/전달 조건이 내용 적합성을 대체하지 못하도록,
+    원본 질의의 명시 주제가 강의 메타데이터에 직접 걸리는지 확인한다.
+    """
+    if not required_terms:
+        return True
+    lecture_terms = _lecture_subject_terms(lec)
+    return any(
+        _concept_match(lecture_term, required_term)
+        for lecture_term in lecture_terms
+        for required_term in required_terms
+    )
+
+
+def _parse_uploaded_at(uploaded_at: Optional[str]) -> Optional[datetime]:
+    if not uploaded_at:
+        return None
+    text = str(uploaded_at).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _compute_recency_score(
+    uploaded_at: Optional[str],
+    half_life_days: float,
+    now: Optional[datetime] = None,
+) -> float:
+    uploaded_dt = _parse_uploaded_at(uploaded_at)
+    if uploaded_dt is None:
+        return 0.0
+    now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_days = max((now_dt - uploaded_dt).total_seconds() / 86400.0, 0.0)
+    half_life = max(float(half_life_days or 1.0), 1.0)
+    return round(math.exp(-age_days * math.log(2) / half_life), 4)
 
 
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
@@ -1022,16 +1230,6 @@ def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
     return (
         any(sig in q for sig in _COMPARISON_SIGNALS) or
         any(kw in _COMPARISON_SIGNALS for kw in (query_keywords or []))
-    )
-
-
-def _detect_visual_preference(query_keywords: list[str], query: str) -> bool:
-    """질의에 그림/도식/표 기반 설명 선호가 있는지 감지"""
-    q = query.lower()
-    keywords = {str(kw).lower() for kw in (query_keywords or [])}
-    return (
-        any(sig in q for sig in _VISUAL_SIGNALS) or
-        any(kw in _VISUAL_SIGNALS for kw in keywords)
     )
 
 
@@ -1066,9 +1264,9 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
-) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
+) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]:
     """
-    질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec + difficulty_hint 추출.
+    질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec 추출.
 
     반환:
       intent             : "recommend" | "list_by_domain" | "list_by_topic"
@@ -1078,7 +1276,7 @@ def analyze_query(
       domain             : available_domains 중 하나, 없으면 None
       focus_concept      : 깊이를 측정할 핵심 개념, 없으면 None
       duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
-      difficulty_hint    : "beginner" | "intermediate" | "advanced" | None
+      conditions         : 조건 질의 플래그
     """
     domain_list  = ", ".join(available_domains)
     keyword_list = ", ".join(available_keywords)
@@ -1095,7 +1293,14 @@ def analyze_query(
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
-  "difficulty_hint": "beginner" 또는 "intermediate" 또는 "advanced" 또는 null
+  "conditions": {{
+    "issue_free": true 또는 false,
+    "prefers_visual": true 또는 false,
+    "prefers_application": true 또는 false,
+    "prefers_slow_speech": true 또는 false,
+    "prefers_listenability": true 또는 false,
+    "prefers_recency": true 또는 false
+  }}
 }}
 
 [intent]: 질의 목적 분류
@@ -1134,11 +1339,14 @@ def analyze_query(
   - "짧은", "빠르게" 등 모호한 표현 → 1800
   - 길이 언급 없으면 → null
 
-[difficulty_hint]: 질의에서 난이도·범위 표현을 감지하여 추출
-  - "입문", "기초", "개론", "개요", "훑어주는", "전반", "처음", "쉽게" 등 → "beginner"
-  - "심화", "자세히", "깊게", "원리", "내부 동작" 등 → "advanced"
-  - "응용", "실습", "프로젝트" 등 중급 신호 → "intermediate"
-  - 난이도·범위 표현 없으면 → null
+[conditions]: 내용 조건이 아니라 강의 상태/형식에 대한 선호를 의미 단위로 추출
+  - issue_free: "오류 없는", "검증된", "이슈 없는", "틀린 내용 없는" 등
+  - prefers_visual: "그림/도식/표/그래프/시각 자료 위주", "시각적으로 설명" 등
+  - prefers_application: "예제/사례/문제풀이/실습/시연/데모/적용/활용 중심", "이론만 말고" 등
+  - prefers_slow_speech: "말이 느렸으면", "급하게 설명하지 않는", "여유있게 진행", "빠르지 않은" 등
+  - prefers_listenability: "음질 좋은", "잘 들리는", "듣기 편한", "녹음 상태 좋은", "전달이 명료한" 등
+  - prefers_recency: "최근 업로드된", "최신 강의", "새로 올라온 강의"처럼 강의 업로드 시점이 최근이기를 선호하는 경우
+    * 단순히 "최신 Transformer", "최신 기술 동향"처럼 주제 자체의 최신성을 말하는 경우는 업로드 시점 선호가 명확할 때만 true
 
 [키워드 목록]: {keyword_list}"""
 
@@ -1156,7 +1364,18 @@ def analyze_query(
     domain            = parsed.get("domain") or None
     focus_concept     = parsed.get("focus_concept") or None
     duration_max_sec  = parsed.get("duration_max_sec") or None
-    difficulty_hint   = parsed.get("difficulty_hint") or None
+    conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
+
+    normalized_conditions = {
+        "issue_free": bool(conditions.get("issue_free")),
+        "prefers_visual": bool(conditions.get("prefers_visual")),
+        "prefers_application": bool(conditions.get("prefers_application")),
+        "prefers_slow_speech": bool(conditions.get("prefers_slow_speech")),
+        "prefers_listenability": bool(conditions.get("prefers_listenability")),
+        "prefers_recency": bool(conditions.get("prefers_recency")),
+    }
+    query_keywords = _content_terms_only(query_keywords, normalized_conditions)
+    inferred_keywords = _content_terms_only(inferred_keywords, normalized_conditions)
 
     # 벡터 임베딩용 search_text — 전체 합산
     search_text = " ".join(query_keywords + inferred_keywords) or query
@@ -1171,12 +1390,19 @@ def analyze_query(
             duration_max_sec = int(duration_max_sec)
         except (ValueError, TypeError):
             duration_max_sec = None
-    if difficulty_hint not in ("beginner", "intermediate", "advanced"):
-        difficulty_hint = None
     if intent not in ("recommend", "list_by_domain", "list_by_topic"):
         intent = "recommend"
 
-    return intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint
+    return (
+        intent,
+        search_text,
+        query_keywords,
+        inferred_keywords,
+        domain,
+        focus_concept,
+        duration_max_sec,
+        normalized_conditions,
+    )
 
 
 # ============================================================================
@@ -1195,7 +1421,7 @@ class RecommendResult:
     score_detail: dict
     reason:       str
     summary:      str
-    tier:         str   # "direct" | "related" | "background"
+    tier:         str   # "direct" | "related"
 
 
 @dataclass
@@ -1208,23 +1434,16 @@ class QueryContext:
     domain:            Optional[str]
     focus_concept:     Optional[str]
     duration_max_sec:  Optional[int]
-    difficulty_hint:   Optional[str]
     comparison_intent: bool
+    issue_free_preference: bool
     visual_preference: bool
+    application_preference: bool
+    listenability_preference: bool
+    slow_speech_preference: bool
+    recency_preference: bool
 
 
 def _build_reason(detail: dict, tier: str = "direct") -> str:
-    if tier == "background":
-        parts = []
-        if detail.get("graph_score", 0) >= 0.1:
-            parts.append(f"개념 그래프 {detail['graph_score']:.0%}")
-        if detail.get("sim_keyword", 0) >= 0.6:
-            parts.append(f"주제 근접 {detail['sim_keyword']:.0%}")
-        if detail.get("domain_score", 0) == 1.0:
-            parts.append("도메인 일치")
-        note = " · ".join(parts) if parts else "배경 개념 포함"
-        return f"직접 추천은 아니지만 이해에 도움이 되는 배경 강의입니다 ({note})"
-
     if tier == "related":
         parts = []
         if detail.get("dm_keyword", 0) > 0.1:
@@ -1243,6 +1462,14 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
         parts.append(f"개념 깊이 {detail['depth_score']:.0%}")
     if detail.get("contrast_bonus", 0) > 0:
         parts.append("비교 분석형")
+    if detail.get("application_preference") and detail.get("application_score", 0) > 0:
+        parts.append(f"예제/시연 지향 {detail['application_score']:.0%}")
+    if detail.get("listenability_preference") and detail.get("listenability_score", 0) > 0:
+        parts.append(f"청취 품질 {detail['listenability_score']:.0%}")
+    if detail.get("slow_speech_preference") and detail.get("speech_rate_score", 0) > 0:
+        parts.append(f"발화 속도 적합 {detail['speech_rate_score']:.0%}")
+    if detail.get("recency_preference") and detail.get("recency_score", 0) >= 0.6:
+        parts.append("최근 업로드")
     if detail.get("sim_keyword", 0) >= 0.6:
         parts.append(f"키워드 유사도 {detail['sim_keyword']:.0%}")
     if detail.get("dm_keyword", 0) > 0.1:
@@ -1281,11 +1508,12 @@ class Recommender:
         self.cfg                 = config or RecommenderConfig()
         self._available_domains  = self.collection.available_domains()
         self._available_keywords = self.collection.available_keywords()
-        # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지)
+
+        # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지).
+        # 테이블이 아직 생성되지 않은 초기 상태에서는 벡터 검색만 비활성화하고,
+        # metadata 기반 BM25/직접매칭/그래프 점수로 추천을 계속 제공한다.
         print("[LanceDB 레코드 로드 중...]")
-        db               = lancedb.connect(self.cfg.DB_DIR)
-        table            = db.open_table("lectures")
-        self._index_rows = table.to_arrow().to_pylist()
+        self._index_rows = self._load_lancedb_rows()
         self._row_by_video_id = {
             row["video_id"]: row
             for row in self._index_rows
@@ -1296,9 +1524,18 @@ class Recommender:
             for video_id in self._row_by_video_id
             if (lec := self.collection.get(video_id)) is not None
         ]
-        self._lexical_stats = _build_lexical_stats(indexed_lectures)
-        self._community_index = CommunityIndex(indexed_lectures)
+        metadata_lectures = self.collection.all()
+        scoring_lectures = indexed_lectures if indexed_lectures else metadata_lectures
+        self._lexical_stats = _build_lexical_stats(scoring_lectures)
+        self._community_index = CommunityIndex(scoring_lectures)
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
+        if not self._index_rows and metadata_lectures:
+            print("  ⚠ LanceDB lectures 테이블 없음/비어 있음 — 벡터 검색 없이 metadata 기반 추천으로 동작합니다.\n")
+        elif len(indexed_lectures) < len(metadata_lectures):
+            print(
+                f"  ⚠ 벡터 인덱스에 없는 metadata 강의 "
+                f"{len(metadata_lectures) - len(indexed_lectures)}개는 metadata 기반으로만 점수화합니다.\n"
+            )
         print(f"[도메인]    {self._available_domains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
         print(
@@ -1307,13 +1544,26 @@ class Recommender:
         )
         print(f"[Vector]    matrix rows={len(self._vector_search_index.video_ids)}\n")
 
+    def _load_lancedb_rows(self) -> list[dict]:
+        try:
+            db = lancedb.connect(self.cfg.DB_DIR)
+            table_names = set(db.table_names())
+            if "lectures" not in table_names:
+                print(f"  ⚠ LanceDB 테이블 없음: lectures ({self.cfg.DB_DIR})")
+                return []
+            table = db.open_table("lectures")
+            return table.to_arrow().to_pylist()
+        except Exception as exc:
+            print(f"  ⚠ LanceDB 로드 실패: {exc}")
+            return []
+
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
         fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains)
         if fast_analysis:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = fast_analysis
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = fast_analysis
         else:
-            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, difficulty_hint = analyze_query(
+            intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = analyze_query(
                 query, self._available_domains, self._available_keywords
             )
         inferred_keywords = _append_topic_expansions(
@@ -1323,18 +1573,27 @@ class Recommender:
         )
         search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
-        visual_preference = _detect_visual_preference(query_keywords, query)
+        issue_free_preference = bool(conditions.get("issue_free"))
+        visual_preference = bool(conditions.get("prefers_visual"))
+        application_preference = bool(conditions.get("prefers_application"))
+        listenability_preference = bool(conditions.get("prefers_listenability"))
+        slow_speech_preference = bool(conditions.get("prefers_slow_speech"))
+        recency_preference = bool(conditions.get("prefers_recency"))
 
         print(f"[질의 의도]   {intent}")
         print(f"[원본 키워드] {query_keywords}")
         print(f"[확장 키워드] {inferred_keywords}")
         print(f"[추론 도메인] {domain or '미확정'}")
         print(f"[깊이 개념]   {focus_concept or '없음'}")
-        print(f"[난이도 힌트] {difficulty_hint or '없음'}")
         print(f"[비교 의도]   {'있음' if comparison_intent else '없음'}")
+        print(f"[검증 조건]   {'있음' if issue_free_preference else '없음'}")
         print(f"[시각 선호]   {'있음' if visual_preference else '없음'}")
+        print(f"[적용/시연]   {'있음' if application_preference else '없음'}")
+        print(f"[청취 품질]   {'있음' if listenability_preference else '없음'}")
+        print(f"[발화 속도]   {'빠르지 않음 선호' if slow_speech_preference else '없음'}")
+        print(f"[최신성]     {'최근 업로드 선호' if recency_preference else '없음'}")
         if duration_max_sec:
-            print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 소프트 패널티 적용")
+            print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 조건 boost + warning 적용")
         print()
 
         return QueryContext(
@@ -1346,36 +1605,26 @@ class Recommender:
             domain            = domain,
             focus_concept     = focus_concept,
             duration_max_sec  = duration_max_sec,
-            difficulty_hint   = difficulty_hint,
             comparison_intent = comparison_intent,
+            issue_free_preference = issue_free_preference,
             visual_preference = visual_preference,
+            application_preference = application_preference,
+            listenability_preference = listenability_preference,
+            slow_speech_preference = slow_speech_preference,
+            recency_preference = recency_preference,
         )
 
     def _all_candidate_ids(self) -> list[str]:
-        return [row["video_id"] for row in self._index_rows]
+        return [lec.video_id for lec in self.collection.all()]
 
     def _list_by_domain_results(self, ctx: QueryContext, top_k: int) -> list[RecommendResult]:
-        difficulty_order = {
-            "beginner": 0,
-            "intermediate": 1,
-            "advanced": 2,
-            "unknown": 3,
-        }
         lectures = []
-        for video_id in self._row_by_video_id:
-            lec = self.collection.get(video_id)
-            if lec is None:
-                continue
+        for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
                 continue
             lectures.append(lec)
 
-        lectures.sort(
-            key=lambda lec: (
-                difficulty_order.get(lec.difficulty, 3),
-                lec.title or lec.video_id,
-            )
-        )
+        lectures.sort(key=lambda lec: lec.title or lec.video_id)
 
         scope = _DOMAIN_LABELS.get(ctx.domain, ctx.domain) if ctx.domain else "전체"
         reason = "전체 강의 목록입니다." if not ctx.domain else f"{scope} 분야 강의 목록입니다."
@@ -1427,25 +1676,19 @@ class Recommender:
         """
         if not self.cfg.USE_METADATA_PREFILTER:
             return None
-        if not (ctx.domain or ctx.difficulty_hint or ctx.duration_max_sec):
+        if not (ctx.domain or ctx.duration_max_sec):
             return None
 
         preferred = set()
-        for video_id in self._row_by_video_id:
-            lec = self.collection.get(video_id)
-            if lec is None:
-                continue
-
+        for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
-                continue
-            if ctx.difficulty_hint and lec.difficulty != ctx.difficulty_hint:
                 continue
             if ctx.duration_max_sec and lec.duration_sec > (
                 ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
             ):
                 continue
 
-            preferred.add(video_id)
+            preferred.add(lec.video_id)
 
         return preferred or None
 
@@ -1559,6 +1802,7 @@ class Recommender:
     @staticmethod
     def _visual_density_score(lec: LectureMetadata) -> float:
         pedagogy = lec.pedagogy or {}
+        teaching_style = (lec.diagnostics or {}).get("teaching_style", {})
 
         def as_float(value) -> float:
             try:
@@ -1567,9 +1811,43 @@ class Recommender:
             except (TypeError, ValueError):
                 return 0.0
 
-        visual_ratio = as_float(pedagogy.get("visual_ratio"))
+        visual_ratio = as_float(teaching_style.get("visual_ratio", pedagogy.get("visual_ratio")))
         structure_ratio = as_float(pedagogy.get("structure_ratio"))
         return round(min(max(0.5 * visual_ratio + 0.5 * structure_ratio, 0.0), 1.0), 4)
+
+    @staticmethod
+    def _diagnostic_score(lec: LectureMetadata, section: str, key: str) -> float:
+        value = ((lec.diagnostics or {}).get(section, {}) or {}).get(key)
+        try:
+            parsed = float(value)
+            return min(max(parsed, 0.0), 1.0) if math.isfinite(parsed) else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _speech_rate_fit_score(lec: LectureMetadata) -> float:
+        delivery = ((lec.diagnostics or {}).get("delivery", {}) or {})
+        try:
+            spm = float(delivery.get("speech_rate_spm"))
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(spm) or spm <= 0:
+            return 0.0
+        # "천천히/빠르지 않게" 조건은 낮은 SPM일수록 더 적합하게 본다.
+        # 임계값은 더미 데이터 분포 기준 임시값이며, 실제 데이터 분포로 재보정한다.
+        if spm <= 240:
+            return 1.0
+        if spm >= 330:
+            return 0.0
+        return round(1.0 - ((spm - 240) / 90), 4)
+
+    def _recency_boost_weight(self, domain: str) -> float:
+        normalized = _normalize_term(domain)
+        if normalized.startswith("eng/cs"):
+            return self.cfg.W_RECENCY_BOOST_FAST
+        if normalized.startswith(("soc/business", "soc/econ", "med")):
+            return self.cfg.W_RECENCY_BOOST_MEDIUM
+        return self.cfg.W_RECENCY_BOOST_SLOW
 
     @staticmethod
     def _visual_concept_score(lec: LectureMetadata, query_terms: Counter) -> float:
@@ -1601,7 +1879,7 @@ class Recommender:
         density_score = self._visual_density_score(lec)
         concept_score = self._visual_concept_score(lec, query_terms)
         if ctx.visual_preference:
-            visual_score = 0.4 * density_score + 0.6 * concept_score
+            visual_score = 0.65 * density_score + 0.35 * concept_score
         else:
             visual_score = 0.5 * density_score
         return (
@@ -1671,7 +1949,7 @@ class Recommender:
         semantic 후보 검색기. 기존 vec_score와 같은 필드 가중치로 top-N을 뽑는다.
         """
         index = self._vector_search_index
-        if not index.video_ids:
+        if not index.video_ids or not query_vec:
             return []
 
         q = _normalize_vector(query_vec)
@@ -1703,7 +1981,7 @@ class Recommender:
 
     def _score_candidate(
         self,
-        row: dict,
+        row: Optional[dict],
         lec: LectureMetadata,
         ctx: QueryContext,
         query_vec: list[float],
@@ -1711,33 +1989,39 @@ class Recommender:
         query_terms: Counter,
         weights: dict[str, float],
     ) -> dict:
-        # ── 길이 소프트 패널티 ────────────────────────────────────
-        # 기준 ±5분(300초) 이내 → 1.0
-        # 초과량에 따라 선형 감쇄 → 최소 0.1
+        # ── 길이 조건 boost + warning ─────────────────────────────
+        # 내용 적합성을 깎지 않고, 요청 길이(+grace)를 만족하는 후보만 boost한다.
+        condition_warnings: list[str] = []
         if ctx.duration_max_sec:
-            over_sec = lec.duration_sec - (ctx.duration_max_sec + 300)
-            if over_sec <= 0:
-                duration_score = 1.0
-            else:
-                # 300초(5분) 초과부터 감쇄, 1200초(20분) 초과 시 0.1
-                duration_score = max(1.0 - (over_sec / 1200) * 0.9, 0.1)
+            duration_fit_score = (
+                1.0
+                if lec.duration_sec <= ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
+                else 0.0
+            )
+            if lec.duration_sec > ctx.duration_max_sec:
+                over_min = math.ceil((lec.duration_sec - ctx.duration_max_sec) / 60.0)
+                condition_warnings.append(f"요청한 길이보다 약 {over_min}분 깁니다.")
         else:
-            duration_score = 1.0
+            duration_fit_score = 0.0
 
-        # 필드별 코사인 유사도
-        sim_title   = _cosine_sim(query_vec, row["title_vec"])
-        sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
-        sim_summary = _cosine_sim(query_vec, row["summary_vec"])
+        # 필드별 코사인 유사도. LanceDB row가 없으면 벡터 성분만 0으로 둔다.
+        has_vector_row = row is not None and bool(query_vec)
+        if has_vector_row:
+            sim_title   = _cosine_sim(query_vec, row["title_vec"])
+            sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
+            sim_summary = _cosine_sim(query_vec, row["summary_vec"])
 
-        # keyword vec threshold 필터
-        sim_keyword_filtered = (
-            sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
-        )
-        vec_score = (
-            self.cfg.W_TITLE   * sim_title            +
-            self.cfg.W_KEYWORD * sim_keyword_filtered +
-            self.cfg.W_SUMMARY * sim_summary
-        )
+            # keyword vec threshold 필터
+            sim_keyword_filtered = (
+                sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
+            )
+            vec_score = (
+                self.cfg.W_TITLE   * sim_title            +
+                self.cfg.W_KEYWORD * sim_keyword_filtered +
+                self.cfg.W_SUMMARY * sim_summary
+            )
+        else:
+            sim_title = sim_keyword = sim_summary = sim_keyword_filtered = vec_score = 0.0
 
         # 직접 토큰 매칭 — 원본 키워드 100%, 추론 키워드 50% 반영
         if self.cfg.USE_TF_IRF_DM:
@@ -1757,17 +2041,15 @@ class Recommender:
         )
 
         # 블렌딩 — content 최대 0.85로 제한 (boost 여유 확보)
+        vec_blend = self.cfg.VEC_BLEND if has_vector_row else 0.0
         content_score = min(
-            self.cfg.VEC_BLEND       * vec_score +
-            (1 - self.cfg.VEC_BLEND) * dm_score,
+            vec_blend       * vec_score +
+            (1 - vec_blend) * dm_score,
             0.85
         )
 
         # domain boost 신호
         domain_score = 1.0 if (ctx.domain and lec.domain == ctx.domain) else 0.0
-
-        # difficulty boost 신호
-        difficulty_match = 1.0 if (ctx.difficulty_hint and lec.difficulty == ctx.difficulty_hint) else 0.0
 
         # depth boost 신호 — BFS 홉 거리 기반
         depth_score = _compute_depth_score(ctx.focus_concept, lec) if ctx.focus_concept else 0.0
@@ -1787,17 +2069,53 @@ class Recommender:
             ctx,
             query_terms,
         )
+        application_score = self._diagnostic_score(
+            lec,
+            "teaching_style",
+            "application_orientation_score",
+        )
+        listenability_score = self._diagnostic_score(
+            lec,
+            "delivery",
+            "listenability_score",
+        )
+        speech_rate_score = self._speech_rate_fit_score(lec)
+        recency_score = _compute_recency_score(
+            lec.uploaded_at,
+            half_life_days=self.cfg.RECENCY_HALF_LIFE_DAYS,
+        )
+        recency_weight = (
+            self._recency_boost_weight(lec.domain)
+            if ctx.recency_preference and lec.uploaded_at
+            else 0.0
+        )
+        if ctx.visual_preference and visual_density_score < 0.3:
+            condition_warnings.append("시각 자료 비중이 높지 않습니다.")
+        if ctx.application_preference and application_score < 0.2:
+            condition_warnings.append("예제/시연 지향 신호가 약합니다.")
+        if ctx.listenability_preference and listenability_score < 0.4:
+            condition_warnings.append("청취 품질 신호가 높지 않습니다.")
+        if ctx.slow_speech_preference and speech_rate_score < 0.3:
+            condition_warnings.append("발화 속도가 빠른 편일 수 있습니다.")
 
         # ── 가중합 구조 점수 ──────────────────────────────────
         MAX_BOOST = (
             self.cfg.W_DOMAIN_BOOST +
-            self.cfg.W_DIFFICULTY_BOOST +
-            self.cfg.W_DEPTH_BOOST
+            self.cfg.W_DEPTH_BOOST +
+            (self.cfg.W_DURATION_BOOST if ctx.duration_max_sec else 0.0) +
+            (self.cfg.W_APPLICATION_BOOST if ctx.application_preference else 0.0) +
+            (self.cfg.W_LISTENABILITY_BOOST if ctx.listenability_preference else 0.0) +
+            (self.cfg.W_SPEECH_RATE_BOOST if ctx.slow_speech_preference else 0.0) +
+            recency_weight
         )
         raw_boost = (
             self.cfg.W_DOMAIN_BOOST     * domain_score    +
-            self.cfg.W_DIFFICULTY_BOOST * difficulty_match +
-            self.cfg.W_DEPTH_BOOST      * depth_score
+            self.cfg.W_DEPTH_BOOST      * depth_score +
+            (self.cfg.W_DURATION_BOOST * duration_fit_score if ctx.duration_max_sec else 0.0) +
+            (self.cfg.W_APPLICATION_BOOST * application_score if ctx.application_preference else 0.0) +
+            (self.cfg.W_LISTENABILITY_BOOST * listenability_score if ctx.listenability_preference else 0.0) +
+            (self.cfg.W_SPEECH_RATE_BOOST * speech_rate_score if ctx.slow_speech_preference else 0.0) +
+            recency_weight * recency_score
         )
         boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0
 
@@ -1805,7 +2123,7 @@ class Recommender:
         frag = _compute_fragmentation_penalty(lec.concept_roles)
 
         total = max(
-            weights["content"] * content_score * duration_score
+            weights["content"] * content_score
             + weights["graph"] * graph_score
             + weights["community"] * community_score
             + weights["visual"] * visual_score
@@ -1856,13 +2174,21 @@ class Recommender:
             "domain_score":         round(domain_score, 4),
             "q_kw_matched":         dm.get("q_kw_matched", True),
             "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
-            "difficulty_match":     round(difficulty_match, 4),
             "graph_score":          round(graph_score, 4),
             "community_score":      round(community_score, 4),
             "visual_score":         round(visual_score, 4),
             "visual_density_score": round(visual_density_score, 4),
             "visual_concept_score": round(visual_concept_score, 4),
             "visual_preference":    ctx.visual_preference,
+            "application_score":    round(application_score, 4),
+            "application_preference": ctx.application_preference,
+            "listenability_score":  round(listenability_score, 4),
+            "listenability_preference": ctx.listenability_preference,
+            "speech_rate_score":    round(speech_rate_score, 4),
+            "slow_speech_preference": ctx.slow_speech_preference,
+            "recency_score":        round(recency_score, 4),
+            "recency_preference":   ctx.recency_preference,
+            "recency_weight":       round(recency_weight, 4),
             "weight_content":       round(weights["content"], 4),
             "weight_graph":         round(weights["graph"], 4),
             "weight_community":     round(weights["community"], 4),
@@ -1873,8 +2199,9 @@ class Recommender:
             "contrast_bonus":       round(contrast_bonus, 4),
             "boost_signal":         round(boost_signal, 4),
             "combined_boost":       round(boost_signal, 4),
-            "duration_score":       round(duration_score, 4),
-            "duration_mismatch":    duration_score < 1.0,
+            "duration_score":       round(duration_fit_score, 4),
+            "duration_mismatch":    bool(ctx.duration_max_sec and lec.duration_sec > ctx.duration_max_sec),
+            "condition_warnings":   condition_warnings,
             "frag_penalty":         round(frag, 4),
         }
 
@@ -1886,6 +2213,7 @@ class Recommender:
     ) -> list[tuple[LectureMetadata, dict]]:
         query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         query_terms = self._query_lexical_terms(ctx)
+        required_subject_terms = _required_subject_terms(ctx)
         weights = self._resolve_rerank_weights(ctx)
         print(
             "[Rerank weights] "
@@ -1897,7 +2225,9 @@ class Recommender:
         for video_id in candidate_ids:
             row = self._row_by_video_id.get(video_id)
             lec = self.collection.get(video_id)
-            if row is None or lec is None:
+            if lec is None:
+                continue
+            if not _has_required_subject_match(lec, required_subject_terms):
                 continue
             detail = self._score_candidate(
                 row,
@@ -1960,40 +2290,47 @@ class Recommender:
             )
 
         related_threshold = max_score * self.cfg.RELATED_RATIO
-        background_threshold = max(
-            max_score * self.cfg.BACKGROUND_RATIO,
-            self.cfg.ABS_BACKGROUND_FLOOR,
-        )
         print(f"  [임계값] direct ≥ {direct_threshold:.3f} (floor={self.cfg.ABS_DIRECT_FLOOR})  "
-              f"related ≥ {related_threshold:.3f} (dm_kw ≥ {self.cfg.DM_KW_FLOOR_RELATED})  "
-              f"background ≥ {background_threshold:.3f}  "
+              f"core_direct_floor={self.cfg.CORE_MATCH_DIRECT_FLOOR:.2f}  "
+              f"related ≥ {related_threshold:.3f}  "
+              f"direct_graph ≥ {self.cfg.DIRECT_GRAPH_FLOOR:.2f}  "
+              f"related_graph/community ≥ {self.cfg.RELATED_GRAPH_FLOOR:.2f}/{self.cfg.RELATED_COMMUNITY_FLOOR:.2f}  "
               f"(top={max_score:.3f})\n")
 
+        query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         results = []
         for lec, detail in candidates:
             score      = detail["score"]
             dm_kw      = detail["dm_keyword"]
             graph_sc   = detail.get("graph_score", 0.0)
-            background_signal = (
-                not detail.get("domain_mismatch")
-                and (
-                    graph_sc >= self.cfg.BG_GRAPH_FLOOR
-                    or detail.get("sim_keyword", 0.0) >= self.cfg.BG_SIM_KEYWORD_FLOOR
-                )
+            community_sc = detail.get("community_score", 0.0)
+            core_match = _query_concept_in_role(lec, query_concepts, "core")
+            introduced_match = _query_concept_in_role(lec, query_concepts, "introduced")
+            strong_graph = graph_sc >= self.cfg.DIRECT_GRAPH_FLOOR
+            related_graph = graph_sc >= self.cfg.RELATED_GRAPH_FLOOR
+            related_community = community_sc >= self.cfg.RELATED_COMMUNITY_FLOOR
+            direct_threshold_for_candidate = (
+                min(direct_threshold, self.cfg.CORE_MATCH_DIRECT_FLOOR)
+                if core_match and detail.get("q_kw_matched", True)
+                else direct_threshold
             )
 
-            if score >= direct_threshold:
+            if score >= direct_threshold_for_candidate and (core_match or strong_graph):
                 tier = "direct"
-            elif score >= related_threshold and dm_kw >= self.cfg.DM_KW_FLOOR_RELATED:
-                # graph_score == 0: 구조적으로 쿼리 개념과 이웃 겹침이 없는 강의
-                # focus_concept 없을 때만 적용 (있을 때는 depth_bonus로 graph가 0일 수 있음)
-                if graph_sc == 0.0 and not ctx.focus_concept and ctx.intent != "list_by_topic":
-                    continue  # related에서도 제외
+                if core_match:
+                    detail["tier_reason"] = "core_match"
+                else:
+                    detail["tier_reason"] = "strong_graph"
+            elif score >= related_threshold and (introduced_match or related_graph or related_community):
                 tier = "related"
-            elif score >= background_threshold and background_signal:
-                tier = "background"
+                if introduced_match:
+                    detail["tier_reason"] = "introduced_match"
+                elif related_graph:
+                    detail["tier_reason"] = "related_graph"
+                else:
+                    detail["tier_reason"] = "related_community"
             else:
-                if score < background_threshold:
+                if score < related_threshold:
                     break
                 continue
 
@@ -2053,15 +2390,11 @@ class Recommender:
                 "ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE,
                 "Q_KW_MISMATCH_PENALTY": self.cfg.Q_KW_MISMATCH_PENALTY,
                 "RELATED_RATIO": self.cfg.RELATED_RATIO,
-                "BACKGROUND_RATIO": self.cfg.BACKGROUND_RATIO,
-                "DM_KW_FLOOR_RELATED": self.cfg.DM_KW_FLOOR_RELATED,
                 "HYBRID_CANDIDATE_TOP_N": self.cfg.HYBRID_CANDIDATE_TOP_N,
             }
             self.cfg.ABS_MIN_SCORE = 0.05
             self.cfg.Q_KW_MISMATCH_PENALTY = 1.0
             self.cfg.RELATED_RATIO = 0.35
-            self.cfg.BACKGROUND_RATIO = 0.15
-            self.cfg.DM_KW_FLOOR_RELATED = 0.0
             self.cfg.HYBRID_CANDIDATE_TOP_N = max(
                 self.cfg.HYBRID_CANDIDATE_TOP_N,
                 self.cfg.LIST_QUERY_TOP_K,
@@ -2072,7 +2405,11 @@ class Recommender:
 
         try:
             # ── 질의 벡터화 ───────────────────────────────────────────────
-            query_vec = _embed(ctx.search_text)
+            query_vec = (
+                _embed(ctx.search_text)
+                if self._vector_search_index.video_ids
+                else []
+            )
             candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
             candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
 
@@ -2112,7 +2449,6 @@ class Recommender:
                 tier_label = {
                     "direct": "✅ 직접 추천",
                     "related": "🔸 간접 관련",
-                    "background": "◻ 배경 강의",
                 }.get(r.tier, r.tier)
                 print(f"  {i}. [{r.video_id}] {r.title}  {tier_label}")
                 print(f"     점수:   {score_100}점  |  {r.reason}")
@@ -2135,7 +2471,6 @@ class Recommender:
             tier_label = {
                 "direct": "직접",
                 "related": "간접",
-                "background": "배경",
             }.get(r.tier, r.tier)
             marker = " ◀" if r in top else ""
             print(f"  {r.video_id:<12} {r.title[:20]:<22} {r.domain:<14} "

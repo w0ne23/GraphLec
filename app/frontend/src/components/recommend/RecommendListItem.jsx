@@ -10,11 +10,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const overallScore  = lecture.display_score ?? null
   const durationLabel = formatDuration(lecture.duration_sec)
 
-  // tier 판단: API 필드 우선, 없으면 reason 텍스트로 fallback
-  const isBackground = lecture.tier === 'background'
   const isRelated = lecture.tier === 'related'
-    || (typeof lecture.reason === 'string' && lecture.reason.includes('직접 일치하지 않지만'))
-  const hasSupportTier = isRelated || isBackground
   const showScore = overallScore != null
 
   // keywords 배열 우선 — reason 텍스트가 태그로 뽑히는 버그 방지
@@ -24,7 +20,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const durationMismatch = detail.duration_mismatch === true
 
   return (
-    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${hasSupportTier ? ' rec-item--related' : ''}${isBackground ? ' rec-item--background' : ''}`}>
+    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${isRelated ? ' rec-item--related' : ''}`}>
 
       {/* ── 메인 행 ── */}
       <div className="rec-item-main" onClick={() => setIsExpanded(v => !v)}>
@@ -52,20 +48,22 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
           </div>
           {lecture.video_id && <div className="rec-sub">{lecture.video_id}</div>}
           {durationMismatch && durationMin && (
-            <span className="rec-duration-warn">⚠ {durationMin}분 · 시간 범위 초과</span>
+            <span className="rec-condition-warning rec-condition-warning--inline">
+              {durationMin}분 · 시간 범위 초과
+            </span>
           )}
         </div>
 
         {/* 점수 + 티어 배지 + 토글 */}
         <div className="rec-col rec-col-score">
           {showScore && (
-            <div className={`rec-overall-score${hasSupportTier ? ' rec-overall-score--related' : ''}${isBackground ? ' rec-overall-score--background' : ''}`}>
+            <div className={`rec-overall-score${isRelated ? ' rec-overall-score--related' : ''}`}>
               {overallScore}점
             </div>
           )}
-          {hasSupportTier && (
-            <span className={`rec-tier-badge${isBackground ? ' rec-tier-badge--background' : ''}`}>
-              {isBackground ? '배경 강의' : '간접 관련'}
+          {isRelated && (
+            <span className="rec-tier-badge">
+              간접 관련
             </span>
           )}
           <button className="rec-toggle-btn">
@@ -78,11 +76,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
       {isExpanded && (
         <div className="rec-item-details">
           <div className="rec-details-content">
-            {hasSupportTier && (
-              <p className={`rec-related-notice${isBackground ? ' rec-related-notice--background' : ''}`}>
-                {isBackground
-                  ? '이 강의는 직접 답변 강의는 아니지만, 주제를 이해하는 데 도움이 되는 배경 개념을 다룹니다.'
-                  : '이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.'}
+            {isRelated && (
+              <p className="rec-related-notice">
+                이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.
               </p>
             )}
             {lecture.reason && (
@@ -106,6 +102,15 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
                   <DetailScoreBar label="커뮤니티 점수" score={pct(detail.community_score)} color="#14b8a6" />
                   {detail.visual_preference && (
                     <DetailScoreBar label="시각 자료" score={pct(detail.visual_score)} color="#ec4899" />
+                  )}
+                  {detail.application_preference && (
+                    <DetailScoreBar label="예제/시연" score={pct(detail.application_score)} color="#f97316" />
+                  )}
+                  {detail.listenability_preference && (
+                    <DetailScoreBar label="청취 품질" score={pct(detail.listenability_score)} color="#06b6d4" />
+                  )}
+                  {detail.slow_speech_preference && (
+                    <DetailScoreBar label="발화 속도" score={pct(detail.speech_rate_score)} color="#84cc16" />
                   )}
                   <DetailScoreBar label="조건 부스트" score={pct(detail.combined_boost)} color="#64748b" />
                 </div>
