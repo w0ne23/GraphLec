@@ -99,6 +99,9 @@ class ScoreDetail(BaseModel):
     listenability_preference: bool = False
     speech_rate_score: float = 0.0
     slow_speech_preference: bool = False
+    recency_score: float = 0.0
+    recency_preference: bool = False
+    recency_weight: float = 0.0
     domain_score:      float
     depth_score:       float
     tier_reason:       str = ""
@@ -192,6 +195,9 @@ def recommend(req: RecommendRequest):
                     listenability_preference = r.score_detail.get("listenability_preference", False),
                     speech_rate_score = r.score_detail.get("speech_rate_score", 0.0),
                     slow_speech_preference = r.score_detail.get("slow_speech_preference", False),
+                    recency_score = r.score_detail.get("recency_score", 0.0),
+                    recency_preference = r.score_detail.get("recency_preference", False),
+                    recency_weight = r.score_detail.get("recency_weight", 0.0),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
                     tier_reason      = r.score_detail.get("tier_reason", ""),

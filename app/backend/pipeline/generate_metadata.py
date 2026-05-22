@@ -1330,6 +1330,7 @@ def generate_metadata(
     instructor_id: str,
     output_dir:    Path,
     metadata_dir:  Path,
+    uploaded_at:   str | None = None,
 ) -> dict:
     print(f"[{stem}] fused.json 로드 중...")
     fused = load_fused(stem, output_dir)
@@ -1418,6 +1419,7 @@ def generate_metadata(
         "video_id":            stem,
         "title":               title,
         "instructor_id":       instructor_id,
+        "uploaded_at":         uploaded_at,
         "duration_sec":        round(duration_sec, 1),
         "domain":              domain,
         "graph_domain":        graph_domain,
@@ -1453,6 +1455,8 @@ if __name__ == "__main__":
     parser.add_argument("--instructor_id", required=True,    help="교수 ID")
     parser.add_argument("--output_dir",    default="output", help="fused.json 위치")
     parser.add_argument("--metadata_dir",  default="metadata", help="메타데이터 저장 디렉토리")
+    parser.add_argument("--uploaded-at", "--uploaded_at", dest="uploaded_at", default=None,
+                        help="업로드 시각 ISO 문자열")
     args = parser.parse_args()
 
     generate_metadata(
@@ -1461,4 +1465,5 @@ if __name__ == "__main__":
         instructor_id = args.instructor_id,
         output_dir    = Path(args.output_dir),
         metadata_dir  = Path(args.metadata_dir),
+        uploaded_at   = args.uploaded_at,
     )
