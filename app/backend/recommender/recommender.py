@@ -30,6 +30,7 @@ import os
 import argparse
 import math
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter, defaultdict
@@ -221,6 +222,10 @@ class RecommenderConfig:
     W_APPLICATION_BOOST: float = 0.10
     W_LISTENABILITY_BOOST: float = 0.08
     W_SPEECH_RATE_BOOST: float = 0.07
+    W_RECENCY_BOOST_FAST: float = 0.10
+    W_RECENCY_BOOST_MEDIUM: float = 0.05
+    W_RECENCY_BOOST_SLOW: float = 0.02
+    RECENCY_HALF_LIFE_DAYS: float = 180.0
     # BM25 후보 검색 파라미터
     BM25_K1:             float = 1.2
     BM25_B:              float = 0.75
@@ -248,6 +253,7 @@ class LectureMetadata:
     video_id:          str
     title:             str
     instructor_id:     str
+    uploaded_at:       Optional[str]
     domain:            str
     difficulty:        str   # "beginner" | "intermediate" | "advanced"
     duration_sec:      float
@@ -322,6 +328,7 @@ class MetadataCollection:
                     video_id          = item["video_id"],
                     title             = item["title"],
                     instructor_id     = item.get("instructor_id", ""),
+                    uploaded_at       = item.get("uploaded_at"),
                     domain            = item.get("domain", "unknown"),
                     difficulty        = item.get("difficulty", "unknown"),
                     duration_sec      = item.get("duration_sec", 0.0),
@@ -1071,6 +1078,11 @@ _DELIVERY_CONDITION_TERMS = frozenset({
     "천천히", "천천", "여유", "명료",
 })
 
+_RECENCY_CONDITION_TERMS = frozenset({
+    "최근", "최신", "새로운", "새로", "새로 올라온", "업로드", "업데이트",
+    "요즘", "근래", "최근 업로드", "최신 강의",
+})
+
 _NON_CONTENT_QUERY_TERMS = frozenset({
     "강의", "추천", "내용", "설명", "요약", "개념", "주제", "관련",
     "기초", "입문", "초급", "쉬운", "쉽게", "쉬움", "설명이 쉬운",
@@ -1098,6 +1110,8 @@ def _content_terms_only(terms: list[str], conditions: dict) -> list[str]:
         blocked.update(_APPLICATION_CONDITION_TERMS)
     if conditions.get("prefers_slow_speech") or conditions.get("prefers_listenability"):
         blocked.update(_DELIVERY_CONDITION_TERMS)
+    if conditions.get("prefers_recency"):
+        blocked.update(_RECENCY_CONDITION_TERMS)
     blocked.update(_NON_CONTENT_QUERY_TERMS)
 
     normalized_blocked = {_normalize_term(term) for term in blocked}
@@ -1159,6 +1173,37 @@ def _has_required_subject_match(lec: LectureMetadata, required_terms: set[str]) 
         for lecture_term in lecture_terms
         for required_term in required_terms
     )
+
+
+def _parse_uploaded_at(uploaded_at: Optional[str]) -> Optional[datetime]:
+    if not uploaded_at:
+        return None
+    text = str(uploaded_at).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _compute_recency_score(
+    uploaded_at: Optional[str],
+    half_life_days: float,
+    now: Optional[datetime] = None,
+) -> float:
+    uploaded_dt = _parse_uploaded_at(uploaded_at)
+    if uploaded_dt is None:
+        return 0.0
+    now_dt = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    age_days = max((now_dt - uploaded_dt).total_seconds() / 86400.0, 0.0)
+    half_life = max(float(half_life_days or 1.0), 1.0)
+    return round(math.exp(-age_days * math.log(2) / half_life), 4)
 
 
 def _compute_contrast_signal(lec: LectureMetadata) -> float:
@@ -1253,7 +1298,8 @@ def analyze_query(
     "prefers_visual": true 또는 false,
     "prefers_application": true 또는 false,
     "prefers_slow_speech": true 또는 false,
-    "prefers_listenability": true 또는 false
+    "prefers_listenability": true 또는 false,
+    "prefers_recency": true 또는 false
   }}
 }}
 
@@ -1299,6 +1345,8 @@ def analyze_query(
   - prefers_application: "예제/사례/문제풀이/실습/시연/데모/적용/활용 중심", "이론만 말고" 등
   - prefers_slow_speech: "말이 느렸으면", "급하게 설명하지 않는", "여유있게 진행", "빠르지 않은" 등
   - prefers_listenability: "음질 좋은", "잘 들리는", "듣기 편한", "녹음 상태 좋은", "전달이 명료한" 등
+  - prefers_recency: "최근 업로드된", "최신 강의", "새로 올라온 강의"처럼 강의 업로드 시점이 최근이기를 선호하는 경우
+    * 단순히 "최신 Transformer", "최신 기술 동향"처럼 주제 자체의 최신성을 말하는 경우는 업로드 시점 선호가 명확할 때만 true
 
 [키워드 목록]: {keyword_list}"""
 
@@ -1324,6 +1372,7 @@ def analyze_query(
         "prefers_application": bool(conditions.get("prefers_application")),
         "prefers_slow_speech": bool(conditions.get("prefers_slow_speech")),
         "prefers_listenability": bool(conditions.get("prefers_listenability")),
+        "prefers_recency": bool(conditions.get("prefers_recency")),
     }
     query_keywords = _content_terms_only(query_keywords, normalized_conditions)
     inferred_keywords = _content_terms_only(inferred_keywords, normalized_conditions)
@@ -1391,6 +1440,7 @@ class QueryContext:
     application_preference: bool
     listenability_preference: bool
     slow_speech_preference: bool
+    recency_preference: bool
 
 
 def _build_reason(detail: dict, tier: str = "direct") -> str:
@@ -1418,6 +1468,8 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
         parts.append(f"청취 품질 {detail['listenability_score']:.0%}")
     if detail.get("slow_speech_preference") and detail.get("speech_rate_score", 0) > 0:
         parts.append(f"발화 속도 적합 {detail['speech_rate_score']:.0%}")
+    if detail.get("recency_preference") and detail.get("recency_score", 0) >= 0.6:
+        parts.append("최근 업로드")
     if detail.get("sim_keyword", 0) >= 0.6:
         parts.append(f"키워드 유사도 {detail['sim_keyword']:.0%}")
     if detail.get("dm_keyword", 0) > 0.1:
@@ -1526,6 +1578,7 @@ class Recommender:
         application_preference = bool(conditions.get("prefers_application"))
         listenability_preference = bool(conditions.get("prefers_listenability"))
         slow_speech_preference = bool(conditions.get("prefers_slow_speech"))
+        recency_preference = bool(conditions.get("prefers_recency"))
 
         print(f"[질의 의도]   {intent}")
         print(f"[원본 키워드] {query_keywords}")
@@ -1538,6 +1591,7 @@ class Recommender:
         print(f"[적용/시연]   {'있음' if application_preference else '없음'}")
         print(f"[청취 품질]   {'있음' if listenability_preference else '없음'}")
         print(f"[발화 속도]   {'빠르지 않음 선호' if slow_speech_preference else '없음'}")
+        print(f"[최신성]     {'최근 업로드 선호' if recency_preference else '없음'}")
         if duration_max_sec:
             print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 조건 boost + warning 적용")
         print()
@@ -1557,6 +1611,7 @@ class Recommender:
             application_preference = application_preference,
             listenability_preference = listenability_preference,
             slow_speech_preference = slow_speech_preference,
+            recency_preference = recency_preference,
         )
 
     def _all_candidate_ids(self) -> list[str]:
@@ -1785,6 +1840,14 @@ class Recommender:
         if spm >= 330:
             return 0.0
         return round(1.0 - ((spm - 240) / 90), 4)
+
+    def _recency_boost_weight(self, domain: str) -> float:
+        normalized = _normalize_term(domain)
+        if normalized.startswith("eng/cs"):
+            return self.cfg.W_RECENCY_BOOST_FAST
+        if normalized.startswith(("soc/business", "soc/econ", "med")):
+            return self.cfg.W_RECENCY_BOOST_MEDIUM
+        return self.cfg.W_RECENCY_BOOST_SLOW
 
     @staticmethod
     def _visual_concept_score(lec: LectureMetadata, query_terms: Counter) -> float:
@@ -2017,13 +2080,22 @@ class Recommender:
             "listenability_score",
         )
         speech_rate_score = self._speech_rate_fit_score(lec)
+        recency_score = _compute_recency_score(
+            lec.uploaded_at,
+            half_life_days=self.cfg.RECENCY_HALF_LIFE_DAYS,
+        )
+        recency_weight = (
+            self._recency_boost_weight(lec.domain)
+            if ctx.recency_preference and lec.uploaded_at
+            else 0.0
+        )
         if ctx.visual_preference and visual_density_score < 0.3:
             condition_warnings.append("시각 자료 비중이 높지 않습니다.")
         if ctx.application_preference and application_score < 0.2:
             condition_warnings.append("예제/시연 지향 신호가 약합니다.")
-        if ctx.listenability_preference and listenability_score < 0.7:
+        if ctx.listenability_preference and listenability_score < 0.4:
             condition_warnings.append("청취 품질 신호가 높지 않습니다.")
-        if ctx.slow_speech_preference and speech_rate_score < 0.6:
+        if ctx.slow_speech_preference and speech_rate_score < 0.3:
             condition_warnings.append("발화 속도가 빠른 편일 수 있습니다.")
 
         # ── 가중합 구조 점수 ──────────────────────────────────
@@ -2033,7 +2105,8 @@ class Recommender:
             (self.cfg.W_DURATION_BOOST if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST if ctx.application_preference else 0.0) +
             (self.cfg.W_LISTENABILITY_BOOST if ctx.listenability_preference else 0.0) +
-            (self.cfg.W_SPEECH_RATE_BOOST if ctx.slow_speech_preference else 0.0)
+            (self.cfg.W_SPEECH_RATE_BOOST if ctx.slow_speech_preference else 0.0) +
+            recency_weight
         )
         raw_boost = (
             self.cfg.W_DOMAIN_BOOST     * domain_score    +
@@ -2041,7 +2114,8 @@ class Recommender:
             (self.cfg.W_DURATION_BOOST * duration_fit_score if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST * application_score if ctx.application_preference else 0.0) +
             (self.cfg.W_LISTENABILITY_BOOST * listenability_score if ctx.listenability_preference else 0.0) +
-            (self.cfg.W_SPEECH_RATE_BOOST * speech_rate_score if ctx.slow_speech_preference else 0.0)
+            (self.cfg.W_SPEECH_RATE_BOOST * speech_rate_score if ctx.slow_speech_preference else 0.0) +
+            recency_weight * recency_score
         )
         boost_signal = raw_boost / MAX_BOOST if MAX_BOOST > 0 else 0.0
 
@@ -2112,6 +2186,9 @@ class Recommender:
             "listenability_preference": ctx.listenability_preference,
             "speech_rate_score":    round(speech_rate_score, 4),
             "slow_speech_preference": ctx.slow_speech_preference,
+            "recency_score":        round(recency_score, 4),
+            "recency_preference":   ctx.recency_preference,
+            "recency_weight":       round(recency_weight, 4),
             "weight_content":       round(weights["content"], 4),
             "weight_graph":         round(weights["graph"], 4),
             "weight_community":     round(weights["community"], 4),

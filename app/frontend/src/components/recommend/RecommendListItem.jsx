@@ -18,9 +18,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
 
   const durationMin      = lecture.duration_sec ? Math.round(lecture.duration_sec / 60) : null
   const durationMismatch = detail.duration_mismatch === true
-  const conditionWarnings = Array.isArray(detail.condition_warnings)
-    ? detail.condition_warnings.filter(Boolean)
-    : []
 
   return (
     <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${isRelated ? ' rec-item--related' : ''}`}>
@@ -86,15 +83,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             )}
             {lecture.reason && (
               <p className="rec-sub" style={{ marginBottom: 8 }}>{lecture.reason}</p>
-            )}
-            {conditionWarnings.length > 0 && (
-              <div className="rec-condition-warnings">
-                {conditionWarnings.map((warning, i) => (
-                  <div key={i} className="rec-condition-warning">
-                    {warning}
-                  </div>
-                ))}
-              </div>
             )}
             {lecture.summary && (
               <p className="rec-sub" style={{ marginBottom: 10 }}>{lecture.summary}</p>
