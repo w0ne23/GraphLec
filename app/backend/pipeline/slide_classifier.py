@@ -247,10 +247,19 @@ class SlideClassifier:
     def __init__(self, silences: List[dict]):
         self.silences = silences
 
+    @staticmethod
+    def _scene_start(entry: dict) -> float:
+        return float(entry.get("scene_start_sec", entry.get("slide_start_sec", entry.get("timestamp_sec", 0.0))) or 0.0)
+
+    @staticmethod
+    def _scene_end(entry: dict) -> float:
+        start = SlideClassifier._scene_start(entry)
+        return float(entry.get("scene_end_sec", entry.get("slide_end_sec", start)) or start)
+
     def _slide_stats(self, entry: dict) -> dict:
         """scene occurrence 1개의 기본 통계 계산."""
-        start = entry["scene_start_sec"]
-        end   = entry["scene_end_sec"]
+        start = self._scene_start(entry)
+        end   = self._scene_end(entry)
         dwell = end - start
         silence_sec, silence_ratio = compute_silence_stats(start, end, self.silences)
         speech_ratio = max(0.0, 1.0 - silence_ratio)
@@ -282,10 +291,12 @@ class SlideClassifier:
                 continue
             entry = base_entries[idx]
             stats = self._slide_stats(entry)
+            scene_start = self._scene_start(entry)
+            scene_end = self._scene_end(entry)
             members.append({
                 "scene_index":   idx,
-                "order":         entry["scene_start_sec"],
-                "scene_end_sec": entry["scene_end_sec"],
+                "order":         scene_start,
+                "scene_end_sec": scene_end,
                 **stats,
             })
 
@@ -449,18 +460,30 @@ class ClassificationPipeline:
         silences = silence_data.get("silences", [])
 
         # base 항목만 추출 (scene_index 기준 중복 제거 — base가 여러 개면 첫 번째 우선)
+        # video scene은 타임라인에는 남기되 슬라이드 역할 분류 대상에서는 제외한다.
         base_entries: Dict[int, dict] = {}
+        video_entries: Dict[int, dict] = {}
         for entry in raw_meta:
             if entry.get("capture_type") == "base":
                 idx = entry.get("scene_index")
                 if idx is None:
                     continue
+                if entry.get("scene_type") == "video":
+                    if idx not in video_entries:
+                        video_entries[idx] = entry
+                    continue
                 if idx not in base_entries:
                     base_entries[idx] = entry
+
+        scene_type_by_scene: Dict[int, str] = {
+            idx: "video" for idx in video_entries
+        }
+        scene_type_by_scene.update({idx: "slide" for idx in base_entries})
 
         logger.info(
             f"✓ scene: {len(tex_data['scenes'])}개 | "
             f"base entries: {len(base_entries)}개 | "
+            f"video entries: {len(video_entries)}개 | "
             f"침묵 구간: {len(silences)}개"
         )
 
@@ -478,6 +501,14 @@ class ClassificationPipeline:
         # ── 분류 ─────────────────────────────────────────────────────────── #
         classifier  = SlideClassifier(silences)
         class_map:  Dict[int, dict] = {}   # scene_index → classification
+        for idx in video_entries:
+            class_map[idx] = {
+                "role":          "video",
+                "score":         None,
+                "revisited":     False,
+                "revisit_count": 0,
+                "continuous":    False,
+            }
 
         for group in dup_groups:
             result = classifier.classify_group(group, base_entries)
@@ -499,6 +530,7 @@ class ClassificationPipeline:
             scene_num = slide.get("scene_number", slide.get("scene_index", slide["slide_number"]))
             slide_num = slide["slide_number"]
             scene_label = int(scene_num) if isinstance(scene_num, int) else int(slide_num)
+            scene_type = slide.get("scene_type") or scene_type_by_scene.get(scene_label, "slide")
             cls   = class_map.get(scene_num, {
                 "role":          "core",
                 "score":         None,
@@ -507,17 +539,28 @@ class ClassificationPipeline:
                 "continuous":    False,
             })
 
-            # 제목 키워드 기반 objectives 판정 (체류/침묵 기반 분류보다 우선)
-            title_lower = slide.get("title", "").lower().strip()
-            slide_text  = slide.get("t1", "")
-            is_objectives = (
-                any(kw in title_lower for kw in OBJECTIVES_TITLE_KEYWORDS)
-                or _is_cover_or_toc_slide(title_lower, slide_text)
-            ) and not _is_instructor_intro_slide(title_lower, slide_text)
-            final_role = "objectives" if is_objectives else cls["role"]
+            if scene_type == "video":
+                final_role = "video"
+                cls = {
+                    "role":          "video",
+                    "score":         None,
+                    "revisited":     False,
+                    "revisit_count": 0,
+                    "continuous":    False,
+                }
+            else:
+                # 제목 키워드 기반 objectives 판정 (체류/침묵 기반 분류보다 우선)
+                title_lower = slide.get("title", "").lower().strip()
+                slide_text  = slide.get("t1", "")
+                is_objectives = (
+                    any(kw in title_lower for kw in OBJECTIVES_TITLE_KEYWORDS)
+                    or _is_cover_or_toc_slide(title_lower, slide_text)
+                ) and not _is_instructor_intro_slide(title_lower, slide_text)
+                final_role = "objectives" if is_objectives else cls["role"]
 
             classified_scene = {
                 **slide,                          # textualized 전체 필드 계승
+                "scene_type":    scene_type,
                 "role":          final_role,
                 "score":         cls.get("score"),
                 "revisited":     cls.get("revisited", False),
@@ -568,7 +611,7 @@ class ClassificationPipeline:
         print("="*70)
         print(f"\n📊 결과:")
         print(f"  • 전체 scene: {len(classified_scenes)}개")
-        for role in ["core", "elaborated", "transitional", "silent_new", "objectives"]:
+        for role in ["core", "elaborated", "transitional", "silent_new", "objectives", "video"]:
             print(f"  • {role:<12}: {role_counter.get(role, 0)}개")
         revisited_count = sum(1 for s in classified_scenes if s.get("revisited"))
         print(f"  • revisited    : {revisited_count}개")

@@ -190,6 +190,9 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
         )
 
         for entry in ordered_metadata:
+            if entry.get("scene_type") == "video":
+                continue
+
             scene_idx = entry.get("scene_index")
             logical_slide_no = entry.get(
                 "slide_number",
@@ -221,14 +224,6 @@ def load_slide_pairs(slides_dir: str) -> list[dict]:
                 if pair["base_path"] is None:
                     pair["base_path"] = full_path
                 pair["original_base_path"] = full_path
-                last_path_by_scene[scene_idx] = full_path
-                continue
-
-            if capture_type == "build":
-                # PPT 애니메이션으로 전개된 clean content state.
-                # 교수 필기 분석의 기준 이미지는 최초 base가 아니라 마지막 build여야 한다.
-                pair["base_path"] = full_path
-                pair["clean_base_path"] = full_path
                 last_path_by_scene[scene_idx] = full_path
                 continue
 
@@ -271,12 +266,10 @@ def _load_pairs_by_filename(slides_path: Path) -> list[dict]:
     pairs = []
     for base in bases:
         idx = int(base.name.split("_")[1])
-        builds = sorted(slides_path.glob(f"scene_{idx:03d}_build_*.jpg"))
         annots = sorted(slides_path.glob(f"scene_{idx:03d}_annot_*.jpg"))
-        clean_base = builds[-1] if builds else base
         pairs.append({
             "slide_number": idx,
-            "base_path": str(clean_base),
+            "base_path": str(base),
             "original_base_path": str(base),
             "annot_paths": [str(a) for a in annots],
         })
