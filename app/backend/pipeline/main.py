@@ -1343,6 +1343,7 @@ def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
         stem=stem,
         output_dir=output_dir,
         slides_dir=slides_dir,
+        lecture_title=(getattr(args, "title", "") or "").strip() or stem,
     )
     GraphPipeline(cfg).run()
 
