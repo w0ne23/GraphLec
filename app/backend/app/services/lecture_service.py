@@ -987,12 +987,14 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
         raise HTTPException(status_code=404, detail="Timeline file not found")
 
     try:
+        base_image_urls = _load_scene_base_image_urls(output_dir)
         with open(json_files[0], "r", encoding="utf-8") as f:
             data = json.load(f)
 
         scenes = []
         for s in data.get("scenes", []):
-            img_url = make_file_url(s.get("image_path"))
+            scene_number = s.get("scene_number", s.get("scene_index"))
+            img_url = base_image_urls.get(_scene_number_key(scene_number)) or make_file_url(s.get("image_path"))
             timestamp_sec = s.get("timestamp")
             try:
                 timestamp_sec = float(timestamp_sec)
@@ -1007,12 +1009,46 @@ async def get_timeline(db: AsyncSession, lecture_id: str) -> List[Dict[str, Any]
                 "type":         "emphasis" if s.get("role") == "elaborated" else "slide",
                 "text":         s.get("title") or f"Slide {s.get('slide_number')}",
                 "image_url":    img_url,
-                "scene_number": s.get("scene_number", s.get("scene_index")),
+                "scene_number": scene_number,
                 "slide_number": s.get("slide_number"),
             })
         return scenes
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading timeline: {e}")
+
+
+def _scene_number_key(value: Any) -> Optional[int]:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _load_scene_base_image_urls(output_dir: Path) -> dict[int, str]:
+    metadata_path = output_dir / "slides" / "metadata.json"
+    if not metadata_path.is_file():
+        return {}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read slide metadata for timeline thumbnails: %s", metadata_path, exc_info=True)
+        return {}
+    if not isinstance(metadata, list):
+        return {}
+
+    out: dict[int, str] = {}
+    slides_dir = metadata_path.parent
+    for entry in metadata:
+        if not isinstance(entry, dict) or entry.get("capture_type") != "base":
+            continue
+        scene_number = _scene_number_key(entry.get("scene_index", entry.get("scene_number")))
+        filename = _str_cell(entry.get("filename"))
+        if scene_number is None or not filename:
+            continue
+        image_url = make_file_url(str(slides_dir / filename))
+        if image_url:
+            out[scene_number] = image_url
+    return out
 
 
 async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
