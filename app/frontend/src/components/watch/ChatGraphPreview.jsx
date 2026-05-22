@@ -82,6 +82,11 @@ function visualAssetLabel(node, fallback) {
   return slideNo != null ? `visualAsset${Number(slideNo)}` : fallback
 }
 
+function videoTitle(node) {
+  const props = nodeProps(node)
+  return String(props.title || node?.name || '').trim()
+}
+
 function firstSentence(text) {
   const compact = String(text || '').replace(/\s+/g, ' ').trim()
   if (!compact) return ''
@@ -338,6 +343,8 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
       } else if (type === 'Segment') {
         const segmentNo = id.match(/segment[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, segmentNo ? `segment${Number(segmentNo)}` : nextLabel('segment'))
+      } else if (type === 'Video') {
+        labels.set(id, 'video')
       } else {
         labels.set(id, conceptLabel(node))
       }
@@ -349,6 +356,10 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
   function nodeDetail(node) {
     const type = normalizedType(node)
     const props = nodeProps(node)
+    if (type === 'Video') {
+      const title = videoTitle(node)
+      return title ? `title: ${title}` : ''
+    }
     if (type === 'VisualAsset') {
       const assetType = String(node?.asset_type || props.asset_type || '').trim()
       return assetType ? `asset_type: ${assetType}` : 'asset_type: visual'
