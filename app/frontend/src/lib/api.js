@@ -193,14 +193,23 @@ export async function getLectureGraphSessionStatus(lectureId) {
 }
 
 export async function recommendLectures(query, topK = 3) {
-  const res = await fetch(`${RECOMMENDER_BASE}/recommend`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query, top_k: topK }),
-  });
+  let res
+  try {
+    res = await fetch(`${RECOMMENDER_BASE}/recommend`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, top_k: topK }),
+    });
+  } catch (error) {
+    const err = new Error('RECOMMENDER_NETWORK_ERROR')
+    err.cause = error
+    throw err
+  }
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Recommend request failed');
+    const err = new Error(errorData.detail || 'RECOMMENDER_SERVER_ERROR');
+    err.status = res.status;
+    throw err;
   }
   return res.json();
 }
