@@ -1619,6 +1619,7 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
         instructor_id = getattr(args, "instructor", ""),
         output_dir    = output_dir,
         metadata_dir  = metadata_dir,
+        uploaded_at   = getattr(args, "uploaded_at", None),
     )
 
     elapsed = time.time() - t0
@@ -2209,6 +2210,8 @@ def get_parser():
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
+    parser.add_argument("--uploaded-at", dest="uploaded_at", default=None,
+                        help="강의 업로드 시각 ISO 문자열")
     
     return parser
 
