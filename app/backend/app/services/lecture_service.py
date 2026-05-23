@@ -1065,57 +1065,8 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         raise HTTPException(status_code=404, detail="Graph files not found")
 
     try:
-        ndf = pd.read_parquet(nodes_paths[0])
-        edf = (
-            pd.read_parquet(edges_paths[0])
-            if edges_paths
-            else pd.DataFrame(columns=["src_id", "rel_type", "tgt_id", "properties_json"])
-        )
-
-        nodes_out = []
-        for _, row in ndf.iterrows():
-            nid = _str_cell(row.get("node_id"))
-            if not nid:
-                continue
-            label = _str_cell(row.get("label")) or nid
-            props = _str_cell(row.get("properties_json")) or "{}"
-            try:
-                props_dict = json.loads(props)
-                ntype = props_dict.get("type") or label or "node"
-            except:
-                props_dict = {}
-                ntype = label or "node"
-            if label == "Domain" or ntype == "Domain" or nid == "lecture_video" or nid.startswith("domain/"):
-                continue
-            nodes_out.append({
-                "id": nid, "label": label[:120], "title": props[:800],
-                "name": _str_cell(props_dict.get("name")) or _str_cell(props_dict.get("title")),
-                "text": _str_cell(props_dict.get("text")) or _str_cell(props_dict.get("target_content")),
-                "asset_type": _str_cell(props_dict.get("asset_type")),
-                "description": _str_cell(props_dict.get("description")),
-                "type": ntype, "color": _hex_color(label),
-            })
-
-        seen_ids = {n["id"] for n in nodes_out}
-        edges_out = []
-        for _, row in edf.iterrows():
-            src, tgt = _str_cell(row.get("src_id")), _str_cell(row.get("tgt_id"))
-            if not src or not tgt:
-                continue
-            rel_type = _str_cell(row.get("rel_type")) or "related"
-            if (
-                rel_type == "HAS_DOMAIN"
-                or src == "lecture_video"
-                or tgt == "lecture_video"
-                or src.startswith("domain/")
-                or tgt.startswith("domain/")
-            ):
-                continue
-            edges_out.append({"from": src, "to": tgt, "label": rel_type})
-            for x in (src, tgt):
-                if x not in seen_ids:
-                    seen_ids.add(x)
-                    nodes_out.append({"id": x, "label": x[:80], "type": "orphan", "color": "#9ca3af"})
+        nodes_out, edges_out = _read_structure_graph(nodes_paths[0], edges_paths[0] if edges_paths else None)
+        _append_graphrag_graph(output_dir, nodes_out, edges_out)
 
         return {
             "node_count": len(nodes_out),
@@ -1124,6 +1075,319 @@ async def get_knowledge_graph(db: AsyncSession, lecture_id: str) -> Dict[str, An
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading graph: {e}")
+
+
+_GRAPHRAG_SLIDE_ID_RE = re.compile(r"slide_\d{3,}")
+_GRAPHRAG_STRUCTURAL_ENTITY_RE = re.compile(
+    r"^(slide[_ ]?\d+|chapter\s*\d+|segment[/_ ]?\d+|context[/_ ]?\d+|scene[/_ ]?\d+|graphlec_seg:segment/\d+)$",
+    re.IGNORECASE,
+)
+
+
+def _read_structure_graph(nodes_path: Path, edges_path: Optional[Path]) -> tuple[list[dict], list[dict]]:
+    ndf = pd.read_parquet(nodes_path)
+    edf = (
+        pd.read_parquet(edges_path)
+        if edges_path and edges_path.is_file()
+        else pd.DataFrame(columns=["src_id", "rel_type", "tgt_id", "properties_json"])
+    )
+
+    nodes_out = []
+    for _, row in ndf.iterrows():
+        nid = _str_cell(row.get("node_id"))
+        if not nid:
+            continue
+        label = _str_cell(row.get("label")) or nid
+        props = _str_cell(row.get("properties_json")) or "{}"
+        try:
+            props_dict = json.loads(props)
+            ntype = props_dict.get("type") or label or "node"
+        except Exception:
+            props_dict = {}
+            ntype = label or "node"
+        if (
+            label in {"Domain", "Concept"}
+            or ntype in {"Domain", "Concept"}
+            or nid == "lecture_video"
+            or nid.startswith("domain/")
+            or nid.startswith("concept/")
+        ):
+            continue
+        nodes_out.append({
+            "id": nid, "label": label[:120], "title": props[:800],
+            "name": _str_cell(props_dict.get("name")) or _str_cell(props_dict.get("title")),
+            "text": _str_cell(props_dict.get("text")) or _str_cell(props_dict.get("target_content")),
+            "asset_type": _str_cell(props_dict.get("asset_type")),
+            "description": _str_cell(props_dict.get("description")),
+            "type": ntype, "color": _hex_color(label),
+        })
+
+    seen_ids = {n["id"] for n in nodes_out}
+    edges_out = []
+    for _, row in edf.iterrows():
+        src, tgt = _str_cell(row.get("src_id")), _str_cell(row.get("tgt_id"))
+        if not src or not tgt:
+            continue
+        rel_type = _str_cell(row.get("rel_type")) or "related"
+        if (
+            rel_type == "HAS_DOMAIN"
+            or src == "lecture_video"
+            or tgt == "lecture_video"
+            or src.startswith("domain/")
+            or tgt.startswith("domain/")
+            or src.startswith("concept/")
+            or tgt.startswith("concept/")
+        ):
+            continue
+        edges_out.append({"from": src, "to": tgt, "label": rel_type})
+        for x in (src, tgt):
+            if x not in seen_ids:
+                seen_ids.add(x)
+                nodes_out.append({"id": x, "label": x[:80], "type": "orphan", "color": "#9ca3af"})
+
+    return nodes_out, edges_out
+
+
+def _append_graphrag_graph(output_dir: Path, nodes_out: list[dict], edges_out: list[dict]) -> None:
+    graphrag_dir = _find_graphrag_output_dir(output_dir)
+    if not graphrag_dir:
+        return
+
+    entities_path = graphrag_dir / "entities.parquet"
+    relationships_path = graphrag_dir / "relationships.parquet"
+    entities = pd.read_parquet(entities_path)
+    relationships = pd.read_parquet(relationships_path)
+
+    seen_ids = {str(n.get("id")) for n in nodes_out if n.get("id")}
+    edge_keys = {
+        (str(e.get("from")), str(e.get("label")), str(e.get("to")))
+        for e in edges_out
+        if e.get("from") and e.get("to")
+    }
+    title_to_id: dict[str, str] = {}
+    raw_entity_id_to_node_id: dict[str, str] = {}
+
+    for _, row in entities.iterrows():
+        raw_id = _str_cell(row.get("id")).strip()
+        title = _str_cell(row.get("title")).strip()
+        if not raw_id or not title or _GRAPHRAG_STRUCTURAL_ENTITY_RE.match(title):
+            continue
+        node_id = f"graphrag/entity/{raw_id}"
+        raw_entity_id_to_node_id[raw_id] = node_id
+        for key in (_graphrag_title_key(title), _graphrag_alias_key(title)):
+            if key and key not in title_to_id:
+                title_to_id[key] = node_id
+        props = {
+            "title": title,
+            "name": title,
+            "graphrag_id": raw_id,
+            "human_readable_id": _str_cell(row.get("human_readable_id")),
+            "entity_type": _str_cell(row.get("type")),
+            "description": _str_cell(row.get("description")),
+            "frequency": _int_val(row.get("frequency")),
+            "degree": _int_val(row.get("degree")),
+            "source": "microsoft_graphrag",
+        }
+        if node_id in seen_ids:
+            continue
+        seen_ids.add(node_id)
+        nodes_out.append({
+            "id": node_id,
+            "label": title[:120],
+            "title": json.dumps(props, ensure_ascii=False)[:1200],
+            "name": title,
+            "text": _str_cell(row.get("description")),
+            "type": "GraphRAGEntity",
+            "color": _hex_color("GraphRAGEntity"),
+        })
+
+    for _, row in relationships.iterrows():
+        src = title_to_id.get(_graphrag_title_key(row.get("source"))) or title_to_id.get(_graphrag_alias_key(row.get("source")))
+        tgt = title_to_id.get(_graphrag_title_key(row.get("target"))) or title_to_id.get(_graphrag_alias_key(row.get("target")))
+        if not src or not tgt or src == tgt:
+            continue
+        _append_graph_edge(
+            edges_out,
+            edge_keys,
+            src,
+            tgt,
+            "GRAPHRAG_RELATES_TO",
+            {
+                "graphrag_id": _str_cell(row.get("id")),
+                "description": _str_cell(row.get("description")),
+                "weight": _float_val(row.get("weight")),
+                "combined_degree": _int_val(row.get("combined_degree")),
+            },
+        )
+
+    _append_graphrag_slide_edges(graphrag_dir, nodes_out, edges_out, edge_keys, raw_entity_id_to_node_id)
+    _append_graphrag_communities(graphrag_dir, nodes_out, edges_out, edge_keys, raw_entity_id_to_node_id)
+
+
+def _find_graphrag_output_dir(output_dir: Path) -> Optional[Path]:
+    for path in (
+        output_dir / "graphrag" / "output",
+        output_dir / "graphrag_output",
+        output_dir / "output",
+    ):
+        if (path / "entities.parquet").is_file() and (path / "relationships.parquet").is_file():
+            return path
+    return None
+
+
+def _append_graphrag_slide_edges(
+    graphrag_dir: Path,
+    nodes_out: list[dict],
+    edges_out: list[dict],
+    edge_keys: set[tuple[str, str, str]],
+    raw_entity_id_to_node_id: dict[str, str],
+) -> None:
+    text_units_path = graphrag_dir / "text_units.parquet"
+    entities_path = graphrag_dir / "entities.parquet"
+    if not text_units_path.is_file():
+        return
+
+    text_units = pd.read_parquet(text_units_path)
+    text_unit_slide_ids = {
+        _str_cell(row.get("id")): sorted(set(_GRAPHRAG_SLIDE_ID_RE.findall(_str_cell(row.get("text")))))
+        for _, row in text_units.iterrows()
+    }
+    if not text_unit_slide_ids:
+        return
+
+    node_ids = {str(n.get("id")) for n in nodes_out if n.get("id")}
+    entities = pd.read_parquet(entities_path)
+    for _, row in entities.iterrows():
+        entity_id = raw_entity_id_to_node_id.get(_str_cell(row.get("id")))
+        if not entity_id:
+            continue
+        slide_ids: set[str] = set()
+        for tu_id in _list_val(row.get("text_unit_ids")):
+            slide_ids.update(text_unit_slide_ids.get(tu_id, []))
+        for slide_id in sorted(slide_ids):
+            if slide_id in node_ids:
+                _append_graph_edge(edges_out, edge_keys, entity_id, slide_id, "GRAPHRAG_APPEARS_IN")
+
+
+def _append_graphrag_communities(
+    graphrag_dir: Path,
+    nodes_out: list[dict],
+    edges_out: list[dict],
+    edge_keys: set[tuple[str, str, str]],
+    raw_entity_id_to_node_id: dict[str, str],
+) -> None:
+    communities_path = graphrag_dir / "communities.parquet"
+    reports_path = graphrag_dir / "community_reports.parquet"
+    if not communities_path.is_file():
+        return
+
+    communities = pd.read_parquet(communities_path)
+    reports_by_community: dict[str, Any] = {}
+    if reports_path.is_file():
+        reports = pd.read_parquet(reports_path)
+        reports_by_community = {
+            _str_cell(row.get("community")): row
+            for _, row in reports.iterrows()
+            if _str_cell(row.get("community"))
+        }
+
+    seen_ids = {str(n.get("id")) for n in nodes_out if n.get("id")}
+    for _, row in communities.iterrows():
+        community = _str_cell(row.get("community")).strip()
+        if not community:
+            continue
+        report = reports_by_community.get(community)
+        node_id = f"graphrag/community/{community}"
+        title = _str_cell((report if report is not None else row).get("title")) or f"Community {community}"
+        summary = _str_cell(report.get("summary")) if report is not None else ""
+        if node_id not in seen_ids:
+            seen_ids.add(node_id)
+            props = {
+                "title": title,
+                "summary": summary,
+                "community": community,
+                "level": _int_val(row.get("level")),
+                "size": _int_val(row.get("size")),
+                "source": "microsoft_graphrag",
+            }
+            nodes_out.append({
+                "id": node_id,
+                "label": title[:120],
+                "title": json.dumps(props, ensure_ascii=False)[:1200],
+                "name": title,
+                "text": summary,
+                "type": "GraphRAGCommunity",
+                "color": _hex_color("GraphRAGCommunity"),
+            })
+        for raw_entity_id in _list_val(row.get("entity_ids")):
+            entity_id = raw_entity_id_to_node_id.get(raw_entity_id)
+            if entity_id:
+                _append_graph_edge(edges_out, edge_keys, node_id, entity_id, "GRAPHRAG_HAS_ENTITY")
+
+
+def _append_graph_edge(
+    edges_out: list[dict],
+    edge_keys: set[tuple[str, str, str]],
+    src: str,
+    tgt: str,
+    label: str,
+    props: Optional[dict[str, Any]] = None,
+) -> None:
+    key = (src, label, tgt)
+    if key in edge_keys:
+        return
+    edge_keys.add(key)
+    edge = {"from": src, "to": tgt, "label": label}
+    if props:
+        edge["title"] = json.dumps(props, ensure_ascii=False)[:1000]
+    edges_out.append(edge)
+
+
+def _graphrag_title_key(value: Any) -> str:
+    return re.sub(r"\s+", "", _str_cell(value).lower())
+
+
+def _graphrag_alias_key(value: Any) -> str:
+    return re.sub(r"[\W_]+", "", _str_cell(value).lower())
+
+
+def _list_val(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw or raw == "[]":
+            return []
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if str(x)]
+        except json.JSONDecodeError:
+            return [x for x in re.findall(r"[0-9A-Za-z][0-9A-Za-z_-]{7,}", raw) if x]
+        return [raw]
+    try:
+        if pd.isna(value):
+            return []
+    except Exception:
+        pass
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if isinstance(value, (list, tuple, set)):
+        return [str(x) for x in value if str(x)]
+    return [str(value)]
+
+
+def _int_val(value: Any, default: int = 0) -> int:
+    try:
+        if value is None or pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def _filter_served_slide_errors(items: list[dict]) -> list[dict]:
     filtered = []

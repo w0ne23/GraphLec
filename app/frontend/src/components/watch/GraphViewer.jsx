@@ -5,7 +5,6 @@ import { getLectureGraph } from '../../lib/api';
 const GRAPH_COLORS = {
   GraphRAGEntity: '#FF6B6B',
   GraphRAGCommunity: '#FF9F43',
-  Concept: '#FF6B6B',
   Slide: '#4ECDC4',
   Scene: '#A29BFE',
   Context: '#81ECEC',
@@ -50,7 +49,7 @@ function normalizedType(node) {
   if (raw === 'segment') return 'Segment';
   if (raw === 'visualasset' || raw === 'visual') return 'VisualAsset';
   if (raw === 'video' || raw === 'lecture' || raw === 'lecturevideo') return 'Video';
-  if (raw === 'graphragentity' || raw === 'concept' || raw === 'conceptgraph' || raw === 'entity') return 'GraphRAGEntity';
+  if (raw === 'graphragentity' || raw === 'conceptgraph') return 'GraphRAGEntity';
   if (raw === 'graphragcommunity' || raw === 'community') return 'GraphRAGCommunity';
   if (raw === 'annotation' || raw === 'annotationemphasis' || raw === 'annot') return 'AnnotationEmphasis';
   if (/slide[_/-]?\d+/.test(id) || /^s\d+$/.test(label)) return 'Slide';
@@ -60,7 +59,8 @@ function normalizedType(node) {
   if (/visual/.test(id) || label === 'visualasset') return 'VisualAsset';
   if (/lecture|video/.test(id) || label === 'video' || label === 'lecture') return 'Video';
   if (/annotation|annot/.test(id) || /annotation|annot/.test(label)) return 'AnnotationEmphasis';
-  if (/concept|graphrag/.test(id) || /concept|entity/.test(label)) return 'GraphRAGEntity';
+  if (/^graphrag\/entity\//.test(id) || label === 'graphragentity') return 'GraphRAGEntity';
+  if (/^graphrag\/community\//.test(id) || label === 'graphragcommunity') return 'GraphRAGCommunity';
   return node?.type || 'node';
 }
 
@@ -111,6 +111,30 @@ function styledEdge(edge, source, target, mode) {
     color,
     width: focused ? 1.5 : 0.45,
   };
+}
+
+function numericProp(node, key) {
+  const props = nodeProps(node);
+  const value = node?.[key] ?? props[key];
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function graphCentrality(rawNodes, rawEdges) {
+  const scores = new Map(rawNodes.map(node => [String(node.id), 0]));
+  rawEdges.forEach((edge) => {
+    const from = String(edge.from != null ? edge.from : edge.src_id);
+    const to = String(edge.to != null ? edge.to : edge.tgt_id);
+    const weight = Math.max(1, Number(edge.weight ?? edge.properties?.weight ?? 1) || 1);
+    if (scores.has(from)) scores.set(from, scores.get(from) + weight);
+    if (scores.has(to)) scores.set(to, scores.get(to) + weight);
+  });
+  rawNodes.forEach((node) => {
+    const id = String(node.id);
+    const bonus = numericProp(node, 'degree') * 0.6 + numericProp(node, 'frequency') * 0.25;
+    scores.set(id, (scores.get(id) || 0) + bonus);
+  });
+  return scores;
 }
 
 function conceptLabel(node) {
@@ -217,20 +241,23 @@ function buildStyledGraph(rawGraph, displayById, mode) {
   const heavy = nCount > 150;
   const nodesById = new Map(rawNodes.map(node => [String(node.id), node]));
   const edgeInfoById = new Map();
+  const centrality = graphCentrality(rawNodes, rawEdges);
 
   const nodes = rawNodes.map((n) => {
     const baseColor = graphColor(n);
     const type = normalizedType(n);
     const group = graphGroup(type);
     const focused = isModeFocused(group, mode);
-    const isConcept = type === 'GraphRAGEntity' || type === 'GraphRAGCommunity';
-    const isVisual = type === 'VisualAsset';
+    const score = centrality.get(String(n.id)) || 0;
+    const sizeBoost = Math.min(6, Math.log1p(score) * 1.8);
+    const baseSize = nCount > 400 ? 12 : 15;
     return {
       id: n.id != null ? String(n.id) : 'n',
       label: displayById.get(String(n.id)) || conceptLabel(n),
       title: nodeDetail(n),
       shape: 'dot',
-      size: isConcept ? (nCount > 400 ? 13 : 18) : (isVisual ? (nCount > 400 ? 12 : 16) : (nCount > 400 ? 11 : 14)),
+      size: baseSize + sizeBoost,
+      mass: 1 + Math.min(5, Math.log1p(score) * 0.8),
       color: styledNodeColor(baseColor, focused),
       borderWidth: focused ? 2 : 1,
       opacity: focused ? 1 : 0.28,
@@ -327,6 +354,10 @@ function GraphViewer({ lectureId }) {
     const data = { nodes, edges };
 
     const options = {
+      layout: {
+        improvedLayout: true,
+        randomSeed: 7,
+      },
       nodes: { borderWidth: 2 },
       edges: {
         color: '#94a3b8',
@@ -338,12 +369,20 @@ function GraphViewer({ lectureId }) {
       },
       physics: {
         enabled: true,
-        stabilization: { enabled: false },
-        barnesHut: {
-          gravitationalConstant: heavy ? -4000 : -2000,
-          springLength: heavy ? 150 : 100,
-          springConstant: 0.04,
-          damping: 0.09,
+        solver: 'forceAtlas2Based',
+        stabilization: {
+          enabled: true,
+          iterations: heavy ? 90 : 140,
+          updateInterval: 20,
+          fit: false,
+        },
+        forceAtlas2Based: {
+          gravitationalConstant: heavy ? -70 : -55,
+          centralGravity: viewMode === 'concept' ? 0.08 : 0.045,
+          springLength: heavy ? 135 : 105,
+          springConstant: 0.06,
+          damping: 0.5,
+          avoidOverlap: 0.65,
         },
       },
       interaction: { 
