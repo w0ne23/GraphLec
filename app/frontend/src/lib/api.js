@@ -1,12 +1,13 @@
 const API_BASE = '/api'
 const RECOMMENDER_BASE = import.meta.env.VITE_RECOMMENDER_API_BASE || '/recommender-api'
 
-export async function uploadLecture({ file, title, category, description }) {
+export async function uploadLecture({ file, title, category, description, workflowMode = 'legacy_full' }) {
   const formData = new FormData();
   formData.append('video', file);
   formData.append('title', title);
   formData.append('category', category);
   formData.append('description', description);
+  formData.append('workflow_mode', workflowMode);
 
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',

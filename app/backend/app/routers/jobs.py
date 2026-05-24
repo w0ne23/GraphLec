@@ -11,11 +11,43 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import JOB_TYPE_LEGACY_FULL, Lecture, ProcessingJob
+from app.models import (
+    JOB_STATUS_DONE,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_REJECTED,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFIED_UPLOAD,
+    Lecture,
+    ProcessingJob,
+)
 from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
+SSE_TERMINAL_STATUSES = {
+    JOB_STATUS_DONE,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_STATUS_REJECTED,
+}
+
+
+def _normalize_upload_job_type(value: str) -> str:
+    token = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
+    aliases = {
+        "legacy": JOB_TYPE_LEGACY_FULL,
+        "legacy_full": JOB_TYPE_LEGACY_FULL,
+        "direct": JOB_TYPE_DIRECT_UPLOAD,
+        "direct_upload": JOB_TYPE_DIRECT_UPLOAD,
+        "verified": JOB_TYPE_VERIFIED_UPLOAD,
+        "verify": JOB_TYPE_VERIFIED_UPLOAD,
+        "verified_upload": JOB_TYPE_VERIFIED_UPLOAD,
+    }
+    if token not in aliases:
+        raise HTTPException(status_code=400, detail="Invalid workflow_mode")
+    return aliases[token]
 
 
 @router.get("")
@@ -59,7 +91,7 @@ async def stream_job_status(
                     "pipeline_stages": job.pipeline_stages or [],
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
-                if job.status in ("done", "error"):
+                if job.status in SSE_TERMINAL_STATUSES:
                     break
             except Exception as e:
                 logger.error(f"SSE error for lecture {lecture_id}: {e}")
@@ -78,8 +110,10 @@ async def create_job(
     title: str = Form(...),
     category: str = Form("컴퓨터 과학"),
     description: str = Form(""),
+    workflow_mode: str = Form(JOB_TYPE_LEGACY_FULL),
     db: AsyncSession = Depends(get_db),
 ):
+    job_type = _normalize_upload_job_type(workflow_mode)
     lecture_id = uuid.uuid4()
     base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
@@ -123,7 +157,7 @@ async def create_job(
         new_job = ProcessingJob(
             id=job_id,
             lecture_id=lecture_id,
-            job_type=JOB_TYPE_LEGACY_FULL,
+            job_type=job_type,
             status="pending",
         )
         db.add(new_job)
