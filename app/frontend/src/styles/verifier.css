@@ -28,6 +28,39 @@
   flex: 1;
 }
 
+.vf-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.vf-upload-action {
+  background: var(--blue);
+  border: 1px solid var(--blue);
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  transition: opacity .14s, background .14s;
+}
+
+.vf-upload-action:hover {
+  opacity: .88;
+}
+
+.vf-upload-action:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.vf-upload-action--reject {
+  background: var(--red-bg);
+  border-color: rgba(220, 38, 38, .22);
+  color: var(--red);
+}
+
 .vf-exit-video-btn {
   background: var(--card);
   border: 1px solid var(--b1);

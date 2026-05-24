@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { getLectureDetail, getLectureVerifier } from '../lib/api'
+import { approveLectureUpload, getLectureDetail, getLectureVerifier, rejectLectureUpload } from '../lib/api'
 
 import VideoPlayer from '../components/watch/VideoPlayer'
 
@@ -574,6 +574,7 @@ export default function VerifierPage() {
   const [activeIssueFilter, setActiveIssueFilter] = useState('all')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
+  const [approvalBusy, setApprovalBusy] = useState('')
 
   useEffect(() => {
     if (!id) return
@@ -678,6 +679,35 @@ export default function VerifierPage() {
   function handleWatchClaim(startTime) {
     setIsVideoMode(true)
     setSeekToSeconds(Number(startTime) || 0)
+  }
+
+  async function handleApproveUpload() {
+    if (!id || approvalBusy) return
+    setApprovalBusy('approve')
+    setError('')
+    try {
+      await approveLectureUpload(id)
+      navigate('/upload')
+    } catch (err) {
+      setError(String(err?.message || err))
+    } finally {
+      setApprovalBusy('')
+    }
+  }
+
+  async function handleRejectUpload() {
+    if (!id || approvalBusy) return
+    if (!window.confirm('검증한 강의를 삭제하시겠습니까?')) return
+    setApprovalBusy('reject')
+    setError('')
+    try {
+      await rejectLectureUpload(id)
+      navigate('/upload')
+    } catch (err) {
+      setError(String(err?.message || err))
+    } finally {
+      setApprovalBusy('')
+    }
   }
 
   function renderClaimList(items, section) {
@@ -819,6 +849,8 @@ export default function VerifierPage() {
     return <div className="lp-loading">Verifier 결과를 찾을 수 없습니다</div>
   }
 
+  const isWaitingApproval = lecture.status === 'waiting_approval'
+
   return (
     <div className="vf-shell">
       <div className="vf-topbar">
@@ -826,11 +858,23 @@ export default function VerifierPage() {
           <button className="lp-back" onClick={() => navigate(-1)}>← 이전으로</button>
           <span className="lp-title">{lecture.title} · Verifier</span>
         </div>
-        {isVideoMode && (
-          <button className="vf-exit-video-btn" onClick={() => setIsVideoMode(false)}>
-            영상 닫기
-          </button>
-        )}
+        <div className="vf-topbar-actions">
+          {isWaitingApproval && (
+            <>
+              <button className="vf-upload-action vf-upload-action--reject" onClick={handleRejectUpload} disabled={!!approvalBusy}>
+                업로드 거절
+              </button>
+              <button className="vf-upload-action" onClick={handleApproveUpload} disabled={!!approvalBusy}>
+                업로드 승인
+              </button>
+            </>
+          )}
+          {isVideoMode && (
+            <button className="vf-exit-video-btn" onClick={() => setIsVideoMode(false)}>
+              영상 닫기
+            </button>
+          )}
+        </div>
       </div>
 
       <div className={`vf-body ${isVideoMode ? 'vf-body--video' : ''}`}>

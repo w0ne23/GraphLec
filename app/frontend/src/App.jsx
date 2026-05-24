@@ -5,6 +5,7 @@ import RecommendPage from './pages/RecommendPage'
 import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
+import PreviewPage   from './pages/PreviewPage'
 import MainLayout    from './components/layout/MainLayout'
 
 export default function App() {
@@ -15,6 +16,7 @@ export default function App() {
           <Routes>
             {/* 헤더/탭바 X */}
             <Route path="/"                      element={<LandingPage />} />
+            <Route path="/preview"               element={<PreviewPage />} />
             <Route path="/lectures/:id"          element={<LecturePage />} />
             <Route path="/lectures/:id/verifier" element={<VerifierPage />} />
 

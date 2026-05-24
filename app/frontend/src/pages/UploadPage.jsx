@@ -10,7 +10,9 @@ const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'graph', 'summarize'
 const STATUS_MAP = {
   done:       { label: '분석 완료', cls: 'status-done' },
   processing: { label: '분석 중',   cls: 'status-proc' },
+  running:    { label: '분석 중',   cls: 'status-proc' },
   pending:    { label: '대기',       cls: 'status-wait' },
+  waiting_approval: { label: '승인 대기', cls: 'status-wait' },
   error:      { label: '오류',       cls: 'status-err'  },
 }
 
@@ -142,7 +144,7 @@ export default function UploadPage() {
           return lec
         }))
 
-        if (data.lecture_status === 'done' || data.lecture_status === 'error') {
+        if (data.lecture_status === 'done' || data.lecture_status === 'error' || data.lecture_status === 'waiting_approval' || data.lecture_status === 'rejected') {
            closeSSE()
         }
       } catch (err) { console.error("SSE Parse error:", err) }
@@ -185,20 +187,21 @@ export default function UploadPage() {
     setTitle(prev => prev.trim() ? prev : f.name.replace(/\.[^.]+$/, ''))
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(workflowMode) {
     if (uploading || !file) return
+    setUploading(workflowMode)
     setError('')
     listRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 
     try {
-      const created = await uploadLecture({ title: title || file.name, category, description, file })
+      const created = await uploadLecture({ title: title || file.name, category, description, file, workflowMode })
       // created에는 id(lecture_id)와 job_id가 모두 있음
       setLectures(prev => [created, ...prev])
       setupSSEForJob(created.id, created.job_id)
     } catch (e) {
       setError(String(e.message || e))
     } finally {
-      setTitle(''); setCategory('컴퓨터 과학'); setDescription(''); setFile(null)
+      setTitle(''); setCategory('컴퓨터 과학'); setDescription(''); setFile(null); setUploading(null)
     }
   }
 
@@ -274,7 +277,10 @@ export default function UploadPage() {
               <textarea className="up-textarea" value={description} onChange={e => setDescription(e.target.value)} placeholder="강의 내용을 간략히 설명하세요..." />
             </div>
           </div>
-          <button className="up-submit-btn" onClick={handleSubmit} disabled={!!uploading || !file}>업로드 시작</button>
+          <div className="up-submit-group">
+            <button className="up-submit-btn up-submit-btn--direct" onClick={() => handleSubmit('direct_upload')} disabled={!!uploading || !file}>바로 업로드</button>
+            <button className="up-submit-btn" onClick={() => handleSubmit('verified_upload')} disabled={!!uploading || !file}>검증 후 업로드</button>
+          </div>
           <button className="up-scroll-hint" onClick={() => listRef.current?.scrollIntoView({ behavior: 'smooth' })}>강의 목록 보기 ↓</button>
         </div>
       </section>
@@ -292,10 +298,17 @@ export default function UploadPage() {
             const st = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
             const thumbBg = THUMB_COLOR[lec.category] ?? '#1e2333'
             const thumbIcon = THUMB_ICON[lec.category] ?? '🎬'
+            const canOpenVerifier = lec.status === 'waiting_approval' || (lec.status === 'done' && lec.job_type !== 'direct_upload')
 
             return (
               <div key={lec.id}>
-                <div className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`} onClick={() => lec.status === 'done' && navigate(`/lectures/${lec.id}`)}>
+                <div
+                  className={`upload-row${lec.status === 'done' || lec.status === 'waiting_approval' ? ' upload-row--done' : ''}`}
+                  onClick={() => {
+                    if (lec.status === 'done') navigate(`/lectures/${lec.id}`)
+                    if (lec.status === 'waiting_approval') navigate(`/lectures/${lec.id}/verifier`)
+                  }}
+                >
                   <div className="upload-row-thumb" style={{ background: thumbBg }}><span className="upload-row-thumb-icon">{thumbIcon}</span></div>
                   <div className="upload-row-main">
                     <div className="upload-row-title">{lec.title}</div>
@@ -304,7 +317,7 @@ export default function UploadPage() {
                   <div className="upload-row-date">{new Date(lec.created_at).toLocaleDateString('ko-KR')}</div>
                   <div className="upload-row-status"><span className={`upload-status-badge ${st.cls}`}>{st.label}</span></div>
                   <div className="upload-row-actions">
-                    {lec.status === 'done' && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); navigate(`/lectures/${lec.id}/verifier`) }}>Verifier</button>}
+                    {canOpenVerifier && <button className="upload-btn-verifier" onClick={(e) => { e.stopPropagation(); navigate(`/lectures/${lec.id}/verifier`) }}>Verifier</button>}
                     {lec.status === 'error' && <button className="upload-btn-retry" onClick={e => handleRetry(lec.id, e)}>재시도</button>}
                     {lec.status !== 'done' && <button className="upload-btn-delete" onClick={e => handleDelete(lec.id, e)}>삭제</button>}
                     {lec.status === 'done' && <span className="upload-row-arrow">→</span>}

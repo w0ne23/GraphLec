@@ -52,11 +52,17 @@
 .up-textarea { resize: vertical; min-height: 64px; }
 
 /* 업로드 버튼 */
+.up-submit-group {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
 .up-submit-btn {
   width: 100%; padding: 11px; background: var(--blue); border: none;
   border-radius: var(--r); color: #fff; font-size: 13px; font-weight: 700;
   transition: opacity .15s;
 }
+.up-submit-btn--direct { background: var(--t1); }
 .up-submit-btn:hover    { opacity: .87; }
 .up-submit-btn:disabled { opacity: .45; cursor: not-allowed; }
 
