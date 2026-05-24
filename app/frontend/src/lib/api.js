@@ -130,6 +130,28 @@ export async function retryLecture(lectureId) {
   return { job_id: data.job_id };
 }
 
+export async function approveLectureUpload(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/approve`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Approve failed');
+  }
+  return res.json();
+}
+
+export async function rejectLectureUpload(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/reject`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Reject failed');
+  }
+  return res.json();
+}
+
 export async function getLectureGraph(lectureId) {
   const res = await fetch(`${API_BASE}/results/${lectureId}/graph`);
   if (!res.ok) {
