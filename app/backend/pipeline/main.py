@@ -2196,7 +2196,7 @@ def _finish_pipeline_run(runtime: PipelineRuntime) -> None:
     print(f"\n    {'총 소요 시간':<30}  {total_elapsed:>7.1f}초")
 
 
-def run_direct_upload_pipeline(args, progress_callback=None) -> dict:
+def run_direct_upload_workflow(args, progress_callback=None) -> dict:
     """Direct workflow: shared preprocess, then graph/upload artifacts."""
     runtime = _create_pipeline_runtime(args, progress_callback, "Direct upload pipeline")
     preprocess_result: dict = {}
@@ -2214,7 +2214,7 @@ def run_direct_upload_pipeline(args, progress_callback=None) -> dict:
         _finish_pipeline_run(runtime)
 
 
-def run_verified_upload_pipeline(args, progress_callback=None) -> dict:
+def run_verified_upload_workflow(args, progress_callback=None) -> dict:
     """Verified workflow: shared preprocess, then synchronous verifier; graph waits for approval."""
     runtime = _create_pipeline_runtime(args, progress_callback, "Verified upload pipeline")
     preprocess_result: dict = {}
@@ -2224,20 +2224,6 @@ def run_verified_upload_pipeline(args, progress_callback=None) -> dict:
         verifier_result = run_verifier_pipeline(args, runtime, preprocess_result, background=False)
         _print_generated_files(runtime, preprocess_result, {}, verifier_result)
         return {"preprocess": preprocess_result, "verifier": verifier_result}
-    except Exception as e:
-        print(f"\n❌ 파이프라인 오류: {e}")
-        raise
-    finally:
-        _finish_pipeline_run(runtime)
-
-
-def run_graph_after_approval_pipeline(args, progress_callback=None) -> dict:
-    """Approval workflow step: build graph artifacts from an existing preprocess output."""
-    runtime = _create_pipeline_runtime(args, progress_callback, "Graph pipeline")
-    try:
-        graph_result = run_graph_pipeline(args, runtime, {})
-        _print_generated_files(runtime, {}, graph_result, {})
-        return {"graph": graph_result}
     except Exception as e:
         print(f"\n❌ 파이프라인 오류: {e}")
         raise

@@ -9,6 +9,25 @@ class Base(DeclarativeBase):
     pass
 
 
+JOB_TYPE_LEGACY_FULL = "legacy_full"
+JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
+JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
+JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
+JOB_TYPE_CLEANUP = "cleanup"
+
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_RUNNING = "running"
+JOB_STATUS_DONE = "done"
+JOB_STATUS_ERROR = "error"
+JOB_STATUS_WAITING_APPROVAL = "waiting_approval"
+JOB_STATUS_REJECTED = "rejected"
+
+WORKER_RUNNABLE_STATUSES = {JOB_STATUS_PENDING}
+RUNNING_STATUSES = {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
+ACTION_REQUIRED_STATUSES = {JOB_STATUS_WAITING_APPROVAL}
+ACTIVE_STATUSES = RUNNING_STATUSES | ACTION_REQUIRED_STATUSES
+
+
 class ProcessingJob(Base):
     """파이프라인 실행 로그 — Lecture당 N개 (다대일)"""
     __tablename__ = "processing_jobs"
@@ -20,6 +39,7 @@ class ProcessingJob(Base):
         nullable=False,
         index=True,
     )
+    job_type = Column(String, nullable=False, default=JOB_TYPE_LEGACY_FULL, server_default=JOB_TYPE_LEGACY_FULL)
     status = Column(String, nullable=False, default="pending")  # pending, running, done, error
     current_stage = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
@@ -52,7 +72,7 @@ class Lecture(Base):
     def active_job(self):
         """현재 실행 중인 job — 최대 1개"""
         return next(
-            (j for j in self.processing_jobs if j.status in ("pending", "running")),
+            (j for j in self.processing_jobs if j.status in ACTIVE_STATUSES),
             None,
         )
 
