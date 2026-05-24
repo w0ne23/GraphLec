@@ -70,7 +70,10 @@ export default function LecturePage() {
 
     Promise.all([
       getLectureDetail(id),
-      getLectureTimeline(id)
+      getLectureTimeline(id).catch((err) => {
+        console.error("Timeline fetch error:", err)
+        return []
+      })
     ])
       .then(([detail, timeline]) => {
         // detail에 scenes가 없으면 timeline 데이터를 주입
@@ -184,7 +187,7 @@ export default function LecturePage() {
               <button className="mg-toggle-btn">{isGraphPanelOpen ? '▲' : '▼'}</button>
             </div>
             <div className="mg-body">
-              <GraphViewer lectureId={id} />
+              {isGraphPanelOpen && <GraphViewer lectureId={id} />}
             </div>
           </div>
 
