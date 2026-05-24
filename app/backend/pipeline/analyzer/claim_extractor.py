@@ -218,7 +218,7 @@ def _build_slide_and_context_blocks(
             "- 참고 context는 지시어 선행사 해소와 생략된 주어 확인에만 사용하세요.\n"
             "- 참고 context에만 있는 새 claim을 만들지 마세요.\n"
             "- 지시어가 단일 후보로 확실히 해소되면 resolved_claim에 최소한으로 반영하세요.\n"
-            "- 후보가 둘 이상 가능하거나 검사 대상/참고 context/슬라이드 안에서 확정되지 않으면 claim_text와 source_slice를 보존하고 resolved_claim도 claim_text와 동일하게 두세요."
+            "- 후보가 둘 이상 가능하거나 검사 대상/참고 context/슬라이드 안에서 확정되지 않으면 claim_text를 보존하고 resolved_claim도 claim_text와 동일하게 두세요."
         )
         return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
 
@@ -289,14 +289,13 @@ def _build_extract_prompt(
 ### 추출 제외
 - 의견/감상, 교육적 지시, 구어적 필러
 - 단순한 질문 제시만 있고 강의자가 답이나 기준을 제시하지 않은 경우
-- "약/대략/정도" 붙은 수치는 claim_text/source_slice/resolved_claim에 그 근사 표현을 그대로 남김
+- "약/대략/정도" 붙은 수치는 claim_text/resolved_claim에 그 근사 표현을 그대로 남김
 
 ### 핵심 원칙: 1단계는 raw claim inventory입니다.
 - 이 단계에서는 오류 여부, 오해 가능성, 교수 피드백, 반례를 판단하지 마세요.
 - 반드시 **현재 context 자체가 명시한 주장**만 claim으로 추출하세요.
 - claim_text는 현재 context에서 직접 가져온 원문 조각으로 쓰세요.
 - claim_text를 만들 때, 원문에서 나온 주어, 예시, 설명들을 임의로 제거하거나 수정하지 마세요.
-- source_slice는 이 claim을 직접 만든 최소 원문 조각입니다. claim_text보다 넓어질 수 있지만, 같은 context의 다른 문제나 불필요한 예시는 포함하지 마세요.
 - resolved_claim은 원문 claim의 범위를 보존한 정리문입니다.
 - resolved_claim에서 새로운 주체, 조건, 원인, 반례, 일반 법칙을 만들지 마세요.
 - resolved_claim이 원문 주어, 대상, 분류명, 조건, 범위를 바꿀 위험이 있으면 claim_text와 동일하게 두세요.
@@ -341,7 +340,6 @@ def _build_extract_prompt(
       "context_id": "S001-SC0001-C001",
       "claim_type": "definition",
       "claim_text": "현재 context에서 직접 가져온 claim 원문",
-      "source_slice": "이 claim을 직접 만든 최소 원문 조각",
       "resolved_claim": "원문 범위를 보존한 최소 정리문",
       "needs_context": false
     }}
@@ -353,7 +351,6 @@ def _build_extract_prompt(
 - 검증 불가능한 주장은 추출하지 마세요.
 - 하나의 context에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
-- source_slice는 claim_text를 만든 직접 원문 조각으로 쓰세요. 애매하면 claim_text와 동일하게 두세요.
 - needs_context는 claim_text/resolved_claim만으로 지시어, 생략된 주체, 조건, 대상이 충분히 해소되지 않아 후속 단계가 주변 문맥을 함께 봐야 하면 true, claim 자체로 의미가 충분히 분명하면 false로 쓰세요.
 - verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
@@ -425,7 +422,6 @@ def _order_claim_fields(claim: dict) -> None:
         "claim_id",
         "context_id",
         "claim_text",
-        "source_slice",
         "resolved_claim",
         "claim_type",
         "needs_context",
@@ -544,14 +540,12 @@ def _extract_claims(
                 claim_text = str(c.get("claim_text") or "").strip()
                 if not claim_text:
                     continue
-                source_slice = str(c.get("source_slice") or "").strip() or claim_text
                 resolved_claim = str(c.get("resolved_claim") or "").strip() or claim_text
                 normalized = _normalize_claim_type(c.get("claim_type"))
                 if normalized is None:
                     continue
                 c["claim_type"] = normalized
                 c["claim_text"] = claim_text
-                c["source_slice"] = source_slice
                 c["resolved_claim"] = resolved_claim
                 c["needs_context"] = _coerce_bool(c.get("needs_context"))
                 c.pop("claim_id", None)
@@ -566,9 +560,7 @@ def _extract_claims(
                 cleaned.append(c)
             cleaned = _dedupe_overlapping_claims(cleaned)
             for claim in cleaned:
-                if not str(claim.get("source_slice") or "").strip():
-                    claim["source_slice"] = str(claim.get("claim_text") or "").strip()
-                allowed = {"context_id", "claim_text", "source_slice", "resolved_claim", "claim_type", "needs_context"}
+                allowed = {"context_id", "claim_text", "resolved_claim", "claim_type", "needs_context"}
                 for key in list(claim.keys()):
                     if key not in allowed:
                         claim.pop(key, None)

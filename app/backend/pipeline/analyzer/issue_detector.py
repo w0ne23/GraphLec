@@ -138,7 +138,6 @@ def _build_issue_candidate_prompt(
         claim_id = _claim_id(c) or f"claim_{i}"
         context_id = _context_id(c)
         claim_text = str(c.get("claim_text") or "").strip()
-        source_slice = str(c.get("source_slice") or "").strip()
         resolved = str(c.get("resolved_claim") or "").strip()
         lines = [
             f"{i}. claim_id: {claim_id}",
@@ -146,8 +145,6 @@ def _build_issue_candidate_prompt(
             f"   claim_type: {c.get('claim_type', '?')}{approx}",
             f"   claim_text: {claim_text}",
         ]
-        if source_slice and source_slice != claim_text:
-            lines.append(f"   source_slice: {source_slice}")
         if resolved and resolved != claim_text:
             lines.append(f"   resolved_claim: {resolved}")
         if c.get("context_ids"):
@@ -184,9 +181,9 @@ def _build_issue_candidate_prompt(
 입력 claim은 아래 순서로 해석하세요.
 
 1. 기본 판정 대상은 `resolved_claim`입니다.
-2. 먼저 `resolved_claim`이 `source_slice`, `claim_text`, 배치 공통 문맥에서 실제로 전달된 의미를 충실히 보존했는지 확인하세요.
+2. 먼저 `resolved_claim`이 `claim_text`, 배치 공통 문맥에서 실제로 전달된 의미를 충실히 보존했는지 확인하세요.
 3. `resolved_claim`이 원문 context보다 주체, 대상, 분류명, 조건, 범위, 인과, 일반성을 과도하게 바꾸거나 넓혔다면 그 강해진 문장을 그대로 믿지 마세요.
-4. 이 경우 `source_slice`/`claim_text`와 배치 문맥에서 실제 전달된 더 좁은 명제를 기준으로 판단하세요.
+4. 이 경우 `claim_text`와 배치 문맥에서 실제 전달된 더 좁은 명제를 기준으로 판단하세요.
 5. 배치 공통 문맥은 지시어, 생략, 즉시 정정 여부와 claim의 실제 의미 범위를 확인하는 보조 문맥입니다.
 
 다음 중 하나라도 구체적으로 남으면 issue 후보로 출력하세요.
