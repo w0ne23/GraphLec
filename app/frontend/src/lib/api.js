@@ -22,6 +22,7 @@ export async function uploadLecture({ file, title, category, description }) {
   return {
     id: data.id,
     job_id: data.job_id,
+    job_type: data.job_type,
     title: data.title || title,
     category: data.category || category,
     description: data.description || description,
@@ -69,6 +70,7 @@ async function _fetchResults(params) {
       items: items.map(lec => ({
         id: lec.id,
         job_id: lec.job_id,
+        job_type: lec.job_type,
         title: lec.title || 'Untitled',
         category: lec.category || '기타',
         status: lec.status,

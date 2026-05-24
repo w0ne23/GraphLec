@@ -11,7 +11,7 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import Lecture, ProcessingJob
+from app.models import JOB_TYPE_LEGACY_FULL, Lecture, ProcessingJob
 from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,7 @@ async def stream_job_status(
                     break
                 payload = {
                     "job_id": str(job.id),
+                    "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
                     "lecture_status": job.status,
                     "current_stage": job.current_stage,
                     "error_message": job.error_message,
@@ -122,6 +123,7 @@ async def create_job(
         new_job = ProcessingJob(
             id=job_id,
             lecture_id=lecture_id,
+            job_type=JOB_TYPE_LEGACY_FULL,
             status="pending",
         )
         db.add(new_job)
@@ -140,6 +142,8 @@ async def create_job(
         "title": final_title,
         "category": category,
         "description": description,
+        "job_id": str(new_job.id),
+        "job_type": new_job.job_type,
         "status": "pending",
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }

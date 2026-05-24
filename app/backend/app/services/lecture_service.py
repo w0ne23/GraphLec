@@ -17,7 +17,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
+from app.models import (
+    ACTIVE_STATUSES,
+    JOB_TYPE_LEGACY_FULL,
+    Lecture,
+    ProcessingJob,
+    GraphSession,
+    ChatSession,
+    ChatMessage,
+)
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -49,6 +57,7 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
 
     res = {
         "job_id": str(job.id),
+        "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
         "status": job.status,
         "current_stage": job.current_stage,
         "error_message": job.error_message,
@@ -375,8 +384,6 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-ACTIVE_STATUSES = {'pending', 'running'}
-
 async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
         select(Lecture, ProcessingJob)
@@ -398,6 +405,8 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
         is_done = job_status == "done"
         out.append({
             "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "current_stage": job.current_stage if job and not is_done else None,
             "error_message": job.error_message if job else None,
@@ -425,6 +434,7 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
+        job_type=JOB_TYPE_LEGACY_FULL,
         status="pending",
         current_stage="Resuming pipeline...",
         error_message=None,
@@ -509,6 +519,7 @@ async def list_all_results(
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
@@ -550,6 +561,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     return {
         "id": str(lecture.id),
         "job_id": str(job.id) if job else None,
+        "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
         "category": info.get("domain") or lecture.category or "기타",

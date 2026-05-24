@@ -124,6 +124,7 @@ export default function DevUploadPage() {
             return { 
               ...lec, 
               job_id: data.job_id, // 혹시 바뀌었을 경우를 대비
+              job_type: data.job_type || lec.job_type,
               status: data.lecture_status,
               current_stage: data.current_stage,
               error_message: data.error_message || lec.error_message,
