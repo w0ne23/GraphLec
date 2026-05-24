@@ -19,6 +19,7 @@ from app.models import (
     JOB_STATUS_WAITING_APPROVAL,
     JOB_TYPE_CLEANUP,
     JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_GRAPH_UPLOAD,
     JOB_TYPE_LEGACY_FULL,
     JOB_TYPE_VERIFIED_UPLOAD,
 )
@@ -125,6 +126,13 @@ def pipeline_process(
                         pipeline_main.run_verified_upload_workflow(args, progress_callback=on_progress)
                         final_status = JOB_STATUS_WAITING_APPROVAL
                         final_stage = "Waiting for approval"
+                    elif job_type == JOB_TYPE_GRAPH_UPLOAD:
+                        runtime = pipeline_main._create_pipeline_runtime(args, progress_callback=on_progress, title="Graph upload pipeline")
+                        graph_result = pipeline_main.run_graph_pipeline(args, runtime, {})
+                        pipeline_main._print_generated_files(runtime, {}, graph_result, {})
+                        pipeline_main._finish_pipeline_run(runtime)
+                        final_status = JOB_STATUS_DONE
+                        final_stage = "Finished"
                     elif job_type == JOB_TYPE_CLEANUP:
                         runtime = pipeline_main._create_pipeline_runtime(args, progress_callback=on_progress, title="Cleanup pipeline")
                         pipeline_main.run_cleanup_pipeline(args, runtime, remove_input=True)
