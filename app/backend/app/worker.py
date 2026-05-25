@@ -17,7 +17,6 @@ from app.models import (
     JOB_STATUS_ERROR,
     JOB_STATUS_REJECTED,
     JOB_STATUS_WAITING_APPROVAL,
-    JOB_TYPE_CLEANUP,
     JOB_TYPE_DIRECT_UPLOAD,
     JOB_TYPE_GRAPH_UPLOAD,
     JOB_TYPE_LEGACY_FULL,
@@ -160,11 +159,6 @@ def pipeline_process(
                         pipeline_main._finish_pipeline_run(runtime)
                         final_status = JOB_STATUS_DONE
                         final_stage = "Finished"
-                    elif job_type == JOB_TYPE_CLEANUP:
-                        runtime = pipeline_main._create_pipeline_runtime(args, progress_callback=on_progress, title="Cleanup pipeline")
-                        pipeline_main.run_cleanup_pipeline(args, runtime, remove_input=True)
-                        final_status = JOB_STATUS_REJECTED
-                        final_stage = "Rejected and cleaned up"
                     else:
                         raise ValueError(f"Unsupported job_type: {job_type}")
 

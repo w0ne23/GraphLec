@@ -13,7 +13,6 @@ JOB_TYPE_LEGACY_FULL = "legacy_full"
 JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
 JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
 JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
-JOB_TYPE_CLEANUP = "cleanup"
 
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
