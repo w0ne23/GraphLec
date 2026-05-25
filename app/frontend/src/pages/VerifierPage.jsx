@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react'
 import PipelineProgress from '../components/verifier/PipelineProgress'
+import VerifyReportPanels from '../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../components/verifier/review/VerifierReviewPanel'
-import { PHASES } from '../components/verifier/verifierConstants'
+import { PHASES, UPLOAD_PIPELINE_FLOW_NODES } from '../components/verifier/verifierConstants'
 import { useVerifierPreviewFlow } from '../hooks/useVerifierPreviewFlow'
 
 import '../styles/verifier.css'
@@ -14,7 +15,7 @@ function VerifierUploadStep({ flow }) {
   return (
     <div className="vf-upload-wrap">
       <div className="vf-upload-inner">
-        <p className="vf-upload-sub">강의 영상을 업로드하여 분석을 시작합니다.</p>
+        <p className="vf-upload-sub">강의 영상을 검증 파이프라인에 올립니다.</p>
         {flow.errorMessage && <p className="vf-upload-error">{flow.errorMessage}</p>}
 
         <div
@@ -64,41 +65,111 @@ function VerifierUploadStep({ flow }) {
         </div>
 
         <button className="vf-submit-btn" onClick={actions.upload} disabled={!flow.file}>
-          업로드 시작
+          다음
         </button>
       </div>
     </div>
   )
 }
 
-function VerifierPipelineStep({ flow }) {
+function VerifyChoiceStep({ flow }) {
+  const { actions } = flow
+
+  return (
+    <div className="vf-choice-wrap">
+      <div className="vf-choice-inner">
+        <div className="vf-choice-head">
+          <span>검증 파이프라인</span>
+          <h1>{flow.title || flow.lecture.title}</h1>
+        </div>
+        <div className="vf-choice-grid">
+          <button className="vf-choice-card vf-choice-card--primary" onClick={actions.startVerify}>
+            <span>권장</span>
+            <strong>검증하기</strong>
+            <em>검증 보고서를 생성한 뒤 결과 확인</em>
+          </button>
+          <button className="vf-choice-card" onClick={actions.skipVerify}>
+            <span>선택</span>
+            <strong>검증 건너뛰기</strong>
+            <em>검증 없이 다음 단계로 진행</em>
+          </button>
+        </div>
+        <button className="vf-cancel-btn" onClick={actions.reset}>이전</button>
+      </div>
+    </div>
+  )
+}
+
+function VerifyPipelineStep({ flow }) {
+  const { actions } = flow
+  const flowActions = (
+    <div className="vf-flow-actions">
+      <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
+      {flow.phase === PHASES.VERIFY_READY ? (
+        <button className="vf-confirm-btn" onClick={actions.openReview}>
+          결과 보기
+        </button>
+      ) : (
+        <button className="vf-confirm-btn" disabled>
+          검증 진행 중
+        </button>
+      )}
+    </div>
+  )
+
+  return (
+    <div className="vf-flow-screen">
+      <div className="vf-flow-screen-inner">
+        <VerifyReportPanels flow={flow} headerActions={flowActions} />
+      </div>
+    </div>
+  )
+}
+
+function UploadPipelineStep({ flow }) {
   const { actions } = flow
 
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
         <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">
-          {flow.phase === PHASES.PIPELINE2
-            ? '2단계 분석 중'
-            : flow.phase === PHASES.VERIFY_READY
-              ? '1단계 분석 완료'
-              : '1단계 분석 중'}
-        </div>
+        <div className="vf-status-label">업로드 파이프라인</div>
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
           errorMessage={flow.errorMessage}
           statusMessage={flow.currentStage}
+          flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
         />
         <div className="vf-status-actions">
-          {flow.phase === PHASES.VERIFY_READY && (
-            <button className="vf-confirm-btn" onClick={actions.openReview}>
-              검증 결과 확인하기
-            </button>
-          )}
           <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function UploadResumeStep({ flow }) {
+  return (
+    <div className="vf-choice-wrap">
+      <div className="vf-choice-inner vf-choice-inner--resume">
+        <div className="vf-choice-head">
+          <span>검증 완료</span>
+          <h1>{flow.lecture.title}</h1>
+        </div>
+        <div className="vf-resume-summary">
+          <div>
+            <span>검토 필요</span>
+            <strong>{flow.verifier?.counts?.needs_review ?? flow.verifier?.summary?.review_needed_feedback_count ?? '-'}</strong>
+          </div>
+          <div>
+            <span>슬라이드 검토</span>
+            <strong>{flow.verifier?.counts?.slide_errors ?? '-'}</strong>
+          </div>
+        </div>
+        <button className="vf-submit-btn" onClick={flow.actions.continueUpload}>
+          업로드 계속
+        </button>
       </div>
     </div>
   )
@@ -115,6 +186,7 @@ function VerifierDoneStep({ flow }) {
           phase={PHASES.DONE}
           errorMessage={flow.errorMessage}
           statusMessage="분석이 완료되었습니다."
+          flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
         />
         <button className="vf-reset-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
       </div>
@@ -147,16 +219,18 @@ function VerifierErrorStep({ flow }) {
 
 export default function VerifierPage() {
   const flow = useVerifierPreviewFlow()
-  const isPipelinePhase =
+  const isVerifyPipelinePhase =
     flow.phase === PHASES.PIPELINE1 ||
-    flow.phase === PHASES.VERIFY_READY ||
-    flow.phase === PHASES.PIPELINE2
+    flow.phase === PHASES.VERIFY_READY
 
   return (
     <div className="vf-page">
       {flow.phase === PHASES.UPLOAD && <VerifierUploadStep flow={flow} />}
-      {isPipelinePhase && <VerifierPipelineStep flow={flow} />}
+      {flow.phase === PHASES.VERIFY_CHOICE && <VerifyChoiceStep flow={flow} />}
+      {isVerifyPipelinePhase && <VerifyPipelineStep flow={flow} />}
       {flow.phase === PHASES.REVIEWED && <VerifierReviewPanel flow={flow} />}
+      {flow.phase === PHASES.UPLOAD_RESUME && <UploadResumeStep flow={flow} />}
+      {flow.phase === PHASES.PIPELINE2 && <UploadPipelineStep flow={flow} />}
       {flow.phase === PHASES.DONE && <VerifierDoneStep flow={flow} />}
       {flow.phase === PHASES.ERROR && <VerifierErrorStep flow={flow} />}
     </div>

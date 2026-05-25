@@ -23,24 +23,29 @@
 
   /* 블루 (primary) */
   --blue:    #2563eb;
+  --blue-fill: #2563eb;
   --blue-bg: #eff6ff;
   --blue-br: #bfdbfe;
 
   /* 앰버 (강조) */
   --amber:    #d97706;
+  --amber-fill: #f59e0b;
   --amber-bg: rgba(245,158,11,.10);
 
   /* 그린 (positive) */
   --green:      #3dad3d;
   --green-text: #15803d;
+  --green-fill: #16a34a;
   --green-bg:   #f0fdf4;
 
   /* 레드 (negative) */
   --red:    #dc2626;
+  --red-fill: #dc2626;
   --red-bg: #fef2f2;
 
   /* 퍼플 (관리자) */
   --purple:  #7c3aed;
+  --purple-fill: #7c3aed;
   --purp-bg: #f5f3ff;
 
   /* 반경 */

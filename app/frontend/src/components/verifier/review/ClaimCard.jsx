@@ -38,6 +38,20 @@ function TranscriptText({ text, highlightText }) {
   )
 }
 
+function WatchLocationRow({ canWatch, onWatch }) {
+  if (!canWatch) return null
+  return (
+    <div className="vf-detail-row vf-watch-location-row">
+      <dt>영상 위치</dt>
+      <dd>
+        <button className="vf-transcript-toggle vf-transcript-toggle--button" type="button" onClick={onWatch}>
+          동영상 보기
+        </button>
+      </dd>
+    </div>
+  )
+}
+
 function TranscriptRow({ contexts, highlightText }) {
   const [open, setOpen] = useState(false)
   const items = asArray(contexts).filter(context => context?.text)
@@ -107,11 +121,11 @@ function ModelVerdicts({ verdicts }) {
           <div className="vf-verdict" key={model}>
             <div className="vf-verdict-model">
               <span>{formatModelName(model)}</span>
-              {verdict?.model_weight !== undefined && <em>가중치 {Number(verdict.model_weight).toFixed(2)}</em>}
+              {verdict?.model_weight !== undefined && <span className="vf-verdict-meta">가중치 {Number(verdict.model_weight).toFixed(2)}</span>}
             </div>
             <strong>{formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
             {(verdict?.decision || verdict?.verdict || verdict?.status) && (
-              <em>판정 유형: {compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</em>
+              <span className="vf-verdict-meta">판정 유형: {compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</span>
             )}
           </div>
         ))}
@@ -163,12 +177,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
 
   return (
     <article className={`vf-claim-card ${expanded ? 'vf-claim-card--expanded' : ''}`}>
-      <div className={`vf-claim-summary ${canWatch ? 'vf-claim-summary--watch' : ''}`}>
-        {canWatch && (
-          <button className="vf-watch-btn" onClick={onWatch} title="영상 보기" aria-label="영상 보기">
-            <span aria-hidden="true">▶</span>
-          </button>
-        )}
+      <div className="vf-claim-summary">
         <button className="vf-claim-main" onClick={onToggle}>
           {hasClaimChips && (
             <div className="vf-chip-row">
@@ -202,6 +211,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
       {expanded && (
         <div className="vf-claim-detail">
           <dl>
+            <WatchLocationRow canWatch={canWatch} onWatch={onWatch} />
             <TranscriptRow contexts={claim.transcript_contexts} highlightText={claim.transcript_claim_text} />
             <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="유형 근거" value={claim.issue_type_rationale} />
@@ -209,7 +219,6 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
             <DetailRow label="왜 문제인가" value={whyWrong} />
             <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
-            <DetailRow label="문맥 해소 여부" value={claim.context_resolution} />
             <DetailRow label="학생 오해 가능성" value={claim.student_misunderstanding} />
             <DetailRow label="올바른 정보/보충 조건" value={claim.correct_info} />
             <DetailRow label="왜 중요한가" value={claim.why_it_matters} />

@@ -5,11 +5,167 @@ import {
   normalizePipelineStages,
 } from '../components/verifier/verifierConstants'
 
+const DEV_FILE_BASE = typeof window !== 'undefined' && window.location?.hostname
+  ? `http://${window.location.hostname}:8000`
+  : ''
+const FILE_BASE = (import.meta.env.VITE_API_BASE_URL || DEV_FILE_BASE || '').replace(/\/$/, '')
 const DEFAULT_PREVIEW_ID = 'd5e73475-c1be-42ba-a526-4fd6eb420aac'
 const DEFAULT_PREVIEW_VIDEO_TITLE = '운영체제 강의 영상'
-const DEFAULT_PREVIEW_VIDEO_URL = `/files/inputs/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ID}.mp4`
-const DEFAULT_PREVIEW_RESULT_URL = `/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ID}_verification.json`
-const DEFAULT_PREVIEW_SLIDE_DATA_URL = `/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ID}_slide_classified.json`
+const DEFAULT_PREVIEW_ANALYZER_DIR = `${DEFAULT_PREVIEW_ID}_analyzer`
+
+function fileUrl(path) {
+  return `${FILE_BASE}${path}`
+}
+
+const DEFAULT_PREVIEW_VIDEO_URL = fileUrl(`/files/inputs/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ID}.mp4`)
+const DEFAULT_PREVIEW_RESULT_URL = fileUrl(`/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ANALYZER_DIR}/${DEFAULT_PREVIEW_ID}_verification_final.json`)
+const DEFAULT_PREVIEW_SLIDE_ERROR_URL = fileUrl(`/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ANALYZER_DIR}/${DEFAULT_PREVIEW_ID}_slide_errors.json`)
+const DEFAULT_PREVIEW_SLIDE_DATA_URL = fileUrl(`/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ID}_slide_classified.json`)
+
+function analyzerFileUrl(suffix) {
+  return fileUrl(`/files/results/${DEFAULT_PREVIEW_ID}/${DEFAULT_PREVIEW_ANALYZER_DIR}/${DEFAULT_PREVIEW_ID}${suffix}`)
+}
+
+const DEFAULT_PREVIEW_ARTIFACT_URLS = {
+  mergedClean: analyzerFileUrl('_merged_clean.json'),
+  claims: analyzerFileUrl('_claims.json'),
+  claimsJsonl: analyzerFileUrl('_claims.jsonl'),
+  issueJudge: analyzerFileUrl('_issue_judge.json'),
+  issueJudgeSummary: analyzerFileUrl('_issue_judge_summary.json'),
+  issueJudgeCompare: analyzerFileUrl('_issue_judge_compare.json'),
+  issueTypes: analyzerFileUrl('_issue_types.json'),
+  classifiedIssues: analyzerFileUrl('_classified_issues.json'),
+  classifiedIssueVerifier: analyzerFileUrl('_classified_issue_verifier.json'),
+  slideErrors: DEFAULT_PREVIEW_SLIDE_ERROR_URL,
+  verification: DEFAULT_PREVIEW_RESULT_URL,
+}
+
+const FALLBACK_VERIFIER_RESULT = {
+  schema_version: 'content_verification.v2',
+  mode: 'classified_issue_verifier',
+  models: ['gpt', 'claude', 'grok'],
+  summary: {
+    total_feedback_count: 2,
+    confirmed_feedback_count: 1,
+    review_needed_feedback_count: 1,
+    rejected_feedback_count: 0,
+    breakdown_by_type: {
+      factual_error: 1,
+      confusing_explanation: 1,
+    },
+  },
+  counts: {
+    final_confirmed: 1,
+    needs_review: 1,
+    rejected: 0,
+    slide_errors: 1,
+  },
+  claims: [
+    {
+      claim_id: 'CL0001',
+      claim_type: 'definition',
+      claim_text: '프로세스는 실행 중인 프로그램이다.',
+      resolved_claim: '프로세스는 실행 중인 프로그램의 실행 단위다.',
+      verification_question: '프로세스 정의가 정확한가?',
+      context_id: 'SC001',
+      slide_number: 3,
+      start_time: 42,
+    },
+    {
+      claim_id: 'CL0002',
+      claim_type: 'relationship',
+      claim_text: '스레드는 항상 독립된 주소 공간을 가진다.',
+      resolved_claim: '스레드는 일반적으로 같은 프로세스의 주소 공간을 공유한다.',
+      verification_question: '스레드와 주소 공간 설명이 맞는가?',
+      context_id: 'SC002',
+      slide_number: 5,
+      start_time: 128,
+    },
+  ],
+  feedback_items: [
+    {
+      feedback_id: 'F0001',
+      issue_id: 'I0001',
+      source_claim_id: 'CL0002',
+      status: 'professor_check',
+      feedback_type: 'factual_error',
+      feedback_label: '사실 오류',
+      claim_text: '스레드는 항상 독립된 주소 공간을 가진다.',
+      resolved_claim: '스레드는 일반적으로 같은 프로세스의 주소 공간을 공유한다.',
+      location: { slide_number: 5, start_time: 128 },
+      severity_score: 0.82,
+      severity_score_percent: 82,
+      problem: {
+        problematic_content: '스레드는 항상 독립된 주소 공간을 가진다.',
+        summary: '스레드의 주소 공간 설명 확인 필요',
+        issue_basis: '핵심 개념',
+        correct_info: '같은 프로세스의 스레드는 주소 공간을 공유한다.',
+        recommendation: '프로세스와 스레드의 메모리 관계를 구분해 설명',
+      },
+      professor_feedback: {
+        summary: '주소 공간 공유 여부가 반대로 전달될 수 있음',
+        teaching_note: '프로세스 단위 자원과 스레드 실행 단위를 나눠 설명',
+      },
+      classified_issue_verifier: {
+        final_severity_score: 0.82,
+        final_severity_percent: 82,
+        average_is_valid_issue: 0.9,
+        average_category_severity: 0.78,
+        average_context_resolution: 0.72,
+        model_disagreement: 0.08,
+        needs_manual_review: true,
+      },
+    },
+    {
+      feedback_id: 'F0002',
+      issue_id: 'I0002',
+      source_claim_id: 'CL0001',
+      status: 'confirmed',
+      feedback_type: 'confusing_explanation',
+      feedback_label: '혼동 설명',
+      claim_text: '프로세스는 실행 중인 프로그램이다.',
+      resolved_claim: '프로세스는 실행 중인 프로그램의 실행 단위다.',
+      location: { slide_number: 3, start_time: 42 },
+      severity_score: 0.48,
+      severity_score_percent: 48,
+      problem: {
+        problematic_content: '프로세스는 실행 중인 프로그램이다.',
+        summary: '표현 보강 권장',
+        issue_basis: '보충 설명',
+        recommendation: '실행 상태와 자원 보유 관점을 함께 설명',
+      },
+      professor_feedback: {
+        summary: '정의 자체는 맞지만 실행 단위 관점을 보강하면 좋음',
+      },
+      classified_issue_verifier: {
+        final_severity_score: 0.48,
+        final_severity_percent: 48,
+        average_is_valid_issue: 0.62,
+        average_category_severity: 0.4,
+        average_context_resolution: 0.75,
+        model_disagreement: 0.14,
+        needs_manual_review: false,
+      },
+    },
+  ],
+  slide_errors: [
+    {
+      slide_error_id: 'S0001',
+      slide_number: 5,
+      error_type_label: '용어 확인',
+      problematic_text: 'Thread has own address space',
+      reason: '강의 맥락상 process의 주소 공간 설명과 혼동 가능',
+      suggested_fix: 'Thread shares process address space',
+    },
+  ],
+  classified_issue_artifacts: {
+    claims_json: 'fallback',
+    issue_judge: 'fallback',
+    issue_types: 'fallback',
+    classified_issue_verifier: 'fallback',
+    slide_errors: 'fallback',
+  },
+}
 
 const EMPTY_VERIFIER_PREVIEW = {
   lecture: {
@@ -17,19 +173,20 @@ const EMPTY_VERIFIER_PREVIEW = {
     title: DEFAULT_PREVIEW_VIDEO_TITLE,
     video_url: DEFAULT_PREVIEW_VIDEO_URL,
   },
-  file: null,
-  verifier: null,
+  file: {
+    name: DEFAULT_PREVIEW_VIDEO_TITLE,
+    size: null,
+  },
+  verifier: FALLBACK_VERIFIER_RESULT,
+  verifierArtifacts: {},
 }
 
 const PREVIEW_PIPELINE1_STAGE_KEYS = [
-  'stage1a_extract',
-  'stage1b_audio_analyze',
-  'stage2a_textualize',
-  'stage2b_transcribe',
-  'stage3a_annotation',
-  'stage3b_audio',
-  'stage9_build_analyzer_merged_clean',
-  'stage10_run_analyzers',
+  'verify_claim_extraction',
+  'verify_issue_judge',
+  'verify_issue_classification',
+  'verify_final_report',
+  'verify_slide_errors',
 ]
 
 const PREVIEW_PIPELINE2_STAGE_KEYS = [
@@ -80,10 +237,7 @@ function createPreviewStages(phase, stageGroupIndex = -1) {
   const stageGroups = getPreviewStageGroups(phase)
 
   if (stageGroupIndex >= 0 && stageGroups[stageGroupIndex]) {
-    const doneStageKeys = [
-      ...(phase === PHASES.PIPELINE2 ? PREVIEW_PIPELINE1_STAGE_KEYS : []),
-      ...stageGroups.slice(0, stageGroupIndex).flat(),
-    ]
+    const doneStageKeys = stageGroups.slice(0, stageGroupIndex).flat()
     const activeStageKeys = stageGroups[stageGroupIndex]
 
     return normalizePipelineStages([
@@ -102,14 +256,13 @@ function createPreviewStages(phase, stageGroupIndex = -1) {
 
   if (phase === PHASES.PIPELINE2) {
     return normalizePipelineStages([
-      ...PREVIEW_PIPELINE1_STAGE_KEYS.map(stage => ({ stage, status: 'done' })),
       ...PREVIEW_PIPELINE2_STAGE_GROUPS[0].map(stage => ({ stage, status: 'run' })),
     ])
   }
 
   if (phase === PHASES.DONE) {
     return normalizePipelineStages(
-      [...PREVIEW_PIPELINE1_STAGE_KEYS, ...PREVIEW_PIPELINE2_STAGE_KEYS].map(stage => ({ stage, status: 'done' }))
+      PREVIEW_PIPELINE2_STAGE_KEYS.map(stage => ({ stage, status: 'done' }))
     )
   }
 
@@ -123,13 +276,13 @@ function getCurrentStageMessage(phase, stageGroupIndex) {
     : null
 
   if (selectedStage) return `${selectedStage.groupLabel} 진행 중`
-  if (phase === PHASES.PIPELINE1) return '데이터 추출 진행 중'
+  if (phase === PHASES.PIPELINE1) return '검증 파이프라인 진행 중'
   if (phase === PHASES.VERIFY_READY) return '검증 결과가 준비되었습니다.'
-  if (phase === PHASES.PIPELINE2) return '강의 구조 파악 진행 중'
+  if (phase === PHASES.PIPELINE2) return '업로드 파이프라인 진행 중'
   return ''
 }
 
-function createPreviewResult(result, scenes = []) {
+function createPreviewResult(result, scenes = [], verifierArtifacts = {}) {
   return {
     lecture: {
       id: DEFAULT_PREVIEW_ID,
@@ -142,6 +295,104 @@ function createPreviewResult(result, scenes = []) {
       size: null,
     },
     verifier: result,
+    verifierArtifacts,
+  }
+}
+
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function mergeSlideErrorArtifact(result, slideErrorResult) {
+  const slideErrors = asArray(slideErrorResult?.slide_errors)
+  if (slideErrors.length === 0) return result
+
+  const existingSlideErrors = asArray(result?.slide_errors)
+  const mergedSlideErrors = existingSlideErrors.length > 0 ? existingSlideErrors : slideErrors
+
+  return {
+    ...result,
+    slide_errors: mergedSlideErrors,
+    slide_error_summary: result?.slide_error_summary || slideErrorResult?.summary || {},
+    slide_error_status: result?.slide_error_status || slideErrorResult?.schema_version || '',
+    summary: {
+      ...(result?.summary || {}),
+      slide_error_count: mergedSlideErrors.length,
+    },
+    counts: {
+      ...(result?.counts || {}),
+      slide_errors: mergedSlideErrors.length,
+    },
+  }
+}
+
+async function loadPreviewSlideErrors() {
+  const response = await fetch(DEFAULT_PREVIEW_SLIDE_ERROR_URL).catch(() => null)
+  if (!response?.ok) return null
+  return response.json()
+}
+
+async function loadJsonArtifact(url) {
+  const response = await fetch(url).catch(() => null)
+  if (!response?.ok) return null
+  return response.json()
+}
+
+async function loadJsonlArtifact(url) {
+  const response = await fetch(url).catch(() => null)
+  if (!response?.ok) return []
+  const text = await response.text()
+  return text
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line)
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+}
+
+async function loadPreviewArtifacts() {
+  const [
+    mergedClean,
+    claims,
+    claimsJsonl,
+    issueJudge,
+    issueJudgeSummary,
+    issueJudgeCompare,
+    issueTypes,
+    classifiedIssues,
+    classifiedIssueVerifier,
+    slideErrors,
+  ] = await Promise.all([
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.mergedClean),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.claims),
+    loadJsonlArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.claimsJsonl),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.issueJudge),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.issueJudgeSummary),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.issueJudgeCompare),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.issueTypes),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.classifiedIssues),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.classifiedIssueVerifier),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.slideErrors),
+  ])
+
+  return {
+    urls: DEFAULT_PREVIEW_ARTIFACT_URLS,
+    mergedClean,
+    claims,
+    claimsJsonl,
+    issueJudge,
+    issueJudgeSummary,
+    issueJudgeCompare,
+    issueTypes,
+    classifiedIssues,
+    classifiedIssueVerifier,
+    slideErrors,
   }
 }
 
@@ -152,12 +403,12 @@ function toPreviewFileUrl(value) {
 
   const normalized = raw.replace(/\\/g, '/')
   const resultMatch = normalized.match(/(?:local_storage|\/?files)\/results\/[^/]+\/(.+)$/)
-  if (resultMatch) return `/files/results/${DEFAULT_PREVIEW_ID}/${resultMatch[1]}`
-  if (normalized.startsWith('/files/')) return normalized
+  if (resultMatch) return fileUrl(`/files/results/${DEFAULT_PREVIEW_ID}/${resultMatch[1]}`)
+  if (normalized.startsWith('/files/')) return fileUrl(normalized)
 
   const marker = 'local_storage/'
   const markerIndex = normalized.indexOf(marker)
-  return markerIndex >= 0 ? `/files/${normalized.slice(markerIndex + marker.length)}` : raw
+  return markerIndex >= 0 ? fileUrl(`/files/${normalized.slice(markerIndex + marker.length)}`) : raw
 }
 
 function timestampFromSlide(slide) {
@@ -212,9 +463,11 @@ export function useVerifierPreviewFlow() {
         const response = await fetch(DEFAULT_PREVIEW_RESULT_URL)
         if (!response.ok) throw new Error('verification result load failed')
         const result = await response.json()
+        const artifacts = await loadPreviewArtifacts()
+        const verifierResult = mergeSlideErrorArtifact(result, artifacts.slideErrors)
         if (!active) return
 
-        const nextPreview = createPreviewResult(result)
+        const nextPreview = createPreviewResult(verifierResult, [], artifacts)
         setPreview(nextPreview)
         setFile(nextPreview.file)
         setTitle(nextPreview.lecture.title)
@@ -229,7 +482,13 @@ export function useVerifierPreviewFlow() {
           },
         }))
       } catch (error) {
-        if (active) setErrorMessage('verification 결과를 불러오지 못했습니다.')
+        if (!active) return
+        const slideErrorResult = await loadPreviewSlideErrors()
+        const fallbackResult = mergeSlideErrorArtifact(FALLBACK_VERIFIER_RESULT, slideErrorResult)
+        const nextPreview = createPreviewResult(fallbackResult)
+        setPreview(nextPreview)
+        setFile(nextPreview.file)
+        setTitle(nextPreview.lecture.title)
       }
     }
 
@@ -272,7 +531,25 @@ export function useVerifierPreviewFlow() {
     if (!file) return
     setErrorMessage('')
     setStageGroupIndex(-1)
+    setPhase(PHASES.VERIFY_CHOICE)
+  }
+
+  function startVerify() {
+    setErrorMessage('')
+    setStageGroupIndex(-1)
     setPhase(PHASES.PIPELINE1)
+  }
+
+  function skipVerify() {
+    setErrorMessage('')
+    setStageGroupIndex(-1)
+    setPhase(PHASES.PIPELINE2)
+  }
+
+  function continueUpload() {
+    setErrorMessage('')
+    setStageGroupIndex(-1)
+    setPhase(PHASES.PIPELINE2)
   }
 
   function reset() {
@@ -303,6 +580,7 @@ export function useVerifierPreviewFlow() {
     phase,
     lecture: preview.lecture,
     verifier: preview.verifier,
+    verifierArtifacts: preview.verifierArtifacts,
     title,
     file,
     pipelineStages,
@@ -315,11 +593,14 @@ export function useVerifierPreviewFlow() {
       setTitle,
       selectFile,
       upload,
+      startVerify,
+      skipVerify,
+      continueUpload,
       openReview: () => setPhase(PHASES.REVIEWED),
       backToVerifyReady,
       confirmReview: () => {
         setStageGroupIndex(-1)
-        setPhase(PHASES.PIPELINE2)
+        setPhase(PHASES.UPLOAD_RESUME)
       },
       retry,
       reset,
@@ -330,5 +611,6 @@ export function useVerifierPreviewFlow() {
       },
       exitVideo: () => setIsVideoMode(false),
     },
+    stageGroupIndex,
   }
 }
