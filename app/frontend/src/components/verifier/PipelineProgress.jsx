@@ -3,27 +3,6 @@ import {
   PIPELINE_FLOW_NODES,
 } from './verifierConstants'
 
-const NODE_TYPE_CLASS = {
-  major: 'vf-flow-item--major',
-  minor: '',
-}
-
-const NODE_STATUS_CLASS = {
-  done: 'vf-flow-item--done',
-  run: 'vf-flow-item--run',
-  wait: '',
-}
-
-const WORK_LOG_STATUS_CLASS = {
-  done: '',
-  run: 'vf-work-log-line--run',
-  wait: '',
-}
-
-function cx(...classNames) {
-  return classNames.filter(Boolean).join(' ')
-}
-
 function getStageStatus(stages, key) {
   return stages.find(s => s.stage === key)?.status ?? 'wait'
 }
@@ -44,7 +23,7 @@ function getMajorStatus(nodeId, phase, stages) {
   if (nodeId === 'verified') {
     if (phase === PHASES.VERIFY_READY) return 'run'
     if (phase === PHASES.REVIEWED || phase === PHASES.PIPELINE2 || phase === PHASES.DONE) return 'done'
-    if (getStageStatus(stages, 'verify_slide_errors') === 'done') return 'done'
+    if (getStageStatus(stages, 'verifier_run') === 'done') return 'done'
     return 'wait'
   }
   if (nodeId === 'done') return phase === PHASES.DONE ? 'run' : 'wait'
@@ -63,10 +42,10 @@ function getActiveNode(flowNodes, stages, phase) {
 function getLogNode(activeNode, flowNodes) {
   if (activeNode?.stages?.length) return activeNode
   if (activeNode?.id === 'verified') {
-    return flowNodes.find(node => node.id === 'slide_review')
+    return flowNodes.find(node => node.id === 'verifier_run')
   }
   if (activeNode?.id === 'done') {
-    return flowNodes.find(node => node.id === 'metadata')
+    return flowNodes.find(node => node.id === 'recommender_index') || flowNodes.find(node => node.id === 'metadata')
   }
   return activeNode
 }
@@ -105,11 +84,11 @@ export default function PipelineProgress({
   function renderNode(node, nodeIndex) {
     const rawNodeStatus = getNodeStatus(node, stages, phase)
     const nodeStatus = activeNodeIndex >= 0 && nodeIndex > activeNodeIndex ? 'wait' : rawNodeStatus
-    const classes = cx(
+    const classes = [
       'vf-flow-item',
-      NODE_TYPE_CLASS[node.type],
-      NODE_STATUS_CLASS[nodeStatus],
-    )
+      `vf-flow-item--${node.type}`,
+      `vf-flow-item--${nodeStatus}`,
+    ].join(' ')
 
     return (
       <div key={node.id} className={classes}>
@@ -132,7 +111,7 @@ export default function PipelineProgress({
             {visibleStages.map(stage => {
               const status = getStageStatus(stages, stage.key)
               return (
-                <div key={stage.key} className={cx('vf-work-log-line', WORK_LOG_STATUS_CLASS[status])}>
+                <div key={stage.key} className={`vf-work-log-line vf-work-log-line--${status}`}>
                   <span>{stage.label}</span>
                   <span className="vf-work-log-line-status">{getStageText(status)}</span>
                 </div>

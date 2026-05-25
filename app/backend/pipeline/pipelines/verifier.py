@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 def run_verifier_pipeline(
     args,
     runtime,
@@ -28,6 +27,7 @@ def run_verifier_pipeline(
     r10b: dict = {}
 
     if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
+        runtime.notify_stage("verifier_run", "run")
         r10a = helpers.stage10_extract_claims(args, merged_clean_path=merged_clean_path, output_dir=runtime.output_dir)
         timings["Stage 10A claim 추출"] = r10a["elapsed"]
         if getattr(args, "stop_after_issue_judge", False):
@@ -39,12 +39,17 @@ def run_verifier_pipeline(
             )
             timings["Stage 10B 1차 issue judge"] = r10b["elapsed"]
         timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        runtime.notify_stage("verifier_run", "done")
     elif background:
+        runtime.notify_stage("verifier_run", "run")
         r10 = helpers.stage10_spawn_analyzers_subprocess(args, merged_clean_path, runtime.output_dir)
         timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
+        runtime.notify_stage("verifier_run", "done")
     else:
+        runtime.notify_stage("verifier_run", "run")
         r10 = helpers.stage10_run_verifier(args, merged_clean_path, runtime.output_dir)
         timings["Stage 10 verifier 실행"] = r10["elapsed"]
+        runtime.notify_stage("verifier_run", "done")
 
     runtime.write_timings("verifier_pipeline_done")
     return {
@@ -52,4 +57,3 @@ def run_verifier_pipeline(
         "claims_result": r10a,
         "issue_judge_result": r10b,
     }
-
