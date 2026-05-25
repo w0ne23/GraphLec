@@ -118,7 +118,7 @@ function VerifierReviewHeader({
               <strong>{reviewCount}</strong>
             </button>
             <button className={reviewTabClassName('typos', activeTab)} onClick={() => onSelectTab('typos')}>
-              <span>슬라이드 오타</span>
+              <span>슬라이드 오류</span>
               <strong>{typoCount}</strong>
             </button>
           </nav>
@@ -166,14 +166,14 @@ function ReviewConfirmModal({ onCancel, onConfirm }) {
         aria-labelledby="vf-next-confirm-title"
         onClick={e => e.stopPropagation()}
       >
-        <h2 id="vf-next-confirm-title">검토를 완료하고 다음 단계를 시작할까요?</h2>
-        <p>모든 항목에 문제가 없음을 확인합니다. 검토 완료 이후 이 화면으로 돌아올 수 없습니다.</p>
+        <h2 id="vf-next-confirm-title">검토 결과를 확정할까요?</h2>
+        <p>확정한 결과를 기준으로 업로드 파이프라인을 계속 진행합니다.</p>
         <div className="vf-confirm-modal-actions">
           <button className="vf-modal-secondary-btn" onClick={onCancel}>
             계속 검토
           </button>
           <button className="vf-modal-primary-btn" onClick={onConfirm}>
-            다음 단계 시작
+            확정
           </button>
         </div>
       </div>
@@ -204,13 +204,12 @@ export default function VerifierReviewPanel({ flow }) {
     const feedbackItems = asArray(verifier?.feedback_items)
     if (feedbackItems.length > 0) {
       const normalized = feedbackItems
-        .filter(item => item.status !== 'confirmed')
         .map(item => feedbackItemToClaim(item, claimById))
       const needsReview = normalized.filter(item => item.stage === 'professor_check' || item.stage === 'review_needed')
       const rejected = normalized.filter(item => item.stage === 'rejected')
       return {
         needsReview,
-        slideTypos: asArray(verifier?.slide_typos),
+        slideTypos: asArray(verifier?.slide_errors),
         crossRejected: rejected,
         inconclusive: [],
         groundingRejected: [],
@@ -220,14 +219,17 @@ export default function VerifierReviewPanel({ flow }) {
       }
     }
 
-    const needsReview = asArray(verifier?.needs_review_claims)
-    const crossRejected = asArray(verifier?.crosscheck_rejected_claims)
+    const needsReview = [
+      ...asArray(verifier?.final_confirmed_claims),
+      ...asArray(verifier?.needs_review_claims),
+    ]
+    const crossRejected = asArray(verifier?.verifier_rejected_claims)
     const inconclusive = asArray(verifier?.crosscheck_inconclusive_claims)
     const groundingRejected = asArray(verifier?.grounding_rejected_claims)
     const firstStageRejected = asArray(verifier?.first_stage_rejected_claims)
     return {
       needsReview,
-      slideTypos: asArray(verifier?.slide_typos),
+      slideTypos: asArray(verifier?.slide_errors),
       crossRejected,
       inconclusive,
       groundingRejected,
@@ -258,7 +260,7 @@ export default function VerifierReviewPanel({ flow }) {
 
   const counts = verifier?.counts || {}
   const reviewCount = sections.needsReview.length
-  const typoCount = counts.slide_typos ?? sections.slideTypos.length
+  const typoCount = counts.slide_errors ?? sections.slideTypos.length
   const filteredCount = sections.filtered.length + sections.firstStageRejected.length
 
   function selectTab(tab) {
@@ -306,7 +308,7 @@ export default function VerifierReviewPanel({ flow }) {
   function sortClaims(items) {
     return [...items].sort((a, b) => {
       if (sortMode === 'score') {
-        const scoreDelta = (Number(b.crosscheck_score) || 0) - (Number(a.crosscheck_score) || 0)
+        const scoreDelta = (Number(b.severity_score ?? b.crosscheck_score) || 0) - (Number(a.severity_score ?? a.crosscheck_score) || 0)
         if (scoreDelta !== 0) return scoreDelta
       }
       return utteranceSortValue(a) - utteranceSortValue(b)
@@ -354,10 +356,10 @@ export default function VerifierReviewPanel({ flow }) {
 
     const filteredGroups = [
       {
-        title: '교차검증 기각',
+        title: '최종 평가 기각',
         items: sections.crossRejected,
-        section: 'crosscheck_rejected',
-        empty: '두 모델 모두 검토 가치가 낮다고 본 후보가 없습니다.',
+        section: 'verifier_rejected',
+        empty: '최종 평가에서 기각된 후보가 없습니다.',
       },
       {
         title: '교차검증 불확실',
@@ -424,10 +426,10 @@ export default function VerifierReviewPanel({ flow }) {
     if (activeTab === 'typos') {
       return (
         <ReviewSection
-          title="슬라이드 오타"
+          title="슬라이드 오류"
           count={sections.slideTypos.length}
           tone="typo"
-          empty="슬라이드 오타가 없습니다."
+          empty="슬라이드 오류가 없습니다."
         >
           {renderTypoGroups(sections.slideTypos)}
         </ReviewSection>

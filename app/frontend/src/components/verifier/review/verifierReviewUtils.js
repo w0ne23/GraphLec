@@ -293,7 +293,6 @@ export function buildVerifierSlideMap(verifier, timelineScenes = [], resultId = 
     asArray(issue?.judge_context?.context_bundle?.target_contexts).forEach(context => addSlideMeta(slides, context, resultId))
     asArray(issue?.judge_context?.context_bundle?.neighbor_contexts).forEach(context => addSlideMeta(slides, context, resultId))
   })
-  asArray(verifier?.slide_typos).forEach(typo => addSlideMeta(slides, typo, resultId))
   asArray(verifier?.slide_errors).forEach(error => addSlideMeta(slides, error, resultId))
 
   return slides
@@ -490,6 +489,8 @@ function getCrosscheckScoreFromModels(modelResults) {
 
 function getCrosscheckScore(item, crosscheck = {}) {
   return (
+    toNumberOrUndefined(item.severity_score) ??
+    toNumberOrUndefined(item.classified_issue_verifier?.final_severity_score) ??
     toNumberOrUndefined(item.crosscheck_score) ??
     toNumberOrUndefined(item.score) ??
     toNumberOrUndefined(crosscheck.score) ??
@@ -499,12 +500,13 @@ function getCrosscheckScore(item, crosscheck = {}) {
 }
 
 function displayStageFromScore(score, fallbackStatus = '') {
+  const status = fallbackStatus === 'review_needed' ? 'professor_check' : fallbackStatus
+  if (status === 'confirmed') return ''
+  if (status) return status
   if (score !== undefined) {
     return score >= PROFESSOR_CHECK_MIN_SCORE ? 'professor_check' : 'rejected'
   }
-  const status = fallbackStatus === 'review_needed' ? 'professor_check' : fallbackStatus
-  if (status === 'confirmed') return ''
-  return status || 'professor_check'
+  return 'professor_check'
 }
 
 export function scoreLabel(score) {
@@ -567,6 +569,7 @@ export function feedbackItemToClaim(item, claimById) {
     context_resolution: problem.context_resolution || evidence.context_resolution || feedback.context_resolution,
     recommendation: problem.recommendation || feedback.teaching_note,
     evidence_in_context: evidence.evidence_in_context || feedback.evidence_in_context,
+    severity_score: item.severity_score ?? item.classified_issue_verifier?.final_severity_score,
     crosscheck_score: crosscheckScore,
     crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
     crosscheck_weighted_status: status,

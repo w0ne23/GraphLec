@@ -1,30 +1,57 @@
-export const PIPELINE_FLOW_NODES = [
-  { id: 'upload', label: '업로드', type: 'major', weight: 2 },
+export const VERIFY_PIPELINE_FLOW_NODES = [
+  { id: 'verify_start', label: '검증 시작', type: 'major', weight: 2 },
   {
-    id: 'extract',
-    label: '데이터 추출',
+    id: 'claim_extraction',
+    label: '주장 추출',
     type: 'minor',
-    weight: 24,
+    weight: 20,
     stages: [
-      { key: 'stage1a_extract', label: '슬라이드 프레임 추출' },
-      { key: 'stage1b_audio_analyze', label: '오디오 품질 분석' },
-      { key: 'stage2a_textualize', label: '슬라이드 내 정보 추출' },
-      { key: 'stage2b_transcribe', label: '강의 음성 텍스트 전사' },
+      { key: 'verify_claim_extraction', label: '주장 후보 추출' },
     ],
   },
   {
-    id: 'content_verify',
-    label: '강의 내용 검증',
+    id: 'issue_judge',
+    label: '이슈 후보 판단',
     type: 'minor',
-    weight: 30,
+    weight: 22,
     stages: [
-      { key: 'stage3a_annotation', label: '필기 강조 분석' },
-      { key: 'stage3b_audio', label: '음성 강조 분석' },
-      { key: 'stage9_build_analyzer_merged_clean', label: '검증 입력 데이터 구성' },
-      { key: 'stage10_run_analyzers', label: '강의 내용 검증 실행' },
+      { key: 'verify_issue_judge', label: '이슈 후보 판단' },
+    ],
+  },
+  {
+    id: 'issue_classification',
+    label: '이슈 유형 분류',
+    type: 'minor',
+    weight: 20,
+    stages: [
+      { key: 'verify_issue_classification', label: '이슈 유형 분류' },
+    ],
+  },
+  {
+    id: 'final_verification',
+    label: '최종 평가',
+    type: 'minor',
+    weight: 22,
+    stages: [
+      { key: 'verify_final_report', label: '최종 평가' },
+    ],
+  },
+  {
+    id: 'slide_review',
+    label: '슬라이드 오류',
+    type: 'minor',
+    weight: 14,
+    stages: [
+      { key: 'verify_slide_errors', label: '슬라이드 오류 검사' },
     ],
   },
   { id: 'verified', label: '검증 결과 확인', type: 'major', weight: 4 },
+]
+
+export const PIPELINE_FLOW_NODES = VERIFY_PIPELINE_FLOW_NODES
+
+export const UPLOAD_PIPELINE_FLOW_NODES = [
+  { id: 'upload', label: '업로드', type: 'major', weight: 2 },
   {
     id: 'structure',
     label: '강의 구조 파악',
@@ -76,23 +103,42 @@ export const PIPELINE_FLOW_NODES = [
   { id: 'done', label: '완료', type: 'major', weight: 2 },
 ]
 
-export const STAGE_KEYS = PIPELINE_FLOW_NODES.flatMap(node => {
+function getStageKeys(node) {
   return node.stages?.map(stage => stage.key) ?? []
-})
+}
 
-export const PIPELINE_LOG_STAGES = PIPELINE_FLOW_NODES.flatMap(node => {
-  return node.stages?.map(stage => ({
-    ...stage,
-    groupId: node.id,
-    groupLabel: node.label,
-  })) ?? []
-})
+function getLogStages(flowNodes) {
+  return flowNodes.flatMap(node => {
+    return node.stages?.map(stage => ({
+      ...stage,
+      groupId: node.id,
+      groupLabel: node.label,
+    })) ?? []
+  })
+}
+
+function uniqueValues(values) {
+  return Array.from(new Set(values))
+}
+
+export const VERIFY_STAGE_KEYS = VERIFY_PIPELINE_FLOW_NODES.flatMap(getStageKeys)
+export const UPLOAD_STAGE_KEYS = UPLOAD_PIPELINE_FLOW_NODES.flatMap(getStageKeys)
+export const STAGE_KEYS = uniqueValues([...VERIFY_STAGE_KEYS, ...UPLOAD_STAGE_KEYS])
+
+export const VERIFY_PIPELINE_LOG_STAGES = getLogStages(VERIFY_PIPELINE_FLOW_NODES)
+export const UPLOAD_PIPELINE_LOG_STAGES = getLogStages(UPLOAD_PIPELINE_FLOW_NODES)
+export const PIPELINE_LOG_STAGES = [
+  ...VERIFY_PIPELINE_LOG_STAGES,
+  ...UPLOAD_PIPELINE_LOG_STAGES,
+]
 
 export const PHASES = {
   UPLOAD: 'upload',
+  VERIFY_CHOICE: 'verifyChoice',
   PIPELINE1: 'pipeline1',
   VERIFY_READY: 'verifyReady',
   REVIEWED: 'reviewed',
+  UPLOAD_RESUME: 'uploadResume',
   PIPELINE2: 'pipeline2',
   DONE: 'done',
   ERROR: 'error',

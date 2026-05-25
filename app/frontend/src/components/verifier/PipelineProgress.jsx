@@ -15,10 +15,15 @@ function summarizeStatuses(statuses) {
 
 function getMajorStatus(nodeId, phase, stages) {
   if (nodeId === 'upload') return phase === PHASES.UPLOAD ? 'run' : 'done'
+  if (nodeId === 'verify_start') {
+    return phase === PHASES.PIPELINE1 || phase === PHASES.VERIFY_READY || phase === PHASES.REVIEWED || phase === PHASES.UPLOAD_RESUME
+      ? 'done'
+      : 'wait'
+  }
   if (nodeId === 'verified') {
     if (phase === PHASES.VERIFY_READY) return 'run'
     if (phase === PHASES.REVIEWED || phase === PHASES.PIPELINE2 || phase === PHASES.DONE) return 'done'
-    if (getStageStatus(stages, 'stage10_run_analyzers') === 'done') return 'done'
+    if (getStageStatus(stages, 'verify_slide_errors') === 'done') return 'done'
     return 'wait'
   }
   if (nodeId === 'done') return phase === PHASES.DONE ? 'run' : 'wait'
@@ -30,17 +35,17 @@ function getNodeStatus(node, stages, phase) {
   return summarizeStatuses((node.stages ?? []).map(stage => getStageStatus(stages, stage.key)))
 }
 
-function getActiveNode(stages, phase) {
-  return PIPELINE_FLOW_NODES.find(node => getNodeStatus(node, stages, phase) === 'run')
+function getActiveNode(flowNodes, stages, phase) {
+  return flowNodes.find(node => getNodeStatus(node, stages, phase) === 'run')
 }
 
-function getLogNode(activeNode) {
+function getLogNode(activeNode, flowNodes) {
   if (activeNode?.stages?.length) return activeNode
   if (activeNode?.id === 'verified') {
-    return PIPELINE_FLOW_NODES.find(node => node.id === 'content_verify')
+    return flowNodes.find(node => node.id === 'slide_review')
   }
   if (activeNode?.id === 'done') {
-    return PIPELINE_FLOW_NODES.find(node => node.id === 'metadata')
+    return flowNodes.find(node => node.id === 'metadata')
   }
   return activeNode
 }
@@ -63,10 +68,16 @@ function getVisibleLogStages(node, stages) {
   return nodeStages.slice(0, currentIndex + 1)
 }
 
-export default function PipelineProgress({ stages, phase, errorMessage, statusMessage }) {
-  const activeNode = getActiveNode(stages, phase)
-  const activeNodeIndex = PIPELINE_FLOW_NODES.findIndex(node => node.id === activeNode?.id)
-  const logNode = getLogNode(activeNode)
+export default function PipelineProgress({
+  stages,
+  phase,
+  errorMessage,
+  statusMessage,
+  flowNodes = PIPELINE_FLOW_NODES,
+}) {
+  const activeNode = getActiveNode(flowNodes, stages, phase)
+  const activeNodeIndex = flowNodes.findIndex(node => node.id === activeNode?.id)
+  const logNode = getLogNode(activeNode, flowNodes)
   const visibleStages = getVisibleLogStages(logNode, stages)
   const showErrorInLog = phase === PHASES.ERROR && errorMessage
 
@@ -102,7 +113,7 @@ export default function PipelineProgress({ stages, phase, errorMessage, statusMe
               return (
                 <div key={stage.key} className={`vf-work-log-line vf-work-log-line--${status}`}>
                   <span>{stage.label}</span>
-                  <em>{getStageText(status)}</em>
+                  <span className="vf-work-log-line-status">{getStageText(status)}</span>
                 </div>
               )
             })}
@@ -118,8 +129,8 @@ export default function PipelineProgress({ stages, phase, errorMessage, statusMe
           <div className="vf-pipe-error">오류: {errorMessage}</div>
         )}
       </div>
-      <div className="vf-flow" style={{ '--flow-count': PIPELINE_FLOW_NODES.length }}>
-        {PIPELINE_FLOW_NODES.map(renderNode)}
+      <div className="vf-flow" style={{ '--flow-count': flowNodes.length }}>
+        {flowNodes.map(renderNode)}
       </div>
     </div>
   )
