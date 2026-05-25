@@ -28,10 +28,10 @@ def run_verifier_pipeline(
 
     if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
         runtime.notify_stage("verifier_run", "run")
-        r10a = helpers.stage10_extract_claims(args, merged_clean_path=merged_clean_path, output_dir=runtime.output_dir)
+        r10a = helpers.extract_claims(args, merged_clean_path=merged_clean_path, output_dir=runtime.output_dir)
         timings["V2A extract_claims — claim 추출"] = r10a["elapsed"]
         if getattr(args, "stop_after_issue_judge", False):
-            r10b = helpers.stage10_issue_judge(
+            r10b = helpers.judge_issues(
                 args,
                 merged_clean_path=merged_clean_path,
                 output_dir=runtime.output_dir,
@@ -42,12 +42,12 @@ def run_verifier_pipeline(
         runtime.notify_stage("verifier_run", "done")
     elif background:
         runtime.notify_stage("verifier_run", "run")
-        r10 = helpers.stage10_spawn_analyzers_subprocess(args, merged_clean_path, runtime.output_dir)
+        r10 = helpers.start_verifier_background(args, merged_clean_path, runtime.output_dir)
         timings["V2 start_verifier_background — verifier 백그라운드 시작"] = r10["elapsed"]
         runtime.notify_stage("verifier_run", "done")
     else:
         runtime.notify_stage("verifier_run", "run")
-        r10 = helpers.stage10_run_verifier(args, merged_clean_path, runtime.output_dir)
+        r10 = helpers.run_verifier(args, merged_clean_path, runtime.output_dir)
         timings["V2 run_verifier — verifier 실행"] = r10["elapsed"]
         runtime.notify_stage("verifier_run", "done")
 
