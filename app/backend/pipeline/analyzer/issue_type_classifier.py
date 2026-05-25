@@ -75,18 +75,6 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _env_seed() -> int | None:
-    raw = str(os.getenv("VERIFIER_SEED", "") or "").strip()
-    if not raw:
-        raw = str(os.getenv("ISSUE_TYPE_CLASSIFIER_SEED", "") or "").strip()
-    if not raw:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
-
-
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -388,20 +376,6 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     raise ValueError(f"지원하지 않는 모델 지정: {model_spec}")
 
 
-def _parse_openai_model_spec(model_spec: str) -> tuple[str, str | None]:
-    spec = str(model_spec or "").strip()
-    if not spec:
-        return spec, None
-
-    match = re.match(
-        r"^(?P<model>(?:gpt|o)[A-Za-z0-9.-]*?)-(?P<effort>low|medium|high|xhigh)$",
-        spec,
-    )
-    if match:
-        return match.group("model"), match.group("effort")
-    return spec, None
-
-
 def _usage_value(obj: Any, *names: str) -> int:
     for name in names:
         value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
@@ -484,9 +458,6 @@ def _call_openai_like(
     if not api_key:
         env_name = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}[provider]
         raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
-    reasoning_effort = None
-    if provider == "openai":
-        model, reasoning_effort = _parse_openai_model_spec(model)
 
     timeout = _env_float(
         f"ISSUE_TYPE_CLASSIFIER_{provider.upper()}_TIMEOUT_SEC",
@@ -501,17 +472,11 @@ def _call_openai_like(
     kwargs = {
         "model": model,
         "messages": messages,
+        "temperature": 0.0,
         "response_format": {"type": "json_object"},
     }
-    if not reasoning_effort:
-        kwargs["temperature"] = 0.0
-    seed = _env_seed()
-    if seed is not None:
-        kwargs["seed"] = seed
     if provider == "openai":
         kwargs["max_completion_tokens"] = max_tokens
-        if reasoning_effort:
-            kwargs["reasoning_effort"] = reasoning_effort
     else:
         kwargs["max_tokens"] = max_tokens
         if provider == "deepseek":
@@ -536,9 +501,6 @@ def _call_openai_like(
                 changed_kwargs = True
             if "response_format" in message and "response_format" in retry_kwargs:
                 retry_kwargs.pop("response_format", None)
-                changed_kwargs = True
-            if "seed" in message.lower() and "seed" in retry_kwargs:
-                retry_kwargs.pop("seed", None)
                 changed_kwargs = True
             if changed_kwargs:
                 kwargs = retry_kwargs
@@ -696,10 +658,12 @@ def _batch_worker(args: tuple) -> dict[str, Any]:
                 max_tokens=max_tokens,
             )
             ok_count = sum(1 for row in rows if row.get("status") == "ok")
-            if ok_count < len(rows) and attempt < attempts:
+            if ok_count < len(rows):
                 last_exc = ValueError(
                     f"probability vectors parsed {ok_count}/{len(rows)}"
                 )
+                if attempt >= attempts:
+                    raise last_exc
                 print(
                     f"    [{model}] batch {batch_index}/{total_batches} 재시도 "
                     f"{attempt}/{attempts - 1}: {last_exc}",
@@ -751,7 +715,7 @@ def _append_batch_result(model_results: dict[str, dict[str, Any]], result: dict[
 
 
 def _append_batch_error(model_results: dict[str, dict[str, Any]], args: tuple, exc: Exception) -> None:
-    model, _batch, batch_index, _total_batches, _current_date, _max_tokens = args
+    model, batch, batch_index, total_batches, _current_date, _max_tokens = args
     try:
         resolved = _resolve_model_spec(model)
     except Exception:
@@ -765,7 +729,22 @@ def _append_batch_error(model_results: dict[str, dict[str, Any]], args: tuple, e
         "_batch_results": [],
         "batch_errors": [],
     })
-    target["batch_errors"].append({"batch_index": batch_index, "error": str(exc)})
+    issue_ids = [str(ref.get("id") or "") for ref in batch if isinstance(ref, dict)]
+    claim_ids = [
+        str((ref.get("issue") or {}).get("claim_id") or "")
+        for ref in batch
+        if isinstance(ref, dict) and isinstance(ref.get("issue"), dict)
+    ]
+    target["batch_errors"].append({
+        "stage": "verifier_issue_type_classifier",
+        "model": model,
+        "batch_index": batch_index,
+        "total_batches": total_batches,
+        "issue_ids": [value for value in issue_ids if value],
+        "claim_ids": [value for value in claim_ids if value],
+        "retry_exhausted": True,
+        "error": str(exc),
+    })
 
 
 def _aggregate_token_usage(usages: list[dict[str, Any]]) -> dict[str, int]:
@@ -1023,6 +1002,19 @@ def _model_breakdown(model_results: dict[str, dict[str, Any]]) -> dict[str, dict
     return breakdown
 
 
+def _classification_failures(model_results: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: list[dict[str, Any]] = []
+    for model, result in model_results.items():
+        for error in result.get("batch_errors", []) or []:
+            if not isinstance(error, dict):
+                continue
+            failure = dict(error)
+            failure.setdefault("stage", "verifier_issue_type_classifier")
+            failure.setdefault("model", model)
+            failures.append(failure)
+    return failures
+
+
 def classify_issues(
     payload: dict[str, Any],
     *,
@@ -1149,6 +1141,46 @@ def classify_issues(
             print(f"  ✓ [{model}] 모델 작업 완료: {len(result['classifications'])}건", flush=True)
 
     model_weights = _parse_model_weights(model_weights_spec, models, model_results)
+    failures = _classification_failures(model_results)
+    failed_models = [model for model, row in model_results.items() if row.get("status") == "failed"]
+    model_type_breakdown = _model_breakdown(model_results)
+    if failures or failed_models:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "stage": "verifier_issue_type_classifier",
+            "generated_at": _now_iso(),
+            "input_path": str(input_path),
+            "current_date": current_date,
+            "issue_list_keys": list_keys,
+            "models": models,
+            "model_weights": model_weights,
+            "low_margin_threshold": low_margin_threshold,
+            "dry_run": dry_run,
+            "categories": {
+                issue_type: _issue_type_label(issue_type)
+                for issue_type in ISSUE_TYPES
+            },
+            "summary": {
+                "input_issue_count": len(refs),
+                "model_count": len(models),
+                "failed_model_count": len(failed_models),
+                "failed_models": failed_models,
+                "breakdown_by_type": {},
+                "low_margin_count": 0,
+                "model_breakdown_by_type": model_type_breakdown,
+            },
+            "failure": failures[0] if failures else {
+                "stage": "verifier_issue_type_classifier",
+                "error": "issue type classifier model failed",
+                "failed_models": failed_models,
+                "retry_exhausted": True,
+            },
+            "failures": failures,
+            "model_results": model_results,
+            "classifications": [],
+            "grouped_results": _group_results([]),
+        }
+
     verdicts_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for result in model_results.values():
         for row in result.get("classifications", []) or []:
@@ -1164,13 +1196,11 @@ def classify_issues(
     ]
 
     type_counts = Counter(record.get("final_issue_type") or "unclassified" for record in records)
-    failed_models = [model for model, row in model_results.items() if row.get("status") == "failed"]
-    model_type_breakdown = _model_breakdown(model_results)
     low_margin_count = sum(1 for record in records if record.get("low_margin"))
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "issue_type_classifier",
+        "stage": "verifier_issue_type_classifier",
         "generated_at": _now_iso(),
         "input_path": str(input_path),
         "current_date": current_date,
@@ -1299,7 +1329,9 @@ def main(argv: list[str] | None = None) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     next_input_path = None
-    if not args.no_next_input:
+    summary = result["summary"]
+    has_failures = bool(summary.get("failed_model_count") or result.get("failures"))
+    if not args.no_next_input and not has_failures:
         next_input_path = Path(args.next_input_output) if args.next_input_output else _default_next_input_path(output_path)
         next_input = build_next_stage_input(result, classification_path=output_path)
         next_input_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1307,7 +1339,6 @@ def main(argv: list[str] | None = None) -> int:
         result.setdefault("artifacts", {})["classified_issues"] = str(next_input_path)
         output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    summary = result["summary"]
     print(f"입력 issue: {summary['input_issue_count']}건")
     print(f"모델: {', '.join(models)}")
     print(f"모델 가중치: {json.dumps(result.get('model_weights', {}), ensure_ascii=False)}")
@@ -1316,6 +1347,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"다음 단계 입력: {next_input_path}")
     if summary["failed_model_count"]:
         print(f"실패 모델: {', '.join(summary['failed_models'])}")
+    if result.get("failures"):
+        print(f"실패 batch: {len(result['failures'])}건")
     print(f"유형별 분포: {json.dumps(summary['breakdown_by_type'], ensure_ascii=False)}")
     print(f"low_margin: {summary.get('low_margin_count', 0)}건")
     print("모델별 판정 갯수:")
@@ -1325,7 +1358,7 @@ def main(argv: list[str] | None = None) -> int:
             f"  - {model} ({breakdown.get('status')} / {breakdown.get('resolved_model')}): "
             f"{json.dumps(counts, ensure_ascii=False)}"
         )
-    return 0 if not summary["failed_model_count"] else 2
+    return 0 if not has_failures else 2
 
 
 if __name__ == "__main__":

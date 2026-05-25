@@ -794,7 +794,7 @@ class ConceptLayerBuilder:
                 from .cost_report import record_model_call
 
                 record_model_call(
-                    stage="stage6_graph_triples",
+                    stage="graph_generate_graph_triples",
                     provider="google",
                     model=self.cfg.gemini_model,
                     response=response,

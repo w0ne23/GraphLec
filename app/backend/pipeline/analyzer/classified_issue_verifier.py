@@ -1499,7 +1499,7 @@ def judge_classified_issues(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "classified_issue_verifier",
+        "stage": "verifier_classified_issue_verifier",
         "source_input_path": str(input_path),
         "source_classification_path": payload.get("source_classification_path", ""),
         "source_issue_path": payload.get("source_issue_path", ""),

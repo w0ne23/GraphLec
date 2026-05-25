@@ -510,7 +510,7 @@ def _extract_claims(
             max_tokens=8192,
             temperature=0.0,
             thinking_budget=1024,
-            stage="extract",
+            stage="verifier_extract_claims",
         )
         api_calls += 1
         cv._add_call_usage(token_usage, call_usage)
