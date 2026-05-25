@@ -736,7 +736,7 @@ def _append_batch_error(model_results: dict[str, dict[str, Any]], args: tuple, e
         if isinstance(ref, dict) and isinstance(ref.get("issue"), dict)
     ]
     target["batch_errors"].append({
-        "stage": "issue_type_classifier",
+        "stage": "verifier_issue_type_classifier",
         "model": model,
         "batch_index": batch_index,
         "total_batches": total_batches,
@@ -1009,7 +1009,7 @@ def _classification_failures(model_results: dict[str, dict[str, Any]]) -> list[d
             if not isinstance(error, dict):
                 continue
             failure = dict(error)
-            failure.setdefault("stage", "issue_type_classifier")
+            failure.setdefault("stage", "verifier_issue_type_classifier")
             failure.setdefault("model", model)
             failures.append(failure)
     return failures
@@ -1147,7 +1147,7 @@ def classify_issues(
     if failures or failed_models:
         return {
             "schema_version": SCHEMA_VERSION,
-            "stage": "issue_type_classifier",
+            "stage": "verifier_issue_type_classifier",
             "generated_at": _now_iso(),
             "input_path": str(input_path),
             "current_date": current_date,
@@ -1170,7 +1170,7 @@ def classify_issues(
                 "model_breakdown_by_type": model_type_breakdown,
             },
             "failure": failures[0] if failures else {
-                "stage": "issue_type_classifier",
+                "stage": "verifier_issue_type_classifier",
                 "error": "issue type classifier model failed",
                 "failed_models": failed_models,
                 "retry_exhausted": True,
@@ -1200,7 +1200,7 @@ def classify_issues(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "issue_type_classifier",
+        "stage": "verifier_issue_type_classifier",
         "generated_at": _now_iso(),
         "input_path": str(input_path),
         "current_date": current_date,

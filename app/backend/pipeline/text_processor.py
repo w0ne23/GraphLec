@@ -54,7 +54,7 @@ def _get_client() -> genai.Client:
     return _override_client
 
 
-def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
+def _add_usage(response, stage: str = "preprocess_process_audio_text_processor") -> None:
     usage = getattr(response, "usage_metadata", None)
     if usage:
         _token_usage["input"] += getattr(usage, "prompt_token_count", 0) or 0
@@ -159,7 +159,7 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response, stage="stage3b_text_processor_domain")
+        _add_usage(response, stage="preprocess_process_audio_text_processor_domain")
         raw = (response.text or "").strip()
         if "```json" in raw:
             raw = raw.split("```json")[1].split("```")[0].strip()
@@ -447,7 +447,7 @@ def _correct_batch_pass1(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response, stage="stage3b_text_processor_pass1")
+        _add_usage(response, stage="preprocess_process_audio_text_processor_pass1")
         batch_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass1 오류 무시] {exc}")
@@ -539,7 +539,7 @@ def _correct_batch_pass2(
 
     try:
         response = api_call_with_retry(call)
-        _add_usage(response, stage="stage3b_text_processor_pass2")
+        _add_usage(response, stage="preprocess_process_audio_text_processor_pass2")
         batch_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")

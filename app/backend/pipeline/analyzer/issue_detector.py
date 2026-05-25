@@ -30,7 +30,7 @@ class IssueJudgeBatchError(RuntimeError):
 
     def to_dict(self) -> dict:
         return {
-            "stage": "issue_judge",
+            "stage": "verifier_judge_issues",
             "batch_index": self.batch_index,
             "active_index": self.active_index,
             "context_range": self.context_range,
@@ -290,7 +290,7 @@ def _judge_issue_candidates(
     system_prompt, prompt = _split_judge_prompt_for_cache(full_prompt)
     response_format = (
         {"type": "json_object"}
-        if cv._supports_json_object_response_format(cv._resolve_stage_model("judge"))
+        if cv._supports_json_object_response_format(cv._resolve_stage_model("verifier_judge_issues"))
         else None
     )
     api_calls = 0
@@ -304,7 +304,7 @@ def _judge_issue_candidates(
             temperature=0.0,
             thinking_budget=2048,
             response_format=response_format,
-            stage="judge",
+            stage="verifier_judge_issues",
         )
         api_calls += 1
         cv._add_call_usage(token_usage, call_usage)

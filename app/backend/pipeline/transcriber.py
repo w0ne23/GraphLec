@@ -268,7 +268,7 @@ def _transcribe_chunks_from_audio(
             from .cost_report import record_audio_call
 
             record_audio_call(
-                stage="stage2b_transcriber",
+                stage="preprocess_transcribe_audio",
                 provider="groq",
                 model="whisper-large-v3-turbo",
                 audio_seconds=dur,
