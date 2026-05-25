@@ -2086,20 +2086,6 @@ def run_verifier_pipeline(
     }
 
 
-def run_cleanup_pipeline(args, runtime: PipelineRuntime, *, remove_input: bool = False) -> dict:
-    """Remove local artifacts for a rejected upload workflow."""
-    removed: list[str] = []
-    if runtime.output_dir.exists():
-        shutil.rmtree(runtime.output_dir, ignore_errors=True)
-        removed.append(str(runtime.output_dir))
-    if remove_input:
-        input_parent = Path(args.input).parent
-        if input_parent.exists():
-            shutil.rmtree(input_parent, ignore_errors=True)
-            removed.append(str(input_parent))
-    return {"removed": removed}
-
-
 def _print_stop_after_summary(args, runtime: PipelineRuntime, verifier_result: dict) -> None:
     if getattr(args, "stop_after_issue_judge", False):
         option_name = "--stop-after-issue-judge"
