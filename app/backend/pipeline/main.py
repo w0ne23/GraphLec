@@ -3,20 +3,20 @@ main.py
 강의 영상 분석 통합 파이프라인
 
 실행 흐름:
-  [병렬] Stage 1A: slide_extractor     — 슬라이드 프레임 추출
-         Stage 1B: audio_analyzer      — 오디오 품질 분석
-  [병렬] Stage 2A: slide_textualizer   — 슬라이드 텍스트 + 강조 추출
-         Stage 2B: transcriber         — 전체 전사 (scene 매핑용)
-  [병렬] Stage 3A: annotation_analyzer — 필기 강조 분석
-         Stage 3B: 오디오 후처리
+  [병렬] P1A extract_slides            — 슬라이드 프레임 추출
+         P1B analyze_audio_quality     — 오디오 품질 분석
+  [병렬] P2A textualize_slides         — 슬라이드 텍스트 + 강조 추출
+         P2B transcribe_audio          — 전체 전사 (scene 매핑용)
+  [병렬] P3A analyze_annotation        — 필기 강조 분석
+         P3B process_audio             — 오디오 후처리
                      text_processor    — 2-pass 교정 + 침묵 구간 저장
                      emphasis          — 오디오 강조 감지
-  [병렬] Stage 4A: slide_classifier    — 슬라이드 역할 분류
-         Stage 4B: by_scene 구조 저장  — (3B 결과 기반)
-  [직렬] Stage 5 : fusion              — 최종 통합
-  [직렬] Stage 6 : 그래프 Parquet       — json_to_graph_triples
-  [직렬] Stage 7 : lance_ingest          — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
-  [직렬] Stage 7B: GraphRAG index        — fused → GraphRAG parquet workspace
+  [병렬] P4A classify_slides           — 슬라이드 역할 분류
+         P4B save_scene_structure      — scene 구조 저장 (3B 결과 기반)
+  [직렬] P5  fusion                    — 최종 통합
+  [직렬] G1  graph_triples             — 그래프 Parquet 생성
+  [직렬] G2  lance_index               — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
+  [직렬] G3  graphrag_index            — fused → GraphRAG parquet workspace
 
 Usage:
     python main.py --input lecture.mp4
@@ -196,7 +196,7 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
     scene_slide_map_path = output_dir / f"{stem}_scene_slide_map.json"
     canonical_slide_annotations_path = output_dir / f"{stem}_canonical_slide_annotations.json"
 
-    if _is_done(meta_path, "Stage 1A 슬라이드 추출", args.force):
+    if _is_done(meta_path, "P1A extract_slides — 슬라이드 추출", args.force):
         return {
             "meta_path": str(meta_path),
             "scene_slide_map_path": str(scene_slide_map_path),
@@ -204,7 +204,7 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
             "elapsed": 0.0,
         }
 
-    _banner("Stage 1  —  슬라이드 추출  (slide_extractor)")
+    _banner("P1A extract_slides — 슬라이드 추출  (slide_extractor)")
     t0 = time.time()
     metadata = extract_slides(
         input_path=args.input,
@@ -236,14 +236,14 @@ def stage1_extract(args, slides_dir: Path, output_dir: Path) -> dict:
 
 
 def stage1b_audio_analyze(args, output_dir: Path) -> dict:
-    """Stage 1B: 오디오 품질 분석 (slide_extractor와 병렬)"""
+    """P1B analyze_audio_quality: 오디오 품질 분석 (slide_extractor와 병렬)."""
     from .audio_analyzer import extract_audio_from_video, analyze_audio_features, evaluate_audio_quality
     from .utils import get_video_duration
 
     stem = Path(args.input).stem
     audio_quality_path = output_dir / f"{stem}_audio_quality.json"
 
-    if _is_done(audio_quality_path, "Stage 1B 오디오 품질 분석", args.force):
+    if _is_done(audio_quality_path, "P1B analyze_audio_quality — 오디오 품질 분석", args.force):
         # duration은 파일에서 복원
         duration = 0.0
         try:
@@ -258,7 +258,7 @@ def stage1b_audio_analyze(args, output_dir: Path) -> dict:
 
     video_path = args.input
 
-    _banner("Stage 1B  —  오디오 품질 분석  (audio_analyzer)")
+    _banner("P1B analyze_audio_quality — 오디오 품질 분석  (audio_analyzer)")
     t0 = time.time()
     duration = get_video_duration(video_path)
     audio_path = str(output_dir / "temp_full_audio.wav")
@@ -282,10 +282,10 @@ def stage2_textualize(args, slides_dir: Path, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     textualized_path = output_dir / f"{stem}_slide_textualized.json"
 
-    if _is_done(textualized_path, "Stage 2 슬라이드 텍스트화", args.force):
+    if _is_done(textualized_path, "P2A textualize_slides — 슬라이드 텍스트화", args.force):
         return {"textualized_path": str(textualized_path), "elapsed": 0.0}
 
-    _banner("Stage 2  —  슬라이드 텍스트화  (slide_textualizer)")
+    _banner("P2A textualize_slides — 슬라이드 텍스트화  (slide_textualizer)")
     t0 = time.time()
     text_config = TextConfig(
         slides_dir=slides_dir,
@@ -307,10 +307,10 @@ def stage2b_transcribe(args, meta_path: str, duration: float, output_dir: Path) 
     stem = Path(args.input).stem
     transcript_raw_path = output_dir / f"{stem}_transcript_raw.json"
 
-    if _is_done(transcript_raw_path, "Stage 2B 전체 전사", args.force):
+    if _is_done(transcript_raw_path, "P2B transcribe_audio — 전체 전사", args.force):
         return {"transcript_raw_path": str(transcript_raw_path), "elapsed": 0.0}
 
-    _banner("Stage 2B  —  전체 전사  (Groq Whisper)")
+    _banner("P2B transcribe_audio — 전체 전사  (Groq Whisper)")
     t0 = time.time()
     slide_ranges = load_slide_ranges(meta_path, duration) if meta_path and Path(meta_path).is_file() else []
     transcribe_result = _transcribe_by_scene(args.input, duration, meta_path, slide_ranges, output_dir)
@@ -336,10 +336,10 @@ def stage3a_annotation(args, slides_dir: Path, output_dir: Path) -> dict:
     stem = Path(args.input).stem
     annotation_path = output_dir / f"{stem}_annotation.json"
 
-    if _is_done(annotation_path, "Stage 3A annotation", args.force):
+    if _is_done(annotation_path, "P3A analyze_annotation — 필기 강조 분석", args.force):
         return {"annotation_path": str(annotation_path), "elapsed": 0.0}
 
-    _banner("Stage 3A  —  필기 강조 분석  (annotation_analyzer)")
+    _banner("P3A analyze_annotation — 필기 강조 분석  (annotation_analyzer)")
     t0 = time.time()
     annot_results = analyze_all(
         slides_dir=str(slides_dir),
@@ -419,7 +419,7 @@ def stage3b_audio(
         and _by_scene_has_context_schema(by_scene_path)
     )
     if seg_ok and silences_ok and emphasis_ok and by_scene_ok:
-        print(f"\n  ⏭  Stage 3B 오디오 파이프라인 — 출력 파일 존재, 스킵")
+        print(f"\n  ⏭  P3B process_audio — 오디오 파이프라인 출력 파일 존재, 스킵")
         print(f"     {segments_path}")
         print(f"     {by_scene_path}")
         print("─" * 70)
@@ -463,7 +463,7 @@ def stage3b_audio(
         }
     elif not args.force and segments_path.exists():
         log.warning(
-            "Stage 3B 캐시가 불완전하여 재실행합니다 "
+            "P3B process_audio 캐시가 불완전하여 재실행합니다 "
             f"(segments={segments_path.exists()}, silences={silences_path.exists()}, "
             f"emphasis={emphasis_path.exists()}, by_scene={by_scene_path.exists()})"
         )
@@ -471,13 +471,13 @@ def stage3b_audio(
     if seg_ok and not by_scene_ok:
         print(
             f"\n  ⚠️  {by_scene_path.name} 없음 — 세그먼트만 있는 불완전 상태입니다. "
-            "Stage 3B 전체를 다시 실행합니다."
+            "P3B process_audio 전체를 다시 실행합니다."
         )
         print("─" * 70)
 
     video_path = args.input
 
-    _banner("Stage 3B  —  오디오 파이프라인")
+    _banner("P3B process_audio — 오디오 파이프라인")
 
     # 슬라이드 텍스트화 데이터 로드
     textualized_data: dict = {"scenes": []}
@@ -655,10 +655,10 @@ def stage4a_classify(
     stem = Path(args.input).stem
     classified_path = output_dir / f"{stem}_slide_classified.json"
 
-    if _is_done(classified_path, "Stage 4A 슬라이드 분류", args.force):
+    if _is_done(classified_path, "P4A classify_slides — 슬라이드 분류", args.force):
         return {"classified_path": str(classified_path), "elapsed": 0.0}
 
-    _banner("Stage 4A  —  슬라이드 분류  (slide_classifier)")
+    _banner("P4A classify_slides — 슬라이드 분류  (slide_classifier)")
     t0 = time.time()
     classified = classify_slides(
         textualized_path=textualized_path,
@@ -742,13 +742,13 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
             "Stage 3B 오디오 후처리 결과를 확인해주세요."
         )
 
-    if _is_done(by_scene_path, "Stage 4B by_scene 저장", args.force):
+    if _is_done(by_scene_path, "P4B save_scene_structure — scene 구조 저장", args.force):
         return {
             "by_scene_path": str(by_scene_path),
             "elapsed": 0.0,
         }
 
-    _banner("Stage 4B  —  by_scene 구조 저장")
+    _banner("P4B save_scene_structure — scene 구조 저장")
     t0 = time.time()
 
     scenes_with_emphasis = json.loads(json.dumps(scenes_structure))
@@ -827,10 +827,10 @@ def stage5_fusion(
     fused_path = output_dir / f"{stem}_fused.json"
     by_scene_path = output_dir / f"{stem}_by_scene.json"
 
-    if _is_done(fused_path, "Stage 5 퓨전", args.force):
+    if _is_done(fused_path, "P5 fusion — 데이터 퓨전", args.force):
         return {"fused_path": str(fused_path), "elapsed": 0.0}
 
-    _banner("Stage 5  —  퓨전  (fusion)")
+    _banner("P5 fusion — 데이터 퓨전  (fusion)")
     t0 = time.time()
 
     cfg = FusionConfig(
@@ -887,14 +887,14 @@ def stage9_build_analyzer_merged_clean(
             with open(merged_clean_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
             if any(slide.get("contexts") for slide in existing.get("slides", [])):
-                print(f"\n  ⏭  Stage 9A analyzer 입력 생성 — context 입력 파일 존재, 스킵")
+                print(f"\n  ⏭  V1 build_analyzer_input — verifier 입력 context 파일 존재, 스킵")
                 print(f"     {merged_clean_path}")
                 print("─" * 70)
                 return {"merged_clean_path": str(merged_clean_path), "elapsed": 0.0}
         except Exception:
             pass
 
-    _banner("Stage 9A  —  analyzer 입력용 merged_clean 생성")
+    _banner("V1 build_analyzer_input — verifier 입력용 merged_clean 생성")
     t0 = time.time()
 
     with open(textualized_path, "r", encoding="utf-8") as f:
@@ -995,7 +995,7 @@ def stage9_build_analyzer_merged_clean(
             contexts_by_slide.setdefault(slide_no, []).append(context_payload)
 
     if not contexts_by_slide:
-        log.warning("Stage 9A context 입력이 비어 있어 segment를 context 단위로 폴백합니다.")
+        log.warning("V1 build_analyzer_input context 입력이 비어 있어 segment를 context 단위로 폴백합니다.")
         for slide_no, slide_segments in segs_by_logical_slide.items():
             for idx, seg in enumerate(sorted(slide_segments, key=lambda item: item.get("start", 0.0))):
                 text = str(seg.get("text", "") or "").strip()
@@ -1172,7 +1172,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
         and _claim_cache_matches(claims_json_path, claim_batch_mode, claim_context_window)
         and claims_jsonl_path.stat().st_mtime >= merged_file.stat().st_mtime
     ):
-        print(f"\n  ⏭  Stage 10A claim 추출 — 출력 파일 존재, 스킵")
+        print(f"\n  ⏭  V2A extract_claims — claim 추출 출력 파일 존재, 스킵")
         print(f"     {claims_jsonl_path}")
         print("─" * 70)
         return {
@@ -1183,7 +1183,7 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
             "skipped": True,
         }
 
-    _banner("Stage 10A  —  claim 추출")
+    _banner("V2A extract_claims — claim 추출")
     t0 = time.time()
     ctx = prepare_verification(str(merged_file))
     claims_by_batch, api_calls, token_usage = extract_claims_only(
@@ -1233,7 +1233,7 @@ def stage10_issue_judge(args, merged_clean_path: str, output_dir: Path, claims_j
     analyzer_dir = output_dir / f"{stem}_analyzer"
     analyzer_dir.mkdir(parents=True, exist_ok=True)
 
-    _banner("Stage 10B  —  1차 issue judge")
+    _banner("V2B judge_issues — 1차 issue 판단")
     t0 = time.time()
     result = run_issue_judge_only(
         merged_clean_path,
@@ -1259,7 +1259,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
         and _claim_output_is_final_verification(claim_output_path)
         and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
     ):
-        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
+        print(f"\n  ⏭  V2 start_verifier_background — verifier 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
         return {
@@ -1271,7 +1271,7 @@ def stage10_spawn_analyzers_subprocess(args, merged_clean_path: str, output_dir:
             "spawned": False,
         }
 
-    _banner("Stage 10  —  verifier 백그라운드 실행")
+    _banner("V2 start_verifier_background — verifier 백그라운드 실행")
     t0 = time.time()
     pkg_root = resolve_pipeline_package_root()
     cmd = [
@@ -1335,7 +1335,7 @@ def stage10_run_verifier(args, merged_clean_path: str, output_dir: Path) -> dict
         and _claim_output_is_final_verification(claim_output_path)
         and claim_output_path.stat().st_mtime >= Path(merged_clean_path).stat().st_mtime
     ):
-        print(f"\n  ⏭  Stage 10 verifier 실행 — 출력 파일 존재, 스킵")
+        print(f"\n  ⏭  V2 run_verifier — verifier 출력 파일 존재, 스킵")
         print(f"     {claim_output_path}")
         print("─" * 70)
         return {
@@ -1347,7 +1347,7 @@ def stage10_run_verifier(args, merged_clean_path: str, output_dir: Path) -> dict
             "skipped": True,
         }
 
-    _banner("Stage 10  —  verifier 실행")
+    _banner("V2 run_verifier — verifier 실행")
     t0 = time.time()
     result = run_classified_issue_pipeline(
         merged_clean_path,
@@ -1374,7 +1374,7 @@ def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
     nodes_parquet = output_dir / f"{stem}_nodes.parquet"
     edges_parquet = output_dir / f"{stem}_edges.parquet"
 
-    if _is_done(triples_parquet, "Stage 6 그래프 트리플 생성", args.force):
+    if _is_done(triples_parquet, "G1 graph_triples — 그래프 트리플 생성", args.force):
         return {
             "triples_parquet": str(triples_parquet),
             "nodes_parquet": str(nodes_parquet),
@@ -1382,7 +1382,7 @@ def stage6_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
             "elapsed": 0.0,
         }
 
-    _banner("Stage 6  —  그래프 트리플 생성  (json_to_graph_triples)")
+    _banner("G1 graph_triples — 그래프 트리플 생성  (json_to_graph_triples)")
     t0 = time.time()
 
     cfg = TripleConfig(
@@ -1415,13 +1415,13 @@ def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     lance_root = Path(args.lance_root) if getattr(args, "lance_root", None) else default_lance_root()
     parquet_path = output_dir / f"{stem}_chunks_lance.parquet"
 
-    if _is_done(parquet_path, "Stage 7 Lance 인덱스", args.force):
+    if _is_done(parquet_path, "G2 lance_index — Lance 인덱스 생성", args.force):
         return {"elapsed": 0.0, "parquet_path": str(parquet_path), "skipped": True}
 
     if not fused_path.exists():
         raise FileNotFoundError(f"Stage 7: fused 파일 없음 — Stage 5 퓨전이 필요합니다: {fused_path}")
 
-    _banner("Stage 7  —  LanceDB 인덱스  (Gemini 임베딩 + lance_ingest)")
+    _banner("G2 lance_index — LanceDB 인덱스  (Gemini 임베딩 + lance_ingest)")
     t0 = time.time()
     result = ingest_stem_to_lance(
         stem=stem,
@@ -1521,7 +1521,7 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
         and relationships_path.exists()
         and relationships_path.stat().st_size > 0
     ):
-        print("\n  ⏭  Stage 7B GraphRAG 인덱스 — parquet 출력 파일 존재, 스킵")
+        print("\n  ⏭  G3 graphrag_index — GraphRAG parquet 출력 파일 존재, 스킵")
         print(f"     {output_graph_dir}")
         print("─" * 70)
         return {
@@ -1544,7 +1544,7 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
     if not api_key:
         raise RuntimeError("Stage 7B: GRAPHRAG_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다.")
 
-    _banner("Stage 7B  —  GraphRAG 인덱스  (fused → parquet workspace)")
+    _banner("G3 graphrag_index — GraphRAG 인덱스  (fused → parquet workspace)")
     t0 = time.time()
 
     workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -1647,17 +1647,17 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
 
 
 def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
-    """Stage 8: 강의 메타데이터 생성."""
+    """G4 metadata: 강의 메타데이터 생성."""
     from .generate_metadata import generate_metadata
 
     stem         = Path(args.input).stem
     metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     output_path  = metadata_dir / f"{stem}_metadata.json"
 
-    if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
+    if _is_done(output_path, "G4 metadata — 메타데이터 생성", args.force):
         return {"metadata_path": str(output_path), "elapsed": 0.0}
 
-    _banner("Stage 8  —  메타데이터 생성  (generate_metadata)")
+    _banner("G4 metadata — 메타데이터 생성  (generate_metadata)")
     t0 = time.time()
 
     generate_metadata(
@@ -1675,13 +1675,13 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
 
 
 def stage11_build_recommender_index(args) -> dict:
-    """Stage 11: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
+    """G5 recommender_index: 추천용 metadata 임베딩 인덱스 생성 (build_index.py)."""
     recommender_dir = Path(__file__).resolve().parents[1] / "recommender"
     script_path = recommender_dir / "build_index.py"
     metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     db_dir = Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))
 
-    _banner("Stage 11  —  추천 인덱스 생성  (build_index)")
+    _banner("G5 recommender_index — 추천 인덱스 생성  (build_index)")
     t0 = time.time()
 
     cmd = [
@@ -1783,17 +1783,17 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
 
     r9: dict = {}
 
-    _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
+    _banner("P1 extract_media — 슬라이드 추출 + 오디오 품질 분석")
     t_parallel = time.time()
     audio_analyze_result: dict = {}
     runtime.notify_stage("preprocess_extract_media", "run")
 
     if args.skip_extract:
-        log.info("Stage 1A 건너뜀 (--skip-extract)")
+        log.info("P1A extract_slides — 슬라이드 추출 건너뜀 (--skip-extract)")
         meta_path = str(paths["metadata"])
-        timings["Stage 1A 슬라이드 추출"] = 0.0
+        timings["P1A extract_slides — 슬라이드 추출"] = 0.0
         audio_analyze_result = stage1b_audio_analyze(args, output_dir)
-        timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
+        timings["P1B analyze_audio_quality — 오디오 품질 분석"] = audio_analyze_result["elapsed"]
     else:
         with ThreadPoolExecutor(max_workers=2) as executor:
             future_1a = executor.submit(stage1_extract, args, slides_dir, output_dir)
@@ -1802,19 +1802,19 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
                 if future is future_1a:
                     r1 = future.result()
                     meta_path = r1["meta_path"]
-                    timings["Stage 1A 슬라이드 추출"] = r1["elapsed"]
+                    timings["P1A extract_slides — 슬라이드 추출"] = r1["elapsed"]
                 else:
                     audio_analyze_result = future.result()
-                    timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
+                    timings["P1B analyze_audio_quality — 오디오 품질 분석"] = audio_analyze_result["elapsed"]
 
     duration = audio_analyze_result.get("duration", 0.0)
-    timings["Stage 1 병렬 총"] = time.time() - t_parallel
+    timings["P1 extract_media total — 슬라이드 추출 + 오디오 품질 분석 총합"] = time.time() - t_parallel
     runtime.notify_stage("preprocess_extract_media", "done")
-    runtime.write_timings("Stage 1 병렬 총")
-    print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
+    runtime.write_timings("P1 extract_media total — 슬라이드 추출 + 오디오 품질 분석 총합")
+    print(f"\n  ✓ P1 extract_media 완료 — 슬라이드 추출 + 오디오 품질 분석  ({timings['P1 extract_media total — 슬라이드 추출 + 오디오 품질 분석 총합']:.1f}초)")
     print("─" * 70)
 
-    _banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
+    _banner("P2 textualize_transcribe — 슬라이드 텍스트화 + 전체 전사")
     t_parallel = time.time()
     transcript_result: dict = {}
     runtime.notify_stage("preprocess_textualize_transcribe", "run")
@@ -1826,18 +1826,18 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
             if future is future_2a:
                 r2 = future.result()
                 textualized_path = r2["textualized_path"]
-                timings["Stage 2A 슬라이드 텍스트화"] = r2["elapsed"]
+                timings["P2A textualize_slides — 슬라이드 텍스트화"] = r2["elapsed"]
             else:
                 transcript_result = future.result()
-                timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
+                timings["P2B transcribe_audio — 전체 전사"] = transcript_result["elapsed"]
 
-    timings["Stage 2 병렬 총"] = time.time() - t_parallel
+    timings["P2 textualize_transcribe total — 텍스트화 + 전사 총합"] = time.time() - t_parallel
     runtime.notify_stage("preprocess_textualize_transcribe", "done")
-    runtime.write_timings("Stage 2 병렬 총")
-    print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
+    runtime.write_timings("P2 textualize_transcribe total — 텍스트화 + 전사 총합")
+    print(f"\n  ✓ P2 textualize_transcribe 완료 — 슬라이드 텍스트화 + 전체 전사  ({timings['P2 textualize_transcribe total — 텍스트화 + 전사 총합']:.1f}초)")
     print("─" * 70)
 
-    _banner("Stage 3  —  병렬 실행 (annotation + 오디오 후처리)")
+    _banner("P3 enrich_audio_annotation — 필기 강조 분석 + 오디오 후처리")
     t_parallel = time.time()
     audio_result: dict = {}
     annotation_result: dict = {}
@@ -1864,7 +1864,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
                 duration=audio_payload.get("duration", duration),
                 slides_structure=audio_payload.get("slides_structure"),
             )
-            timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
+            timings["V1 build_analyzer_input — verifier 입력 생성"] = local_r9["elapsed"]
             r9.update(local_r9)
             analyzer_input_built["done"] = True
             runtime.notify_stage("verifier_build_analyzer_input", "done")
@@ -1884,19 +1884,20 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
         for future in as_completed([future_a, future_b]):
             if future is future_a:
                 annotation_result = future.result()
-                timings["Stage 3A annotation"] = annotation_result["elapsed"]
+                timings["P3A analyze_annotation — 필기 강조 분석"] = annotation_result["elapsed"]
             else:
                 audio_result = future.result()
+                timings["P3B process_audio — 오디오 후처리"] = audio_result.get("elapsed", 0.0)
                 if build_analyzer_input and not analyzer_input_built["done"]:
                     _build_analyzer_input_once(audio_result)
 
-    timings["Stage 3 병렬 총"] = time.time() - t_parallel
+    timings["P3 enrich_audio_annotation total — 보강 분석 총합"] = time.time() - t_parallel
     runtime.notify_stage("preprocess_enrich_audio_annotation", "done")
-    runtime.write_timings("Stage 3 병렬 총")
-    print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
+    runtime.write_timings("P3 enrich_audio_annotation total — 보강 분석 총합")
+    print(f"\n  ✓ P3 enrich_audio_annotation 완료 — 필기 강조 분석 + 오디오 후처리  ({timings['P3 enrich_audio_annotation total — 보강 분석 총합']:.1f}초)")
     print("─" * 70)
 
-    _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
+    _banner("P4 classify_scene — 슬라이드 분류 + scene 구조 저장")
     t_parallel = time.time()
     classified_result: dict = {}
     by_scene_result: dict = {}
@@ -1912,15 +1913,15 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
         for future in as_completed([future_c, future_d]):
             if future is future_c:
                 classified_result = future.result()
-                timings["Stage 4A 분류"] = classified_result.get("elapsed", 0.0)
+                timings["P4A classify_slides — 슬라이드 분류"] = classified_result.get("elapsed", 0.0)
             else:
                 by_scene_result = future.result()
-                timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
+                timings["P4B save_scene_structure — scene 구조 저장"] = by_scene_result.get("elapsed", 0.0)
 
-    timings["Stage 4 병렬 총"] = time.time() - t_parallel
+    timings["P4 classify_scene total — 구조화 총합"] = time.time() - t_parallel
     runtime.notify_stage("preprocess_classify_scene", "done")
-    runtime.write_timings("Stage 4 병렬 총")
-    print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
+    runtime.write_timings("P4 classify_scene total — 구조화 총합")
+    print(f"\n  ✓ P4 classify_scene 완료 — 슬라이드 분류 + scene 구조 저장  ({timings['P4 classify_scene total — 구조화 총합']:.1f}초)")
     print("─" * 70)
 
     runtime.notify_stage("preprocess_fusion", "run")
@@ -1931,12 +1932,12 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
         audio_result=audio_result,
         output_dir=output_dir,
     )
-    timings["Stage 5 퓨전"] = r5["elapsed"]
+    timings["P5 fusion — 데이터 퓨전"] = r5["elapsed"]
     runtime.notify_stage("preprocess_fusion", "done")
-    runtime.write_timings("Stage 5 퓨전")
+    runtime.write_timings("P5 fusion — 데이터 퓨전")
 
-    if build_analyzer_input and not timings.get("Stage 9 analyzer 입력 생성"):
-        timings["Stage 9 analyzer 입력 생성"] = 0.0
+    if build_analyzer_input and not timings.get("V1 build_analyzer_input — verifier 입력 생성"):
+        timings["V1 build_analyzer_input — verifier 입력 생성"] = 0.0
 
     return {
         "meta_path": meta_path,
@@ -1965,58 +1966,58 @@ def run_graph_pipeline(args, runtime: PipelineRuntime, preprocess_result: Option
 
     runtime.notify_stage("graph_triples", "run")
     if args.skip_graph_triples:
-        print("\n  ⏭  Stage 6 그래프 트리플 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G1 graph_triples — 그래프 트리플 생성 스킵")
         print("─" * 70)
-        timings["Stage 6 그래프 트리플"] = 0.0
-        timings["Neo4j 적재"] = 0.0
+        timings["G1 graph_triples — 그래프 트리플 생성"] = 0.0
+        timings["G1 neo4j_load — Neo4j 적재"] = 0.0
     else:
         r6 = stage6_graph_triples(args, output_dir, slides_dir)
-        timings["Stage 6 그래프 트리플"] = r6["elapsed"]
+        timings["G1 graph_triples — 그래프 트리플 생성"] = r6["elapsed"]
         print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
         print("─" * 70)
-        timings["Neo4j 적재"] = 0.0
+        timings["G1 neo4j_load — Neo4j 적재"] = 0.0
     runtime.notify_stage("graph_triples", "done")
 
     if args.skip_lance_index:
-        print("\n  ⏭  Stage 7 Lance 인덱스 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G2 lance_index — Lance 인덱스 생성 스킵")
         print("─" * 70)
-        timings["Stage 7 Lance 인덱스"] = 0.0
+        timings["G2 lance_index — Lance 인덱스 생성"] = 0.0
     else:
         runtime.notify_stage("graph_lance_index", "run")
         r7 = stage7_lance_index(args, output_dir, slides_dir)
-        timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
+        timings["G2 lance_index — Lance 인덱스 생성"] = r7.get("elapsed", 0.0)
         runtime.notify_stage("graph_lance_index", "done")
 
     if getattr(args, "skip_graphrag_index", False):
-        print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G3 graphrag_index — GraphRAG 인덱스 생성 스킵")
         print("─" * 70)
-        runtime.record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
+        runtime.record_timing("G3 graphrag_index — GraphRAG 인덱스 생성", 0.0, "skipped")
     else:
         runtime.notify_stage("graph_graphrag_index", "run")
-        runtime.stage_status["Stage 7B GraphRAG 인덱스"] = "run"
-        runtime.write_timings("Stage 7B GraphRAG 인덱스")
+        runtime.stage_status["G3 graphrag_index — GraphRAG 인덱스 생성"] = "run"
+        runtime.write_timings("G3 graphrag_index — GraphRAG 인덱스 생성")
         r7b = stage7b_graphrag_index(args, output_dir)
         runtime.notify_stage("graph_graphrag_index", "done")
-        runtime.record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
+        runtime.record_timing("G3 graphrag_index — GraphRAG 인덱스 생성", r7b.get("elapsed", 0.0), "done")
 
     if getattr(args, "skip_metadata", False):
-        print("\n  ⏭  Stage 8 메타데이터 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G4 metadata — 메타데이터 생성 스킵")
         print("─" * 70)
-        timings["Stage 8 메타데이터 생성"] = 0.0
+        timings["G4 metadata — 메타데이터 생성"] = 0.0
     else:
         runtime.notify_stage("graph_metadata", "run")
         r8 = stage8_generate_metadata(args, output_dir, slides_dir)
-        timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+        timings["G4 metadata — 메타데이터 생성"] = r8["elapsed"]
         runtime.notify_stage("graph_metadata", "done")
 
     if getattr(args, "skip_recommender_index", False):
-        print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G5 recommender_index — 추천 인덱스 생성 스킵")
         print("─" * 70)
-        timings["Stage 11 추천 인덱스 생성"] = 0.0
+        timings["G5 recommender_index — 추천 인덱스 생성"] = 0.0
     else:
         runtime.notify_stage("graph_recommender_index", "run")
         r11 = stage11_build_recommender_index(args)
-        timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+        timings["G5 recommender_index — 추천 인덱스 생성"] = r11["elapsed"]
         runtime.notify_stage("graph_recommender_index", "done")
 
     runtime.write_timings("graph_pipeline_done")
@@ -2039,7 +2040,7 @@ def run_verifier_pipeline(
     """Run verifier stages from the shared analyzer input."""
     timings = runtime.timings
     if getattr(args, "skip_analyzer", False):
-        timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         return {}
 
     analyzer_result = (preprocess_result or {}).get("analyzer_input_result", {})
@@ -2057,7 +2058,7 @@ def run_verifier_pipeline(
     if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
         runtime.notify_stage("verifier_run", "run")
         r10a = stage10_extract_claims(args, merged_clean_path=merged_clean_path, output_dir=runtime.output_dir)
-        timings["Stage 10A claim 추출"] = r10a["elapsed"]
+        timings["V2A extract_claims — claim 추출"] = r10a["elapsed"]
         if getattr(args, "stop_after_issue_judge", False):
             r10b = stage10_issue_judge(
                 args,
@@ -2065,18 +2066,18 @@ def run_verifier_pipeline(
                 output_dir=runtime.output_dir,
                 claims_jsonl=r10a["claims_jsonl"],
             )
-            timings["Stage 10B 1차 issue judge"] = r10b["elapsed"]
-        timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+            timings["V2B judge_issues — 1차 issue 판단"] = r10b["elapsed"]
+        timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         runtime.notify_stage("verifier_run", "done")
     elif background:
         runtime.notify_stage("verifier_run", "run")
         r10 = stage10_spawn_analyzers_subprocess(args, merged_clean_path, runtime.output_dir)
-        timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
+        timings["V2 start_verifier_background — verifier 백그라운드 시작"] = r10["elapsed"]
         runtime.notify_stage("verifier_run", "done")
     else:
         runtime.notify_stage("verifier_run", "run")
         r10 = stage10_run_verifier(args, merged_clean_path, runtime.output_dir)
-        timings["Stage 10 verifier 실행"] = r10["elapsed"]
+        timings["V2 run_verifier — verifier 실행"] = r10["elapsed"]
         runtime.notify_stage("verifier_run", "done")
 
     runtime.write_timings("verifier_pipeline_done")
@@ -2219,7 +2220,7 @@ def run_direct_upload_workflow(args, progress_callback=None) -> dict:
     graph_result: dict = {}
     try:
         preprocess_result = run_preprocess_pipeline(args, runtime, build_analyzer_input=False)
-        runtime.timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         graph_result = run_graph_pipeline(args, runtime, preprocess_result)
         _print_generated_files(runtime, preprocess_result, graph_result, {})
         return {"preprocess": preprocess_result, "graph": graph_result}
@@ -2276,7 +2277,7 @@ def run_pipeline(args, progress_callback=None):
                 ),
             )
         else:
-            runtime.timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+            runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
 
         if should_stop_after_verifier:
             _print_stop_after_summary(args, runtime, verifier_result)
@@ -2321,51 +2322,51 @@ def get_parser():
     parser.add_argument("--output", "-o", default=str(DEFAULT_OUTPUT_DIR),
                         help=f"분석 결과 저장 디렉토리 (default: {DEFAULT_OUTPUT_DIR})")
     parser.add_argument("--skip-extract", action="store_true",
-                        help="Stage 1A 건너뜀 (이미 슬라이드가 추출된 경우)")
+                        help="P1A extract_slides 건너뜀 (이미 슬라이드가 추출된 경우)")
     parser.add_argument("--force", action="store_true",
                         help="출력 파일이 있어도 모든 단계 강제 재실행")
     parser.add_argument("--retries", type=int, default=3,
                         help="Gemini API 재시도 횟수 (default: 3)")
-    parser.add_argument("--debug", action="store_true", help="Stage 1 디버그 로그 출력")
+    parser.add_argument("--debug", action="store_true", help="P1 extract_media 디버그 로그 출력")
     parser.add_argument(
         "--slide-decode-backend",
         choices=["opencv", "ffmpeg-cuda", "ffmpeg-videotoolbox", "auto"],
         default=os.getenv("GRAPHLEC_SLIDE_DECODE_BACKEND", "auto"),
-        help="Stage 1A 프레임 디코드 백엔드 (default: auto)",
+        help="P1A extract_slides 프레임 디코드 백엔드 (default: auto)",
     )
     parser.add_argument(
         "--slide-extract-workers",
         type=int,
         default=int(os.getenv("GRAPHLEC_SLIDE_EXTRACT_WORKERS", "0")),
-        help="Stage 1A 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
+        help="P1A extract_slides 시간 청크 병렬 추출 worker 수 (기본: 0, chunk 개수만큼 자동)",
     )
-    parser.add_argument("--masks", action="store_true", help="Stage 3A diff 마스크 이미지 저장")
+    parser.add_argument("--masks", action="store_true", help="P3A analyze_annotation diff 마스크 이미지 저장")
     parser.add_argument(
         "--per-annot-mode",
         dest="per_annot_mode",
         action="store_true",
-        help="Stage 3A를 annot별 개별 호출 방식으로 실행",
+        help="P3A analyze_annotation을 annot별 개별 호출 방식으로 실행",
     )
     parser.add_argument("--legacy-per-annot", dest="per_annot_mode", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--no-batch", dest="per_annot_mode", action="store_true",
                         help=argparse.SUPPRESS)
     parser.add_argument("--skip-graph-triples", action="store_true",
-                        help="Stage 6 그래프 Parquet(triples/nodes/edges) 생성 스킵")
+                        help="G1 graph_triples 그래프 Parquet(triples/nodes/edges) 생성 스킵")
     parser.add_argument(
         "--skip-neo4j",
         action="store_true",
         help="호환성 유지용 옵션입니다. Neo4j 적재는 강의 시청 화면 진입 시 수행됩니다.",
     )
     parser.add_argument("--skip-lance-index", action="store_true",
-                        help="Stage 7 LanceDB+Parquet 인덱스 스킵")
+                        help="G2 lance_index LanceDB+Parquet 인덱스 스킵")
     parser.add_argument(
         "--lance-root",
         default=None,
         help="LanceDB 저장 경로 (기본: 환경변수 GRAPHLEC_LANCE_ROOT 또는 data/lancedb)",
     )
     parser.add_argument("--skip-graphrag-index", action="store_true",
-                        help="Stage 7B GraphRAG parquet 인덱스 생성 스킵")
+                        help="G3 graphrag_index GraphRAG parquet 인덱스 생성 스킵")
     parser.add_argument(
         "--graphrag-root",
         default=None,
@@ -2378,23 +2379,23 @@ def get_parser():
         help="GraphRAG index method (default: standard)",
     )
     parser.add_argument("--skip-metadata", action="store_true",
-                        help="Stage 8 메타데이터 생성 스킵")
+                        help="G4 metadata 메타데이터 생성 스킵")
     parser.add_argument("--skip-analyzer", action="store_true",
-                        help="Stage 10 verifier 실행 스킵")
+                        help="V2 run_verifier verifier 실행 스킵")
     parser.add_argument(
         "--stop-after-verifier-start",
         action="store_true",
-        help="Stage 3B context 기반 analyzer 입력 생성 및 verifier 시작 후 종료",
+        help="P3B process_audio context 기반 analyzer 입력 생성 및 verifier 시작 후 종료",
     )
     parser.add_argument(
         "--stop-after-claim-extract",
         action="store_true",
-        help="Stage 3B context 기반 analyzer 입력 생성 및 claim 추출 후 종료",
+        help="P3B process_audio context 기반 analyzer 입력 생성 및 claim 추출 후 종료",
     )
     parser.add_argument(
         "--stop-after-issue-judge",
         action="store_true",
-        help="Stage 3B context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
+        help="P3B process_audio context 기반 analyzer 입력 생성, claim 추출, 1차 issue judge 후 종료",
     )
     parser.add_argument(
         "--issue-judge-min-confidence",
@@ -2403,7 +2404,7 @@ def get_parser():
         help="1차 issue judge 후보 저장 confidence 기준. 기본값은 환경변수 또는 0.8",
     )
     parser.add_argument("--skip-recommender-index", action="store_true",
-                        help="Stage 11 추천 인덱스 생성(build_index) 스킵")
+                        help="G5 recommender_index 추천 인덱스 생성(build_index) 스킵")
     parser.add_argument("--metadata-dir", dest="metadata_dir", default=DEFAULT_RECOMMENDER_METADATA_DIR,
                         help=f"메타데이터 저장 디렉토리 (default: {DEFAULT_RECOMMENDER_METADATA_DIR})")
     parser.add_argument("--recommender-db-dir", dest="recommender_db_dir", default=DEFAULT_RECOMMENDER_DB_DIR,
