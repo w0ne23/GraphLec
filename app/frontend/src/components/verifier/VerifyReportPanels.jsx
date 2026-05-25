@@ -158,7 +158,7 @@ function resultFileUrl(value, resultId) {
   return url.startsWith('/files/') ? `${FILE_BASE}${url}` : url
 }
 
-function hideMissingImage(event) {
+export function hideMissingImage(event) {
   event.currentTarget.closest('.vf-context-media, .vf-slide-thumb, .vf-source-transcript-thumb')?.setAttribute('data-missing', 'true')
   event.currentTarget.closest('.vf-context-panel, .vf-slide-report, .vf-source-transcript-scene')?.setAttribute('data-image-missing', 'true')
 }
