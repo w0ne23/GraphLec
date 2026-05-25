@@ -721,10 +721,10 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
                 "by_scene_path": str(by_scene_path),
                 "elapsed": 0.0,
             }
-        raise RuntimeError("Stage 4B by_scene 저장 실패: slide_ranges가 비어 있습니다.")
+        raise RuntimeError("P4B save_scene_structure — scene 구조 저장 실패: slide_ranges가 비어 있습니다.")
 
     if not scenes_structure and annotated_segments:
-        log.warning("Stage 4B by_scene 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
+        log.warning("P4B save_scene_structure — scene 구조가 비어 있어 annotated_segments 기반으로 재구성합니다.")
         try:
             _, scenes_structure = group_segments_by_scene_and_context(
                 annotated_segments,
@@ -734,12 +734,12 @@ def stage4b_save_by_scene(args, audio_result: dict, output_dir: Path) -> dict:
                 use_llm_merge=False,
             )
         except Exception as exc:
-            raise RuntimeError(f"Stage 4B by_scene 재구성 실패: {exc}") from exc
+            raise RuntimeError(f"P4B save_scene_structure — scene 구조 재구성 실패: {exc}") from exc
 
     if not scenes_structure:
         raise RuntimeError(
-            "Stage 4B by_scene 저장 실패: scenes_structure가 비어 있습니다. "
-            "Stage 3B 오디오 후처리 결과를 확인해주세요."
+            "P4B save_scene_structure — scene 구조 저장 실패: scenes_structure가 비어 있습니다. "
+            "P3B process_audio — 오디오 후처리 결과를 확인해주세요."
         )
 
     if _is_done(by_scene_path, "P4B save_scene_structure — scene 구조 저장", args.force):
@@ -1417,7 +1417,7 @@ def stage7_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
         return {"elapsed": 0.0, "parquet_path": str(parquet_path), "skipped": True}
 
     if not fused_path.exists():
-        raise FileNotFoundError(f"Stage 7: fused 파일 없음 — Stage 5 퓨전이 필요합니다: {fused_path}")
+        raise FileNotFoundError(f"G2 lance_index — fused 파일 없음. P5 fusion — 데이터 퓨전이 필요합니다: {fused_path}")
 
     _banner("G2 lance_index — LanceDB 인덱스  (Gemini 임베딩 + lance_ingest)")
     t0 = time.time()
@@ -1532,15 +1532,15 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
         }
 
     if not fused_path.exists():
-        raise FileNotFoundError(f"Stage 7B: fused 파일 없음 — Stage 5 퓨전이 필요합니다: {fused_path}")
+        raise FileNotFoundError(f"G3 graphrag_index — fused 파일 없음. P5 fusion — 데이터 퓨전이 필요합니다: {fused_path}")
 
     graphrag_bin = _find_graphrag_executable()
     if not graphrag_bin:
-        raise RuntimeError("Stage 7B: graphrag CLI를 찾을 수 없습니다. requirements 설치 후 다시 실행하세요.")
+        raise RuntimeError("G3 graphrag_index — graphrag CLI를 찾을 수 없습니다. requirements 설치 후 다시 실행하세요.")
 
     api_key = os.getenv("GRAPHRAG_API_KEY") or os.getenv("OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("Stage 7B: GRAPHRAG_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다.")
+        raise RuntimeError("G3 graphrag_index — GRAPHRAG_API_KEY 또는 OPENAI_API_KEY 환경변수가 필요합니다.")
 
     _banner("G3 graphrag_index — GraphRAG 인덱스  (fused → parquet workspace)")
     t0 = time.time()
