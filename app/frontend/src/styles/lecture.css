@@ -1,7 +1,7 @@
 /* ============================================================
    lecture.css — 강의 시청 페이지 (LecturePage) 스타일
    구성: 영상 플레이어 + 타임라인 + 채팅/그래프 패널 레이아웃
-   ※ lp-back, lp-title, lp-loading 은 VerifierPage.jsx 에서도 사용 중
+   ※ lp-back, lp-title, lp-loading 은 DevVerifierPage.jsx 에서도 사용 중
    ============================================================ */
 
 :root {

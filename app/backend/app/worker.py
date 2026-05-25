@@ -43,6 +43,37 @@ else:
 PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else PROJECT_ROOT_DIR
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 
+PIPELINE_STAGE_KEYS = [
+    "preprocess_extract_media",
+    "preprocess_textualize_transcribe",
+    "preprocess_enrich_audio_annotation",
+    "preprocess_classify_scene",
+    "preprocess_fusion",
+    "verifier_build_analyzer_input",
+    "verifier_run",
+    "graph_triples",
+    "graph_lance_index",
+    "graph_graphrag_index",
+    "graph_metadata",
+    "graph_recommender_index",
+]
+
+GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS = {
+    "preprocess_extract_media",
+    "preprocess_textualize_transcribe",
+    "preprocess_enrich_audio_annotation",
+    "preprocess_classify_scene",
+    "preprocess_fusion",
+}
+
+
+def _initial_stage_state(job_type: str) -> dict[str, str]:
+    stages = {key: "wait" for key in PIPELINE_STAGE_KEYS}
+    if job_type == JOB_TYPE_GRAPH_UPLOAD:
+        for key in GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS:
+            stages[key] = "done"
+    return stages
+
 
 def pipeline_process(
     job_id: str,
@@ -76,11 +107,7 @@ def pipeline_process(
         output_dir.mkdir(parents=True, exist_ok=True)
         slides_dir.mkdir(parents=True, exist_ok=True)
 
-        stages_state = {
-            "scene": "wait", "voice": "wait", "stt": "wait",
-            "integrate": "wait", "graph": "wait",
-            "summarize": "wait", "metadata": "wait",
-        }
+        stages_state = _initial_stage_state(job_type)
 
         def on_progress(stage_key: str, status: str):
             if stage_key in stages_state:

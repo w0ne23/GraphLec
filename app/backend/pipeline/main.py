@@ -1786,8 +1786,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
     _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
     t_parallel = time.time()
     audio_analyze_result: dict = {}
-    runtime.notify_stage("scene", "run")
-    runtime.notify_stage("voice", "run")
+    runtime.notify_stage("preprocess_extract_media", "run")
 
     if args.skip_extract:
         log.info("Stage 1A 건너뜀 (--skip-extract)")
@@ -1810,8 +1809,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
 
     duration = audio_analyze_result.get("duration", 0.0)
     timings["Stage 1 병렬 총"] = time.time() - t_parallel
-    runtime.notify_stage("scene", "done")
-    runtime.notify_stage("voice", "done")
+    runtime.notify_stage("preprocess_extract_media", "done")
     runtime.write_timings("Stage 1 병렬 총")
     print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -1819,7 +1817,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
     _banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
     t_parallel = time.time()
     transcript_result: dict = {}
-    runtime.notify_stage("stt", "run")
+    runtime.notify_stage("preprocess_textualize_transcribe", "run")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_2a = executor.submit(stage2_textualize, args, slides_dir, output_dir)
@@ -1834,7 +1832,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
                 timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
 
     timings["Stage 2 병렬 총"] = time.time() - t_parallel
-    runtime.notify_stage("stt", "done")
+    runtime.notify_stage("preprocess_textualize_transcribe", "done")
     runtime.write_timings("Stage 2 병렬 총")
     print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -1845,6 +1843,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
     annotation_result: dict = {}
     analyzer_lock = Lock()
     analyzer_input_built = {"done": False}
+    runtime.notify_stage("preprocess_enrich_audio_annotation", "run")
 
     transcript_raw_path = transcript_result.get(
         "transcript_raw_path",
@@ -1855,6 +1854,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
         with analyzer_lock:
             if analyzer_input_built["done"]:
                 return
+            runtime.notify_stage("verifier_build_analyzer_input", "run")
             local_r9 = stage9_build_analyzer_merged_clean(
                 args,
                 meta_path=meta_path,
@@ -1867,6 +1867,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
             timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
             r9.update(local_r9)
             analyzer_input_built["done"] = True
+            runtime.notify_stage("verifier_build_analyzer_input", "done")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_a = executor.submit(stage3a_annotation, args, slides_dir, output_dir)
@@ -1890,6 +1891,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
                     _build_analyzer_input_once(audio_result)
 
     timings["Stage 3 병렬 총"] = time.time() - t_parallel
+    runtime.notify_stage("preprocess_enrich_audio_annotation", "done")
     runtime.write_timings("Stage 3 병렬 총")
     print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -1900,6 +1902,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
     by_scene_result: dict = {}
     silences_path = audio_result.get("silences_path", str(paths["silences"]))
     annotation_path = annotation_result.get("annotation_path", str(paths["annotation"]))
+    runtime.notify_stage("preprocess_classify_scene", "run")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_c = executor.submit(
@@ -1915,11 +1918,12 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
                 timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
 
     timings["Stage 4 병렬 총"] = time.time() - t_parallel
+    runtime.notify_stage("preprocess_classify_scene", "done")
     runtime.write_timings("Stage 4 병렬 총")
     print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
     print("─" * 70)
 
-    runtime.notify_stage("integrate", "run")
+    runtime.notify_stage("preprocess_fusion", "run")
     r5 = stage5_fusion(
         args,
         textualized_path=textualized_path,
@@ -1928,6 +1932,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
         output_dir=output_dir,
     )
     timings["Stage 5 퓨전"] = r5["elapsed"]
+    runtime.notify_stage("preprocess_fusion", "done")
     runtime.write_timings("Stage 5 퓨전")
 
     if build_analyzer_input and not timings.get("Stage 9 analyzer 입력 생성"):
@@ -1958,7 +1963,7 @@ def run_graph_pipeline(args, runtime: PipelineRuntime, preprocess_result: Option
     r8: dict = {}
     r11: dict = {}
 
-    runtime.notify_stage("graph", "run")
+    runtime.notify_stage("graph_triples", "run")
     if args.skip_graph_triples:
         print("\n  ⏭  Stage 6 그래프 트리플 생성 — 사용자 옵션으로 스킵")
         print("─" * 70)
@@ -1970,27 +1975,28 @@ def run_graph_pipeline(args, runtime: PipelineRuntime, preprocess_result: Option
         print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
         print("─" * 70)
         timings["Neo4j 적재"] = 0.0
-    runtime.notify_stage("graph", "done")
-    runtime.notify_stage("integrate", "done")
+    runtime.notify_stage("graph_triples", "done")
 
     if args.skip_lance_index:
         print("\n  ⏭  Stage 7 Lance 인덱스 — 사용자 옵션으로 스킵")
         print("─" * 70)
         timings["Stage 7 Lance 인덱스"] = 0.0
     else:
-        runtime.notify_stage("summarize", "run")
+        runtime.notify_stage("graph_lance_index", "run")
         r7 = stage7_lance_index(args, output_dir, slides_dir)
         timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
-        runtime.notify_stage("summarize", "done")
+        runtime.notify_stage("graph_lance_index", "done")
 
     if getattr(args, "skip_graphrag_index", False):
         print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
         print("─" * 70)
         runtime.record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
     else:
+        runtime.notify_stage("graph_graphrag_index", "run")
         runtime.stage_status["Stage 7B GraphRAG 인덱스"] = "run"
         runtime.write_timings("Stage 7B GraphRAG 인덱스")
         r7b = stage7b_graphrag_index(args, output_dir)
+        runtime.notify_stage("graph_graphrag_index", "done")
         runtime.record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
 
     if getattr(args, "skip_metadata", False):
@@ -1998,16 +2004,20 @@ def run_graph_pipeline(args, runtime: PipelineRuntime, preprocess_result: Option
         print("─" * 70)
         timings["Stage 8 메타데이터 생성"] = 0.0
     else:
+        runtime.notify_stage("graph_metadata", "run")
         r8 = stage8_generate_metadata(args, output_dir, slides_dir)
         timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+        runtime.notify_stage("graph_metadata", "done")
 
     if getattr(args, "skip_recommender_index", False):
         print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
         print("─" * 70)
         timings["Stage 11 추천 인덱스 생성"] = 0.0
     else:
+        runtime.notify_stage("graph_recommender_index", "run")
         r11 = stage11_build_recommender_index(args)
         timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+        runtime.notify_stage("graph_recommender_index", "done")
 
     runtime.write_timings("graph_pipeline_done")
     return {
@@ -2045,6 +2055,7 @@ def run_verifier_pipeline(
     r10b: dict = {}
 
     if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
+        runtime.notify_stage("verifier_run", "run")
         r10a = stage10_extract_claims(args, merged_clean_path=merged_clean_path, output_dir=runtime.output_dir)
         timings["Stage 10A claim 추출"] = r10a["elapsed"]
         if getattr(args, "stop_after_issue_judge", False):
@@ -2056,12 +2067,17 @@ def run_verifier_pipeline(
             )
             timings["Stage 10B 1차 issue judge"] = r10b["elapsed"]
         timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        runtime.notify_stage("verifier_run", "done")
     elif background:
+        runtime.notify_stage("verifier_run", "run")
         r10 = stage10_spawn_analyzers_subprocess(args, merged_clean_path, runtime.output_dir)
         timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
+        runtime.notify_stage("verifier_run", "done")
     else:
+        runtime.notify_stage("verifier_run", "run")
         r10 = stage10_run_verifier(args, merged_clean_path, runtime.output_dir)
         timings["Stage 10 verifier 실행"] = r10["elapsed"]
+        runtime.notify_stage("verifier_run", "done")
 
     runtime.write_timings("verifier_pipeline_done")
     return {

@@ -1,29 +1,61 @@
 /* ============================================================
-   upload.css — UploadPage 스타일
-   업로드 폼(primary) + 분석 진행/완료 강의 목록(secondary)을 담는 페이지.
-   사용: UploadPage.jsx
-   ※ BEM 리네이밍 예정
+   dev-upload.css — DevUploadPage 스타일
    ============================================================ */
 
-/* 페이지 전체: 세로 스크롤 컨테이너 */
+/* 페이지 전체: 제한 폭 콘텐츠 + 내부 작업 패널 */
 .up-page {
-  flex: 1; overflow-y: auto;
-  scroll-behavior: smooth;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 40px 24px;
+  background: var(--bg);
+}
+.up-content {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 1120px;
+  height: 100%;
+  min-height: 0;
+  margin: 0 auto;
+}
+.up-header {
+  margin-bottom: 22px;
+}
+.up-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--t1);
+  margin-bottom: 8px;
+}
+.up-subtitle {
+  font-size: 13px;
+  color: var(--t3);
+}
+.up-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  background: rgba(200,205,224,.3);
+  border: 1px solid var(--b1);
+  border-radius: var(--rl);
+  overflow: hidden;
 }
 
-/* 섹션 1: 업로드 폼 — 뷰포트 전체 높이 */
+/* 섹션 1: 업로드 폼 */
 .up-form-section {
-  height: 100%;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--bg); padding: 32px 24px;
+  flex: 0 0 300px;
+  min-width: 0;
+  display: flex; align-items: flex-start; justify-content: center;
+  background: transparent; padding: 28px 24px;
+  border-right: 1px solid var(--b2);
+  overflow-y: auto;
 }
 .up-form-inner {
   display: flex; flex-direction: column;
   width: 100%; max-width: 480px; gap: 16px;
 }
-.up-form-logo      { font-size: 22px; font-weight: 700; color: var(--t1); }
-.up-form-logo span { color: var(--blue); }
-.up-form-sub       { font-size: 13px; color: var(--t3); margin-top: -8px; }
+.up-section-title  { font-size: 15px; font-weight: 700; color: var(--t1); }
 .up-error          { font-size: 12px; color: var(--red); }
 
 /* 드롭존 */
@@ -38,48 +70,42 @@
 .up-dz-icon        { font-size: 28px; margin-bottom: 8px; opacity: .6; }
 .up-dz-text        { font-size: 12px; color: var(--t2); }
 .up-dz-sub         { font-size: 11px; color: var(--t3); margin-top: 4px; }
+.up-file-input     { display: none; }
 
 /* 폼 필드 */
-.up-field-group { display: flex; flex-direction: column; gap: 10px; }
 .up-field       { display: flex; flex-direction: column; gap: 4px; }
 .up-label       { font-size: 11px; color: var(--t2); }
-.up-input, .up-select, .up-textarea {
+.up-input {
   width: 100%; background: var(--panel); border: 1.5px solid var(--b1);
   border-radius: var(--r); padding: 8px 10px; font-size: 12px; color: var(--t1);
   outline: none; transition: border-color .15s;
 }
-.up-input:focus, .up-select:focus, .up-textarea:focus { border-color: var(--blue); }
-.up-textarea { resize: vertical; min-height: 64px; }
+.up-input:focus { border-color: var(--blue); }
 
 /* 업로드 버튼 */
-.up-submit-group {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
 .up-submit-btn {
   width: 100%; padding: 11px; background: var(--blue); border: none;
   border-radius: var(--r); color: #fff; font-size: 13px; font-weight: 700;
   transition: opacity .15s;
 }
-.up-submit-btn--direct { background: var(--t1); }
 .up-submit-btn:hover    { opacity: .87; }
 .up-submit-btn:disabled { opacity: .45; cursor: not-allowed; }
 
-/* 목록 스크롤 힌트 */
-.up-scroll-hint {
-  background: none; border: none; color: var(--t3);
-  font-size: 12px; text-align: center; padding: 4px; cursor: pointer;
-  transition: color .14s;
-}
-.up-scroll-hint:hover { color: var(--t1); }
-
 /* 섹션 2: 강의 목록 */
-.up-list-section { padding: 28px 24px; min-height: 100%; background: var(--bg); }
-.up-list-header  { display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
-.up-list-title   { font-size: 15px; font-weight: 700; }
+.up-list-section {
+  flex: 1 1 560px;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 28px 24px;
+  background: transparent;
+  overflow-y: auto;
+}
+.up-list-header  { width: 100%; display: flex; align-items: baseline; gap: 8px; margin-bottom: 14px; }
 .up-list-count   { font-size: 12px; color: var(--t3); }
-.up-list         { display: flex; flex-direction: column; gap: 8px; }
+.up-list         { width: 100%; display: flex; flex-direction: column; gap: 8px; }
 .up-empty        { font-size: 13px; color: var(--t3); padding: 32px 0; text-align: center; }
 
 /* 강의 목록 행 */
@@ -95,9 +121,8 @@
 .upload-row-thumb-icon { font-size: 18px; opacity: .45; }
 .upload-row-main       { flex: 1; min-width: 0; }
 .upload-row-title      { font-size: 13px; font-weight: 600; color: var(--t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-bottom: 3px; }
-.upload-row-meta       { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
-.upload-row-cat        { font-size: 10px; font-weight: 700; color: var(--blue); text-transform: uppercase; letter-spacing: .4px; }
-.upload-row-tag        { font-size: 10px; padding: 1px 6px; border-radius: 3px; background: var(--blue-bg); color: var(--blue); }
+.upload-row-meta       { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.upload-row-cat        { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; font-weight: 700; color: var(--blue); text-transform: uppercase; letter-spacing: .4px; }
 .upload-row-date       { font-size: 11px; color: var(--t3); font-family: 'JetBrains Mono', monospace; flex-shrink: 0; }
 
 /* 상태 배지 (upload-row 전용 래퍼) */
@@ -106,15 +131,14 @@
 
 /* 파이프라인 진행 표시 */
 .upload-pipe         { margin-top: 8px; padding: 10px 12px; background: var(--card); border-radius: var(--r); border: 1px solid var(--b1); }
-.upload-pipe-header  { display: flex; justify-content: space-between; margin-bottom: 6px; }
-.upload-pipe-name    { font-size: 11px; font-weight: 500; }
-.upload-pipe-pct     { font-size: 11px; color: var(--t3); font-family: 'JetBrains Mono', monospace; }
+.upload-pipe--attached { margin: -4px 0 4px; border-top-left-radius: 0; border-top-right-radius: 0; }
 .upload-pipe-track   { height: 3px; background: var(--hover); border-radius: 2px; overflow: hidden; margin-bottom: 7px; }
 .upload-pipe-fill    { height: 100%; background: var(--blue); border-radius: 2px; transition: width .4s; }
 .upload-pipe-stages  { display: flex; flex-wrap: wrap; gap: 4px; }
 .upload-chip         { font-size: 10px; padding: 2px 7px; border-radius: 3px; border: 1px solid var(--b1); color: var(--t3); }
 .upload-chip--run    { background: var(--blue-bg);  border-color: var(--blue-br); color: var(--blue); }
 .upload-chip--done   { background: var(--green-bg); border-color: rgba(21,128,61,.2); color: var(--green-text); }
+.upload-pipe-error   { margin-top: 8px; font-size: 11px; color: var(--red); }
 
 /* 행 액션 버튼 */
 .upload-row-actions  { display: flex; gap: 6px; flex-shrink: 0; }
@@ -126,3 +150,26 @@
 .upload-btn-verifier:hover { background: var(--blue);  color: #fff; }
 .upload-row-arrow    { font-size: 16px; color: var(--t3); transition: color .14s; }
 .upload-row:hover .upload-row-arrow { color: var(--blue); }
+
+@media (max-width: 760px) {
+  .up-panel {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .up-form-section {
+    flex: none;
+    min-width: 0;
+    align-items: stretch;
+    border-right: 0;
+    border-bottom: 1px solid var(--b1);
+  }
+  .up-form-inner {
+    max-width: none;
+  }
+  .up-list-section {
+    flex: none;
+    min-height: 0;
+    align-items: stretch;
+    overflow: visible;
+  }
+}

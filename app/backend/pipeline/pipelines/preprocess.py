@@ -16,8 +16,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     helpers._banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
     t_parallel = time.time()
     audio_analyze_result: dict = {}
-    runtime.notify_stage("scene", "run")
-    runtime.notify_stage("voice", "run")
+    runtime.notify_stage("preprocess_extract_media", "run")
 
     if args.skip_extract:
         helpers.log.info("Stage 1A 건너뜀 (--skip-extract)")
@@ -40,8 +39,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
 
     duration = audio_analyze_result.get("duration", 0.0)
     timings["Stage 1 병렬 총"] = time.time() - t_parallel
-    runtime.notify_stage("scene", "done")
-    runtime.notify_stage("voice", "done")
+    runtime.notify_stage("preprocess_extract_media", "done")
     runtime.write_timings("Stage 1 병렬 총")
     print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -49,7 +47,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     helpers._banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
     t_parallel = time.time()
     transcript_result: dict = {}
-    runtime.notify_stage("stt", "run")
+    runtime.notify_stage("preprocess_textualize_transcribe", "run")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_2a = executor.submit(helpers.stage2_textualize, args, slides_dir, output_dir)
@@ -64,7 +62,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
                 timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
 
     timings["Stage 2 병렬 총"] = time.time() - t_parallel
-    runtime.notify_stage("stt", "done")
+    runtime.notify_stage("preprocess_textualize_transcribe", "done")
     runtime.write_timings("Stage 2 병렬 총")
     print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -75,6 +73,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     annotation_result: dict = {}
     analyzer_lock = Lock()
     analyzer_input_built = {"done": False}
+    runtime.notify_stage("preprocess_enrich_audio_annotation", "run")
 
     transcript_raw_path = transcript_result.get(
         "transcript_raw_path",
@@ -85,6 +84,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
         with analyzer_lock:
             if analyzer_input_built["done"]:
                 return
+            runtime.notify_stage("verifier_build_analyzer_input", "run")
             local_r9 = helpers.stage9_build_analyzer_merged_clean(
                 args,
                 meta_path=meta_path,
@@ -97,6 +97,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
             timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
             r9.update(local_r9)
             analyzer_input_built["done"] = True
+            runtime.notify_stage("verifier_build_analyzer_input", "done")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_a = executor.submit(helpers.stage3a_annotation, args, slides_dir, output_dir)
@@ -120,6 +121,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
                     _build_analyzer_input_once(audio_result)
 
     timings["Stage 3 병렬 총"] = time.time() - t_parallel
+    runtime.notify_stage("preprocess_enrich_audio_annotation", "done")
     runtime.write_timings("Stage 3 병렬 총")
     print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
     print("─" * 70)
@@ -130,6 +132,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     by_scene_result: dict = {}
     silences_path = audio_result.get("silences_path", str(paths["silences"]))
     annotation_path = annotation_result.get("annotation_path", str(paths["annotation"]))
+    runtime.notify_stage("preprocess_classify_scene", "run")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_c = executor.submit(
@@ -145,11 +148,12 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
                 timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
 
     timings["Stage 4 병렬 총"] = time.time() - t_parallel
+    runtime.notify_stage("preprocess_classify_scene", "done")
     runtime.write_timings("Stage 4 병렬 총")
     print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
     print("─" * 70)
 
-    runtime.notify_stage("integrate", "run")
+    runtime.notify_stage("preprocess_fusion", "run")
     r5 = helpers.stage5_fusion(
         args,
         textualized_path=textualized_path,
@@ -158,6 +162,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
         output_dir=output_dir,
     )
     timings["Stage 5 퓨전"] = r5["elapsed"]
+    runtime.notify_stage("preprocess_fusion", "done")
     runtime.write_timings("Stage 5 퓨전")
 
     if build_analyzer_input and not timings.get("Stage 9 analyzer 입력 생성"):
@@ -175,4 +180,3 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
         "fusion_result": r5,
         "analyzer_input_result": r9,
     }
-
