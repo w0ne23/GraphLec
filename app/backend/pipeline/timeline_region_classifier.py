@@ -31,12 +31,16 @@ from statistics import mean, median
 from typing import Iterable
 
 import cv2
+import imagehash
 import numpy as np
+from PIL import Image
 
 try:
     from .sample_cache import iter_sample_cache, load_sample_cache
+    from .person_masks import load_person_mask, masked_pair
 except ImportError:  # pragma: no cover - allows direct script execution
     from sample_cache import iter_sample_cache, load_sample_cache
+    from person_masks import load_person_mask, masked_pair
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -111,6 +115,12 @@ def _decision_frame(frame: np.ndarray, cfg: RegionClassifierConfig) -> np.ndarra
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+def _decision_mask(mask: np.ndarray | None, cfg: RegionClassifierConfig) -> np.ndarray | None:
+    if mask is None:
+        return None
+    return _content_region(mask.astype(np.uint8), cfg).astype(bool)
+
+
 def _changed_ratio(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     return float(np.sum(diff > threshold) / diff.size)
@@ -122,35 +132,57 @@ def _mse(frame_a: np.ndarray, frame_b: np.ndarray) -> float:
     return float(np.mean((a - b) ** 2))
 
 
+def _phash_int(frame: np.ndarray) -> int:
+    pil_img = Image.fromarray(frame)
+    return int(str(imagehash.phash(pil_img)), 16)
+
+
+def _phash_distance(a: int, b: int) -> int:
+    return int(a ^ b).bit_count()
+
+
 def _sample_motion_metrics(cache_dir: str | Path, cfg: RegionClassifierConfig) -> dict[int, dict]:
     metrics: dict[int, dict] = {}
     prev_decision = None
+    prev_mask = None
     for frame_info, frame in iter_sample_cache(cache_dir):
         sample_index = int(frame_info["sample_index"])
         decision = _decision_frame(frame, cfg)
+        mask = _decision_mask(load_person_mask(cache_dir, frame_info), cfg)
         if prev_decision is None:
             metrics[sample_index] = {
                 "changed_ratio": None,
                 "motion_mse": None,
+                "motion_hash_dist": None,
                 "pixel_motion": False,
                 "strong_pixel_motion": False,
             }
         else:
-            changed = _changed_ratio(prev_decision, decision, cfg.diff_threshold)
-            motion_mse = _mse(prev_decision, decision)
+            masked_prev, masked_curr = masked_pair(prev_decision, prev_mask, decision, mask)
+            changed = _changed_ratio(masked_prev, masked_curr, cfg.diff_threshold)
+            motion_mse = _mse(masked_prev, masked_curr)
+            motion_hash_dist = _phash_distance(_phash_int(masked_prev), _phash_int(masked_curr))
             metrics[sample_index] = {
                 "changed_ratio": round(changed, 6),
                 "motion_mse": round(motion_mse, 6),
+                "motion_hash_dist": motion_hash_dist,
                 "pixel_motion": changed >= cfg.motion_ratio,
                 "strong_pixel_motion": changed >= cfg.strong_motion_ratio,
             }
         prev_decision = decision
+        prev_mask = mask
     return metrics
 
 
 def _window_metrics(frames: list[dict], motion_metrics: dict[int, dict], cfg: RegionClassifierConfig) -> dict:
-    mses = _safe_values(f.get("prev_mse") for f in frames)
-    hashes = _safe_values(f.get("prev_hash_dist") for f in frames)
+    mses = _safe_values(
+        motion_metrics.get(int(f["sample_index"]), {}).get("motion_mse")
+        for f in frames
+    )
+    hashes = _safe_values(
+        motion_metrics.get(int(f["sample_index"]), {}).get("motion_hash_dist")
+        for f in frames
+    )
     changed_ratios = _safe_values(
         motion_metrics.get(int(f["sample_index"]), {}).get("changed_ratio")
         for f in frames
@@ -167,20 +199,20 @@ def _window_metrics(frames: list[dict], motion_metrics: dict[int, dict], cfg: Re
     metric_count = max(1, len(metric_frames))
 
     cut_flags = [
-        (float(f.get("prev_mse") or 0.0) >= cfg.cut_mse)
-        and (int(f.get("prev_hash_dist") or 0) >= cfg.cut_hash)
+        (float(motion_metrics.get(int(f["sample_index"]), {}).get("motion_mse") or 0.0) >= cfg.cut_mse)
+        and (int(motion_metrics.get(int(f["sample_index"]), {}).get("motion_hash_dist") or 0) >= cfg.cut_hash)
         for f in metric_frames
     ]
     active_flags = [
         (
-            float(f.get("prev_mse") or 0.0) >= cfg.active_mse
-            or int(f.get("prev_hash_dist") or 0) >= cfg.active_hash
+            float(motion_metrics.get(int(f["sample_index"]), {}).get("motion_mse") or 0.0) >= cfg.active_mse
+            or int(motion_metrics.get(int(f["sample_index"]), {}).get("motion_hash_dist") or 0) >= cfg.active_hash
         )
         and not cut
         for f, cut in zip(metric_frames, cut_flags)
     ]
     very_active_flags = [
-        float(f.get("prev_mse") or 0.0) >= cfg.very_active_mse and not cut
+        float(motion_metrics.get(int(f["sample_index"]), {}).get("motion_mse") or 0.0) >= cfg.very_active_mse and not cut
         for f, cut in zip(metric_frames, cut_flags)
     ]
     pixel_motion_flags = [

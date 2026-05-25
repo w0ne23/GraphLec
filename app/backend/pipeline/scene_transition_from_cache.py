@@ -25,6 +25,7 @@ import cv2
 
 try:
     from .sample_cache import iter_sample_cache, load_sample_cache
+    from .person_masks import load_person_mask, masked_pair
     from .scene_transition_probe import (
         ProbeConfig,
         compute_mse,
@@ -36,6 +37,7 @@ try:
     )
 except ImportError:  # Allows direct script execution during local debugging.
     from sample_cache import iter_sample_cache, load_sample_cache
+    from person_masks import load_person_mask, masked_pair
     from scene_transition_probe import (
         ProbeConfig,
         compute_mse,
@@ -128,6 +130,31 @@ def _save_cache_scene(
     return record
 
 
+def _save_scene_mask_preview(
+    out_dir: Path,
+    scene_index: int,
+    frame,
+    mask,
+    frame_info: dict,
+) -> str | None:
+    if mask is None:
+        return None
+    preview_dir = out_dir / "person_mask_previews"
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    preview = frame.copy()
+    resized_mask = mask
+    if resized_mask.shape[:2] != frame.shape[:2]:
+        resized_mask = cv2.resize(
+            resized_mask.astype(np.uint8),
+            (frame.shape[1], frame.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+    preview[resized_mask.astype(bool)] = 0
+    filename = f"scene_{scene_index:03d}_person_mask_sample_{int(frame_info['sample_index']):06d}.jpg"
+    cv2.imwrite(str(preview_dir / filename), preview, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return f"person_mask_previews/{filename}"
+
+
 def _scene_time(record: dict) -> float:
     return float(
         record.get(
@@ -147,6 +174,16 @@ def _remove_pruned_scene_previews(out_dir: Path, pruned_records: list[dict]) -> 
         filename = record.get("filename")
         if filename:
             (out_dir / str(filename)).unlink(missing_ok=True)
+
+
+def _masked_mse_and_hash(
+    frame_a,
+    mask_a,
+    frame_b,
+    mask_b,
+) -> tuple[float, int]:
+    masked_a, masked_b = masked_pair(frame_a, mask_a, frame_b, mask_b)
+    return compute_mse(masked_a, masked_b), int(compute_phash(masked_a) - compute_phash(masked_b))
 
 
 def prune_transition_middle_frames(
@@ -240,6 +277,7 @@ def run_cache_probe(
     prune_bursts: bool = True,
     transient_burst_gap_sec: float = 3.0,
     transient_burst_min_extra_scenes: int = 2,
+    save_person_mask_previews: bool = False,
 ) -> list[dict]:
     manifest = load_sample_cache(cache_dir)
     sampled_fps = float(manifest["cache"]["sampled_fps"])
@@ -251,6 +289,10 @@ def run_cache_probe(
     out_dir.mkdir(parents=True, exist_ok=True)
     for stale in out_dir.glob("scene_*.jpg"):
         stale.unlink(missing_ok=True)
+    preview_dir = out_dir / "person_mask_previews"
+    if preview_dir.exists():
+        for stale in preview_dir.glob("scene_*_person_mask_sample_*.jpg"):
+            stale.unlink(missing_ok=True)
 
     stable_frames_required = max(2, int(cfg.delay_sec * sampled_fps))
     pending_max_frames = max(stable_frames_required, int(cfg.max_pending_sec * sampled_fps))
@@ -260,8 +302,11 @@ def run_cache_probe(
     processed = 0
     skipped = 0
     base_decision = None
+    base_mask = None
     last_saved_base_decision = None
+    last_saved_base_mask = None
     prev_decision = None
+    prev_mask = None
     prev_hash = None
     pending = None
     active_region = None
@@ -292,14 +337,18 @@ def run_cache_probe(
                     )
                 active_region = None
                 base_decision = None
+                base_mask = None
                 prev_decision = None
+                prev_mask = None
                 prev_hash = None
                 pending = None
                 continue
             if active_region is None or active_region["segment_index"] != region["segment_index"]:
                 active_region = region
                 base_decision = None
+                base_mask = None
                 prev_decision = None
+                prev_mask = None
                 prev_hash = None
                 pending = None
                 log.info(
@@ -310,15 +359,18 @@ def run_cache_probe(
                 )
 
         decision = to_decision_frame(frame, cfg.resize_width)
+        person_mask = load_person_mask(cache_dir, frame_info)
         decision_hash = compute_phash(decision)
 
         if base_decision is None:
             base_decision = decision.copy()
+            base_mask = person_mask.copy() if person_mask is not None else None
             prev_decision = decision.copy()
+            prev_mask = person_mask.copy() if person_mask is not None else None
             prev_hash = decision_hash
             if (
                 last_saved_base_decision is not None
-                and is_duplicate_scene(last_saved_base_decision, decision, cfg)
+                and is_duplicate_scene(last_saved_base_decision, decision, cfg, last_saved_base_mask, person_mask)
             ):
                 log.info(
                     "[suppress] duplicate region first frame @ %.3fs frame=%s",
@@ -329,6 +381,10 @@ def run_cache_probe(
                 scene_index += 1
                 reason = "region_first_frame" if slide_regions else "first_frame"
                 record = _save_cache_scene(out_dir, scene_index, frame, frame_info, reason, {})
+                if save_person_mask_previews:
+                    preview_filename = _save_scene_mask_preview(out_dir, scene_index, frame, person_mask, frame_info)
+                    if preview_filename:
+                        record["person_mask_preview_filename"] = preview_filename
                 record["scene_start_frame_no"] = int(frame_info["frame_no"])
                 record["scene_start_sec"] = float(frame_info["timestamp_sec"])
                 record["base_frame_no"] = int(frame_info["frame_no"])
@@ -339,13 +395,22 @@ def run_cache_probe(
                     record["region_end_sec"] = float(active_region["end_sec"])
                 records.append(record)
                 last_saved_base_decision = decision.copy()
+                last_saved_base_mask = person_mask.copy() if person_mask is not None else None
             continue
 
         if pending is not None:
-            anchor_mse = compute_mse(pending["anchor_decision"], decision)
-            anchor_hash_dist = int(pending["anchor_hash"] - decision_hash)
-            prev_pending_mse = compute_mse(pending["last_decision"], decision)
-            prev_pending_hash_dist = int(pending["last_hash"] - decision_hash)
+            anchor_mse, anchor_hash_dist = _masked_mse_and_hash(
+                pending["anchor_decision"],
+                pending.get("anchor_mask"),
+                decision,
+                person_mask,
+            )
+            prev_pending_mse, prev_pending_hash_dist = _masked_mse_and_hash(
+                pending["last_decision"],
+                pending.get("last_mask"),
+                decision,
+                person_mask,
+            )
             pending["observed"] += 1
 
             if (
@@ -358,25 +423,35 @@ def run_cache_probe(
                 pending.update({
                     "frame": frame.copy(),
                     "decision": decision.copy(),
+                    "mask": person_mask.copy() if person_mask is not None else None,
                     "frame_info": dict(frame_info),
                     "hash": decision_hash,
                 })
             else:
                 pending.update({
                     "anchor_decision": decision.copy(),
+                    "anchor_mask": person_mask.copy() if person_mask is not None else None,
                     "anchor_hash": decision_hash,
                     "frame": frame.copy(),
                     "decision": decision.copy(),
+                    "mask": person_mask.copy() if person_mask is not None else None,
                     "frame_info": dict(frame_info),
                     "hash": decision_hash,
                     "stable": 1,
                 })
 
             pending["last_decision"] = decision.copy()
+            pending["last_mask"] = person_mask.copy() if person_mask is not None else None
             pending["last_hash"] = decision_hash
 
             if pending["stable"] >= stable_frames_required or pending["observed"] >= pending_max_frames:
-                if base_decision is not None and is_duplicate_scene(base_decision, pending["decision"], cfg):
+                if base_decision is not None and is_duplicate_scene(
+                    base_decision,
+                    pending["decision"],
+                    cfg,
+                    base_mask,
+                    pending.get("mask"),
+                ):
                     log.info(
                         "[suppress] duplicate pending scene @ %.3fs frame=%s",
                         float(pending["frame_info"]["timestamp_sec"]),
@@ -394,6 +469,16 @@ def run_cache_probe(
                         pending["reason"] + "_stabilized",
                         pending["details"],
                     )
+                    if save_person_mask_previews:
+                        preview_filename = _save_scene_mask_preview(
+                            out_dir,
+                            scene_index,
+                            pending["frame"],
+                            pending.get("mask"),
+                            save_info,
+                        )
+                        if preview_filename:
+                            record["person_mask_preview_filename"] = preview_filename
                     record["scene_start_frame_no"] = int(start_info["frame_no"])
                     record["scene_start_sec"] = float(start_info["timestamp_sec"])
                     record["base_frame_no"] = int(save_info["frame_no"])
@@ -404,24 +489,40 @@ def run_cache_probe(
                         record["region_end_sec"] = float(active_region["end_sec"])
                     records.append(record)
                     base_decision = pending["decision"].copy()
+                    base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
                     last_saved_base_decision = pending["decision"].copy()
+                    last_saved_base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
 
                 prev_decision = decision.copy()
+                prev_mask = person_mask.copy() if person_mask is not None else None
                 prev_hash = decision_hash
                 pending = None
             continue
 
         assert base_decision is not None and prev_decision is not None and prev_hash is not None
-        reason, details = transition_reason(base_decision, prev_decision, decision, prev_hash, decision_hash, cfg)
+        reason, details = transition_reason(
+            base_decision,
+            prev_decision,
+            decision,
+            prev_hash,
+            decision_hash,
+            cfg,
+            base_mask=base_mask,
+            prev_mask=prev_mask,
+            current_mask=person_mask,
+        )
         if reason is not None:
             pending = {
                 "start_frame_info": dict(frame_info),
                 "anchor_decision": decision.copy(),
+                "anchor_mask": person_mask.copy() if person_mask is not None else None,
                 "anchor_hash": decision_hash,
                 "last_decision": decision.copy(),
+                "last_mask": person_mask.copy() if person_mask is not None else None,
                 "last_hash": decision_hash,
                 "frame": frame.copy(),
                 "decision": decision.copy(),
+                "mask": person_mask.copy() if person_mask is not None else None,
                 "frame_info": dict(frame_info),
                 "hash": decision_hash,
                 "stable": 1,
@@ -438,6 +539,7 @@ def run_cache_probe(
             continue
 
         prev_decision = decision.copy()
+        prev_mask = person_mask.copy() if person_mask is not None else None
         prev_hash = decision_hash
 
         if processed % 1000 == 0:
@@ -445,7 +547,13 @@ def run_cache_probe(
             log.info("processed=%s/%s %.1f%%", processed, sample_count, pct)
 
     if pending is not None:
-        if base_decision is None or not is_duplicate_scene(base_decision, pending["decision"], cfg):
+        if base_decision is None or not is_duplicate_scene(
+            base_decision,
+            pending["decision"],
+            cfg,
+            base_mask,
+            pending.get("mask"),
+        ):
             scene_index += 1
             record = _save_cache_scene(
                 out_dir,
@@ -455,12 +563,23 @@ def run_cache_probe(
                 pending["reason"] + "_flush",
                 pending["details"],
             )
+            if save_person_mask_previews:
+                preview_filename = _save_scene_mask_preview(
+                    out_dir,
+                    scene_index,
+                    pending["frame"],
+                    pending.get("mask"),
+                    pending["frame_info"],
+                )
+                if preview_filename:
+                    record["person_mask_preview_filename"] = preview_filename
             record["scene_start_frame_no"] = int(pending["start_frame_info"]["frame_no"])
             record["scene_start_sec"] = float(pending["start_frame_info"]["timestamp_sec"])
             record["base_frame_no"] = int(pending["frame_info"]["frame_no"])
             record["base_timestamp_sec"] = float(pending["frame_info"]["timestamp_sec"])
             records.append(record)
             last_saved_base_decision = pending["decision"].copy()
+            last_saved_base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
 
     pruned_records: list[dict] = []
     review_candidates: list[dict] = []
@@ -487,6 +606,7 @@ def run_cache_probe(
             "pruned_records": pruned_records,
             "review_candidate_count": len(review_candidates),
             "review_candidates": review_candidates,
+            "person_mask_scene_previews": save_person_mask_previews,
         },
         "config": asdict(cfg),
         "cache": manifest.get("cache"),
@@ -513,11 +633,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-prune-transient-bursts", action="store_true", help="Legacy name: disable rapid transition-cluster VLM candidate generation")
     parser.add_argument("--transient-burst-gap-sec", type=float, default=3.0, help="Max gap between adjacent scene candidates in one transition cluster")
     parser.add_argument("--transient-burst-min-extra-scenes", type=int, default=2, help="Legacy option: default 2 means review clusters with 3+ candidates")
+    parser.add_argument("--save-person-mask-previews", action="store_true", help="Save one masked preview per saved scene/base frame")
     parser.add_argument("--resize-width", type=int, default=ProbeConfig.resize_width)
     parser.add_argument("--delay-sec", type=float, default=ProbeConfig.delay_sec)
     parser.add_argument("--max-pending-sec", type=float, default=ProbeConfig.max_pending_sec)
     parser.add_argument("--stable-mse", type=float, default=ProbeConfig.stable_mse)
     parser.add_argument("--stable-prev-mse", type=float, default=ProbeConfig.stable_prev_mse)
+    parser.add_argument("--base-mse", type=float, default=ProbeConfig.base_mse)
+    parser.add_argument("--base-changed-ratio", type=float, default=ProbeConfig.base_changed_ratio)
+    parser.add_argument("--base-hash", type=int, default=ProbeConfig.base_hash)
+    parser.add_argument("--edge-break-ratio", type=float, default=ProbeConfig.edge_break_ratio)
+    parser.add_argument("--fine-diff-threshold", type=int, default=ProbeConfig.fine_diff_threshold)
+    parser.add_argument("--subtle-changed-ratio", type=float, default=ProbeConfig.subtle_changed_ratio)
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -533,6 +660,12 @@ def main():
         max_pending_sec=max(args.delay_sec, args.max_pending_sec),
         stable_mse=max(0.0, args.stable_mse),
         stable_prev_mse=max(0.0, args.stable_prev_mse),
+        base_mse=max(0.0, args.base_mse),
+        base_changed_ratio=max(0.0, args.base_changed_ratio),
+        base_hash=max(0, args.base_hash),
+        edge_break_ratio=max(0.0, args.edge_break_ratio),
+        fine_diff_threshold=max(1, args.fine_diff_threshold),
+        subtle_changed_ratio=max(0.0, args.subtle_changed_ratio),
     )
     run_cache_probe(
         args.cache,
@@ -543,6 +676,7 @@ def main():
         prune_bursts=not args.no_prune_transient_bursts,
         transient_burst_gap_sec=max(0.0, args.transient_burst_gap_sec),
         transient_burst_min_extra_scenes=max(1, args.transient_burst_min_extra_scenes),
+        save_person_mask_previews=args.save_person_mask_previews,
     )
 
 

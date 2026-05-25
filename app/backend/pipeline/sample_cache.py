@@ -27,6 +27,11 @@ import imagehash
 import numpy as np
 from PIL import Image
 
+try:
+    from .person_masks import MASKS_DIRNAME
+except ImportError:  # pragma: no cover - allows direct script execution
+    from person_masks import MASKS_DIRNAME
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -42,6 +47,15 @@ class SampleCacheConfig:
     sample_every: int = 2
     resize_width: int = 768
     jpeg_quality: int = 95
+    person_masks: bool = True
+    person_mask_model: str = "yolov8n-seg.pt"
+    person_mask_conf: float = 0.25
+    person_mask_dilate_px: int = 30
+    person_mask_static_diff_threshold: float = 3.0
+    person_mask_match_iou_threshold: float = 0.05
+    person_mask_fill_gap_sec: float = 6.0
+    save_person_mask_previews: bool = False
+    person_mask_preview_limit: int = 30
 
 
 def resize_frame(frame: np.ndarray, width: int) -> np.ndarray:
@@ -71,6 +85,140 @@ def compute_phash_int(frame: np.ndarray) -> int:
 
 def phash_distance_int(a: int, b: int) -> int:
     return int(a ^ b).bit_count()
+
+
+def _load_person_model(model_name: str):
+    try:
+        from ultralytics import YOLO
+    except ImportError:
+        log.warning("ultralytics is not installed; person masks disabled")
+        return None
+    try:
+        return YOLO(model_name)
+    except Exception as exc:
+        log.warning("failed to load person mask model %s; person masks disabled: %s", model_name, exc)
+        return None
+
+
+def _person_detections_from_frame(model, frame: np.ndarray, conf: float) -> list[dict]:
+    if model is None:
+        return []
+    height, width = frame.shape[:2]
+    results = model(frame, classes=[0], conf=conf, verbose=False)[0]
+    if results.masks is None:
+        return []
+
+    detections: list[dict] = []
+    for box, polygon in zip(results.boxes, results.masks.xy):
+        if len(polygon) < 3:
+            continue
+        mask = np.zeros((height, width), dtype=np.uint8)
+        pts = np.asarray(polygon, dtype=np.int32).reshape((-1, 1, 2))
+        cv2.fillPoly(mask, [pts], 1)
+        if not bool(mask.any()):
+            continue
+        x1, y1, x2, y2 = box.xyxy[0].tolist()
+        detections.append({
+            "bbox": (int(x1), int(y1), int(x2), int(y2)),
+            "mask": mask,
+        })
+    return detections
+
+
+def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    if ix2 <= ix1 or iy2 <= iy1:
+        return 0.0
+    inter = float((ix2 - ix1) * (iy2 - iy1))
+    area_a = max(1.0, float((ax2 - ax1) * (ay2 - ay1)))
+    area_b = max(1.0, float((bx2 - bx1) * (by2 - by1)))
+    return inter / (area_a + area_b - inter)
+
+
+def _bbox_diff(frame_a: np.ndarray, frame_b: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
+    h, w = frame_a.shape[:2]
+    x1, y1, x2, y2 = bbox
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return 0.0
+    a = cv2.cvtColor(frame_a[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    b = cv2.cvtColor(frame_b[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
+    return float(np.mean(np.abs(a - b)))
+
+
+def _moving_person_mask(
+    frame: np.ndarray,
+    detections: list[dict],
+    next_frame: np.ndarray | None,
+    next_detections: list[dict],
+    static_diff_threshold: float,
+    match_iou_threshold: float,
+    dilate_px: int,
+) -> np.ndarray | None:
+    if next_frame is None or not detections or not next_detections:
+        return None
+
+    height, width = frame.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    for det in detections:
+        bbox = det["bbox"]
+        best_iou = max((_bbox_iou(bbox, curr["bbox"]) for curr in next_detections), default=0.0)
+        if best_iou < match_iou_threshold:
+            continue
+        if _bbox_diff(frame, next_frame, bbox) < static_diff_threshold:
+            continue
+        x1, y1, x2, y2 = bbox
+        pad = max(0, int(dilate_px))
+        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+        x2, y2 = min(width, x2 + pad), min(height, y2 + pad)
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
+
+    if not bool(mask.any()):
+        return None
+    return (mask > 0).astype(np.uint8)
+
+
+def _masked_preview(frame: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    preview = frame.copy()
+    preview[mask.astype(bool)] = 0
+    return preview
+
+
+def _fill_short_person_mask_gaps(frames: list[dict], max_gap: int) -> int:
+    if max_gap <= 0:
+        return 0
+    mask_positions = [
+        (idx, frame["person_mask_filename"])
+        for idx, frame in enumerate(frames)
+        if frame.get("person_mask_filename")
+    ]
+    if not mask_positions:
+        return 0
+
+    filled = 0
+    for idx, frame in enumerate(frames):
+        if frame.get("person_mask_filename"):
+            continue
+        best_filename = None
+        best_dist = max_gap + 1
+        for mask_idx, filename in mask_positions:
+            dist = abs(mask_idx - idx)
+            if dist < best_dist:
+                best_dist = dist
+                best_filename = filename
+            if mask_idx > idx and dist > best_dist:
+                break
+        if best_filename and best_dist <= max_gap:
+            frame["person_mask_filename"] = best_filename
+            frame["person_mask_inherited"] = True
+            frame["person_mask_inherited_distance"] = best_dist
+            filled += 1
+    return filled
 
 
 def read_video_metadata(input_path: str) -> dict:
@@ -113,8 +261,19 @@ def create_sample_cache(
 
     video_path = output_path / VIDEO_FILENAME
     manifest_path = output_path / MANIFEST_FILENAME
+    masks_path = output_path / MASKS_DIRNAME
+    mask_previews_path = output_path / "person_mask_previews"
     video_path.unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
+    if masks_path.exists():
+        for stale in masks_path.glob("person_mask_*.npy"):
+            stale.unlink(missing_ok=True)
+    masks_path.mkdir(parents=True, exist_ok=True)
+    if mask_previews_path.exists():
+        for stale in mask_previews_path.glob("person_mask_preview_*.jpg"):
+            stale.unlink(missing_ok=True)
+    if cfg.save_person_mask_previews:
+        mask_previews_path.mkdir(parents=True, exist_ok=True)
 
     cached_height = int(video_meta["height"] * (cfg.resize_width / video_meta["width"]))
     sampled_fps = max(1.0, video_meta["fps"] / cfg.sample_every)
@@ -139,6 +298,38 @@ def create_sample_cache(
     frame_no = 0
     sample_index = 0
     progress_interval = 2000
+    person_model = _load_person_model(cfg.person_mask_model) if cfg.person_masks else None
+    masks_enabled = person_model is not None
+    preview_count = 0
+    pending_sample = None
+
+    def finalize_sample(sample: dict, next_frame: np.ndarray | None, next_detections: list[dict]) -> None:
+        nonlocal preview_count
+        frame_record = dict(sample["record"])
+        if masks_enabled:
+            person_mask = _moving_person_mask(
+                sample["frame"],
+                sample["detections"],
+                next_frame,
+                next_detections,
+                static_diff_threshold=max(0.0, float(cfg.person_mask_static_diff_threshold)),
+                match_iou_threshold=max(0.0, float(cfg.person_mask_match_iou_threshold)),
+                dilate_px=max(0, int(cfg.person_mask_dilate_px)),
+            )
+            if person_mask is not None:
+                person_mask_filename = f"{MASKS_DIRNAME}/person_mask_{int(sample['sample_index']):06d}.npy"
+                np.save(output_path / person_mask_filename, person_mask, allow_pickle=False)
+                frame_record["person_mask_filename"] = person_mask_filename
+                if cfg.save_person_mask_previews and preview_count < max(0, int(cfg.person_mask_preview_limit)):
+                    preview_count += 1
+                    preview_filename = f"person_mask_preview_{int(sample['sample_index']):06d}.jpg"
+                    preview = _masked_preview(sample["frame"], person_mask)
+                    cv2.imwrite(
+                        str(mask_previews_path / preview_filename),
+                        preview,
+                        [cv2.IMWRITE_JPEG_QUALITY, int(cfg.jpeg_quality)],
+                    )
+        frames.append(frame_record)
 
     log.info(
         "sample cache start: input=%s fps=%.2f frames=%s sample_every=%s size=%sx%s",
@@ -172,16 +363,30 @@ def create_sample_cache(
                 if prev_phash is not None
                 else None
             )
+            detections = (
+                _person_detections_from_frame(person_model, small, conf=max(0.0, float(cfg.person_mask_conf)))
+                if masks_enabled
+                else []
+            )
 
             writer.write(small)
-            frames.append({
+            frame_record = {
                 "sample_index": sample_index,
                 "frame_no": frame_no,
                 "timestamp_sec": round(frame_no / video_meta["fps"], 6),
                 "phash_int": phash_int,
                 "prev_mse": round(prev_mse, 6) if prev_mse is not None else None,
                 "prev_hash_dist": prev_hash_dist,
-            })
+            }
+
+            if pending_sample is not None:
+                finalize_sample(pending_sample, small, detections)
+            pending_sample = {
+                "sample_index": sample_index,
+                "frame": small.copy(),
+                "detections": detections,
+                "record": frame_record,
+            }
 
             prev_decision = decision
             prev_phash = phash_int
@@ -193,11 +398,31 @@ def create_sample_cache(
         cap.release()
         writer.release()
 
+    if pending_sample is not None:
+        finalize_sample(pending_sample, None, [])
+
+    mask_fill_gap_samples = max(0, int(round(float(cfg.person_mask_fill_gap_sec) * sampled_fps)))
+    inherited_masks = _fill_short_person_mask_gaps(frames, max_gap=mask_fill_gap_samples)
+
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "input_path": input_path,
         "video_filename": VIDEO_FILENAME,
         "config": asdict(cfg),
+        "person_masks": {
+            "enabled": masks_enabled,
+            "dirname": MASKS_DIRNAME,
+            "model": cfg.person_mask_model if masks_enabled else None,
+            "coordinate_space": "sample_cache_frame",
+            "mode": "moving_person_only",
+            "static_diff_threshold": cfg.person_mask_static_diff_threshold,
+            "match_iou_threshold": cfg.person_mask_match_iou_threshold,
+            "fill_gap_sec": cfg.person_mask_fill_gap_sec,
+            "fill_gap_samples": mask_fill_gap_samples,
+            "inherited_count": inherited_masks,
+            "preview_dirname": "person_mask_previews" if cfg.save_person_mask_previews else None,
+            "preview_count": preview_count,
+        },
         "source": video_meta,
         "cache": {
             "sampled_fps": sampled_fps,
@@ -247,6 +472,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", required=True, help="Output cache directory")
     parser.add_argument("--sample-every", type=int, default=SampleCacheConfig.sample_every)
     parser.add_argument("--resize-width", type=int, default=SampleCacheConfig.resize_width)
+    parser.add_argument("--no-person-masks", action="store_true", help="Disable YOLO person mask generation")
+    parser.add_argument("--person-mask-model", default=SampleCacheConfig.person_mask_model)
+    parser.add_argument("--person-mask-dilate-px", type=int, default=SampleCacheConfig.person_mask_dilate_px)
+    parser.add_argument("--person-mask-static-diff-threshold", type=float, default=SampleCacheConfig.person_mask_static_diff_threshold)
+    parser.add_argument("--person-mask-match-iou-threshold", type=float, default=SampleCacheConfig.person_mask_match_iou_threshold)
+    parser.add_argument("--person-mask-fill-gap-sec", type=float, default=SampleCacheConfig.person_mask_fill_gap_sec)
+    parser.add_argument("--save-person-mask-previews", action="store_true", help="Save a few masked sample preview JPGs for debugging")
+    parser.add_argument("--person-mask-preview-limit", type=int, default=SampleCacheConfig.person_mask_preview_limit)
     parser.add_argument("--debug", action="store_true")
     return parser.parse_args()
 
@@ -259,6 +492,14 @@ def main():
     cfg = SampleCacheConfig(
         sample_every=args.sample_every,
         resize_width=args.resize_width,
+        person_masks=not args.no_person_masks,
+        person_mask_model=args.person_mask_model,
+        person_mask_dilate_px=args.person_mask_dilate_px,
+        person_mask_static_diff_threshold=args.person_mask_static_diff_threshold,
+        person_mask_match_iou_threshold=args.person_mask_match_iou_threshold,
+        person_mask_fill_gap_sec=args.person_mask_fill_gap_sec,
+        save_person_mask_previews=args.save_person_mask_previews,
+        person_mask_preview_limit=args.person_mask_preview_limit,
     )
     create_sample_cache(args.input, args.output, cfg)
 
