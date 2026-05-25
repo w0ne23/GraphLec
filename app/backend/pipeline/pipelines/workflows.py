@@ -5,7 +5,7 @@ def run_direct_upload_workflow(args, progress_callback=None, *, helpers) -> dict
     graph_result: dict = {}
     try:
         preprocess_result = helpers.run_preprocess_pipeline(args, runtime, build_analyzer_input=False)
-        runtime.timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+        runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         graph_result = helpers.run_graph_pipeline(args, runtime, preprocess_result)
         helpers._print_generated_files(runtime, preprocess_result, graph_result, {})
         return {"preprocess": preprocess_result, "graph": graph_result}
@@ -62,7 +62,7 @@ def run_pipeline(args, progress_callback=None, *, helpers):
                 ),
             )
         else:
-            runtime.timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+            runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
 
         if should_stop_after_verifier:
             helpers._print_stop_after_summary(args, runtime, verifier_result)
@@ -76,4 +76,3 @@ def run_pipeline(args, progress_callback=None, *, helpers):
         raise
     finally:
         helpers._finish_pipeline_run(runtime)
-

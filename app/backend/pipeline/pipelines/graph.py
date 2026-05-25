@@ -11,58 +11,58 @@ def run_graph_pipeline(args, runtime, preprocess_result: dict | None = None, *, 
 
     runtime.notify_stage("graph_triples", "run")
     if args.skip_graph_triples:
-        print("\n  ⏭  Stage 6 그래프 트리플 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G1 graph_triples — 그래프 트리플 생성 스킵")
         print("─" * 70)
-        timings["Stage 6 그래프 트리플"] = 0.0
-        timings["Neo4j 적재"] = 0.0
+        timings["G1 graph_triples — 그래프 트리플 생성"] = 0.0
+        timings["G1 neo4j_load — Neo4j 적재"] = 0.0
     else:
         r6 = helpers.stage6_graph_triples(args, output_dir, slides_dir)
-        timings["Stage 6 그래프 트리플"] = r6["elapsed"]
+        timings["G1 graph_triples — 그래프 트리플 생성"] = r6["elapsed"]
         print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
         print("─" * 70)
-        timings["Neo4j 적재"] = 0.0
+        timings["G1 neo4j_load — Neo4j 적재"] = 0.0
     runtime.notify_stage("graph_triples", "done")
 
     if args.skip_lance_index:
-        print("\n  ⏭  Stage 7 Lance 인덱스 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G2 lance_index — Lance 인덱스 생성 스킵")
         print("─" * 70)
-        timings["Stage 7 Lance 인덱스"] = 0.0
+        timings["G2 lance_index — Lance 인덱스 생성"] = 0.0
     else:
         runtime.notify_stage("graph_lance_index", "run")
         r7 = helpers.stage7_lance_index(args, output_dir, slides_dir)
-        timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
+        timings["G2 lance_index — Lance 인덱스 생성"] = r7.get("elapsed", 0.0)
         runtime.notify_stage("graph_lance_index", "done")
 
     if getattr(args, "skip_graphrag_index", False):
-        print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G3 graphrag_index — GraphRAG 인덱스 생성 스킵")
         print("─" * 70)
-        runtime.record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
+        runtime.record_timing("G3 graphrag_index — GraphRAG 인덱스 생성", 0.0, "skipped")
     else:
         runtime.notify_stage("graph_graphrag_index", "run")
-        runtime.stage_status["Stage 7B GraphRAG 인덱스"] = "run"
-        runtime.write_timings("Stage 7B GraphRAG 인덱스")
+        runtime.stage_status["G3 graphrag_index — GraphRAG 인덱스 생성"] = "run"
+        runtime.write_timings("G3 graphrag_index — GraphRAG 인덱스 생성")
         r7b = helpers.stage7b_graphrag_index(args, output_dir)
         runtime.notify_stage("graph_graphrag_index", "done")
-        runtime.record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
+        runtime.record_timing("G3 graphrag_index — GraphRAG 인덱스 생성", r7b.get("elapsed", 0.0), "done")
 
     if getattr(args, "skip_metadata", False):
-        print("\n  ⏭  Stage 8 메타데이터 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G4 metadata — 메타데이터 생성 스킵")
         print("─" * 70)
-        timings["Stage 8 메타데이터 생성"] = 0.0
+        timings["G4 metadata — 메타데이터 생성"] = 0.0
     else:
         runtime.notify_stage("graph_metadata", "run")
         r8 = helpers.stage8_generate_metadata(args, output_dir, slides_dir)
-        timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+        timings["G4 metadata — 메타데이터 생성"] = r8["elapsed"]
         runtime.notify_stage("graph_metadata", "done")
 
     if getattr(args, "skip_recommender_index", False):
-        print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+        print("\n  ⏭  G5 recommender_index — 추천 인덱스 생성 스킵")
         print("─" * 70)
-        timings["Stage 11 추천 인덱스 생성"] = 0.0
+        timings["G5 recommender_index — 추천 인덱스 생성"] = 0.0
     else:
         runtime.notify_stage("graph_recommender_index", "run")
         r11 = helpers.stage11_build_recommender_index(args)
-        timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+        timings["G5 recommender_index — 추천 인덱스 생성"] = r11["elapsed"]
         runtime.notify_stage("graph_recommender_index", "done")
 
     runtime.write_timings("graph_pipeline_done")
