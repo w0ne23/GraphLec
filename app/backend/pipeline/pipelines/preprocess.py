@@ -22,12 +22,12 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
         helpers.log.info("P1A extract_slides — 슬라이드 추출 건너뜀 (--skip-extract)")
         meta_path = str(paths["metadata"])
         timings["P1A extract_slides — 슬라이드 추출"] = 0.0
-        audio_analyze_result = helpers.stage1b_audio_analyze(args, output_dir)
+        audio_analyze_result = helpers.analyze_audio_quality(args, output_dir)
         timings["P1B analyze_audio_quality — 오디오 품질 분석"] = audio_analyze_result["elapsed"]
     else:
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_1a = executor.submit(helpers.stage1_extract, args, slides_dir, output_dir)
-            future_1b = executor.submit(helpers.stage1b_audio_analyze, args, output_dir)
+            future_1a = executor.submit(helpers.extract_slides, args, slides_dir, output_dir)
+            future_1b = executor.submit(helpers.analyze_audio_quality, args, output_dir)
             for future in as_completed([future_1a, future_1b]):
                 if future is future_1a:
                     r1 = future.result()
@@ -50,8 +50,8 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     runtime.notify_stage("preprocess_textualize_transcribe", "run")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        future_2a = executor.submit(helpers.stage2_textualize, args, slides_dir, output_dir)
-        future_2b = executor.submit(helpers.stage2b_transcribe, args, meta_path, duration, output_dir)
+        future_2a = executor.submit(helpers.textualize_slides, args, slides_dir, output_dir)
+        future_2b = executor.submit(helpers.transcribe_audio, args, meta_path, duration, output_dir)
         for future in as_completed([future_2a, future_2b]):
             if future is future_2a:
                 r2 = future.result()
@@ -85,7 +85,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
             if analyzer_input_built["done"]:
                 return
             runtime.notify_stage("verifier_build_analyzer_input", "run")
-            local_r9 = helpers.stage9_build_analyzer_merged_clean(
+            local_r9 = helpers.build_analyzer_input(
                 args,
                 meta_path=meta_path,
                 textualized_path=textualized_path,
@@ -100,9 +100,9 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
             runtime.notify_stage("verifier_build_analyzer_input", "done")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        future_a = executor.submit(helpers.stage3a_annotation, args, slides_dir, output_dir)
+        future_a = executor.submit(helpers.analyze_slide_annotations, args, slides_dir, output_dir)
         future_b = executor.submit(
-            helpers.stage3b_audio,
+            helpers.process_audio,
             args,
             meta_path,
             textualized_path,
@@ -137,9 +137,9 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         future_c = executor.submit(
-            helpers.stage4a_classify, args, textualized_path, meta_path, silences_path, output_dir
+            helpers.classify_slides, args, textualized_path, meta_path, silences_path, output_dir
         )
-        future_d = executor.submit(helpers.stage4b_save_by_scene, args, audio_result, output_dir)
+        future_d = executor.submit(helpers.save_scene_structure, args, audio_result, output_dir)
         for future in as_completed([future_c, future_d]):
             if future is future_c:
                 classified_result = future.result()
@@ -155,7 +155,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     print("─" * 70)
 
     runtime.notify_stage("preprocess_fusion", "run")
-    r5 = helpers.stage5_fusion(
+    r5 = helpers.fuse_preprocessed_data(
         args,
         textualized_path=textualized_path,
         annotation_path=annotation_path,
