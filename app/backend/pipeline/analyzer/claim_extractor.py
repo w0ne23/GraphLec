@@ -220,7 +220,7 @@ def _build_slide_and_context_blocks(
             "- 참고 context는 지시어 선행사 해소와 생략된 주어 확인에만 사용하세요.\n"
             "- 참고 context에만 있는 새 claim을 만들지 마세요.\n"
             "- 지시어가 단일 후보로 확실히 해소되면 resolved_claim에 최소한으로 반영하세요.\n"
-            "- 후보가 둘 이상 가능하거나 검사 대상/참고 context/슬라이드 안에서 확정되지 않으면 claim_text와 source_slice를 보존하고 resolved_claim도 claim_text와 동일하게 두세요."
+            "- 후보가 둘 이상 가능하거나 검사 대상/참고 context/슬라이드 안에서 확정되지 않으면 claim_text를 보존하고 resolved_claim도 claim_text와 동일하게 두세요."
         )
         return _build_slide_references(list(seen_slides.keys()), slide_ctx), context
 
@@ -291,14 +291,13 @@ def _build_extract_prompt(
 ### 추출 제외
 - 의견/감상, 교육적 지시, 구어적 필러
 - 단순한 질문 제시만 있고 강의자가 답이나 기준을 제시하지 않은 경우
-- "약/대략/정도" 붙은 수치는 claim_text/source_slice/resolved_claim에 그 근사 표현을 그대로 남김
+- "약/대략/정도" 붙은 수치는 claim_text/resolved_claim에 그 근사 표현을 그대로 남김
 
 ### 핵심 원칙: 1단계는 raw claim inventory입니다.
 - 이 단계에서는 오류 여부, 오해 가능성, 교수 피드백, 반례를 판단하지 마세요.
 - 반드시 **현재 context 자체가 명시한 주장**만 claim으로 추출하세요.
 - claim_text는 현재 context에서 직접 가져온 원문 조각으로 쓰세요.
 - claim_text를 만들 때, 원문에서 나온 주어, 예시, 설명들을 임의로 제거하거나 수정하지 마세요.
-- source_slice는 이 claim을 직접 만든 최소 원문 조각입니다. claim_text보다 넓어질 수 있지만, 같은 context의 다른 문제나 불필요한 예시는 포함하지 마세요.
 - resolved_claim은 원문 claim의 범위를 보존한 정리문입니다.
 - resolved_claim은 지시어, 생략 주어, 담화 표지, 반복 표현을 문맥상 확실한 범위 안에서 풀어 검증 가능한 완성 명제로 만드는 필드입니다.
 - 예: "작업 관리자 있죠? 또는 제어판 이런 것들은 ... 응용 프로그램이라고 부르는 것인데"는 "작업 관리자와 제어판은 ... 응용 프로그램이다"처럼 정리할 수 있습니다.
@@ -349,7 +348,6 @@ def _build_extract_prompt(
       "context_id": "S001-SC0001-C001",
       "claim_type": "definition",
       "claim_text": "현재 context에서 직접 가져온 claim 원문",
-      "source_slice": "이 claim을 직접 만든 최소 원문 조각",
       "resolved_claim": "원문 범위를 보존한 최소 정리문"
     }}
   ]
@@ -360,7 +358,6 @@ def _build_extract_prompt(
 - 검증 불가능한 주장은 추출하지 마세요.
 - 하나의 context에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
-- source_slice는 claim_text를 만든 직접 원문 조각으로 쓰세요. 애매하면 claim_text와 동일하게 두세요.
 - verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
@@ -418,7 +415,6 @@ def _order_claim_fields(claim: dict) -> None:
         "claim_id",
         "context_id",
         "claim_text",
-        "source_slice",
         "resolved_claim",
         "claim_type",
     )
@@ -506,15 +502,14 @@ def _explicit_label_heads(text: str) -> list[str]:
     return heads
 
 
-def _preserve_explicit_label_terms(claim_text: str, source_slice: str, resolved_claim: str) -> str:
+def _preserve_explicit_label_terms(claim_text: str, resolved_claim: str) -> str:
     """Do not let resolved_claim silently correct an explicit source label/category."""
     resolved_compact = _compact_for_guard(resolved_claim)
     if not resolved_compact:
         return claim_text
-    for text in (claim_text, source_slice):
-        for head in _explicit_label_heads(text):
-            if _compact_for_guard(head) and _compact_for_guard(head) not in resolved_compact:
-                return claim_text
+    for head in _explicit_label_heads(claim_text):
+        if _compact_for_guard(head) and _compact_for_guard(head) not in resolved_compact:
+            return claim_text
     return resolved_claim
 
 
@@ -622,15 +617,13 @@ def _extract_claims(
                 claim_text = str(c.get("claim_text") or "").strip()
                 if not claim_text:
                     continue
-                source_slice = str(c.get("source_slice") or "").strip() or claim_text
                 resolved_claim = str(c.get("resolved_claim") or "").strip() or claim_text
-                resolved_claim = _preserve_explicit_label_terms(claim_text, source_slice, resolved_claim)
+                resolved_claim = _preserve_explicit_label_terms(claim_text, resolved_claim)
                 normalized = _normalize_claim_type(c.get("claim_type"))
                 if normalized is None:
                     continue
                 c["claim_type"] = normalized
                 c["claim_text"] = claim_text
-                c["source_slice"] = source_slice
                 c["resolved_claim"] = resolved_claim
                 c.pop("claim_id", None)
                 c["context_ids"] = [str(c.get("context_id") or "")]
@@ -645,9 +638,7 @@ def _extract_claims(
                 cleaned.append(c)
             cleaned = _dedupe_overlapping_claims(cleaned)
             for claim in cleaned:
-                if not str(claim.get("source_slice") or "").strip():
-                    claim["source_slice"] = str(claim.get("claim_text") or "").strip()
-                allowed = {"context_id", "claim_text", "source_slice", "resolved_claim", "claim_type"}
+                allowed = {"context_id", "claim_text", "resolved_claim", "claim_type"}
                 for key in list(claim.keys()):
                     if key not in allowed:
                         claim.pop(key, None)

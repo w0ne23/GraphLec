@@ -798,7 +798,6 @@ def _claim_output_payload_for_classified_pipeline(claim: dict) -> dict:
         "claim_id": claim.get("claim_id", ""),
         "context_id": context_id,
         "claim_text": claim.get("claim_text", ""),
-        "source_slice": claim.get("source_slice", ""),
         "resolved_claim": claim.get("resolved_claim", ""),
         "claim_type": claim.get("claim_type", ""),
     }

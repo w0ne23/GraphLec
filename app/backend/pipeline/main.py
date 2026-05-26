@@ -1149,7 +1149,6 @@ def stage10_extract_claims(args, merged_clean_path: str, output_dir: Path) -> di
             "claim_id": claim.get("claim_id", ""),
             "context_id": context_id,
             "claim_text": claim.get("claim_text", ""),
-            "source_slice": claim.get("source_slice", ""),
             "resolved_claim": claim.get("resolved_claim", ""),
             "claim_type": claim.get("claim_type", ""),
         }
