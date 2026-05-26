@@ -92,7 +92,7 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 1. 출력 기준
 - claim은 학생이 그대로 외웠을 때 참/거짓을 검증할 수 있는 **완성 명제**여야 합니다.
 - 단순히 강의자가 설명을 시작함, 예시를 들겠다고 함, 다음 내용을 예고함, 질문을 던짐, 강의 운영을 안내함은 claim이 아닙니다.
-- "정의한다면", "원가라는 것은", "재화나 용역을", "얻기 위해서 희생한"처럼 술어가 끝나지 않은 조각은 단독 claim으로 출력하지 마세요.
+- 술어가 끝나지 않은 문장 조각이나 목적어/수식어만 있는 조각은 단독 claim으로 출력하지 마세요.
 
 2. 전수 확인의 의미
 - 검사 대상 context마다 claim 후보가 있는지 확인하라는 뜻이지, 모든 검사 대상 context를 claim으로 만들라는 뜻이 아닙니다.
@@ -106,8 +106,10 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 
 4. resolved_claim 작성
 - resolved_claim은 원문보다 넓어지면 안 됩니다.
+- resolved_claim은 원문을 정답처럼 교정하는 필드가 아닙니다.
+- 원문에 명시된 용어, 분류명, 주체, 대상이 틀린 것처럼 보여도 고치지 말고 그대로 보존하세요.
 - 하나의 원문에 서로 다른 명제가 있으면 하나로 요약하지 말고 분리하세요.
-- 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 마세요. 예: "A와 직접 관련 없다"와 "B를 제공한다"는 별도 claim입니다.
+- 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 말고, 서로 다른 핵심 명제는 별도 claim으로 분리하세요.
 """
 
 
@@ -297,18 +299,23 @@ def _build_extract_prompt(
 - claim_text는 현재 context에서 직접 가져온 원문 조각으로 쓰세요.
 - claim_text를 만들 때, 원문에서 나온 주어, 예시, 설명들을 임의로 제거하거나 수정하지 마세요.
 - resolved_claim은 원문 claim의 범위를 보존한 정리문입니다.
+- resolved_claim은 지시어, 생략 주어, 담화 표지, 반복 표현을 문맥상 확실한 범위 안에서 풀어 검증 가능한 완성 명제로 만드는 필드입니다.
+- 열거 대상과 지시어가 같은 context 안에서 명확히 연결될 때만, 그 범위 안에서 resolved_claim을 완성문으로 정리하세요.
+- resolved_claim은 전사 오류, 용어 오류, 분류 오류, 사실 오류를 교정하는 필드가 아닙니다.
+- 원문에 명시된 용어/분류명/주체/대상이 일반 지식이나 주변 문맥과 다르게 보이더라도 resolved_claim에서 고치지 마세요.
 - resolved_claim에서 새로운 주체, 조건, 원인, 반례, 일반 법칙을 만들지 마세요.
-- resolved_claim이 원문 주어, 대상, 분류명, 조건, 범위를 바꿀 위험이 있으면 claim_text와 동일하게 두세요.
+- resolved_claim이 원문 주어, 대상, 분류명, 조건, 범위를 실제로 교정하거나 바꿀 위험이 있으면 claim_text와 동일하게 두세요.
+- 단, "이런 것들", "그것", 생략 주어를 문맥에서 바로 확인되는 명시 대상명으로 바꾸는 것은 교정이 아니라 지시어 해소입니다.
 - 주변 문맥과 슬라이드는 현재 context가 claim인지, 예시인지, 지시어가 명확한지만 판단하는 보조 정보입니다.
 - 주변 문맥에 있는 더 강한 일반 명제를 현재 context에 덧씌우지 마세요.
 - 현재 context가 예시/가정/비유/수사적 요약이면, resolved_claim에도 그 예시/가정/비유/요약 범위를 유지하세요.
 
 ### 지시어 처리
 - "이것", "여기", "해당 항목", "얘", "이거", "그거" 같은 지시어는 단일 선행사가 확실할 때만 최소한으로 풀어 쓰세요.
+- "이런 것들", "이것들", "얘네들"처럼 같은 context 안에서 바로 앞에 열거된 대상 전체를 가리키는 표현은, 열거 대상이 명확하면 resolved_claim에서 그 대상명으로 풀어 쓰세요.
 - 둘 이상의 합리적 해석이 가능하면 특정 대상으로 확정하지 말고 원문 지시어를 유지하세요.
 - 지시어 선행사가 제공된 문맥보다 앞에 있을 수 있어도, 현재 context에 검증 가능한 술어/정의/수치/관계가 있으면
-  claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두고,
-  needs_context=tru로 표시하세요.
+  claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두세요.
 - 슬라이드나 앞뒤 context가 보이더라도, 현재 context가 실제로 말하지 않은 관계를 resolved_claim에 추가하지 마세요.
 - 불완전한 조각 문장은 현재 context 안에서 검증 가능한 값/정의/관계가 완성되지 않으면 추출하지 마세요.
 - 복원 결과가 애매하다는 이유만으로 "이것은 X이다", "얘는 Y로 처리된다" 같은 원문 claim을 버리지 마세요.
@@ -340,8 +347,7 @@ def _build_extract_prompt(
       "context_id": "S001-SC0001-C001",
       "claim_type": "definition",
       "claim_text": "현재 context에서 직접 가져온 claim 원문",
-      "resolved_claim": "원문 범위를 보존한 최소 정리문",
-      "needs_context": false
+      "resolved_claim": "원문 범위를 보존한 최소 정리문"
     }}
   ]
 }}
@@ -351,7 +357,6 @@ def _build_extract_prompt(
 - 검증 불가능한 주장은 추출하지 마세요.
 - 하나의 context에서 여러 claim이 나올 수 있습니다.
 - claim_type은 반드시 `definition`, `numeric`, `causal`, `relationship`, `currentness` 중 하나만 사용하세요.
-- needs_context는 claim_text/resolved_claim만으로 지시어, 생략된 주체, 조건, 대상이 충분히 해소되지 않아 후속 단계가 주변 문맥을 함께 봐야 하면 true, claim 자체로 의미가 충분히 분명하면 false로 쓰세요.
 - verification_question은 생성하지 마세요. 검증 질문은 후속 판정 단계에서 필요한 claim에만 만듭니다.
 - resolved_claim을 쓰기 애매하면 claim_text와 동일하게 두세요.
 - claim이 없으면 {{"claims": []}}만 출력하세요.
@@ -394,19 +399,6 @@ def _normalize_claim_type(value: str) -> str | None:
     return "definition"
 
 
-def _coerce_bool(value) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    raw = str(value).strip().lower()
-    if raw in {"1", "true", "yes", "y", "필요", "필요함"}:
-        return True
-    if raw in {"0", "false", "no", "n", "resolved", "해소", "불필요", "불필요함"}:
-        return False
-    return False
-
-
 def assign_claim_display_ids(claims_by_batch: list[tuple]) -> None:
     """최종 추출 순서 기준으로 사람이 읽는 claim_id를 부여한다."""
     sequence = 1
@@ -424,7 +416,6 @@ def _order_claim_fields(claim: dict) -> None:
         "claim_text",
         "resolved_claim",
         "claim_type",
-        "needs_context",
     )
     ordered = {key: claim[key] for key in preferred_keys if key in claim}
     ordered.update({key: value for key, value in claim.items() if key not in ordered})
@@ -547,20 +538,20 @@ def _extract_claims(
                 c["claim_type"] = normalized
                 c["claim_text"] = claim_text
                 c["resolved_claim"] = resolved_claim
-                c["needs_context"] = _coerce_bool(c.get("needs_context"))
                 c.pop("claim_id", None)
                 c["context_ids"] = [str(c.get("context_id") or "")]
                 c.pop("resolution_status", None)
                 c.pop("antecedent_context_ids", None)
                 c.pop("claim_fingerprint", None)
                 c.pop("is_approximate", None)
+                c.pop("needs_context", None)
                 c.pop("context_note", None)
                 c.pop("verification_question", None)
                 c.pop("verificationQuestion", None)
                 cleaned.append(c)
             cleaned = _dedupe_overlapping_claims(cleaned)
             for claim in cleaned:
-                allowed = {"context_id", "claim_text", "resolved_claim", "claim_type", "needs_context"}
+                allowed = {"context_id", "claim_text", "resolved_claim", "claim_type"}
                 for key in list(claim.keys()):
                     if key not in allowed:
                         claim.pop(key, None)

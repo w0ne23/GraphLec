@@ -1,14 +1,15 @@
 """
 텍스트 교정 엔진.
 
-Pass 1: 원본 전사 + 슬라이드 제목 + 용어 사전으로 ASR 오인식 교정
-Pass 2: Pass 1 교정본 + 슬라이드 전체 컨텍스트로 추가 교정
+Pass 1: 슬라이드 제목 + 용어 사전만으로 ASR 오인식 교정
+Pass 2: 슬라이드 전체 컨텍스트로 교정 → Pass 1과 merge하여 안전하게 적용
 """
 
 import json
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -122,6 +123,41 @@ def _is_variable_or_abbrev_fix(orig: str, corrected: str) -> bool:
         if stripped and code_pattern.match(stripped):
             return True
     return False
+
+
+def _is_safe_auto_correction(orig: str, corrected: str, is_cs: bool = False) -> bool:
+    """Return True only for corrections that cannot change lecture meaning."""
+    if not orig or not corrected:
+        return False
+    if _normalize_text(orig) == _normalize_text(corrected):
+        return False
+    if _is_spacing_only(orig, corrected):
+        return True
+    if _is_english_term_fix(orig, corrected):
+        return True
+    if is_cs and _is_variable_or_abbrev_fix(orig, corrected):
+        return True
+    return False
+
+
+def _candidate_only(text: str, risk: str, reason: str) -> dict:
+    return {
+        "candidate_text": text,
+        "applied_text": "",
+        "risk": risk,
+        "apply": False,
+        "reason": reason,
+    }
+
+
+def _applied(text: str, risk: str, reason: str) -> dict:
+    return {
+        "candidate_text": text,
+        "applied_text": text,
+        "risk": risk,
+        "apply": True,
+        "reason": reason,
+    }
 
 
 def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> dict:
@@ -398,11 +434,9 @@ def _correct_batch_pass1(
     if not batch:
         return {}
 
-    batch_by_global = {global_i: seg for global_i, seg in batch}
-    example_index = batch[0][0]
     seg_text = "\n".join(
-        f"[{global_i}] {seg.get('text_original', seg['text'])}"
-        for global_i, seg in batch
+        f"[{local_i}] {seg.get('text_original', seg['text'])}"
+        for local_i, (_, seg) in enumerate(batch)
     )
     topic_hint = f"\n## 현재 구간 주제\n{slide_title}\n" if slide_title.strip() else ""
     glossary_block = f"\n{glossary}\n" if glossary.strip() else ""
@@ -413,7 +447,7 @@ def _correct_batch_pass1(
 {seg_text}
 
 ## 출력 (JSON만)
-{{"corrections": [{{"index": {example_index}, "text": "교정된 텍스트"}}, ...]}}
+{{"corrections": [{{"index": 0, "text": "교정된 텍스트"}}, ...]}}
 
 ### 교정 범위
 - ASR 오인식 교정 (깨진 텍스트를 문맥에 맞는 단어로 복원)
@@ -429,9 +463,9 @@ def _correct_batch_pass1(
 - 강의자의 발화 구조와 의미를 절대적으로 보존하라
 - 문장 길이와 정보량은 원문과 거의 똑같게 유지
 - 문맥상 말이 안 되는 단어(ASR 깨짐)만 복원. 의미가 통하는 단어는 그대로 둘 것
-- 강의자의 단어 선택에 있어, 문맥적으로 맞는데, 오탈자가 있다면, 문맥에만 맞게 바꾸어주라(해당 내용이 틀리던 말던, 문맥에는 맞으면 됨)
-- 절대 강의자가 주어와 서술어를 반대되는 개념으로 설명하여도, 바꾸지 말아라. 강의자가 잘못된 내용을 말한 것이다.
-- index는 전사에 표시된 대괄호 번호를 그대로 사용하라. 번호를 0부터 다시 매기지 말 것
+- 강의자가 틀린 개념, 반대 개념, 이상한 관계를 말한 것처럼 보여도 정답처럼 고치지 말 것
+- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 교정 대상이 아니다
+- 의미가 바뀔 수 있는 한국어 전문용어 교체는 하지 말 것
 - 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것"""
 
     def call():
@@ -448,15 +482,16 @@ def _correct_batch_pass1(
     try:
         response = api_call_with_retry(call)
         _add_usage(response, stage="stage3b_text_processor_pass1")
-        batch_corrections = parse_batch_response(response.text or "")
+        local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass1 오류 무시] {exc}")
         return {}
 
     result: dict[int, str] = {}
-    for global_i, corr_payload in batch_corrections.items():
-        if global_i in batch_by_global:
-            original = batch_by_global[global_i].get("text_original", batch_by_global[global_i]["text"])
+    for local_i, corr_payload in local_corrections.items():
+        if 0 <= local_i < len(batch):
+            global_i = batch[local_i][0]
+            original = batch[local_i][1].get("text_original", batch[local_i][1]["text"])
             cleaned = _normalize_text(str(corr_payload.get("text", "") or ""))
             if cleaned and cleaned != _normalize_text(original):
                 result[global_i] = cleaned
@@ -471,11 +506,9 @@ def _correct_batch_pass2(
     if not batch:
         return {}
 
-    batch_by_global = {global_i: seg for global_i, seg in batch}
-    example_index = batch[0][0]
     seg_text = "\n".join(
-        f"[{global_i}] {seg.get('text_original', seg['text'])}"
-        for global_i, seg in batch
+        f"[{local_i}] {seg.get('text_original', seg['text'])}"
+        for local_i, (_, seg) in enumerate(batch)
     )
     has_image = bool(slide_image_path and Path(slide_image_path).exists())
     if has_image:
@@ -485,39 +518,33 @@ def _correct_batch_pass2(
     else:
         ref_block = f"\n## 강의자료 (용어 참조)\n{slide_context[:2000]}\n" if slide_context.strip() else ""
 
-    prompt = f"""강의 음성 전사본의 1차 교정본을 검토하세요.
-슬라이드와 강의자료는 전문용어 표기 확인용으로만 사용하세요.
-기본적으로 1차 교정본을 그대로 유지하고, 명백한 ASR 오인식 또는 전문용어 표기 오류가 있을 때만 최소 수정하세요.
-
+    prompt = f"""강의 음성 전사본을 슬라이드와 문맥을 참고하여 교정하세요.
 {ref_block}
-
-## 1차 교정본 (검토 대상)
+## 전사 (교정 대상)
 {seg_text}
 
 ## 출력 (JSON만)
-{{"corrections": [{{"index": {example_index}, "text": "교정된 텍스트"}}, ...]}}
+{{"corrections": [{{"index": 0, "text": "교정된 텍스트"}}, ...]}}
 
-### 검토 범위
-- 명백한 ASR 오인식 교정
-- 슬라이드에 실제로 등장하는 전문용어, 함수명, 클래스명, 변수명, 라이브러리명, 수식 표기 확인
-- 맞춤법, 띄어쓰기, 조사 오류 중 의미 변화 없이 고칠 수 있는 것
-- 불필요한 추임새 제거는 의미와 발화 흐름이 완전히 유지될 때만 허용
+### 교정 범위
+- ASR 오인식 교정 (깨진 텍스트를 문맥에 맞는 단어로 복원)
+- 전문용어 철자 교정 (슬라이드를 참고하여 정확한 표기로)
+- 맞춤법, 띄어쓰기, 조사 오류 교정
+- 불필요한 추임새(자, 뭐, 어, 그) 제거 (의미가 유지될 때만)
 
-### 핵심 원칙
-- 1차 교정본을 기본값으로 유지하라
-- 슬라이드는 용어 철자와 표기 확인용 참고 자료일 뿐이다
-- 슬라이드 내용에 맞추기 위해 강의자의 설명, 개념 관계, 주어/서술어, 긍정/부정을 바꾸지 말 것
-- 강의 내용이 틀려 보이거나 슬라이드와 다르더라도 정답처럼 고치지 말 것
-- 명백한 ASR 오인식일 때만 같은 의미를 유지하는 범위에서 교체하라
-- 문장 길이와 정보량은 1차 교정본과 거의 똑같게 유지하라
-- 문장부호 스타일을 새로 통일하지 말 것
-- 쉼표를 마침표로 바꾸거나 각 세그먼트 끝에 마침표를 강제로 붙이지 말 것
+### 핵심 원칙 — 강의자의 실제 발화 의미를 보존하라
+- 전사 원문의 의미가 기준이다. 슬라이드는 용어 철자 확인용 참고 자료일 뿐이다
+- 문장 길이와 정보량은 원문과 거의 똑같게 유지
 - 요약, 재서술, 슬라이드 bullet 복사 금지
-- 강의자가 실제로 한국어 일반 용어로 말한 경우에는 슬라이드에 대응되는 영문 용어가 있더라도 영어로 번역하지 말 것
-- 발화가 외래어/영문 토큰 자체를 읽는 맥락이면 영문 표기를 사용할 수 있다
-- 각 index의 문장은 해당 index 안에서만 수정하고, 다른 index의 내용과 섞지 말 것
-- index는 입력에 표시된 대괄호 번호를 그대로 사용하라. 번호를 0부터 다시 매기지 말 것
-"""
+- 강의자의 발화 중 오인식된 단어가 있다면 해당 단어에 대해서만 교체하는 수준이다
+- 슬라이드와 발화가 완전히 다르다면, 발화를 따르도록 할 것.
+- 전사본을 따라갔을 때 강의 내용이 틀려 보이더라도 정답으로 고치지 말 것
+- 슬라이드의 정답/문맥에 맞추기 위해 강의자의 한국어 개념어를 반대 개념으로 바꾸지 말 것
+- 각 index의 원문만 수정. 다른 index 내용과 섞지 말 것
+
+### 중요 원칙
+- 강의자의 발화 구조를 절대적으로 따라가라
+- 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 verifier가 확인할 문제이므로 전사 보정에서 제거하지 말 것"""
 
     contents = []
     if has_image:
@@ -540,15 +567,16 @@ def _correct_batch_pass2(
     try:
         response = api_call_with_retry(call)
         _add_usage(response, stage="stage3b_text_processor_pass2")
-        batch_corrections = parse_batch_response(response.text or "")
+        local_corrections = parse_batch_response(response.text or "")
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")
         return {}
 
     result: dict[int, str] = {}
-    for global_i, corr_payload in batch_corrections.items():
-        if global_i in batch_by_global:
-            original = batch_by_global[global_i].get("text_original", batch_by_global[global_i]["text"])
+    for local_i, corr_payload in local_corrections.items():
+        if 0 <= local_i < len(batch):
+            global_i = batch[local_i][0]
+            original = batch[local_i][1].get("text_original", batch[local_i][1]["text"])
             cleaned = _normalize_text(str(corr_payload.get("text", "") or ""))
             if cleaned and cleaned != _normalize_text(original):
                 result[global_i] = cleaned
@@ -561,48 +589,60 @@ def merge_two_passes(
     pass2: dict[int, str],
     subdomain: str = "",
 ) -> dict[int, dict]:
+    is_cs = subdomain in ("컴퓨터공학", "소프트웨어공학", "정보통신", "전산학")
     corrections: dict[int, dict] = {}
     all_indices = set(pass1.keys()) | set(pass2.keys())
+    orig_map = {global_i: seg.get("text_original", seg["text"]) for global_i, seg in batch}
 
     for global_i in all_indices:
         p1 = pass1.get(global_i)
         p2 = pass2.get(global_i)
+        original = orig_map.get(global_i, "")
 
-        if p2:
-            corrections[global_i] = {
-                "candidate_text": p2,
-                "applied_text": p2,
-                "risk": "low",
-                "apply": True,
-                "reason": "pass2 채택 (1차 교정본 기반)",
-            }
-        elif p1:
-            corrections[global_i] = {
-                "candidate_text": p1,
-                "applied_text": p1,
-                "risk": "low",
-                "apply": True,
-                "reason": "pass1만 교정 (문맥 기반)",
-            }
+        if p1 and p2:
+            if _normalize_text(p1) == _normalize_text(p2):
+                if _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                    corrections[global_i] = _applied(p1, "low", "pass1+pass2 일치, 안전 교정")
+                else:
+                    corrections[global_i] = _candidate_only(
+                        p1,
+                        "high",
+                        "pass1+pass2 일치했지만 의미 변경 가능성으로 원문 유지",
+                    )
+            else:
+                if _is_safe_auto_correction(original, p2, is_cs=is_cs):
+                    corrections[global_i] = _applied(p2, "low", "pass2 안전 교정 채택")
+                elif _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                    corrections[global_i] = _applied(p1, "low", "pass1 안전 교정 채택")
+                else:
+                    corrections[global_i] = _candidate_only(
+                        p2,
+                        "high",
+                        "pass1/pass2 상이, 의미 변경 가능성으로 원문 유지",
+                    )
+        elif p1 and not p2:
+            if _is_safe_auto_correction(original, p1, is_cs=is_cs):
+                corrections[global_i] = _applied(p1, "low", "pass1 안전 교정")
+            else:
+                corrections[global_i] = _candidate_only(
+                    p1,
+                    "high",
+                    "pass1만 교정, 의미 변경 가능성으로 원문 유지",
+                )
+        elif p2 and not p1:
+            if _is_spacing_only(original, p2):
+                corrections[global_i] = _applied(p2, "low", "pass2 띄어쓰기 교정만 (안전)")
+            elif is_cs and _is_variable_or_abbrev_fix(original, p2):
+                corrections[global_i] = _applied(p2, "low", "pass2 변수명/약어 표기 반영 (CS)")
+            elif _is_english_term_fix(original, p2):
+                corrections[global_i] = _applied(p2, "low", "pass2 영문 용어 교정 (ASR 오인식)")
+            else:
+                corrections[global_i] = _candidate_only(
+                    p2,
+                    "high",
+                    "pass2만 교정 (슬라이드 영향 가능성)",
+                )
     return corrections
-
-
-def _build_pass2_batch_from_pass1(
-    batch: list[tuple[int, dict]],
-    pass1: dict[int, str],
-) -> list[tuple[int, dict]]:
-    pass2_batch: list[tuple[int, dict]] = []
-    for global_i, seg in batch:
-        pass1_text = pass1.get(global_i)
-        if not pass1_text:
-            pass2_batch.append((global_i, seg))
-            continue
-        # Pass 2는 원본 전사가 아니라 Pass 1 결과를 입력으로 다시 검토한다.
-        seg_for_pass2 = seg.copy()
-        seg_for_pass2["text_original"] = pass1_text
-        seg_for_pass2["text"] = pass1_text
-        pass2_batch.append((global_i, seg_for_pass2))
-    return pass2_batch
 
 
 def correct_segments_two_pass(
@@ -687,11 +727,13 @@ def correct_segments_two_pass(
         sub_batches = [group[b:b + BATCH_SIZE] for b in range(0, len(group), BATCH_SIZE)]
         for sub in sub_batches:
             if use_pass2:
-                pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
-                print("①", end="", flush=True)
-                pass2_batch = _build_pass2_batch_from_pass1(sub, pass1)
-                pass2 = _correct_batch_pass2(pass2_batch, context)
-                print("②", end="", flush=True)
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    future_pass1 = pool.submit(_correct_batch_pass1, sub, slide_title=slide_title, glossary=glossary)
+                    future_pass2 = pool.submit(_correct_batch_pass2, sub, context)
+                    pass1 = future_pass1.result()
+                    print("①", end="", flush=True)
+                    pass2 = future_pass2.result()
+                    print("②", end="", flush=True)
                 merged = merge_two_passes(sub, pass1, pass2, subdomain=subdomain)
             else:
                 pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
@@ -714,7 +756,7 @@ def correct_segments_two_pass(
         for offset in range(0, len(no_slide), BATCH_SIZE):
             sub = no_slide[offset:offset + BATCH_SIZE]
             pass1 = _correct_batch_pass1(sub, glossary=glossary)
-            merged = {
+            all_corrections.update({
                 global_i: {
                     "candidate_text": text_value,
                     "applied_text": text_value,
@@ -723,8 +765,7 @@ def correct_segments_two_pass(
                     "reason": "pass1 only (미매핑)",
                 }
                 for global_i, text_value in pass1.items()
-            }
-            all_corrections.update(merged)
+            })
             print(".", end="", flush=True)
         print()
 

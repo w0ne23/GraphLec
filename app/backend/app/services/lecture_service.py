@@ -1494,6 +1494,8 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
     analyzer_dir = output_dir / f"{stem}_analyzer"
 
     candidate_paths = [
+        analyzer_dir / f"{stem}_content_verification.json",
+        output_dir / f"{stem}_content_verification.json",
         analyzer_dir / f"{stem}_verification_final.json",
         output_dir / f"{stem}_verification_final.json",
     ]
