@@ -92,7 +92,7 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 1. 출력 기준
 - claim은 학생이 그대로 외웠을 때 참/거짓을 검증할 수 있는 **완성 명제**여야 합니다.
 - 단순히 강의자가 설명을 시작함, 예시를 들겠다고 함, 다음 내용을 예고함, 질문을 던짐, 강의 운영을 안내함은 claim이 아닙니다.
-- "정의한다면", "원가라는 것은", "재화나 용역을", "얻기 위해서 희생한"처럼 술어가 끝나지 않은 조각은 단독 claim으로 출력하지 마세요.
+- 술어가 끝나지 않은 문장 조각이나 목적어/수식어만 있는 조각은 단독 claim으로 출력하지 마세요.
 
 2. 전수 확인의 의미
 - 검사 대상 context마다 claim 후보가 있는지 확인하라는 뜻이지, 모든 검사 대상 context를 claim으로 만들라는 뜻이 아닙니다.
@@ -109,7 +109,7 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 - resolved_claim은 원문을 정답처럼 교정하는 필드가 아닙니다.
 - 원문에 명시된 용어, 분류명, 주체, 대상이 틀린 것처럼 보여도 고치지 말고 그대로 보존하세요.
 - 하나의 원문에 서로 다른 명제가 있으면 하나로 요약하지 말고 분리하세요.
-- 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 마세요. 예: "A와 직접 관련 없다"와 "B를 제공한다"는 별도 claim입니다.
+- 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 말고, 서로 다른 핵심 명제는 별도 claim으로 분리하세요.
 """
 
 
@@ -300,7 +300,7 @@ def _build_extract_prompt(
 - claim_text를 만들 때, 원문에서 나온 주어, 예시, 설명들을 임의로 제거하거나 수정하지 마세요.
 - resolved_claim은 원문 claim의 범위를 보존한 정리문입니다.
 - resolved_claim은 지시어, 생략 주어, 담화 표지, 반복 표현을 문맥상 확실한 범위 안에서 풀어 검증 가능한 완성 명제로 만드는 필드입니다.
-- 예: "작업 관리자 있죠? 또는 제어판 이런 것들은 ... 응용 프로그램이라고 부르는 것인데"는 "작업 관리자와 제어판은 ... 응용 프로그램이다"처럼 정리할 수 있습니다.
+- 열거 대상과 지시어가 같은 context 안에서 명확히 연결될 때만, 그 범위 안에서 resolved_claim을 완성문으로 정리하세요.
 - resolved_claim은 전사 오류, 용어 오류, 분류 오류, 사실 오류를 교정하는 필드가 아닙니다.
 - 원문에 명시된 용어/분류명/주체/대상이 일반 지식이나 주변 문맥과 다르게 보이더라도 resolved_claim에서 고치지 마세요.
 - resolved_claim에서 새로운 주체, 조건, 원인, 반례, 일반 법칙을 만들지 마세요.
@@ -427,91 +427,6 @@ def _text_tokens(value: str) -> set[str]:
     return {token for token in re.split(r"\s+", str(value or "").strip()) if token}
 
 
-_DISCOURSE_PREFIXES = (
-    "그런데",
-    "그러니까",
-    "그리고",
-    "그다음에",
-    "바로",
-    "이제",
-    "또",
-)
-
-_PRONOUN_LABEL_HEADS = {
-    "이것",
-    "그것",
-    "저것",
-    "이거",
-    "그거",
-    "저거",
-    "얘",
-    "걔",
-    "얘네",
-    "걔네",
-    "여기",
-    "저기",
-    "해당",
-}
-
-_LABEL_TAIL_HINTS = {
-    "소프트웨어",
-    "프로그램",
-    "운영체제",
-    "하드웨어",
-    "프로세스",
-    "메모리",
-    "파일",
-    "비용",
-    "손실",
-    "자산",
-    "원가",
-}
-
-
-def _compact_for_guard(value: str) -> str:
-    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or ""))
-
-
-def _explicit_label_heads(text: str) -> list[str]:
-    heads: list[str] = []
-    for match in re.finditer(r"([^.!?\n]{1,60}?)(?:이라는|이라고|이란|은요|는요|은|는)\b", str(text or "")):
-        raw = match.group(1).strip(" ,:;\"'`“”‘’()[]{}")
-        if not raw:
-            continue
-        raw = re.split(r"[,/]", raw)[-1].strip()
-        for prefix in _DISCOURSE_PREFIXES:
-            if raw.startswith(prefix + " "):
-                raw = raw[len(prefix) :].strip()
-            elif raw == prefix:
-                raw = ""
-        compact = _compact_for_guard(raw)
-        if len(compact) < 3 or compact in _PRONOUN_LABEL_HEADS:
-            continue
-        if raw.endswith(("하", "되")):
-            continue
-        tokens = raw.split()
-        tail = tokens[-1] if tokens else ""
-        if tail in _LABEL_TAIL_HINTS and len(tokens) >= 2:
-            raw = " ".join(tokens[-2:])
-            compact = _compact_for_guard(raw)
-        elif len(compact) > 18 or any(mark in raw for mark in ("?", "있죠", "이런 것", "저런 것", "그런 것")):
-            continue
-        if raw and raw not in heads:
-            heads.append(raw)
-    return heads
-
-
-def _preserve_explicit_label_terms(claim_text: str, resolved_claim: str) -> str:
-    """Do not let resolved_claim silently correct an explicit source label/category."""
-    resolved_compact = _compact_for_guard(resolved_claim)
-    if not resolved_compact:
-        return claim_text
-    for head in _explicit_label_heads(claim_text):
-        if _compact_for_guard(head) and _compact_for_guard(head) not in resolved_compact:
-            return claim_text
-    return resolved_claim
-
-
 def _similar_claim_text(a: dict, b: dict) -> bool:
     a_text = str(a.get("claim_text") or "")
     b_text = str(b.get("claim_text") or "")
@@ -617,7 +532,6 @@ def _extract_claims(
                 if not claim_text:
                     continue
                 resolved_claim = str(c.get("resolved_claim") or "").strip() or claim_text
-                resolved_claim = _preserve_explicit_label_terms(claim_text, resolved_claim)
                 normalized = _normalize_claim_type(c.get("claim_type"))
                 if normalized is None:
                     continue
