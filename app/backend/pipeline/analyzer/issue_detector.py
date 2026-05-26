@@ -110,12 +110,11 @@ def _build_issue_candidate_prompt(
             f"{i}. claim_id: {claim_id}",
             f"   context_id: {context_id}",
             f"   claim_type: {c.get('claim_type', '?')}{approx}",
+            f"   resolved_claim: {resolved or claim_text}",
             f"   claim_text: {claim_text}",
         ]
         if source_slice and source_slice != claim_text:
             lines.append(f"   source_slice: {source_slice}")
-        if resolved and resolved != claim_text:
-            lines.append(f"   resolved_claim: {resolved}")
         if c.get("context_ids"):
             lines.append(f"   context_ids: {', '.join(str(x) for x in c.get('context_ids') or [])}")
         if c.get("antecedent_context_ids"):
@@ -160,6 +159,8 @@ def _build_issue_candidate_prompt(
 - 정의, 분류, 포함 관계, 주체, 과정, 원인-결과, 작동 방식이 잘못 연결되었을 가능성
 - 수치, 순서, 조건, 가능/불가능, 전체/일부, 일시/영구 같은 범위가 뒤바뀌었을 가능성
 - 여러 구체 대상을 하나의 범주로 묶어 말했는데 그 범주명이 부정확할 가능성
+- 강의가 특정 분류 체계, 대비표, 상하위 범주를 설명하는 문맥에서 대상을 다른 범주명으로 명시적으로 부른 가능성
+  이 경우 그 용어가 넓은 일상적 의미로는 가능해 보여도, 강의 분류 기준상 혼동을 만들 수 있으면 `terminology` 또는 `definition_relation` 후보로 출력하세요.
 - 특정 조건에서만 맞는 말을 조건 없이 일반 사실처럼 말했을 가능성
 - 결과를 과장하여 잘못된 일반 규칙이나 배제 관계가 남을 가능성
 - 현재성, 최신성, 지원 여부, 사용 여부, 버전, 정책, 통계, 시장 상황처럼 업로드/검증 기준일({current_date}) 기준 확인이 필요한 가능성
@@ -176,10 +177,11 @@ def _build_issue_candidate_prompt(
 
 confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후, LLM 자신의 일반 도메인 지식 기준으로 판단했을 때, 해당 claim이 틀렸거나 확인할 가치가 있어 보이는 정도를 0.0~1.0 사이의 숫자로 표현한 것입니다. 일반적으로 0.6 이상이면 후속 검증이 충분히 가치 있다고 판단한 경우입니다.
 
-- 0.00~0.39: 일반적으로 통용되는 설명이다
-- 0.40~0.59: 일반적으로 사용되나, 약간의 예외나 조건이 있을 수 있다
-- 0.60~0.79: 일반적으로 애매한 표현이며, 예외나 조건이 명확히 존재한다
-- 0.80~1.00: 일반적으로 맞지 않는 말이다.
+- 0.00~0.19: 일반적으로 통용되는 설명이며 후속 검증 후보로 보기 어렵습니다.
+- 0.20~0.39: 대체로 맞는 설명이고, 표현 개선이나 엄밀성 보충 수준입니다.
+- 0.40~0.59: 일반적으로 사용될 수 있으나 예외나 조건이 있어 약한 검증 후보입니다.
+- 0.60~0.79: 표현이 애매하거나 예외/조건이 명확해 후속 검증할 가치가 있습니다.
+- 0.80~1.00: LLM 자신의 일반 도메인 지식 기준으로 일반적으로 맞지 않는 말에 가깝습니다.
 
 ### 응답 (JSON만)
 
@@ -195,8 +197,8 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
   "issues": [
     {{
       "claim_id": "CL0001",
-      "resolved_claim": "판정에 사용한 resolved_claim",
-      "claim_text": "원문 claim_text",
+      "resolved_claim": "입력 claim의 resolved_claim을 그대로 복사",
+      "claim_text": "입력 claim의 claim_text를 그대로 복사",
       "basis_code": "definition_relation",
       "confidence": 0.0
     }}
@@ -211,8 +213,10 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
 4. 같은 claim에서 같은 문제는 한 건만 출력하세요.
 5. 문제가 없으면 {{"issues": []}}만 출력하세요.
 6. basis_code는 위 다섯 코드 중 하나만 출력하세요.
-7. issue, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
-8. JSON 외 텍스트를 출력하지 마세요.
+7. issue, reason, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
+8. resolved_claim과 claim_text는 절대 새로 쓰거나 정리하지 말고 입력 claim의 값을 그대로 복사하세요.
+   이 단계는 upstream claim 필드를 수정하는 단계가 아닙니다.
+9. JSON 외 텍스트를 출력하지 마세요.
 """
 
 
@@ -311,14 +315,9 @@ def _judge_issue_candidates(
                 continue
             seen.add(issue_key)
 
-            resolved_claim = str(
-                raw_issue.get("resolved_claim")
-                or source_claim.get("resolved_claim")
-                or source_claim.get("claim_text")
-                or ""
-            ).strip()
-            claim_text = str(raw_issue.get("claim_text") or source_claim.get("claim_text") or "").strip()
-            source_issue_text = claim_text or resolved_claim
+            resolved_claim = str(source_claim.get("resolved_claim") or source_claim.get("claim_text") or "").strip()
+            claim_text = str(source_claim.get("claim_text") or "").strip()
+            source_issue_text = resolved_claim or claim_text
             basis_code = str(raw_issue.get("basis_code") or "").strip()
             issue = {
                 "claim_id": claim_id,

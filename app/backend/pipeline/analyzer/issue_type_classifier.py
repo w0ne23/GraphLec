@@ -75,6 +75,18 @@ def _now_iso() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
+def _env_seed() -> int | None:
+    raw = str(os.getenv("VERIFIER_SEED", "") or "").strip()
+    if not raw:
+        raw = str(os.getenv("ISSUE_TYPE_CLASSIFIER_SEED", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -154,10 +166,10 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 애매한 경우에는 가장 그럴듯한 한 유형에만 몰지 말고, 가능한 유형들에 확률을 나누어 주세요.
 
 분류:
-- temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 더 이상 맞지 않는 정보인 경우.
+- temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 부족하거나 더 이상 맞지 않는 정보인 경우.
 - scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
-- factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
 - confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
+- factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
 
 판단 기준:
 - resolved_claim을 주 판단 기준으로 사용하고, claim_text는 원문 표현이나 범위 표현 확인용 보조 정보로만 사용하세요.
@@ -169,7 +181,9 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 - 단순히 더 자세한 설명이 가능하다는 이유만으로 confusing_explanation을 선택하지 마세요.
 - "항상", "모든", "오직", "유일한" 같은 단어가 있다는 이유만으로 scope_overclaim로 올리지 마세요.
 - factual_error와 scope_overclaim이 모두 가능하면, 제한 표현이나 범위 단정만 완화하면 대체로 맞는 문장이 되는 경우 scope_overclaim에 더 높은 확률을 주세요. 명제의 핵심 내용 자체가 틀리면 factual_error에 더 높은 확률을 주세요.
-- temporal_error와 scope_overclaim이 모두 가능하면, 현재 기술 생태계 변화로 인해 중요한 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
+- temporal_error와 scope_overclaim이 모두 가능하면, 문제의 원인이 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
+- 원문 claim_text나 resolved_claim에 "항상", "모든", "오직", "반드시", "~만", "유일한", "전부", "불가능"처럼 범위 표현이 없고, 문맥상 대표 사례/일반 경향을 말한 것으로도 자연스럽게 읽히면 단순히 대안이 존재한다는 이유만으로 scope_overclaim을 높게 주지 마세요.
+- 빠진 대안이나 사례가 업로드/검증 기준일 현재 새롭게 중요해진 기술, 정책, 지원 여부, 사용 추세 때문이라면 temporal_error에 더 높은 확률을 주세요.
 
 
 응답은 JSON만 출력하세요.
@@ -374,6 +388,20 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
     raise ValueError(f"지원하지 않는 모델 지정: {model_spec}")
 
 
+def _parse_openai_model_spec(model_spec: str) -> tuple[str, str | None]:
+    spec = str(model_spec or "").strip()
+    if not spec:
+        return spec, None
+
+    match = re.match(
+        r"^(?P<model>(?:gpt|o)[A-Za-z0-9.-]*?)-(?P<effort>low|medium|high|xhigh)$",
+        spec,
+    )
+    if match:
+        return match.group("model"), match.group("effort")
+    return spec, None
+
+
 def _usage_value(obj: Any, *names: str) -> int:
     for name in names:
         value = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
@@ -456,6 +484,9 @@ def _call_openai_like(
     if not api_key:
         env_name = {"openai": "OPENAI_API_KEY", "xai": "XAI_API_KEY", "deepseek": "DEEPSEEK_API_KEY"}[provider]
         raise RuntimeError(f"{env_name}가 설정되지 않았습니다.")
+    reasoning_effort = None
+    if provider == "openai":
+        model, reasoning_effort = _parse_openai_model_spec(model)
 
     timeout = _env_float(
         f"ISSUE_TYPE_CLASSIFIER_{provider.upper()}_TIMEOUT_SEC",
@@ -470,11 +501,17 @@ def _call_openai_like(
     kwargs = {
         "model": model,
         "messages": messages,
-        "temperature": 0.0,
         "response_format": {"type": "json_object"},
     }
+    if not reasoning_effort:
+        kwargs["temperature"] = 0.0
+    seed = _env_seed()
+    if seed is not None:
+        kwargs["seed"] = seed
     if provider == "openai":
         kwargs["max_completion_tokens"] = max_tokens
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
     else:
         kwargs["max_tokens"] = max_tokens
         if provider == "deepseek":
@@ -499,6 +536,9 @@ def _call_openai_like(
                 changed_kwargs = True
             if "response_format" in message and "response_format" in retry_kwargs:
                 retry_kwargs.pop("response_format", None)
+                changed_kwargs = True
+            if "seed" in message.lower() and "seed" in retry_kwargs:
+                retry_kwargs.pop("seed", None)
                 changed_kwargs = True
             if changed_kwargs:
                 kwargs = retry_kwargs

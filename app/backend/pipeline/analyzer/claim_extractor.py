@@ -106,6 +106,8 @@ GPT 계열 모델은 "빠뜨리지 말라"는 지시를 과하게 해석해 문�
 
 4. resolved_claim 작성
 - resolved_claim은 원문보다 넓어지면 안 됩니다.
+- resolved_claim은 원문을 정답처럼 교정하는 필드가 아닙니다.
+- 원문에 명시된 용어, 분류명, 주체, 대상이 틀린 것처럼 보여도 고치지 말고 그대로 보존하세요.
 - 하나의 원문에 서로 다른 명제가 있으면 하나로 요약하지 말고 분리하세요.
 - 원문에 있는 중요한 부정/한정 표현을 덮어쓰지 마세요. 예: "A와 직접 관련 없다"와 "B를 제공한다"는 별도 claim입니다.
 """
@@ -298,14 +300,21 @@ def _build_extract_prompt(
 - claim_text를 만들 때, 원문에서 나온 주어, 예시, 설명들을 임의로 제거하거나 수정하지 마세요.
 - source_slice는 이 claim을 직접 만든 최소 원문 조각입니다. claim_text보다 넓어질 수 있지만, 같은 context의 다른 문제나 불필요한 예시는 포함하지 마세요.
 - resolved_claim은 원문 claim의 범위를 보존한 정리문입니다.
+- resolved_claim은 지시어, 생략 주어, 담화 표지, 반복 표현을 문맥상 확실한 범위 안에서 풀어 검증 가능한 완성 명제로 만드는 필드입니다.
+- 예: "작업 관리자 있죠? 또는 제어판 이런 것들은 ... 응용 프로그램이라고 부르는 것인데"는 "작업 관리자와 제어판은 ... 응용 프로그램이다"처럼 정리할 수 있습니다.
+- resolved_claim은 전사 오류, 용어 오류, 분류 오류, 사실 오류를 교정하는 필드가 아닙니다.
+- 원문에 명시된 용어/분류명/주체/대상이 일반 지식이나 주변 문맥과 다르게 보이더라도 resolved_claim에서 고치지 마세요.
+- 예: 원문이 "A 소프트웨어는 ..."라고 말했으면, 주변 문맥상 B 소프트웨어를 설명하는 것처럼 보여도 resolved_claim의 주어를 "B 소프트웨어"로 바꾸지 마세요.
 - resolved_claim에서 새로운 주체, 조건, 원인, 반례, 일반 법칙을 만들지 마세요.
-- resolved_claim이 원문 주어, 대상, 분류명, 조건, 범위를 바꿀 위험이 있으면 claim_text와 동일하게 두세요.
+- resolved_claim이 원문 주어, 대상, 분류명, 조건, 범위를 실제로 교정하거나 바꿀 위험이 있으면 claim_text와 동일하게 두세요.
+- 단, "이런 것들", "그것", 생략 주어를 문맥에서 바로 확인되는 명시 대상명으로 바꾸는 것은 교정이 아니라 지시어 해소입니다.
 - 주변 문맥과 슬라이드는 현재 context가 claim인지, 예시인지, 지시어가 명확한지만 판단하는 보조 정보입니다.
 - 주변 문맥에 있는 더 강한 일반 명제를 현재 context에 덧씌우지 마세요.
 - 현재 context가 예시/가정/비유/수사적 요약이면, resolved_claim에도 그 예시/가정/비유/요약 범위를 유지하세요.
 
 ### 지시어 처리
 - "이것", "여기", "해당 항목", "얘", "이거", "그거" 같은 지시어는 단일 선행사가 확실할 때만 최소한으로 풀어 쓰세요.
+- "이런 것들", "이것들", "얘네들"처럼 같은 context 안에서 바로 앞에 열거된 대상 전체를 가리키는 표현은, 열거 대상이 명확하면 resolved_claim에서 그 대상명으로 풀어 쓰세요.
 - 둘 이상의 합리적 해석이 가능하면 특정 대상으로 확정하지 말고 원문 지시어를 유지하세요.
 - 지시어 선행사가 제공된 문맥보다 앞에 있을 수 있어도, 현재 context에 검증 가능한 술어/정의/수치/관계가 있으면
   claim을 버리지 말고 원문 그대로 추출하세요. 이때 resolved_claim은 claim_text와 같게 두세요.
@@ -423,6 +432,92 @@ def _text_tokens(value: str) -> set[str]:
     return {token for token in re.split(r"\s+", str(value or "").strip()) if token}
 
 
+_DISCOURSE_PREFIXES = (
+    "그런데",
+    "그러니까",
+    "그리고",
+    "그다음에",
+    "바로",
+    "이제",
+    "또",
+)
+
+_PRONOUN_LABEL_HEADS = {
+    "이것",
+    "그것",
+    "저것",
+    "이거",
+    "그거",
+    "저거",
+    "얘",
+    "걔",
+    "얘네",
+    "걔네",
+    "여기",
+    "저기",
+    "해당",
+}
+
+_LABEL_TAIL_HINTS = {
+    "소프트웨어",
+    "프로그램",
+    "운영체제",
+    "하드웨어",
+    "프로세스",
+    "메모리",
+    "파일",
+    "비용",
+    "손실",
+    "자산",
+    "원가",
+}
+
+
+def _compact_for_guard(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]+", "", str(value or ""))
+
+
+def _explicit_label_heads(text: str) -> list[str]:
+    heads: list[str] = []
+    for match in re.finditer(r"([^.!?\n]{1,60}?)(?:이라는|이라고|이란|은요|는요|은|는)\b", str(text or "")):
+        raw = match.group(1).strip(" ,:;\"'`“”‘’()[]{}")
+        if not raw:
+            continue
+        raw = re.split(r"[,/]", raw)[-1].strip()
+        for prefix in _DISCOURSE_PREFIXES:
+            if raw.startswith(prefix + " "):
+                raw = raw[len(prefix) :].strip()
+            elif raw == prefix:
+                raw = ""
+        compact = _compact_for_guard(raw)
+        if len(compact) < 3 or compact in _PRONOUN_LABEL_HEADS:
+            continue
+        if raw.endswith(("하", "되")):
+            continue
+        tokens = raw.split()
+        tail = tokens[-1] if tokens else ""
+        if tail in _LABEL_TAIL_HINTS and len(tokens) >= 2:
+            raw = " ".join(tokens[-2:])
+            compact = _compact_for_guard(raw)
+        elif len(compact) > 18 or any(mark in raw for mark in ("?", "있죠", "이런 것", "저런 것", "그런 것")):
+            continue
+        if raw and raw not in heads:
+            heads.append(raw)
+    return heads
+
+
+def _preserve_explicit_label_terms(claim_text: str, source_slice: str, resolved_claim: str) -> str:
+    """Do not let resolved_claim silently correct an explicit source label/category."""
+    resolved_compact = _compact_for_guard(resolved_claim)
+    if not resolved_compact:
+        return claim_text
+    for text in (claim_text, source_slice):
+        for head in _explicit_label_heads(text):
+            if _compact_for_guard(head) and _compact_for_guard(head) not in resolved_compact:
+                return claim_text
+    return resolved_claim
+
+
 def _similar_claim_text(a: dict, b: dict) -> bool:
     a_text = str(a.get("claim_text") or "")
     b_text = str(b.get("claim_text") or "")
@@ -529,6 +624,7 @@ def _extract_claims(
                     continue
                 source_slice = str(c.get("source_slice") or "").strip() or claim_text
                 resolved_claim = str(c.get("resolved_claim") or "").strip() or claim_text
+                resolved_claim = _preserve_explicit_label_terms(claim_text, source_slice, resolved_claim)
                 normalized = _normalize_claim_type(c.get("claim_type"))
                 if normalized is None:
                     continue

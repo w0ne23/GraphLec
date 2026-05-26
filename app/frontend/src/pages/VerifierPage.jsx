@@ -52,14 +52,14 @@ function compactText(value, fallback = '-') {
 function labelForStage(stage) {
   const labels = {
     confirmed: '확정',
-    professor_check: '교수 확인',
-    review_needed: '교수 확인',
+    professor_check: '강의자 확인',
+    review_needed: '강의자 확인',
     rejected: '기각',
     final_confirmed: '확정',
-    needs_review: '교수 확인',
+    needs_review: '강의자 확인',
     verifier_rejected: '검증 기각',
     agree: '확정',
-    inconclusive: '교수 확인',
+    inconclusive: '강의자 확인',
     disagree: '기각',
   }
   return labels[stage] || compactText(stage)
@@ -230,7 +230,7 @@ function getSeverityScorePercent(item, severity = {}, score) {
 function statusFromScore(score) {
   if (score === undefined) return ''
   if (score >= 0.8) return 'confirmed'
-  if (score >= 0.45) return 'professor_check'
+  if (score > 0.4) return 'professor_check'
   return 'rejected'
 }
 
@@ -719,10 +719,10 @@ export default function VerifierPage() {
       const filteredReview = filterIssueClaims(sections.needsReview)
       return (
         <Section
-          title="교수 확인이 필요한 내용 이슈"
+          title="강의자 확인이 필요한 내용 이슈"
           count={sections.needsReview.length}
           tone="review"
-          empty="교수 확인이 필요한 내용 이슈가 없습니다."
+          empty="강의자 확인이 필요한 내용 이슈가 없습니다."
         >
           <IssueTypeBreakdown
             items={sections.needsReview}
@@ -733,7 +733,7 @@ export default function VerifierPage() {
           <IssueFilterDescription filter={activeIssueFilter} />
           {filteredReview.length > 0
             ? renderClaimList(filteredReview, 'needs_review')
-            : <div className="vf-empty">선택한 유형의 교수 확인 이슈가 없습니다.</div>}
+            : <div className="vf-empty">선택한 유형의 강의자 확인 이슈가 없습니다.</div>}
         </Section>
       )
     }
@@ -857,7 +857,7 @@ export default function VerifierPage() {
               onClick={() => selectTab('confirmed')}
             />
             <SummaryMetric
-              label="교수 확인"
+              label="강의자 확인"
               value={reviewCount}
               tone="review"
               active={activeTab === 'review'}
