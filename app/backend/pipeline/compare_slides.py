@@ -19,6 +19,19 @@ from PIL import Image
 from pathlib import Path
 from collections import defaultdict
 
+try:
+    from .slide_extractor import (
+        Config,
+        duplicate_frame_features,
+        duplicate_pair_decision,
+    )
+except ImportError:
+    from slide_extractor import (
+        Config,
+        duplicate_frame_features,
+        duplicate_pair_decision,
+    )
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
@@ -61,66 +74,72 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
 
     with open(meta_path, encoding="utf-8") as f:
         metadata = json.load(f)
+    cfg = Config()
+    cfg.DUPLICATE_HASH_THRESHOLD = int(threshold)
 
     # scene_index별 그룹화
     groups: dict[int, list] = defaultdict(list)
     for m in metadata:
         groups[m["scene_index"]].append(m)
 
-    # 프레임 풀 구성: label → (scene_index, filename)
-    pool: dict[str, tuple[int, str]] = {}
+    # scene별 clean representative 구성
+    representatives: dict[int, dict] = {}
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
         base_list  = [f for f in frames if f["capture_type"] == "base"]
-        annot_list = [f for f in frames if f["capture_type"] == "annotation"]
+        clean_list = [f for f in frames if f.get("is_clean_final")]
 
-        if base_list:
-            pool[f"base{idx}"] = (idx, base_list[0]["filename"])
-        if annot_list:
-            pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"])
+        rep = clean_list[-1] if clean_list else base_list[0] if base_list else None
+        if not rep:
+            log.warning(f"  representative 없음: scene {idx}")
+            continue
 
-    log.info(f"프레임 풀: {list(pool.keys())}")
-
-    # phash 계산
-    phashes: dict[str, imagehash.ImageHash] = {}
-    for label, (_, fname) in pool.items():
+        fname = rep["filename"]
         img = cv2.imread(str(out_path / fname))
-        if img is not None:
-            phashes[label] = compute_phash_hires(resize_frame(img, RESIZE_WIDTH))
-            log.info(f"  phash 계산: {label} ({fname})")
-        else:
+        if img is None:
             log.warning(f"  이미지 로드 실패: {fname}")
+            continue
+        representatives[idx] = duplicate_frame_features(img, cfg) | {"filename": fname}
+        log.info(f"  representative 계산: scene {idx} ({fname})")
 
-    # 전체 쌍 비교
-    labels = sorted(phashes.keys())
+    scene_indices = sorted(representatives)
     duplicate_map: dict[int, set[int]] = defaultdict(set)
+    duplicate_edges: set[frozenset[int]] = set()
 
     print("\n" + "═" * 70)
-    print(f"  슬라이드 phash 전체 쌍 비교  |  threshold={threshold}  (256비트, 최대 256)")
+    print(f"  슬라이드 clean representative 중복 비교  |  phash threshold={threshold}")
     print("═" * 70)
-    print(f"  {'프레임 쌍':<30}  {'dist':>5}  {'판정'}")
-    print(f"  {'-'*30}  {'-'*5}  {'-'*12}")
+    print(
+        f"  {'scene pair':<17} {'p':>3} {'d':>3} {'cp':>3} "
+        f"{'cchg':>6} {'cedge':>6} {'hist':>6}  {'판정'}"
+    )
+    print(f"  {'-'*17} {'-'*3} {'-'*3} {'-'*3} {'-'*6} {'-'*6} {'-'*6}  {'-'*12}")
 
     results = []
-    for i in range(len(labels)):
-        for j in range(i + 1, len(labels)):
-            la, lb  = labels[i], labels[j]
-            idx_a   = pool[la][0]
-            idx_b   = pool[lb][0]
-
-            if idx_a == idx_b:
-                continue
-
-            dist = phashes[la] - phashes[lb]
-            is_dup = dist < threshold
-            flag   = "★ 중복 후보" if is_dup else ""
-
-            print(f"  {la:<14} ↔ {lb:<14}  {dist:>5}  {flag}")
-            results.append({"pair": f"{la}↔{lb}", "slide_a": idx_a, "slide_b": idx_b, "dist": dist, "duplicate": is_dup})
+    for i in range(len(scene_indices)):
+        for j in range(i + 1, len(scene_indices)):
+            idx_a = scene_indices[i]
+            idx_b = scene_indices[j]
+            is_dup, metrics = duplicate_pair_decision(representatives[idx_a], representatives[idx_b], cfg)
+            if (
+                is_dup
+                or metrics["phash"] <= cfg.DUPLICATE_HASH_THRESHOLD
+                or metrics["dhash"] <= cfg.DUPLICATE_DHASH_THRESHOLD
+                or metrics["content_phash"] <= cfg.DUPLICATE_CONTENT_HASH_THRESHOLD
+            ):
+                flag = f"★ 중복 후보/{metrics['reason']}" if is_dup else ""
+                print(
+                    f"  {idx_a:03d} ↔ {idx_b:03d}       "
+                    f"{metrics['phash']:>3} {metrics['dhash']:>3} {metrics['content_phash']:>3} "
+                    f"{metrics['content_changed']:>6.4f} {metrics['content_edge']:>6.4f} "
+                    f"{metrics['hist']:>6.4f}  {flag}"
+                )
+            results.append({"scene_a": idx_a, "scene_b": idx_b, **metrics, "duplicate": is_dup})
 
             if is_dup:
                 duplicate_map[idx_a].add(idx_b)
                 duplicate_map[idx_b].add(idx_a)
+                duplicate_edges.add(frozenset((idx_a, idx_b)))
 
     print("═" * 70)
 
@@ -133,10 +152,10 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
         print(f"\n  threshold={threshold} 기준 중복 후보 없음")
 
     # 거리 분포 요약
-    dists = [r["dist"] for r in results]
+    dists = [r["phash"] for r in results]
     if dists:
-        dup_dists    = [r["dist"] for r in results if r["duplicate"]]
-        nondup_dists = [r["dist"] for r in results if not r["duplicate"]]
+        dup_dists    = [r["phash"] for r in results if r["duplicate"]]
+        nondup_dists = [r["phash"] for r in results if not r["duplicate"]]
         print(f"\n  [거리 분포]")
         print(f"    전체   min={min(dists)}  max={max(dists)}  avg={sum(dists)/len(dists):.1f}")
         if dup_dists:
@@ -147,9 +166,25 @@ def compare_slides(slides_dir: str, threshold: int, update_metadata: bool):
 
     # metadata.json 업데이트 (--update-metadata 옵션)
     if update_metadata:
+        grouped: list[set[int]] = []
+        for idx in sorted(groups):
+            for group in grouped:
+                if all(frozenset((idx, member)) in duplicate_edges for member in group):
+                    group.add(idx)
+                    break
+            else:
+                grouped.append({idx})
+        group_of = {idx: group for group in grouped for idx in group}
         for m in metadata:
             idx = m["scene_index"]
-            m["duplicate_of"] = sorted(duplicate_map[idx])
+            members = sorted(group_of.get(idx, {idx}))
+            m["duplicate_of"] = [other for other in members if other != idx]
+            m["same_slide_group"] = members
+            m["same_slide_canonical"] = members[0]
+            m["same_slide_group_size"] = len(members)
+            m["slide_group"] = members
+            m["slide_canonical_index"] = members[0]
+            m["slide_group_size"] = len(members)
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
         log.info(f"\n  metadata.json 업데이트 완료: {meta_path}")

@@ -33,7 +33,7 @@ PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else PROJECT
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 
 
-def pipeline_process(job_id: str, lecture_id: str, input_path: str):
+def pipeline_process(job_id: str, lecture_id: str, input_path: str, uploaded_at: str | None = None, title: str = ""):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
 
     # spawn된 자식 프로세스는 부모의 sys.path를 상속받지 않으므로 pipeline 패키지를 import하기 위해 명시적으로 경로를 추가한다.
@@ -91,7 +91,8 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str):
                         "--skip-neo4j",
                         "--metadata-dir", str(output_dir / "metadata"),
                         "--lance-root",   str(output_dir / "lancedb"),
-                    ])
+                    ] + (["--title", title] if title else [])
+                      + (["--uploaded-at", uploaded_at] if uploaded_at else []))
                     os.environ["PYTHONUNBUFFERED"] = "1"
                     logger.info(f"[{job_id}] Starting pipeline...")
                     pipeline_main.run_pipeline(args, progress_callback=on_progress)
@@ -135,10 +136,11 @@ async def worker_loop():
                 job_id_val = None
                 job_lecture_id = None
                 job_input_path = None
+                job_uploaded_at = None
 
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(text("""
-                        SELECT pj.id, pj.lecture_id, l.video_path
+                        SELECT pj.id, pj.lecture_id, l.video_path, l.created_at, l.title
                         FROM processing_jobs pj
                         JOIN lectures l ON l.id = pj.lecture_id
                         WHERE pj.status = 'pending'
@@ -151,6 +153,12 @@ async def worker_loop():
                         job_id_val     = job["id"]
                         job_lecture_id = job["lecture_id"]
                         job_input_path = job["video_path"]
+                        job_title      = job["title"] or ""
+                        job_uploaded_at = (
+                            job["created_at"].isoformat()
+                            if job["created_at"]
+                            else None
+                        )
                         await db.execute(text("""
                             UPDATE processing_jobs
                             SET status = 'running', current_stage = 'Starting pipeline'
@@ -169,7 +177,13 @@ async def worker_loop():
                 try:
                     loop = asyncio.get_running_loop()
                     success, output_dir, error = await loop.run_in_executor(
-                        executor, pipeline_process, job_id_str, job_lecture_str, job_input_path
+                        executor,
+                        pipeline_process,
+                        job_id_str,
+                        job_lecture_str,
+                        job_input_path,
+                        job_uploaded_at,
+                        job_title,
                     )
                 except concurrent.futures.process.BrokenProcessPool as bp_err:
                     logger.error(f"--- [Worker EXECUTOR BROKEN] {job_id_str}: {bp_err} ---")

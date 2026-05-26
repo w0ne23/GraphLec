@@ -70,6 +70,69 @@ GPU용 PyTorch가 필요하면 `requirements.txt` 상단 주석의 CUDA 인덱�
 
 질의 서비스(`query_service`)는 `GOOGLE_API_KEY_2`·`GOOGLE_API_KEY`·`GEMINI_API_KEY` 등으로 Gemini를 찾습니다. LanceDB 경로는 `GRAPHLEC_LANCE_ROOT`(미설정 시 저장소 루트의 `data/lancedb`).
 
+### LocalVLM / Ollama 설정 (선택)
+
+슬라이드 추출 단계에서 자동 규칙만으로 애매한 후보를 LocalVLM에 넘겨 최종 판정할 수 있습니다. 현재 용도는 다음 세 가지입니다.
+
+- `same_slide_duplicate`: 같은 슬라이드가 다시 등장했는지 확인
+- `same_slide_build`: 같은 슬라이드에 내용이 빌드업된 것인지 확인
+- `transition_noise`: 슬라이드 전환 중간 프레임이라 제거해야 하는지 확인
+
+LocalVLM은 기본 비활성화되어 있습니다. 사용하려면 먼저 호스트 머신에 Ollama를 설치하고 모델을 받아야 합니다.
+
+```bash
+ollama serve
+ollama pull gemma3:4b
+ollama list
+```
+
+`ollama serve`는 파이프라인 실행 중 켜져 있어야 합니다. Docker Compose로 백엔드를 띄우는 경우 백엔드 컨테이너는 호스트의 Ollama 서버를 `http://host.docker.internal:11434`로 호출합니다.
+
+#### CPU 로컬 환경 권장값
+
+```env
+GRAPHLEC_VLM_ENABLED=1
+GRAPHLEC_VLM_PROVIDER=ollama
+GRAPHLEC_OLLAMA_BASE_URL=http://host.docker.internal:11434
+GRAPHLEC_OLLAMA_MODEL=gemma3:4b
+GRAPHLEC_VLM_WORKERS=2
+GRAPHLEC_VLM_TEMPERATURE=0.0
+GRAPHLEC_VLM_APPLY=0
+GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE=0.65
+```
+
+- `GRAPHLEC_VLM_ENABLED=1`: LocalVLM 후보 판정을 실행합니다.
+- `GRAPHLEC_VLM_APPLY=0`: 판정 결과만 `slides/llm_review_results.json`에 저장하고 metadata에는 반영하지 않습니다. 정확도를 확인한 뒤 `1`로 바꿉니다.
+- `GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE`: `APPLY=1`일 때 이 confidence 이상인 결정만 metadata에 반영합니다.
+- `GRAPHLEC_VLM_WORKERS`: Ollama 동시 요청 수입니다. CPU 로컬은 `2` 정도가 무난합니다.
+
+#### GPU 서버 환경 예시
+
+GPU 서버에서는 더 큰 VLM을 쓸 수 있고 동시 요청 수도 늘릴 수 있습니다. 설치된 Ollama 모델 태그는 서버에서 `ollama list`로 확인하세요.
+
+```env
+GRAPHLEC_VLM_ENABLED=1
+GRAPHLEC_VLM_PROVIDER=ollama
+GRAPHLEC_OLLAMA_BASE_URL=http://host.docker.internal:11434
+GRAPHLEC_OLLAMA_MODEL=qwen2.5vl:7b
+GRAPHLEC_VLM_WORKERS=4
+GRAPHLEC_VLM_TEMPERATURE=0.0
+GRAPHLEC_VLM_APPLY=1
+GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE=0.65
+```
+
+GPU 서버에서도 Ollama는 백엔드 컨테이너 밖의 호스트 또는 별도 서버에서 실행할 수 있습니다. 별도 서버라면 `GRAPHLEC_OLLAMA_BASE_URL`을 해당 서버 주소로 바꿉니다.
+
+#### 결과 확인
+
+슬라이드 추출이 끝나면 아래 파일을 확인합니다.
+
+- `slides/llm_review_candidates.json`: LocalVLM에 넘긴 후보 목록
+- `slides/llm_review_results.json`: LocalVLM 판정 결과
+- `slides/metadata.json`: `GRAPHLEC_VLM_APPLY=1`인 경우 transition 제거·중복 그룹 판정이 반영된 최종 metadata
+
+Ollama가 꺼져 있거나 모델이 없으면 LocalVLM 단계에서 실패하므로, 먼저 `ollama list`와 `ollama serve` 상태를 확인합니다.
+
 **Neo4j 적재(Stage 6 직후, 기본 비활성화)**  
 `main.py`는 기본적으로 Stage 6 이후 Neo4j 적재를 건너뜁니다. Neo4j까지 올리고 싶다면 실행 시 **`--load-neo4j`** 를 지정하세요 (Parquet 생성은 그대로).  
 `--load-neo4j`를 사용했는데 연결 실패하면 파이프라인은 **오류로 중단**됩니다.

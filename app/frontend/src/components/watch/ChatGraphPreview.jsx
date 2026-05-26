@@ -7,7 +7,6 @@ const STRUCTURE_VISIBLE_TYPES = new Set(['Slide', 'Scene', 'VisualAsset'])
 const GRAPH_COLORS = {
   GraphRAGEntity: '#FF6B6B',
   GraphRAGCommunity: '#FF9F43',
-  Concept: '#FF6B6B',
   Slide: '#4ECDC4',
   Scene: '#A29BFE',
   Context: '#81ECEC',
@@ -44,7 +43,7 @@ function normalizedType(node) {
   if (raw === 'segment') return 'Segment'
   if (raw === 'visualasset' || raw === 'visual') return 'VisualAsset'
   if (raw === 'video' || raw === 'lecture' || raw === 'lecturevideo') return 'Video'
-  if (raw === 'graphragentity' || raw === 'concept' || raw === 'conceptgraph' || raw === 'entity') return 'GraphRAGEntity'
+  if (raw === 'graphragentity' || raw === 'conceptgraph') return 'GraphRAGEntity'
   if (raw === 'graphragcommunity' || raw === 'community') return 'GraphRAGCommunity'
   if (raw === 'annotation' || raw === 'annotationemphasis' || raw === 'annot') return 'AnnotationEmphasis'
   if (/slide[_/-]?\d+/.test(id) || /^s\d+$/.test(label)) return 'Slide'
@@ -54,7 +53,8 @@ function normalizedType(node) {
   if (/visual/.test(id) || label === 'visualasset') return 'VisualAsset'
   if (/lecture|video/.test(id) || label === 'video' || label === 'lecture') return 'Video'
   if (/annotation|annot/.test(id) || /annotation|annot/.test(label)) return 'AnnotationEmphasis'
-  if (/concept|graphrag/.test(id) || /concept|entity/.test(label)) return 'GraphRAGEntity'
+  if (/^graphrag\/entity\//.test(id) || label === 'graphragentity') return 'GraphRAGEntity'
+  if (/^graphrag\/community\//.test(id) || label === 'graphragcommunity') return 'GraphRAGCommunity'
   return node?.type || 'node'
 }
 
@@ -80,6 +80,11 @@ function visualAssetLabel(node, fallback) {
   const props = nodeProps(node)
   const slideNo = props.slide_number ?? String(node?.id || '').match(/slide[_/-]?0*(\d+)/i)?.[1]
   return slideNo != null ? `visualAsset${Number(slideNo)}` : fallback
+}
+
+function videoTitle(node) {
+  const props = nodeProps(node)
+  return String(props.title || node?.name || '').trim()
 }
 
 function firstSentence(text) {
@@ -221,11 +226,12 @@ function compactGraph(graph, options = {}) {
   function edgeAllowed(edge) {
     if (sourceMode !== 'visual_location') return true
     const label = edgeLabel(edge)
-    const fromType = nodesById.get(edge._from)?.type
-    const toType = nodesById.get(edge._to)?.type
+    const fromType = normalizedType(nodesById.get(edge._from))
+    const toType = normalizedType(nodesById.get(edge._to))
     if (label === 'HAS_CONTEXT' || label === 'HAS_SEGMENT') return false
     if (STRUCTURE_VISIBLE_TYPES.has(fromType) && STRUCTURE_VISIBLE_TYPES.has(toType)) return true
     if (fromType === 'GraphRAGEntity' || toType === 'GraphRAGEntity') return true
+    if (fromType === 'GraphRAGCommunity' || toType === 'GraphRAGCommunity') return true
     return false
   }
 
@@ -242,7 +248,7 @@ function compactGraph(graph, options = {}) {
   function nodeAllowed(node) {
     if (sourceMode !== 'visual_location') return true
     const type = normalizedType(node)
-    return STRUCTURE_VISIBLE_TYPES.has(type) || type === 'GraphRAGEntity'
+    return STRUCTURE_VISIBLE_TYPES.has(type) || type === 'GraphRAGEntity' || type === 'GraphRAGCommunity'
   }
 
   const selectedIds = new Set()
@@ -288,6 +294,17 @@ function compactGraph(graph, options = {}) {
     .slice(0, NODE_LIMIT)
     .map(id => nodesById.get(id))
     .filter(Boolean)
+  if (!nodes.length) {
+    const fallbackNodes = rawNodes
+      .slice()
+      .sort((a, b) => nodePriority(b) - nodePriority(a))
+      .slice(0, NODE_LIMIT)
+    const fallbackIds = new Set(fallbackNodes.map(node => String(node.id)))
+    const fallbackEdges = rankedEdges
+      .filter(edge => fallbackIds.has(edge._from) && fallbackIds.has(edge._to))
+      .slice(0, EDGE_LIMIT)
+    return { nodes: fallbackNodes, edges: fallbackEdges }
+  }
   const nodeIds = new Set(nodes.map(node => String(node.id)))
   const visibleEdges = edges.filter(edge => nodeIds.has(edge._from) && nodeIds.has(edge._to))
 
@@ -338,6 +355,8 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
       } else if (type === 'Segment') {
         const segmentNo = id.match(/segment[_/-]?0*(\d+)/i)?.[1]
         labels.set(id, segmentNo ? `segment${Number(segmentNo)}` : nextLabel('segment'))
+      } else if (type === 'Video') {
+        labels.set(id, 'video')
       } else {
         labels.set(id, conceptLabel(node))
       }
@@ -349,6 +368,10 @@ export default function ChatGraphPreview({ graph, sourceMode = 'default', relate
   function nodeDetail(node) {
     const type = normalizedType(node)
     const props = nodeProps(node)
+    if (type === 'Video') {
+      const title = videoTitle(node)
+      return title ? `title: ${title}` : ''
+    }
     if (type === 'VisualAsset') {
       const assetType = String(node?.asset_type || props.asset_type || '').trim()
       return assetType ? `asset_type: ${assetType}` : 'asset_type: visual'

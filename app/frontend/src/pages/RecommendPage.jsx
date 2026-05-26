@@ -8,8 +8,8 @@ import '../styles/recommend.css'
 
 const SUGGESTIONS = [
   '선형대수 행렬 강의',
-  '30분 내외의 설명이 쉬운 기초 파이썬',
-  '머신러닝 배우기 전에 들으면 좋은 수학 강의',
+  '30분 내외의 그림 위주 파이썬',
+  '음질 좋은 DNA 복제 단계 설명해주는 강의',
   '딥러닝 CNN 실습 위주 강의',
 ]
 
@@ -38,8 +38,9 @@ export default function RecommendPage() {
       const res = await recommendLectures(text, 5)
       setResults(res?.results ?? [])
     } catch (e) {
-      setError(String(e.message || e))
-      setResults([])
+      console.error('Recommend search failed:', e)
+      setError('추천 서버가 잠시 불안정합니다. 잠시 후 다시 검색해 주세요.')
+      setResults(null)
     } finally {
       setLoading(false)
     }
@@ -77,7 +78,7 @@ export default function RecommendPage() {
           <input
             ref={inputRef}
             className="rec-searchbar-input"
-            placeholder="강의 내용, 주제, 난이도 등을 자유롭게 입력하세요"
+            placeholder="강의 내용, 주제, 조건 등을 자유롭게 입력하세요"
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={e => {
@@ -123,6 +124,18 @@ export default function RecommendPage() {
               <span className="rec-loading-dot" />
               <span className="rec-loading-dot" />
             </div>
+          ) : error ? (
+            <div className="rec-error-state">
+              <p className="rec-empty-title">추천을 불러오지 못했습니다</p>
+              <p className="rec-empty-sub">{error}</p>
+              <button
+                className="rec-retry-btn"
+                onClick={() => handleSearch(searchLabel || query)}
+                disabled={loading}
+              >
+                다시 검색
+              </button>
+            </div>
           ) : results === null ? null : results.length === 0 ? (
             <div className="rec-empty">
               <p className="rec-empty-title">검색 결과가 없습니다</p>
@@ -133,11 +146,6 @@ export default function RecommendPage() {
               <div className="rec-result-label">
                 <strong>"{searchLabel}"</strong>에 대한 추천 강의 {results.length}개
               </div>
-              {error && (
-                <div className="rec-empty" style={{ paddingTop: 0 }}>
-                  <p className="rec-empty-sub">오류: {error}</p>
-                </div>
-              )}
               <div className="rec-list">
                 {results.map(lec => (
                   <RecommendListItem

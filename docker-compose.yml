@@ -130,11 +130,22 @@ services:
       - GRAPHLEC_METADATA_DIR=/app/metadata
       - RECOMMENDER_DB_DIR=/lance/lancedb
       - GRAPHLEC_CLEAR_NEO4J_ON_START=0
+      - GRAPHLEC_ANNOT_WORKERS=${GRAPHLEC_ANNOT_WORKERS:-0}
+      - GRAPHLEC_VLM_ENABLED=${GRAPHLEC_VLM_ENABLED:-0}
+      - GRAPHLEC_VLM_PROVIDER=${GRAPHLEC_VLM_PROVIDER:-ollama}
+      - GRAPHLEC_OLLAMA_MODEL=${GRAPHLEC_OLLAMA_MODEL:-gemma3:4b}
+      - GRAPHLEC_OLLAMA_BASE_URL=${GRAPHLEC_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - GRAPHLEC_VLM_WORKERS=${GRAPHLEC_VLM_WORKERS:-2}
+      - GRAPHLEC_VLM_TEMPERATURE=${GRAPHLEC_VLM_TEMPERATURE:-0.0}
+      - GRAPHLEC_VLM_APPLY=${GRAPHLEC_VLM_APPLY:-0}
+      - GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE=${GRAPHLEC_VLM_APPLY_MIN_CONFIDENCE:-0.65}
     volumes:
       - ./input:/pipeline/input
       - ./local_storage:/pipeline/local_storage
       - lance_data:/lance
       - ./app/backend:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

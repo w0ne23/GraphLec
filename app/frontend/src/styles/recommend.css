@@ -137,23 +137,38 @@
 .rec-empty       { text-align: center; padding: 48px 0; }
 .rec-empty-title { font-size: 15px; font-weight: 600; color: var(--t1); margin-bottom: 8px; }
 .rec-empty-sub   { font-size: 13px; color: var(--t3); }
+.rec-error-state { text-align: center; padding: 48px 0; }
+.rec-retry-btn {
+  margin-top: 14px;
+  padding: 8px 16px;
+  border: 1px solid var(--blue-br);
+  border-radius: var(--r);
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-size: 13px;
+  font-weight: 700;
+  transition: all .14s;
+}
+.rec-retry-btn:hover {
+  background: var(--blue);
+  color: #fff;
+}
+.rec-retry-btn:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
 
-/* 티어 배지 (간접 관련 / 배경 강의) */
+/* 티어 배지 (간접 관련) */
 .rec-item--related    { opacity: .92; }
-.rec-item--background { opacity: .80; }
 .rec-overall-score--related    { color: var(--amber); }
-.rec-overall-score--background { color: var(--t3); }
 .rec-tier-badge {
   font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
   background: var(--amber-bg); color: var(--amber);
 }
-.rec-tier-badge--background { background: var(--card); color: var(--t3); }
 .rec-related-notice {
   font-size: 12px; color: var(--amber); margin-bottom: 8px;
   padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r);
 }
-.rec-related-notice--background { color: var(--t3); background: var(--card); }
-.rec-duration-warn { font-size: 10px; color: var(--amber); }
 
 /* 모바일 */
 @media (max-width: 768px) {
@@ -278,11 +293,21 @@
 
 /* 티어 배지 */
 .rec-item--related { opacity: .92; }
-.rec-item--background { opacity: .80; }
 .rec-overall-score--related { color: var(--amber); }
-.rec-overall-score--background { color: var(--t3); }
 .rec-tier-badge { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: var(--amber-bg); color: var(--amber); }
-.rec-tier-badge--background { background: var(--card); color: var(--t3); }
 .rec-related-notice { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
-.rec-related-notice--background { color: var(--t3); background: var(--card); }
-.rec-duration-warn { font-size: 10px; color: var(--amber); }
+.rec-condition-warnings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+.rec-condition-warning {
+  font-size: 11px;
+  color: var(--amber);
+  padding: 6px 10px;
+  background: var(--amber-bg);
+  border-radius: var(--r);
+}
+.rec-condition-warning--inline {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  font-size: 10px;
+  padding: 2px 6px;
+}
