@@ -107,6 +107,9 @@ class Config:
     DUPLICATE_CONTENT_MSE_MAX = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_MSE_MAX", "0.025"))
     DUPLICATE_CONTENT_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_CONTENT_HIST_MIN", "0.97"))
     DUPLICATE_FULL_HIST_MIN = float(os.getenv("GRAPHLEC_DUPLICATE_FULL_HIST_MIN", "0.95"))
+    AGENDA_TEXT_GUARD_ENABLED = os.getenv("GRAPHLEC_AGENDA_TEXT_GUARD_ENABLED", "1") != "0"
+    AGENDA_TEXT_MISMATCH_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_MISMATCH_MAX", "0.18"))
+    AGENDA_TEXT_XOR_MAX = float(os.getenv("GRAPHLEC_AGENDA_TEXT_XOR_MAX", "0.045"))
     BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN = float(
         os.getenv("GRAPHLEC_BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN", "0.90")
     )
@@ -310,6 +313,104 @@ def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | 
     }
 
 
+def _agenda_white_components(content: np.ndarray, ignore_mask: np.ndarray | None = None) -> tuple[np.ndarray, int]:
+    hsv = cv2.cvtColor(content, cv2.COLOR_BGR2HSV)
+    white = (hsv[:, :, 1] <= 55) & (hsv[:, :, 2] >= 175)
+    if ignore_mask is not None:
+        white &= ~ignore_mask
+
+    candidate = white.astype(np.uint8) * 255
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    candidate = cv2.morphologyEx(candidate, cv2.MORPH_CLOSE, np.ones((11, 11), np.uint8))
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(candidate, 8)
+    h, w = candidate.shape[:2]
+    keep = np.zeros_like(candidate)
+    component_count = 0
+    for label in range(1, count):
+        x, y, comp_w, comp_h, area = stats[label]
+        aspect = comp_w / max(comp_h, 1)
+        if area < 0.012 * h * w:
+            continue
+        if area > 0.50 * h * w:
+            continue
+        if not (0.40 <= aspect <= 2.60):
+            continue
+        keep[labels == label] = 255
+        component_count += 1
+
+    keep = cv2.dilate(keep, np.ones((5, 5), np.uint8), iterations=1)
+    return keep.astype(bool), component_count
+
+
+def agenda_text_guard_metrics(rep_a: dict, rep_b: dict) -> dict:
+    """Detect agenda/table-of-contents slides whose circle text changed.
+
+    Person masks intentionally remove lecturer bodies first, then the guard
+    compares dark text inside large white agenda/table regions. This catches
+    slides that share the same template but have different numbered items.
+    """
+    content_a = rep_a["content"]
+    content_b = rep_b["content"]
+    ignore_mask = None
+    mask_a = rep_a.get("content_mask")
+    mask_b = rep_b.get("content_mask")
+    if mask_a is not None or mask_b is not None:
+        ignore_mask = np.zeros(content_a.shape[:2], dtype=bool)
+        if mask_a is not None:
+            ignore_mask |= mask_a.astype(bool)
+        if mask_b is not None:
+            ignore_mask |= mask_b.astype(bool)
+        ignore_mask = cv2.dilate(
+            ignore_mask.astype(np.uint8) * 255,
+            np.ones((15, 15), np.uint8),
+            iterations=1,
+        ).astype(bool)
+
+    white_a, components_a = _agenda_white_components(content_a, ignore_mask)
+    white_b, components_b = _agenda_white_components(content_b, ignore_mask)
+    shared_region = white_a | white_b
+    if ignore_mask is not None:
+        shared_region &= ~ignore_mask
+
+    shared_area = float(np.mean(shared_region))
+    if components_a < 2 or components_b < 2 or shared_area < 0.08:
+        return {
+            "agenda_like": False,
+            "agenda_components_a": int(components_a),
+            "agenda_components_b": int(components_b),
+            "agenda_shared_area": shared_area,
+        }
+
+    def _dark_text_mask(content: np.ndarray) -> np.ndarray:
+        gray = cv2.cvtColor(content, cv2.COLOR_BGR2GRAY)
+        text = ((gray < 165) & shared_region).astype(np.uint8) * 255
+        text = cv2.morphologyEx(text, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        return text.astype(bool)
+
+    text_a = _dark_text_mask(content_a)
+    text_b = _dark_text_mask(content_b)
+    text_count = max(int(text_a.sum()), int(text_b.sum()), 1)
+
+    kernel = np.ones((3, 3), np.uint8)
+    dilated_a = cv2.dilate(text_a.astype(np.uint8) * 255, kernel, iterations=1).astype(bool)
+    dilated_b = cv2.dilate(text_b.astype(np.uint8) * 255, kernel, iterations=1).astype(bool)
+    tolerant_overlap = int(((text_a & dilated_b) | (text_b & dilated_a)).sum())
+    mismatch_ratio = max(0.0, 1.0 - (tolerant_overlap / text_count))
+    xor_ratio = float((text_a ^ text_b).sum() / max(int(shared_region.sum()), 1))
+
+    return {
+        "agenda_like": True,
+        "agenda_components_a": int(components_a),
+        "agenda_components_b": int(components_b),
+        "agenda_shared_area": shared_area,
+        "agenda_text_pixels_a": int(text_a.sum()),
+        "agenda_text_pixels_b": int(text_b.sum()),
+        "agenda_text_mismatch": float(mismatch_ratio),
+        "agenda_text_xor": xor_ratio,
+    }
+
+
 def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
     full_a, full_b = masked_pair(rep_a["frame"], rep_a.get("mask"), rep_b["frame"], rep_b.get("mask"))
     content_a, content_b = masked_pair(
@@ -378,7 +479,22 @@ def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool
     else:
         metrics["reason"] = ""
 
-    return bool(strict_match or near_identical or content_match), metrics
+    is_duplicate = bool(strict_match or near_identical or content_match)
+    if is_duplicate and cfg.AGENDA_TEXT_GUARD_ENABLED:
+        agenda_metrics = agenda_text_guard_metrics(rep_a, rep_b)
+        metrics.update(agenda_metrics)
+        if (
+            agenda_metrics.get("agenda_like")
+            and (
+                agenda_metrics.get("agenda_text_mismatch", 0.0) > cfg.AGENDA_TEXT_MISMATCH_MAX
+                or agenda_metrics.get("agenda_text_xor", 0.0) > cfg.AGENDA_TEXT_XOR_MAX
+            )
+        ):
+            metrics["duplicate_veto"] = "agenda_text_changed"
+            metrics["reason"] = ""
+            is_duplicate = False
+
+    return is_duplicate, metrics
 
 
 def build_pair_decision(prev_rep: dict, curr_rep: dict, cfg: Config) -> tuple[bool, dict]:
@@ -2704,9 +2820,9 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             int(metrics.get("content_phash", 9999)),
         )
 
-    def _add_review_candidate(candidate: dict):
+    def _add_review_candidate(candidate: dict, allow_auto_confirmed: bool = False):
         scene_a, scene_b = sorted(candidate["scene_indices"])
-        if (scene_a, scene_b) in auto_confirmed_scene_pairs:
+        if not allow_auto_confirmed and (scene_a, scene_b) in auto_confirmed_scene_pairs:
             return
         key = (candidate["candidate_type"], scene_a, scene_b)
         previous = review_candidates_by_key.get(key)
@@ -2831,6 +2947,46 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
             "reason": build_metrics["reason"],
             "metrics": build_metrics,
         })
+
+    provisional_parent = {idx: idx for idx in groups.keys()}
+
+    def provisional_find(x: int) -> int:
+        while provisional_parent[x] != x:
+            provisional_parent[x] = provisional_parent[provisional_parent[x]]
+            x = provisional_parent[x]
+        return x
+
+    def provisional_union(x: int, y: int) -> None:
+        if x not in provisional_parent or y not in provisional_parent:
+            return
+        px, py = provisional_find(x), provisional_find(y)
+        if px != py:
+            provisional_parent[max(px, py)] = min(px, py)
+
+    for idx_a, neighbors in duplicate_map.items():
+        for idx_b in neighbors:
+            provisional_union(idx_a, idx_b)
+
+    provisional_groups: dict[int, set[int]] = defaultdict(set)
+    for idx in groups.keys():
+        provisional_groups[provisional_find(idx)].add(idx)
+
+    for members in provisional_groups.values():
+        ordered = sorted(idx for idx in members if idx in base_representatives and idx in base_pool)
+        if len(ordered) < 3:
+            continue
+        for idx_a, idx_b in zip(ordered, ordered[1:]):
+            _, metrics = duplicate_pair_decision(base_representatives[idx_a], base_representatives[idx_b], cfg)
+            _add_review_candidate({
+                "candidate_type": "same_slide_duplicate",
+                "source": "auto_group_boundary_review",
+                "proposed_decision": "needs_vlm_same_slide_check",
+                "scene_indices": [idx_a, idx_b],
+                "labels": [f"base{idx_a}", f"base{idx_b}"],
+                "filenames": [base_pool[idx_a], base_pool[idx_b]],
+                "reason": metrics.get("reason") or "auto_group_boundary",
+                "metrics": metrics,
+            }, allow_auto_confirmed=True)
 
     review_candidates = [
         limit_vlm_review_candidate_images(candidate)

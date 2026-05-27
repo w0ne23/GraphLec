@@ -198,6 +198,16 @@ def _prompt(candidate: dict[str, Any]) -> str:
         "- transition_noise: image is captured during slide movement/animation and should not be used as a representative scene.\n"
         "- different_slide: images are different lecture-material slides.\n"
         "- uncertain: not enough evidence.\n\n"
+        "Critical rule for lecture slides:\n"
+        "- Prioritize readable slide content over layout similarity. If titles, section numbers, agenda numbers, "
+        "bullet labels, table headings, or key Korean/English text differ in meaning, choose different_slide even "
+        "when the template, colors, circles, logos, speaker position, or overall layout are nearly identical.\n"
+        "- Agenda/table-of-contents slides with different numbered items are different slides, not duplicates.\n"
+        "- Choose same_slide_duplicate only when the substantive text and semantic content are the same. "
+        "Allowed differences are lecturer pose, masking, crop/toolbars, compression noise, pointer position, "
+        "or tiny non-semantic visual changes.\n"
+        "- Choose same_slide_build only when the later image keeps the same slide topic and merely adds/reveals "
+        "incremental content from that same topic; do not use it for a different agenda page or a new set of items.\n\n"
         f"Candidate type: {candidate.get('candidate_type')}\n"
         f"Scene indices: {candidate.get('scene_indices')}\n"
         f"Context scene indices: {candidate.get('context_scene_indices')}\n"
@@ -373,6 +383,16 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
                 indices.append(idx)
         return indices
 
+    base_presence_ratio: dict[int, float] = {}
+    for item in metadata:
+        if item.get("capture_type") != "base":
+            continue
+        try:
+            idx = int(item.get("scene_index", 0) or 0)
+            base_presence_ratio[idx] = float(item.get("person_presence_ratio", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+
     for item in metadata:
         idx = int(item.get("scene_index", 0) or 0)
         for other in item.get("same_slide_group") or []:
@@ -383,6 +403,8 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
     result_by_scene: dict[int, list[dict[str, Any]]] = {scene: [] for scene in scenes}
     dropped_scenes: set[int] = set()
     build_representatives: set[int] = set()
+    veto_pairs: set[tuple[int, int]] = set()
+    approved_pairs: set[tuple[int, int]] = set()
     for result in results:
         scene_indices = known_scene_indices(result.get("scene_indices", []))
         decision = result.get("decision")
@@ -397,6 +419,7 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
                 first = scene_indices[0]
                 for other in scene_indices[1:]:
                     union(first, other)
+                    approved_pairs.add(tuple(sorted((first, other))))
             if decision == "same_slide_build":
                 representative = known_scene_indices([result.get("representative_scene_index")])
                 if not representative and scene_indices:
@@ -406,20 +429,58 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
         elif decision == "transition_noise" and result.get("should_drop_scene", True):
             drop_indices = known_scene_indices(result.get("middle_scene_indices") or scene_indices)
             dropped_scenes.update(drop_indices)
+        elif decision == "different_slide" and len(scene_indices) >= 2:
+            for i, scene_a in enumerate(scene_indices):
+                for scene_b in scene_indices[i + 1:]:
+                    veto_pairs.add(tuple(sorted((scene_a, scene_b))))
 
-    groups: dict[int, set[int]] = {}
+    constrained_parent = {scene: scene for scene in scenes}
+
+    def constrained_find(x: int) -> int:
+        while constrained_parent[x] != x:
+            constrained_parent[x] = constrained_parent[constrained_parent[x]]
+            x = constrained_parent[x]
+        return x
+
+    def constrained_union(a: int, b: int) -> None:
+        if a not in constrained_parent or b not in constrained_parent:
+            return
+        if tuple(sorted((a, b))) in veto_pairs:
+            return
+        ra, rb = constrained_find(a), constrained_find(b)
+        if ra != rb:
+            constrained_parent[max(ra, rb)] = min(ra, rb)
+
+    existing_adjacent_pairs: set[tuple[int, int]] = set()
+    for item in metadata:
+        members = known_scene_indices(item.get("same_slide_group") or [])
+        for scene_a, scene_b in zip(sorted(set(members)), sorted(set(members))[1:]):
+            existing_adjacent_pairs.add(tuple(sorted((scene_a, scene_b))))
+
+    for scene_a, scene_b in sorted(existing_adjacent_pairs | approved_pairs):
+        constrained_union(scene_a, scene_b)
+
+    split_group_by_root: dict[int, set[int]] = {}
     for scene in scenes:
-        groups.setdefault(find(scene), set()).add(scene)
-    group_of = {scene: sorted(members) for members in groups.values() for scene in members}
+        split_group_by_root.setdefault(constrained_find(scene), set()).add(scene)
+    split_groups = list(split_group_by_root.values())
+
+    group_of = {scene: sorted(members) for members in split_groups for scene in members}
     canonical_by_root: dict[int, int] = {}
-    for root, members in groups.items():
+    canonical_by_scene: dict[int, int] = {}
+    for members in split_groups:
         preferred = sorted(scene for scene in members if scene in build_representatives)
-        canonical_by_root[root] = preferred[0] if preferred else min(members)
+        canonical = preferred[0] if preferred else min(
+            members,
+            key=lambda scene: (base_presence_ratio.get(scene, 0.0), scene),
+        )
+        for scene in members:
+            canonical_by_scene[scene] = canonical
 
     for item in metadata:
         idx = int(item.get("scene_index", 0) or 0)
         members = group_of.get(idx, [idx])
-        canonical = canonical_by_root.get(find(idx), members[0]) if idx in parent else members[0]
+        canonical = canonical_by_scene.get(idx, members[0])
         item["duplicate_of"] = [x for x in members if x != idx]
         item["same_slide_group"] = members
         item["same_slide_canonical"] = canonical
@@ -440,6 +501,8 @@ def apply_vlm_slide_decisions(metadata: list[dict[str, Any]], review_payload: di
                 }
                 for r in scene_results
             ]
+        if any(r.get("decision") == "different_slide" and float(r.get("confidence", 0.0) or 0.0) >= min_confidence for r in scene_results):
+            item["vlm_different_slide_veto"] = True
         if idx == canonical:
             item["vlm_preferred_representative"] = idx in build_representatives
         if idx in dropped_scenes:
