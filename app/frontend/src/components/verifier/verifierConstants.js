@@ -50,6 +50,14 @@ export const VERIFY_PIPELINE_FLOW_NODES = [
 
 export const PIPELINE_FLOW_NODES = VERIFY_PIPELINE_FLOW_NODES
 
+export const VERIFY_STEPS = [
+  { key: 'claim_extraction', label: '주장 추출' },
+  { key: 'issue_judge', label: '이슈 후보 판단' },
+  { key: 'issue_classification', label: '이슈 유형 분류' },
+  { key: 'final_verification', label: '최종 평가' },
+  { key: 'slide_review', label: '슬라이드 오류' },
+]
+
 export const UPLOAD_PIPELINE_FLOW_NODES = [
   { id: 'upload', label: '업로드', type: 'major', weight: 2 },
   {
