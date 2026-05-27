@@ -4,7 +4,7 @@ def run_direct_upload_workflow(args, progress_callback=None, *, helpers) -> dict
     preprocess_result: dict = {}
     graph_result: dict = {}
     try:
-        preprocess_result = helpers.run_preprocess_pipeline(args, runtime, build_analyzer_input=False)
+        preprocess_result = helpers.run_preprocess_pipeline(args, runtime, should_build_analyzer_input=False)
         runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         graph_result = helpers.run_graph_pipeline(args, runtime, preprocess_result)
         helpers._print_generated_files(runtime, preprocess_result, graph_result, {})
@@ -22,7 +22,7 @@ def run_verified_upload_workflow(args, progress_callback=None, *, helpers) -> di
     preprocess_result: dict = {}
     verifier_result: dict = {}
     try:
-        preprocess_result = helpers.run_preprocess_pipeline(args, runtime, build_analyzer_input=True)
+        preprocess_result = helpers.run_preprocess_pipeline(args, runtime, should_build_analyzer_input=True)
         verifier_result = helpers.run_verifier_pipeline(args, runtime, preprocess_result, background=False)
         helpers._print_generated_files(runtime, preprocess_result, {}, verifier_result)
         return {"preprocess": preprocess_result, "verifier": verifier_result}
@@ -48,7 +48,7 @@ def run_pipeline(args, progress_callback=None, *, helpers):
         preprocess_result = helpers.run_preprocess_pipeline(
             args,
             runtime,
-            build_analyzer_input=should_run_verifier,
+            should_build_analyzer_input=should_run_verifier,
         )
 
         if should_run_verifier:

@@ -65,9 +65,11 @@ function lectureFromCreated(created, fallbackTitle) {
 }
 
 function verifierArtifactsFromResult(verifier) {
+  const artifacts = verifier?.verifier_artifacts || {}
   return {
-    classifiedIssueVerifier: verifier?.classified_issue_verifier,
-    slideErrors: verifier?.slide_errors,
+    ...artifacts,
+    classifiedIssueVerifier: artifacts.classifiedIssueVerifier || verifier?.classified_issue_verifier,
+    slideErrors: artifacts.slideErrors || { slide_errors: verifier?.slide_errors || [] },
   }
 }
 
