@@ -43,6 +43,11 @@ import json
 import logging
 import math
 
+try:
+    from .person_masks import masked_pair, resize_mask
+except ImportError:  # pragma: no cover - allows direct script execution
+    from person_masks import masked_pair, resize_mask
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 _FFMPEG_HWACCEL_DEVICE_CACHE: dict[str, bool] = {}
@@ -288,12 +293,16 @@ def is_same_scene_content(reference: np.ndarray, frame: np.ndarray, cfg: Config)
     return metrics["edge_preserve"] >= cfg.SAME_SCENE_EDGE_PRESERVE_THRESHOLD
 
 
-def duplicate_frame_features(frame: np.ndarray, cfg: Config) -> dict:
+def duplicate_frame_features(frame: np.ndarray, cfg: Config, mask: np.ndarray | None = None) -> dict:
     full = resize_frame(frame, cfg.RESIZE_WIDTH)
     content = content_region(full, cfg)
+    full_mask = resize_mask(mask, full.shape[:2]) if mask is not None else None
+    content_mask = content_region(full_mask.astype(np.uint8), cfg).astype(bool) if full_mask is not None else None
     return {
         "frame": full,
         "content": content,
+        "mask": full_mask,
+        "content_mask": content_mask,
         "phash": compute_phash_hires(full),
         "dhash": compute_dhash_hires(full),
         "content_phash": compute_phash_hires(content),
@@ -302,24 +311,36 @@ def duplicate_frame_features(frame: np.ndarray, cfg: Config) -> dict:
 
 
 def duplicate_pair_decision(rep_a: dict, rep_b: dict, cfg: Config) -> tuple[bool, dict]:
-    full_a = rep_a["frame"]
-    full_b = rep_b["frame"]
-    content_a = rep_a["content"]
-    content_b = rep_b["content"]
+    full_a, full_b = masked_pair(rep_a["frame"], rep_a.get("mask"), rep_b["frame"], rep_b.get("mask"))
+    content_a, content_b = masked_pair(
+        rep_a["content"],
+        rep_a.get("content_mask"),
+        rep_b["content"],
+        rep_b.get("content_mask"),
+    )
+    phash_a = compute_phash_hires(full_a)
+    phash_b = compute_phash_hires(full_b)
+    dhash_a = compute_dhash_hires(full_a)
+    dhash_b = compute_dhash_hires(full_b)
+    content_phash_a = compute_phash_hires(content_a)
+    content_phash_b = compute_phash_hires(content_b)
+    content_dhash_a = compute_dhash_hires(content_a)
+    content_dhash_b = compute_dhash_hires(content_b)
 
     metrics = {
-        "phash": int(rep_a["phash"] - rep_b["phash"]),
-        "dhash": int(rep_a["dhash"] - rep_b["dhash"]),
+        "phash": int(phash_a - phash_b),
+        "dhash": int(dhash_a - dhash_b),
         "changed": float(count_changed_pixels(full_a, full_b, cfg.ANNOT_DIFF_THRESHOLD)),
         "edge": float(symmetric_edge_overlap(full_a, full_b)),
         "mse": float(normalized_mse(full_a, full_b)),
         "hist": float(grayscale_hist_correlation(full_a, full_b)),
-        "content_phash": int(rep_a["content_phash"] - rep_b["content_phash"]),
-        "content_dhash": int(rep_a["content_dhash"] - rep_b["content_dhash"]),
+        "content_phash": int(content_phash_a - content_phash_b),
+        "content_dhash": int(content_dhash_a - content_dhash_b),
         "content_changed": float(count_changed_pixels(content_a, content_b, cfg.ANNOT_DIFF_THRESHOLD)),
         "content_edge": float(symmetric_edge_overlap(content_a, content_b)),
         "content_mse": float(normalized_mse(content_a, content_b)),
         "content_hist": float(grayscale_hist_correlation(content_a, content_b)),
+        "person_masked": bool(rep_a.get("mask") is not None or rep_b.get("mask") is not None),
     }
 
     strict_phash = max(8, min(int(cfg.DUPLICATE_HASH_THRESHOLD), 18))
@@ -367,18 +388,32 @@ def build_pair_decision(prev_rep: dict, curr_rep: dict, cfg: Config) -> tuple[bo
     A build step should preserve most of the previous slide structure while
     adding or revealing a meaningful amount of content.
     """
-    prev_content = prev_rep["content"]
-    curr_content = curr_rep["content"]
+    prev_full, curr_full = masked_pair(prev_rep["frame"], prev_rep.get("mask"), curr_rep["frame"], curr_rep.get("mask"))
+    prev_content, curr_content = masked_pair(
+        prev_rep["content"],
+        prev_rep.get("content_mask"),
+        curr_rep["content"],
+        curr_rep.get("content_mask"),
+    )
+    content_phash_prev = compute_phash_hires(prev_content)
+    content_phash_curr = compute_phash_hires(curr_content)
+    content_dhash_prev = compute_dhash_hires(prev_content)
+    content_dhash_curr = compute_dhash_hires(curr_content)
+    phash_prev = compute_phash_hires(prev_full)
+    phash_curr = compute_phash_hires(curr_full)
+    dhash_prev = compute_dhash_hires(prev_full)
+    dhash_curr = compute_dhash_hires(curr_full)
     metrics = {
         "prev_edge_preserve": float(edge_preservation_ratio(prev_content, curr_content)),
         "curr_edge_preserve": float(edge_preservation_ratio(curr_content, prev_content)),
         "content_changed": float(count_changed_pixels(prev_content, curr_content, cfg.ANNOT_DIFF_THRESHOLD)),
         "content_mse": float(normalized_mse(prev_content, curr_content)),
         "content_hist": float(grayscale_hist_correlation(prev_content, curr_content)),
-        "content_phash": int(prev_rep["content_phash"] - curr_rep["content_phash"]),
-        "content_dhash": int(prev_rep["content_dhash"] - curr_rep["content_dhash"]),
-        "phash": int(prev_rep["phash"] - curr_rep["phash"]),
-        "dhash": int(prev_rep["dhash"] - curr_rep["dhash"]),
+        "content_phash": int(content_phash_prev - content_phash_curr),
+        "content_dhash": int(content_dhash_prev - content_dhash_curr),
+        "phash": int(phash_prev - phash_curr),
+        "dhash": int(dhash_prev - dhash_curr),
+        "person_masked": bool(prev_rep.get("mask") is not None or curr_rep.get("mask") is not None),
     }
     additive_change = (
         metrics["prev_edge_preserve"] >= cfg.BUILD_CANDIDATE_PREV_EDGE_PRESERVE_MIN
@@ -2158,7 +2193,7 @@ def _filename_for_final_scene(item: dict, scene_index: int) -> str:
 
 def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
     """Recompute same-slide relation fields after scene IDs are compacted."""
-    from collections import Counter, defaultdict
+    from collections import defaultdict
 
     scenes = sorted({int(item["scene_index"]) for item in metadata if item.get("scene_index") is not None})
     parent = {idx: idx for idx in scenes}
@@ -2189,15 +2224,16 @@ def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
     for idx in scenes:
         groups[find(idx)].add(idx)
 
-    canonical_votes: dict[int, Counter] = defaultdict(Counter)
     preferred_representatives: dict[int, set[int]] = defaultdict(set)
+    base_presence_ratio: dict[int, float] = {}
     for item in metadata:
         idx = int(item["scene_index"])
         root = find(idx)
-        for field in ("slide_canonical_index", "same_slide_canonical", "scene_canonical"):
-            canonical = _remap_optional_scene_index(item.get(field), {x: x for x in scenes})
-            if canonical in groups[root]:
-                canonical_votes[root][canonical] += 1
+        if item.get("capture_type") == "base":
+            try:
+                base_presence_ratio[idx] = float(item.get("person_presence_ratio", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                base_presence_ratio[idx] = 0.0
         if item.get("vlm_preferred_representative"):
             preferred_representatives[root].add(idx)
 
@@ -2207,10 +2243,11 @@ def refresh_slide_group_relations(metadata: list[dict]) -> list[dict]:
         preferred = sorted(preferred_representatives.get(root, set()) & members)
         if preferred:
             canonical_by_root[root] = preferred[0]
-        elif canonical_votes.get(root):
-            canonical_by_root[root] = canonical_votes[root].most_common(1)[0][0]
         else:
-            canonical_by_root[root] = min(members)
+            canonical_by_root[root] = min(
+                members,
+                key=lambda idx: (base_presence_ratio.get(idx, 0.0), idx),
+            )
 
     visit_order: dict[int, int] = {}
     prev_visit: dict[int, int | None] = {}
@@ -2579,31 +2616,70 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     """
     from collections import defaultdict
 
+    cache_dir = out_path.parent / "sample_cache"
+
+    def _load_metadata_person_mask(item: dict) -> np.ndarray | None:
+        filename = item.get("person_mask_filename")
+        if not filename:
+            return None
+        path = cache_dir / str(filename)
+        if not path.exists():
+            return None
+        try:
+            return np.load(path, allow_pickle=False).astype(bool)
+        except Exception:
+            log.warning("  [중복 감지] person mask 로드 실패: %s", path, exc_info=True)
+            return None
+
+    def _metadata_presence_ratio(item: dict | None) -> float:
+        if not item:
+            return 0.0
+        try:
+            ratio = float(item.get("person_presence_ratio", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            ratio = 0.0
+        if ratio > 0.0:
+            return ratio
+        filename = item.get("person_presence_mask_filename")
+        if not filename:
+            return 0.0
+        path = cache_dir / str(filename)
+        if not path.exists():
+            return 0.0
+        try:
+            mask = np.load(path, allow_pickle=False).astype(bool)
+            return float(np.mean(mask))
+        except Exception:
+            log.warning("  [중복 감지] person presence mask 로드 실패: %s", path, exc_info=True)
+            return 0.0
+
     # scene_index별 프레임 그룹화
     groups: dict[int, list] = defaultdict(list)
     for m in metadata:
         groups[m["scene_index"]].append(m)
 
-    # 프레임 풀 구성: label → (scene_index, filename)
-    pool: dict[str, tuple[int, str]] = {}
+    # 프레임 풀 구성: label → (scene_index, filename, metadata item)
+    pool: dict[str, tuple[int, str, dict]] = {}
     base_pool: dict[int, str] = {}
+    base_items: dict[int, dict] = {}
     for idx in sorted(groups.keys()):
         frames     = groups[idx]
         base_list  = [f for f in frames if f["capture_type"] == "base"]
         annot_list = [f for f in frames if f["capture_type"] == "annotation"]
 
         if base_list:
-            pool[f"base{idx}"] = (idx, base_list[0]["filename"])
+            pool[f"base{idx}"] = (idx, base_list[0]["filename"], base_list[0])
             base_pool[idx] = base_list[0]["filename"]
+            base_items[idx] = base_list[0]
         if annot_list:
-            pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"])
+            pool[f"annot{idx}"] = (idx, annot_list[-1]["filename"], annot_list[-1])
 
     # full frame은 보조로, content region은 실제 장표 본문 identity 판정에 사용한다.
     representatives: dict[str, dict] = {}
-    for label, (_, fname) in pool.items():
+    for label, (_, fname, item) in pool.items():
         img = cv2.imread(str(out_path / fname))
         if img is not None:
-            representatives[label] = duplicate_frame_features(img, cfg)
+            representatives[label] = duplicate_frame_features(img, cfg, mask=_load_metadata_person_mask(item))
         else:
             log.warning(f"  [중복 감지] 이미지 로드 실패: {fname}")
 
@@ -2641,25 +2717,28 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         return label.startswith("base")
 
     def _is_auto_confirmed_duplicate(label_a: str, label_b: str, metrics: dict) -> bool:
-        """Only very strong base-base matches are reflected into metadata now.
+        """Reflect strong base-base matches into metadata.
 
         Annot-derived matches and looser content matches stay in the LocalVLM
-        queue so metadata grouping only contains already-confirmed pairs.
+        queue. Base-base strict matches are allowed a little more motion/noise
+        because lecturer regions may be present before representative selection
+        chooses the least-occluded base.
         """
         if not (_is_base_label(label_a) and _is_base_label(label_b)):
             return False
         if metrics.get("reason") not in {"strict", "near-identical"}:
             return False
         return (
-            metrics["phash"] <= 12
-            and metrics["content_phash"] <= 12
-            and metrics["changed"] <= 0.025
-            and metrics["content_changed"] <= 0.025
-            and metrics["mse"] <= 0.006
-            and metrics["content_mse"] <= 0.006
-            and metrics["edge"] >= 0.92
-            and metrics["content_edge"] >= 0.92
+            metrics["phash"] <= 22
+            and metrics["content_phash"] <= 20
+            and metrics["changed"] <= 0.065
+            and metrics["content_changed"] <= 0.08
+            and metrics["mse"] <= 0.007
+            and metrics["content_mse"] <= 0.009
+            and metrics["edge"] >= 0.87
+            and metrics["content_edge"] >= 0.87
             and metrics["hist"] >= 0.995
+            and metrics["content_hist"] >= 0.995
         )
 
     log.info("\n──────── 슬라이드 간 복합 비교 (같은 슬라이드 판정용) ────────")
@@ -2808,6 +2887,14 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
     for members in dup_groups.values():
         for idx in members:
             group_of[idx] = members
+    canonical_by_scene: dict[int, int] = {}
+    for members in dup_groups.values():
+        canonical = min(
+            members,
+            key=lambda idx: (_metadata_presence_ratio(base_items.get(idx)), idx),
+        )
+        for idx in members:
+            canonical_by_scene[idx] = canonical
 
     # 같은 slide family 내 scene 방문 순서도 함께 기록한다.
     family_visit_order: dict[int, int] = {}
@@ -2827,17 +2914,18 @@ def mark_visual_duplicates(metadata: list, out_path: Path, cfg: Config) -> list:
         others = [x for x in members if x != idx]
         m["duplicate_of"] = others
         m["scene_group"] = members
-        m["scene_canonical"] = members[0]
+        canonical = canonical_by_scene.get(idx, members[0])
+        m["scene_canonical"] = canonical
         m["scene_group_size"] = len(members)
         m["same_slide_group"] = members
-        m["same_slide_canonical"] = members[0]
+        m["same_slide_canonical"] = canonical
         m["same_slide_group_size"] = len(members)
         m["same_slide_visit_order"] = family_visit_order.get(idx, 1)
         m["same_slide_is_revisit"] = family_visit_order.get(idx, 1) > 1
         m["same_slide_previous"] = family_prev_visit.get(idx)
         m["same_slide_next"] = family_next_visit.get(idx)
         m["slide_group"] = members
-        m["slide_canonical_index"] = members[0]
+        m["slide_canonical_index"] = canonical
         m["slide_group_size"] = len(members)
         m["slide_visit_order"] = family_visit_order.get(idx, 1)
         m["slide_is_revisit"] = family_visit_order.get(idx, 1) > 1

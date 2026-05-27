@@ -28,9 +28,9 @@ import numpy as np
 from PIL import Image
 
 try:
-    from .person_masks import MASKS_DIRNAME
+    from .person_masks import MASKS_DIRNAME, PRESENCE_MASKS_DIRNAME
 except ImportError:  # pragma: no cover - allows direct script execution
-    from person_masks import MASKS_DIRNAME
+    from person_masks import MASKS_DIRNAME, PRESENCE_MASKS_DIRNAME
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -51,7 +51,8 @@ class SampleCacheConfig:
     person_mask_model: str = "yolov8n-seg.pt"
     person_mask_conf: float = 0.25
     person_mask_dilate_px: int = 30
-    person_mask_static_diff_threshold: float = 3.0
+    person_mask_static_diff_threshold: float = 1.0
+    person_mask_static_changed_ratio_threshold: float = 0.003
     person_mask_match_iou_threshold: float = 0.05
     person_mask_fill_gap_sec: float = 6.0
     save_person_mask_previews: bool = False
@@ -138,16 +139,17 @@ def _bbox_iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> flo
     return inter / (area_a + area_b - inter)
 
 
-def _bbox_diff(frame_a: np.ndarray, frame_b: np.ndarray, bbox: tuple[int, int, int, int]) -> float:
+def _bbox_motion_metrics(frame_a: np.ndarray, frame_b: np.ndarray, bbox: tuple[int, int, int, int]) -> tuple[float, float]:
     h, w = frame_a.shape[:2]
     x1, y1, x2, y2 = bbox
     x1, y1 = max(0, x1), max(0, y1)
     x2, y2 = min(w, x2), min(h, y2)
     if x2 <= x1 or y2 <= y1:
-        return 0.0
+        return 0.0, 0.0
     a = cv2.cvtColor(frame_a[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
     b = cv2.cvtColor(frame_b[y1:y2, x1:x2], cv2.COLOR_BGR2GRAY).astype(np.float32)
-    return float(np.mean(np.abs(a - b)))
+    diff = np.abs(a - b)
+    return float(np.mean(diff)), float(np.mean(diff >= 8.0))
 
 
 def _moving_person_mask(
@@ -156,6 +158,7 @@ def _moving_person_mask(
     next_frame: np.ndarray | None,
     next_detections: list[dict],
     static_diff_threshold: float,
+    static_changed_ratio_threshold: float,
     match_iou_threshold: float,
     dilate_px: int,
 ) -> np.ndarray | None:
@@ -169,7 +172,8 @@ def _moving_person_mask(
         best_iou = max((_bbox_iou(bbox, curr["bbox"]) for curr in next_detections), default=0.0)
         if best_iou < match_iou_threshold:
             continue
-        if _bbox_diff(frame, next_frame, bbox) < static_diff_threshold:
+        mean_diff, changed_ratio = _bbox_motion_metrics(frame, next_frame, bbox)
+        if mean_diff < static_diff_threshold and changed_ratio < static_changed_ratio_threshold:
             continue
         x1, y1, x2, y2 = bbox
         pad = max(0, int(dilate_px))
@@ -178,6 +182,27 @@ def _moving_person_mask(
         if x2 > x1 and y2 > y1:
             mask[y1:y2, x1:x2] = 1
 
+    if not bool(mask.any()):
+        return None
+    return (mask > 0).astype(np.uint8)
+
+
+def _person_presence_mask(
+    frame: np.ndarray,
+    detections: list[dict],
+    dilate_px: int,
+) -> np.ndarray | None:
+    if not detections:
+        return None
+    height, width = frame.shape[:2]
+    mask = np.zeros((height, width), dtype=np.uint8)
+    pad = max(0, int(dilate_px))
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox"]
+        x1, y1 = max(0, x1 - pad), max(0, y1 - pad)
+        x2, y2 = min(width, x2 + pad), min(height, y2 + pad)
+        if x2 > x1 and y2 > y1:
+            mask[y1:y2, x1:x2] = 1
     if not bool(mask.any()):
         return None
     return (mask > 0).astype(np.uint8)
@@ -262,6 +287,7 @@ def create_sample_cache(
     video_path = output_path / VIDEO_FILENAME
     manifest_path = output_path / MANIFEST_FILENAME
     masks_path = output_path / MASKS_DIRNAME
+    presence_masks_path = output_path / PRESENCE_MASKS_DIRNAME
     mask_previews_path = output_path / "person_mask_previews"
     video_path.unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
@@ -269,6 +295,10 @@ def create_sample_cache(
         for stale in masks_path.glob("person_mask_*.npy"):
             stale.unlink(missing_ok=True)
     masks_path.mkdir(parents=True, exist_ok=True)
+    if presence_masks_path.exists():
+        for stale in presence_masks_path.glob("person_presence_mask_*.npy"):
+            stale.unlink(missing_ok=True)
+    presence_masks_path.mkdir(parents=True, exist_ok=True)
     if mask_previews_path.exists():
         for stale in mask_previews_path.glob("person_mask_preview_*.jpg"):
             stale.unlink(missing_ok=True)
@@ -307,12 +337,23 @@ def create_sample_cache(
         nonlocal preview_count
         frame_record = dict(sample["record"])
         if masks_enabled:
+            presence_mask = _person_presence_mask(
+                sample["frame"],
+                sample["detections"],
+                dilate_px=max(0, int(cfg.person_mask_dilate_px)),
+            )
+            if presence_mask is not None:
+                presence_mask_filename = f"{PRESENCE_MASKS_DIRNAME}/person_presence_mask_{int(sample['sample_index']):06d}.npy"
+                np.save(output_path / presence_mask_filename, presence_mask, allow_pickle=False)
+                frame_record["person_presence_mask_filename"] = presence_mask_filename
+                frame_record["person_presence_ratio"] = round(float(np.mean(presence_mask.astype(bool))), 6)
             person_mask = _moving_person_mask(
                 sample["frame"],
                 sample["detections"],
                 next_frame,
                 next_detections,
                 static_diff_threshold=max(0.0, float(cfg.person_mask_static_diff_threshold)),
+                static_changed_ratio_threshold=max(0.0, float(cfg.person_mask_static_changed_ratio_threshold)),
                 match_iou_threshold=max(0.0, float(cfg.person_mask_match_iou_threshold)),
                 dilate_px=max(0, int(cfg.person_mask_dilate_px)),
             )
@@ -412,10 +453,12 @@ def create_sample_cache(
         "person_masks": {
             "enabled": masks_enabled,
             "dirname": MASKS_DIRNAME,
+            "presence_dirname": PRESENCE_MASKS_DIRNAME,
             "model": cfg.person_mask_model if masks_enabled else None,
             "coordinate_space": "sample_cache_frame",
             "mode": "moving_person_only",
             "static_diff_threshold": cfg.person_mask_static_diff_threshold,
+            "static_changed_ratio_threshold": cfg.person_mask_static_changed_ratio_threshold,
             "match_iou_threshold": cfg.person_mask_match_iou_threshold,
             "fill_gap_sec": cfg.person_mask_fill_gap_sec,
             "fill_gap_samples": mask_fill_gap_samples,
@@ -476,6 +519,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--person-mask-model", default=SampleCacheConfig.person_mask_model)
     parser.add_argument("--person-mask-dilate-px", type=int, default=SampleCacheConfig.person_mask_dilate_px)
     parser.add_argument("--person-mask-static-diff-threshold", type=float, default=SampleCacheConfig.person_mask_static_diff_threshold)
+    parser.add_argument("--person-mask-static-changed-ratio-threshold", type=float, default=SampleCacheConfig.person_mask_static_changed_ratio_threshold)
     parser.add_argument("--person-mask-match-iou-threshold", type=float, default=SampleCacheConfig.person_mask_match_iou_threshold)
     parser.add_argument("--person-mask-fill-gap-sec", type=float, default=SampleCacheConfig.person_mask_fill_gap_sec)
     parser.add_argument("--save-person-mask-previews", action="store_true", help="Save a few masked sample preview JPGs for debugging")
@@ -496,6 +540,7 @@ def main():
         person_mask_model=args.person_mask_model,
         person_mask_dilate_px=args.person_mask_dilate_px,
         person_mask_static_diff_threshold=args.person_mask_static_diff_threshold,
+        person_mask_static_changed_ratio_threshold=args.person_mask_static_changed_ratio_threshold,
         person_mask_match_iou_threshold=args.person_mask_match_iou_threshold,
         person_mask_fill_gap_sec=args.person_mask_fill_gap_sec,
         save_person_mask_previews=args.save_person_mask_previews,

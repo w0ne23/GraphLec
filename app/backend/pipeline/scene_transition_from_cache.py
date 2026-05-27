@@ -32,6 +32,7 @@ try:
         compute_phash,
         is_duplicate_scene,
         save_scene,
+        scene_metrics,
         to_decision_frame,
         transition_reason,
     )
@@ -44,6 +45,7 @@ except ImportError:  # Allows direct script execution during local debugging.
         compute_phash,
         is_duplicate_scene,
         save_scene,
+        scene_metrics,
         to_decision_frame,
         transition_reason,
     )
@@ -127,6 +129,14 @@ def _save_cache_scene(
         details,
     )
     record["sample_index"] = int(frame_info["sample_index"])
+    if frame_info.get("person_mask_filename"):
+        record["person_mask_filename"] = frame_info.get("person_mask_filename")
+        if frame_info.get("person_mask_inherited"):
+            record["person_mask_inherited"] = True
+            record["person_mask_inherited_distance"] = int(frame_info.get("person_mask_inherited_distance", 0) or 0)
+    if frame_info.get("person_presence_mask_filename"):
+        record["person_presence_mask_filename"] = frame_info.get("person_presence_mask_filename")
+        record["person_presence_ratio"] = float(frame_info.get("person_presence_ratio", 0.0) or 0.0)
     return record
 
 
@@ -184,6 +194,68 @@ def _masked_mse_and_hash(
 ) -> tuple[float, int]:
     masked_a, masked_b = masked_pair(frame_a, mask_a, frame_b, mask_b)
     return compute_mse(masked_a, masked_b), int(compute_phash(masked_a) - compute_phash(masked_b))
+
+
+def _presence_ratio(frame_info: dict | None) -> float:
+    if not frame_info:
+        return 0.0
+    try:
+        return float(frame_info.get("person_presence_ratio", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _person_presence_change_reason(
+    base_frame,
+    current_frame,
+    cfg: ProbeConfig,
+    base_presence_ratio: float,
+    current_presence_ratio: float,
+    masked_details: dict,
+) -> tuple[str | None, dict | None]:
+    presence_delta = current_presence_ratio - base_presence_ratio
+    min_delta = 0.05
+    if abs(presence_delta) < min_delta:
+        return None, None
+
+    if presence_delta < 0:
+        if base_presence_ratio < 0.03 or current_presence_ratio > max(0.01, base_presence_ratio * 0.35):
+            return None, None
+        reason = "person_reveal"
+    else:
+        if current_presence_ratio < 0.03 or base_presence_ratio > max(0.01, current_presence_ratio * 0.35):
+            return None, None
+        reason = "person_cover"
+
+    raw_metrics = scene_metrics(base_frame, current_frame, cfg)
+    raw_changed = (
+        raw_metrics["mse"] >= cfg.base_mse
+        or raw_metrics["changed_ratio"] >= cfg.base_changed_ratio
+        or raw_metrics["hash_dist"] >= cfg.base_hash
+    )
+    masked_looks_same = (
+        bool(masked_details.get("same_content"))
+        or (
+            masked_details.get("mse", 0.0) <= cfg.base_mse * 0.5
+            and masked_details.get("changed_ratio", 0.0) <= cfg.base_changed_ratio * 0.5
+        )
+    )
+    if not (raw_changed and masked_looks_same):
+        return None, None
+
+    details = dict(masked_details)
+    details.update({
+        "presence_change": True,
+        "base_person_presence_ratio": base_presence_ratio,
+        "current_person_presence_ratio": current_presence_ratio,
+        "person_presence_delta": presence_delta,
+        "raw_mse": raw_metrics["mse"],
+        "raw_changed_ratio": raw_metrics["changed_ratio"],
+        "raw_fine_changed_ratio": raw_metrics["fine_changed_ratio"],
+        "raw_edge_preserve": raw_metrics["edge_preserve"],
+        "raw_hash_dist": raw_metrics["hash_dist"],
+    })
+    return reason, details
 
 
 def prune_transition_middle_frames(
@@ -303,6 +375,7 @@ def run_cache_probe(
     skipped = 0
     base_decision = None
     base_mask = None
+    base_presence_ratio = 0.0
     last_saved_base_decision = None
     last_saved_base_mask = None
     prev_decision = None
@@ -338,6 +411,7 @@ def run_cache_probe(
                 active_region = None
                 base_decision = None
                 base_mask = None
+                base_presence_ratio = 0.0
                 prev_decision = None
                 prev_mask = None
                 prev_hash = None
@@ -347,6 +421,7 @@ def run_cache_probe(
                 active_region = region
                 base_decision = None
                 base_mask = None
+                base_presence_ratio = 0.0
                 prev_decision = None
                 prev_mask = None
                 prev_hash = None
@@ -360,11 +435,13 @@ def run_cache_probe(
 
         decision = to_decision_frame(frame, cfg.resize_width)
         person_mask = load_person_mask(cache_dir, frame_info)
+        person_presence_ratio = _presence_ratio(frame_info)
         decision_hash = compute_phash(decision)
 
         if base_decision is None:
             base_decision = decision.copy()
             base_mask = person_mask.copy() if person_mask is not None else None
+            base_presence_ratio = person_presence_ratio
             prev_decision = decision.copy()
             prev_mask = person_mask.copy() if person_mask is not None else None
             prev_hash = decision_hash
@@ -445,12 +522,17 @@ def run_cache_probe(
             pending["last_hash"] = decision_hash
 
             if pending["stable"] >= stable_frames_required or pending["observed"] >= pending_max_frames:
-                if base_decision is not None and is_duplicate_scene(
-                    base_decision,
-                    pending["decision"],
-                    cfg,
-                    base_mask,
-                    pending.get("mask"),
+                force_save_presence_change = str(pending.get("reason", "")).startswith("person_")
+                if (
+                    not force_save_presence_change
+                    and base_decision is not None
+                    and is_duplicate_scene(
+                        base_decision,
+                        pending["decision"],
+                        cfg,
+                        base_mask,
+                        pending.get("mask"),
+                    )
                 ):
                     log.info(
                         "[suppress] duplicate pending scene @ %.3fs frame=%s",
@@ -490,6 +572,7 @@ def run_cache_probe(
                     records.append(record)
                     base_decision = pending["decision"].copy()
                     base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
+                    base_presence_ratio = _presence_ratio(save_info)
                     last_saved_base_decision = pending["decision"].copy()
                     last_saved_base_mask = pending.get("mask").copy() if pending.get("mask") is not None else None
 
@@ -511,6 +594,18 @@ def run_cache_probe(
             prev_mask=prev_mask,
             current_mask=person_mask,
         )
+        if reason is None:
+            presence_reason, presence_details = _person_presence_change_reason(
+                base_decision,
+                decision,
+                cfg,
+                base_presence_ratio,
+                person_presence_ratio,
+                details,
+            )
+            if presence_reason is not None and presence_details is not None:
+                reason = presence_reason
+                details = presence_details
         if reason is not None:
             pending = {
                 "start_frame_info": dict(frame_info),
@@ -547,12 +642,17 @@ def run_cache_probe(
             log.info("processed=%s/%s %.1f%%", processed, sample_count, pct)
 
     if pending is not None:
-        if base_decision is None or not is_duplicate_scene(
-            base_decision,
-            pending["decision"],
-            cfg,
-            base_mask,
-            pending.get("mask"),
+        force_save_presence_change = str(pending.get("reason", "")).startswith("person_")
+        if (
+            force_save_presence_change
+            or base_decision is None
+            or not is_duplicate_scene(
+                base_decision,
+                pending["decision"],
+                cfg,
+                base_mask,
+                pending.get("mask"),
+            )
         ):
             scene_index += 1
             record = _save_cache_scene(

@@ -7,6 +7,7 @@ import numpy as np
 
 
 MASKS_DIRNAME = "person_masks"
+PRESENCE_MASKS_DIRNAME = "person_presence_masks"
 
 
 def load_person_mask(cache_dir: str | Path, frame_info: dict) -> np.ndarray | None:

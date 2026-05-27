@@ -74,16 +74,28 @@ def _base_record(scene: dict, fps: float, output_scene_index: int | None = None)
         "scene_annot_index": 0,
         "source": "step2_scene_base",
         "region_segment_index": scene.get("region_segment_index"),
+        "sample_index": scene.get("sample_index"),
+        "person_mask_filename": scene.get("person_mask_filename"),
+        "person_mask_inherited": bool(scene.get("person_mask_inherited", False)),
+        "person_mask_inherited_distance": scene.get("person_mask_inherited_distance"),
+        "person_presence_mask_filename": scene.get("person_presence_mask_filename"),
+        "person_presence_ratio": float(scene.get("person_presence_ratio", 0.0) or 0.0),
         "duplicate_of": [],
     }
 
 
-def _annotation_records(annotation_payload: dict, scene_index_map: dict[int, int] | None = None) -> list[dict]:
+def _annotation_records(
+    annotation_payload: dict,
+    scene_index_map: dict[int, int] | None = None,
+    scene_lookup: dict[int, dict] | None = None,
+) -> list[dict]:
     scene_index_map = scene_index_map or {}
+    scene_lookup = scene_lookup or {}
     records: list[dict] = []
     for scene in annotation_payload.get("scenes", []):
         source_scene_index = int(scene["scene_index"])
         scene_index = int(scene_index_map.get(source_scene_index, source_scene_index))
+        base_scene = scene_lookup.get(source_scene_index, {})
         for annot in scene.get("annotations", []):
             annot_index = int(annot["annot_index"])
             records.append({
@@ -102,6 +114,12 @@ def _annotation_records(annotation_payload: dict, scene_index_map: dict[int, int
                 "global_annot_index": int(annot.get("global_annot_index", 0) or 0),
                 "base_frame_no": int(annot.get("base_frame_no", scene.get("base_frame_no", 0)) or 0),
                 "base_timestamp_sec": round(float(annot.get("base_timestamp_sec", scene.get("base_timestamp_sec", 0.0)) or 0.0), 3),
+                "sample_index": annot.get("sample_index", base_scene.get("sample_index")),
+                "person_mask_filename": annot.get("person_mask_filename", base_scene.get("person_mask_filename")),
+                "person_mask_inherited": bool(annot.get("person_mask_inherited", base_scene.get("person_mask_inherited", False))),
+                "person_mask_inherited_distance": annot.get("person_mask_inherited_distance", base_scene.get("person_mask_inherited_distance")),
+                "person_presence_mask_filename": annot.get("person_presence_mask_filename", base_scene.get("person_presence_mask_filename")),
+                "person_presence_ratio": float(annot.get("person_presence_ratio", base_scene.get("person_presence_ratio", 0.0)) or 0.0),
                 "source": "step3_annotation",
                 "duplicate_of": [],
             })
@@ -187,13 +205,14 @@ def build_metadata(
 ) -> list[dict]:
     video_segments = _load_video_segments(regions_path, fps)
     units, scene_index_map = _timeline_units(scene_payload, video_segments, fps)
+    scene_lookup = {int(scene["scene_index"]): scene for scene in scene_payload.get("scenes", [])}
     bases = [
         _base_record(unit["scene"], fps, output_scene_index=int(unit["scene_index"]))
         for unit in units
         if unit["kind"] == "slide"
     ]
     videos = [_video_record(unit) for unit in units if unit["kind"] == "video"]
-    annotations = _annotation_records(annotation_payload, scene_index_map)
+    annotations = _annotation_records(annotation_payload, scene_index_map, scene_lookup)
     metadata = bases + annotations
     metadata.extend(videos)
     metadata.sort(key=lambda item: (int(item["scene_index"]), int(item["annot_index"]), int(item["frame_no"])))
