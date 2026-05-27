@@ -22,6 +22,11 @@ import imagehash
 import numpy as np
 from PIL import Image
 
+try:
+    from .person_masks import masked_pair
+except ImportError:  # pragma: no cover - allows direct script execution
+    from person_masks import masked_pair
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
@@ -39,10 +44,15 @@ class ProbeConfig:
     stable_prev_hash: int = 2
     cut_mse: float = 500.0
     cut_hash: int = 10
-    base_mse: float = 450.0
-    base_changed_ratio: float = 0.08
+    base_mse: float = 350.0
+    base_changed_ratio: float = 0.045
     base_hash: int = 8
+    strong_changed_ratio: float = 0.10
     edge_break_ratio: float = 0.45
+    same_scene_edge_preserve: float = 0.64
+    same_scene_changed_ratio_max: float = 0.32
+    fine_diff_threshold: int = 5
+    subtle_changed_ratio: float = 0.012
     duplicate_hash: int = 6
     duplicate_edge_preserve: float = 0.95
     duplicate_changed_ratio: float = 0.18
@@ -116,25 +126,49 @@ def content_region(frame: np.ndarray, cfg: ProbeConfig) -> np.ndarray:
     return frame[y0:y1, x0:x1]
 
 
-def scene_metrics(reference: np.ndarray, frame: np.ndarray, cfg: ProbeConfig) -> dict:
+def mask_content_region(mask: np.ndarray | None, cfg: ProbeConfig) -> np.ndarray | None:
+    if mask is None:
+        return None
+    return content_region(mask.astype(np.uint8), cfg).astype(bool)
+
+
+def scene_metrics(
+    reference: np.ndarray,
+    frame: np.ndarray,
+    cfg: ProbeConfig,
+    reference_mask: np.ndarray | None = None,
+    frame_mask: np.ndarray | None = None,
+) -> dict:
     ref = content_region(reference, cfg)
     cur = content_region(frame, cfg)
+    ref, cur = masked_pair(ref, mask_content_region(reference_mask, cfg), cur, mask_content_region(frame_mask, cfg))
     return {
         "mse": compute_mse(ref, cur),
         "changed_ratio": count_changed_pixels(ref, cur, cfg.diff_threshold),
+        "fine_changed_ratio": count_changed_pixels(ref, cur, cfg.fine_diff_threshold),
         "edge_preserve": edge_preservation_ratio(ref, cur),
         "symmetric_edge": symmetric_edge_overlap(ref, cur),
         "hash_dist": int(compute_phash(ref) - compute_phash(cur)),
     }
 
 
-def is_duplicate_scene(reference: np.ndarray, frame: np.ndarray, cfg: ProbeConfig) -> bool:
-    metrics = scene_metrics(reference, frame, cfg)
-    return (
-        metrics["hash_dist"] <= cfg.duplicate_hash
-        and metrics["edge_preserve"] >= cfg.duplicate_edge_preserve
-        and metrics["changed_ratio"] <= cfg.duplicate_changed_ratio
-    )
+def is_duplicate_scene(
+    reference: np.ndarray,
+    frame: np.ndarray,
+    cfg: ProbeConfig,
+    reference_mask: np.ndarray | None = None,
+    frame_mask: np.ndarray | None = None,
+) -> bool:
+    metrics = scene_metrics(reference, frame, cfg, reference_mask, frame_mask)
+    return is_same_scene_content(metrics, cfg)
+
+
+def is_same_scene_content(metrics: dict, cfg: ProbeConfig) -> bool:
+    if metrics["changed_ratio"] > cfg.same_scene_changed_ratio_max:
+        return False
+    if metrics.get("fine_changed_ratio", 0.0) >= cfg.subtle_changed_ratio:
+        return False
+    return metrics["edge_preserve"] >= cfg.same_scene_edge_preserve
 
 
 def transition_reason(
@@ -144,29 +178,74 @@ def transition_reason(
     prev_hash: imagehash.ImageHash,
     current_hash: imagehash.ImageHash,
     cfg: ProbeConfig,
+    base_mask: np.ndarray | None = None,
+    prev_mask: np.ndarray | None = None,
+    current_mask: np.ndarray | None = None,
 ) -> tuple[str | None, dict]:
-    prev_mse = compute_mse(prev_frame, current_frame)
-    prev_hash_dist = int(prev_hash - current_hash)
-    metrics = scene_metrics(base_frame, current_frame, cfg)
+    masked_prev, masked_current = masked_pair(prev_frame, prev_mask, current_frame, current_mask)
+    prev_mse = compute_mse(masked_prev, masked_current)
+    if prev_mask is not None or current_mask is not None:
+        prev_hash_dist = int(compute_phash(masked_prev) - compute_phash(masked_current))
+    else:
+        prev_hash_dist = int(prev_hash - current_hash)
+    metrics = scene_metrics(base_frame, current_frame, cfg, base_mask, current_mask)
+    same_content = is_same_scene_content(metrics, cfg)
 
     details = {
         "prev_mse": prev_mse,
         "prev_hash_dist": prev_hash_dist,
+        "same_content": same_content,
         **metrics,
     }
 
-    if prev_mse >= cfg.cut_mse and prev_hash_dist >= cfg.cut_hash:
+    if not same_content and prev_mse >= cfg.cut_mse and prev_hash_dist >= cfg.cut_hash:
         return "cut", details
 
     if (
-        metrics["mse"] >= cfg.base_mse
+        not same_content
+        and metrics["mse"] >= cfg.base_mse
+        and metrics["changed_ratio"] >= cfg.base_changed_ratio
+    ):
+        return "base_structure", details
+
+    if (
+        not same_content
+        and metrics["changed_ratio"] >= cfg.strong_changed_ratio
+        and metrics["hash_dist"] >= max(4, cfg.base_hash // 2)
+    ):
+        return "base_strong_change", details
+
+    if (
+        not same_content
+        and metrics["fine_changed_ratio"] >= cfg.subtle_changed_ratio
+        and (
+            metrics["mse"] >= 10.0
+            or metrics["changed_ratio"] >= cfg.base_changed_ratio * 0.12
+        )
+        and (
+            metrics["edge_preserve"] < 0.995
+            or metrics["changed_ratio"] >= 0.02
+            or metrics["mse"] >= 50.0
+        )
+        and (
+            metrics["mse"] >= cfg.base_mse * 0.35
+            or metrics["changed_ratio"] >= cfg.base_changed_ratio * 0.5
+            or metrics["hash_dist"] >= max(2, cfg.base_hash // 4)
+        )
+    ):
+        return "subtle_text_change", details
+
+    if (
+        not same_content
+        and metrics["mse"] >= cfg.base_mse
         and metrics["changed_ratio"] >= cfg.base_changed_ratio
         and metrics["hash_dist"] >= cfg.base_hash
     ):
         return "base_diff", details
 
     if (
-        metrics["mse"] >= cfg.base_mse
+        not same_content
+        and metrics["mse"] >= cfg.base_mse
         and metrics["changed_ratio"] >= cfg.base_changed_ratio
         and metrics["symmetric_edge"] <= cfg.edge_break_ratio
     ):

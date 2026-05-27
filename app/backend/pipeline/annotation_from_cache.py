@@ -32,8 +32,10 @@ import numpy as np
 
 try:
     from .sample_cache import iter_sample_cache, load_sample_cache
+    from .person_masks import load_person_mask, masked_pair
 except ImportError:  # pragma: no cover - allows direct script execution
     from sample_cache import iter_sample_cache, load_sample_cache
+    from person_masks import load_person_mask, masked_pair
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -88,9 +90,26 @@ def _decision_frame(frame: np.ndarray, cfg: AnnotationConfig) -> np.ndarray:
     return cv2.GaussianBlur(gray, (3, 3), 0)
 
 
+def _decision_mask(mask: np.ndarray | None, cfg: AnnotationConfig) -> np.ndarray | None:
+    if mask is None:
+        return None
+    return _content_region(mask.astype(np.uint8), cfg).astype(bool)
+
+
 def _changed_ratio(frame_a: np.ndarray, frame_b: np.ndarray, threshold: int) -> float:
     diff = cv2.absdiff(frame_a, frame_b)
     return float(np.sum(diff > threshold) / diff.size)
+
+
+def _masked_changed_ratio(
+    frame_a: np.ndarray,
+    mask_a: np.ndarray | None,
+    frame_b: np.ndarray,
+    mask_b: np.ndarray | None,
+    threshold: int,
+) -> float:
+    masked_a, masked_b = masked_pair(frame_a, mask_a, frame_b, mask_b)
+    return _changed_ratio(masked_a, masked_b, threshold)
 
 
 def _sample_index_for_frame(frame_no: int, frame_to_sample: dict[int, int], sample_every: int) -> int:
@@ -224,13 +243,16 @@ class AnnotationState:
         self,
         scene: dict,
         base_decision: np.ndarray,
+        base_mask: np.ndarray | None,
         base_frame: np.ndarray,
         cfg: AnnotationConfig,
         sampled_fps: float,
     ):
         self.scene = scene
         self.base_decision = base_decision.copy()
+        self.base_mask = base_mask.copy() if base_mask is not None else None
         self.prev_decision = base_decision.copy()
+        self.prev_mask = base_mask.copy() if base_mask is not None else None
         self.base_frame = base_frame.copy()
         self.cfg = cfg
         self.stable_required = max(2, int(round(cfg.stable_sec * sampled_fps)))
@@ -243,15 +265,21 @@ class AnnotationState:
         self.last_capture_sample_index = -10**9
         self.annotations: list[dict] = []
 
-    def process(self, frame_info: dict, frame: np.ndarray, decision: np.ndarray) -> dict | None:
-        cumulative = _changed_ratio(self.base_decision, decision, self.cfg.diff_threshold)
-        instant = _changed_ratio(self.prev_decision, decision, self.cfg.diff_threshold)
+    def process(
+        self,
+        frame_info: dict,
+        frame: np.ndarray,
+        decision: np.ndarray,
+        mask: np.ndarray | None,
+    ) -> dict | None:
+        cumulative = _masked_changed_ratio(self.base_decision, self.base_mask, decision, mask, self.cfg.diff_threshold)
+        instant = _masked_changed_ratio(self.prev_decision, self.prev_mask, decision, mask, self.cfg.diff_threshold)
         active = instant >= self.cfg.instant_ratio
         sample_index = int(frame_info["sample_index"])
         capture: dict | None = None
 
         if cumulative >= self.cfg.reject_large_change_ratio:
-            self._reset_to(decision)
+            self._reset_to(decision, mask)
             return None
 
         if self.state == "STABLE":
@@ -263,12 +291,13 @@ class AnnotationState:
                     "frame_info": dict(frame_info),
                     "frame": frame.copy(),
                     "decision": decision.copy(),
+                    "mask": mask.copy() if mask is not None else None,
                     "cumulative_ratio": cumulative,
                     "instant_ratio": instant,
                 }
         elif self.state == "WRITING":
             if cumulative < self.cfg.cumulative_ratio:
-                self._reset_to(decision)
+                self._reset_to(decision, mask)
             else:
                 self.writing_count += 1
                 if active:
@@ -277,6 +306,7 @@ class AnnotationState:
                         "frame_info": dict(frame_info),
                         "frame": frame.copy(),
                         "decision": decision.copy(),
+                        "mask": mask.copy() if mask is not None else None,
                         "cumulative_ratio": cumulative,
                         "instant_ratio": instant,
                     }
@@ -294,6 +324,7 @@ class AnnotationState:
                     capture["stable_frame_no"] = int(frame_info["frame_no"])
                     capture["stable_timestamp_sec"] = float(frame_info["timestamp_sec"])
                     self.base_decision = decision.copy()
+                    self.base_mask = mask.copy() if mask is not None else None
                     self.last_capture_sample_index = sample_index
                     self.state = "STABLE"
                     self.stable_count = 0
@@ -301,6 +332,7 @@ class AnnotationState:
                     self.last_active = None
 
         self.prev_decision = decision.copy()
+        self.prev_mask = mask.copy() if mask is not None else None
         return capture
 
     def flush(self) -> dict | None:
@@ -316,12 +348,13 @@ class AnnotationState:
             return capture
         return None
 
-    def _reset_to(self, decision: np.ndarray) -> None:
+    def _reset_to(self, decision: np.ndarray, mask: np.ndarray | None = None) -> None:
         self.state = "STABLE"
         self.stable_count = 0
         self.writing_count = 0
         self.last_active = None
         self.prev_decision = decision.copy()
+        self.prev_mask = mask.copy() if mask is not None else None
 
 
 def _detect_interval_annotations(
@@ -344,15 +377,16 @@ def _detect_interval_annotations(
     ):
         sample_index = int(frame_info["sample_index"])
         decision = _decision_frame(frame, cfg)
+        person_mask = _decision_mask(load_person_mask(cache_dir, frame_info), cfg)
 
         if active_state is None:
-            active_state = AnnotationState(interval["scene"], decision, frame, cfg, sampled_fps)
+            active_state = AnnotationState(interval["scene"], decision, person_mask, frame, cfg, sampled_fps)
             continue
 
         if sample_index < int(interval["detect_start_sample_index"]):
             continue
 
-        capture = active_state.process(frame_info, frame, decision)
+        capture = active_state.process(frame_info, frame, decision, person_mask)
         if capture is not None:
             _record_capture(out_dir, interval, capture, 0, scene_result)
 
@@ -509,9 +543,15 @@ def _record_capture(
         "stable_timestamp_sec": round(float(capture["stable_timestamp_sec"]), 3),
         "base_frame_no": int(interval["base_frame_no"]),
         "base_timestamp_sec": round(float(interval["base_timestamp_sec"]), 3),
+        "person_mask_filename": frame_info.get("person_mask_filename"),
+        "person_mask_inherited": bool(frame_info.get("person_mask_inherited", False)),
+        "person_mask_inherited_distance": frame_info.get("person_mask_inherited_distance"),
+        "person_presence_mask_filename": frame_info.get("person_presence_mask_filename"),
+        "person_presence_ratio": float(frame_info.get("person_presence_ratio", 0.0) or 0.0),
         "details": {
             "cumulative_ratio": round(float(capture["cumulative_ratio"]), 6),
             "instant_ratio": round(float(capture["instant_ratio"]), 6),
+            "person_masked": bool(frame_info.get("person_mask_filename")),
         },
     }
     scene_result["annotations"].append(record)

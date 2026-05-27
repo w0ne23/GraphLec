@@ -28,6 +28,7 @@ anthropic>=0.49.0
 # ── ML & Vision ───────────────────────────────────────────────
 torch>=2.0.0
 transformers>=4.40.0
+ultralytics>=8.0.0
 
 # ── Text & Knowledge Graph ────────────────────────────────────
 kiwipiepy
