@@ -1773,7 +1773,7 @@ def _create_pipeline_runtime(args, progress_callback=None, title: str = "강의 
     return runtime
 
 
-def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_input: bool = True) -> dict:
+def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, should_build_analyzer_input: bool = True) -> dict:
     """Build the shared artifacts consumed by graph and verifier workflows."""
     stem = runtime.stem
     paths = runtime.paths
@@ -1879,7 +1879,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
             duration,
             output_dir,
             transcript_raw_path,
-            _build_analyzer_input_once if build_analyzer_input else None,
+            _build_analyzer_input_once if should_build_analyzer_input else None,
         )
         for future in as_completed([future_a, future_b]):
             if future is future_a:
@@ -1888,7 +1888,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
             else:
                 audio_result = future.result()
                 timings["P3B process_audio — 오디오 후처리"] = audio_result.get("elapsed", 0.0)
-                if build_analyzer_input and not analyzer_input_built["done"]:
+                if should_build_analyzer_input and not analyzer_input_built["done"]:
                     _build_analyzer_input_once(audio_result)
 
     timings["P3 enrich_audio_annotation total — 보강 분석 총합"] = time.time() - t_parallel
@@ -1936,7 +1936,7 @@ def run_preprocess_pipeline(args, runtime: PipelineRuntime, *, build_analyzer_in
     runtime.notify_stage("preprocess_fusion", "done")
     runtime.write_timings("P5 fusion — 데이터 퓨전")
 
-    if build_analyzer_input and not timings.get("V1 build_analyzer_input — verifier 입력 생성"):
+    if should_build_analyzer_input and not timings.get("V1 build_analyzer_input — verifier 입력 생성"):
         timings["V1 build_analyzer_input — verifier 입력 생성"] = 0.0
 
     return {
@@ -2205,7 +2205,7 @@ def run_direct_upload_workflow(args, progress_callback=None) -> dict:
     preprocess_result: dict = {}
     graph_result: dict = {}
     try:
-        preprocess_result = run_preprocess_pipeline(args, runtime, build_analyzer_input=False)
+        preprocess_result = run_preprocess_pipeline(args, runtime, should_build_analyzer_input=False)
         runtime.timings["V2 start_verifier_background — verifier 백그라운드 시작"] = 0.0
         graph_result = run_graph_pipeline(args, runtime, preprocess_result)
         _print_generated_files(runtime, preprocess_result, graph_result, {})
@@ -2223,7 +2223,7 @@ def run_verified_upload_workflow(args, progress_callback=None) -> dict:
     preprocess_result: dict = {}
     verifier_result: dict = {}
     try:
-        preprocess_result = run_preprocess_pipeline(args, runtime, build_analyzer_input=True)
+        preprocess_result = run_preprocess_pipeline(args, runtime, should_build_analyzer_input=True)
         verifier_result = run_verifier_pipeline(args, runtime, preprocess_result, background=False)
         _print_generated_files(runtime, preprocess_result, {}, verifier_result)
         return {"preprocess": preprocess_result, "verifier": verifier_result}
@@ -2249,7 +2249,7 @@ def run_pipeline(args, progress_callback=None):
         preprocess_result = run_preprocess_pipeline(
             args,
             runtime,
-            build_analyzer_input=should_run_verifier,
+            should_build_analyzer_input=should_run_verifier,
         )
 
         if should_run_verifier:

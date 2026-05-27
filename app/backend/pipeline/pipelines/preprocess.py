@@ -3,7 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
 
-def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True, helpers) -> dict:
+def run_preprocess_pipeline(args, runtime, *, should_build_analyzer_input: bool = True, helpers) -> dict:
     """Build shared artifacts consumed by graph and verifier workflows."""
     stem = runtime.stem
     paths = runtime.paths
@@ -109,7 +109,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
             duration,
             output_dir,
             transcript_raw_path,
-            _build_analyzer_input_once if build_analyzer_input else None,
+            _build_analyzer_input_once if should_build_analyzer_input else None,
         )
         for future in as_completed([future_a, future_b]):
             if future is future_a:
@@ -118,7 +118,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
             else:
                 audio_result = future.result()
                 timings["P3B process_audio — 오디오 후처리"] = audio_result.get("elapsed", 0.0)
-                if build_analyzer_input and not analyzer_input_built["done"]:
+                if should_build_analyzer_input and not analyzer_input_built["done"]:
                     _build_analyzer_input_once(audio_result)
 
     timings["P3 enrich_audio_annotation total — 보강 분석 총합"] = time.time() - t_parallel
@@ -166,7 +166,7 @@ def run_preprocess_pipeline(args, runtime, *, build_analyzer_input: bool = True,
     runtime.notify_stage("preprocess_fusion", "done")
     runtime.write_timings("P5 fusion — 데이터 퓨전")
 
-    if build_analyzer_input and not timings.get("V1 build_analyzer_input — verifier 입력 생성"):
+    if should_build_analyzer_input and not timings.get("V1 build_analyzer_input — verifier 입력 생성"):
         timings["V1 build_analyzer_input — verifier 입력 생성"] = 0.0
 
     return {
