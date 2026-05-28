@@ -4,6 +4,7 @@ import VerifyReportPanels from '../../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import {
   PHASES,
+  FINALIZE_PIPELINE_FLOW_NODES,
   UPLOAD_PIPELINE_FLOW_NODES,
   UPLOAD_STAGE_KEYS,
   normalizePipelineStages,
@@ -25,6 +26,7 @@ const VERIFY_RUNTIME_STAGE_KEYS = [
   'verifier_build_analyzer_input',
   'verifier_run',
 ]
+const FINALIZE_STAGE_KEYS = UPLOAD_STAGE_KEYS.filter(stage => !PREPROCESS_STAGE_KEYS.includes(stage))
 
 const VERIFY_PREVIEW_STEP_COUNT = PREPROCESS_STAGE_KEYS.length + 5
 
@@ -149,6 +151,7 @@ function createUploadPreviewStages(cursor) {
 function useDevVerifierPreviewFlow() {
   const [phase, setPhase] = useState(PHASES.UPLOAD)
   const [cursor, setCursor] = useState(-1)
+  const [mode, setMode] = useState('verify')
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
@@ -156,7 +159,11 @@ function useDevVerifierPreviewFlow() {
   useEffect(() => {
     if (phase !== PHASES.PIPELINE1 && phase !== PHASES.PIPELINE2) return undefined
 
-    const limit = phase === PHASES.PIPELINE1 ? VERIFY_PREVIEW_STEP_COUNT : UPLOAD_STAGE_KEYS.length
+    const limit = phase === PHASES.PIPELINE1
+      ? VERIFY_PREVIEW_STEP_COUNT
+      : mode === 'finalize'
+        ? FINALIZE_STAGE_KEYS.length
+        : UPLOAD_STAGE_KEYS.length
     const timer = window.setTimeout(() => {
       setCursor(current => {
         const next = current + 1
@@ -186,16 +193,18 @@ function useDevVerifierPreviewFlow() {
     if (phase === PHASES.DONE) {
       return normalizePipelineStages(UPLOAD_STAGE_KEYS.map(stage => ({ stage, status: 'done' })))
     }
-    return createUploadPreviewStages(Math.max(0, cursor))
-  }, [cursor, phase])
+    return normalizePipelineStages(stageStatusRows(mode === 'finalize' ? FINALIZE_STAGE_KEYS : UPLOAD_STAGE_KEYS, Math.max(0, cursor)))
+  }, [cursor, mode, phase])
 
-  function startPipeline(nextPhase) {
+  function startPipeline(nextPhase, nextMode = mode) {
+    setMode(nextMode)
     setCursor(0)
     setPhase(nextPhase)
   }
 
   function reset() {
     setPhase(PHASES.UPLOAD)
+    setMode('verify')
     setCursor(-1)
     setExpandedClaimKey('')
     setIsVideoMode(false)
@@ -205,6 +214,7 @@ function useDevVerifierPreviewFlow() {
   return {
     phase,
     stageGroupIndex,
+    mode,
     lecture: PREVIEW_LECTURE,
     verifier: PREVIEW_VERIFIER,
     verifierArtifacts: {},
@@ -220,14 +230,14 @@ function useDevVerifierPreviewFlow() {
       setTitle: () => {},
       selectFile: () => {},
       upload: () => setPhase(PHASES.VERIFY_CHOICE),
-      startVerify: () => startPipeline(PHASES.PIPELINE1),
-      skipVerify: () => startPipeline(PHASES.PIPELINE2),
-      continueUpload: () => startPipeline(PHASES.PIPELINE2),
+      startVerify: () => startPipeline(PHASES.PIPELINE1, 'verify'),
+      skipVerify: () => startPipeline(PHASES.PIPELINE2, 'direct'),
+      continueUpload: () => startPipeline(PHASES.PIPELINE2, 'finalize'),
       openReview: () => setPhase(PHASES.REVIEWED),
       backToVerifyReady: () => setPhase(PHASES.VERIFY_READY),
       confirmReview: () => setPhase(PHASES.UPLOAD_RESUME),
       rejectUpload: reset,
-      retry: () => startPipeline(PHASES.PIPELINE1),
+      retry: () => startPipeline(PHASES.PIPELINE1, 'verify'),
       reset,
       toggleClaim: key => setExpandedClaimKey(prev => prev === key ? '' : key),
       watchClaim: startTime => {
@@ -311,17 +321,19 @@ function PreviewVerifyPipelineStep({ flow }) {
 }
 
 function PreviewUploadPipelineStep({ flow }) {
+  const isFinalizePreview = flow.mode === 'finalize'
+
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
         <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">업로드 파이프라인 Preview</div>
+        <div className="vf-status-label">{isFinalizePreview ? '검증 이후 업로드 파이프라인 Preview' : '업로드 파이프라인 Preview'}</div>
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
           errorMessage={flow.errorMessage}
           statusMessage="2초마다 다음 단계로 넘어갑니다."
-          flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
+          flowNodes={isFinalizePreview ? FINALIZE_PIPELINE_FLOW_NODES : UPLOAD_PIPELINE_FLOW_NODES}
         />
         <div className="vf-status-actions">
           <button className="vf-cancel-btn" onClick={flow.actions.reset}>Preview 종료</button>
@@ -361,6 +373,8 @@ function PreviewResumeStep({ flow }) {
 }
 
 function PreviewDoneStep({ flow }) {
+  const isFinalizePreview = flow.mode === 'finalize'
+
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
@@ -371,7 +385,7 @@ function PreviewDoneStep({ flow }) {
           phase={PHASES.DONE}
           errorMessage={flow.errorMessage}
           statusMessage="Preview가 완료되었습니다."
-          flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
+          flowNodes={isFinalizePreview ? FINALIZE_PIPELINE_FLOW_NODES : UPLOAD_PIPELINE_FLOW_NODES}
         />
         <button className="vf-reset-btn" onClick={flow.actions.reset}>다시 보기</button>
       </div>
