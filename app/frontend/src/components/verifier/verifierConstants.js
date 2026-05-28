@@ -172,10 +172,97 @@ export const VERIFIER_PREPROCESS_FLOW_NODES = [
 ]
 
 export const FINALIZE_PIPELINE_FLOW_NODES = [
-  { id: 'verify_start', label: '검증하기', type: 'major', weight: 2 },
+  { id: 'verified', label: '검증 완료', type: 'major', weight: 2 },
   ...UPLOAD_PIPELINE_FLOW_NODES.filter(node => (
     ['graph_build', 'lance_index', 'graphrag_index', 'metadata', 'recommender_index', 'done'].includes(node.id)
   )),
+]
+
+export const VERIFY_PROGRESS_PIPELINE_FLOW_NODES = [
+  { id: 'upload', label: '업로드', type: 'major', weight: 2 },
+  {
+    id: 'extract',
+    label: '데이터 추출',
+    type: 'minor',
+    weight: 12,
+    stages: [
+      { key: 'preprocess_extract_media', label: '슬라이드 추출 및 오디오 품질 분석' },
+    ],
+  },
+  {
+    id: 'text',
+    label: '텍스트화',
+    type: 'minor',
+    weight: 12,
+    stages: [
+      { key: 'preprocess_textualize_transcribe', label: '슬라이드 텍스트화 및 전체 전사' },
+    ],
+  },
+  {
+    id: 'enrichment',
+    label: '강의 보강 분석',
+    type: 'minor',
+    weight: 10,
+    stages: [
+      { key: 'preprocess_enrich_audio_annotation', label: '필기 강조 및 오디오 후처리' },
+    ],
+  },
+  {
+    id: 'fusion',
+    label: '데이터 통합',
+    type: 'minor',
+    weight: 14,
+    stages: [
+      { key: 'preprocess_classify_scene', label: '슬라이드 분류 및 장면별 데이터 정리' },
+      { key: 'preprocess_fusion', label: '전체 데이터 통합' },
+    ],
+  },
+  {
+    id: 'verify_start',
+    label: '검증 시작',
+    type: 'major',
+    weight: 8,
+    stages: [
+      { key: 'verifier_build_analyzer_input', label: '검증 입력 생성' },
+    ],
+  },
+  {
+    id: 'claim_extraction',
+    label: '주장 추출',
+    type: 'minor',
+    weight: 9,
+    stages: [
+      { key: 'verifier_claim_extraction', label: '주장 후보 추출' },
+    ],
+  },
+  {
+    id: 'issue_judge',
+    label: '이슈 후보 판단',
+    type: 'minor',
+    weight: 9,
+    stages: [
+      { key: 'verifier_issue_judge', label: '이슈 후보 판단' },
+    ],
+  },
+  {
+    id: 'issue_classification',
+    label: '이슈 유형 분류',
+    type: 'minor',
+    weight: 9,
+    stages: [
+      { key: 'verifier_issue_classification', label: '이슈 유형 분류' },
+    ],
+  },
+  {
+    id: 'final_verification',
+    label: '최종 평가',
+    type: 'minor',
+    weight: 9,
+    stages: [
+      { key: 'verifier_final_verification', label: '최종 평가' },
+    ],
+  },
+  { id: 'verified', label: '검증 완료', type: 'major', weight: 4 },
 ]
 
 function getStageKeys(node) {
@@ -198,7 +285,8 @@ function uniqueValues(values) {
 
 export const VERIFY_STAGE_KEYS = VERIFY_PIPELINE_FLOW_NODES.flatMap(getStageKeys)
 export const UPLOAD_STAGE_KEYS = UPLOAD_PIPELINE_FLOW_NODES.flatMap(getStageKeys)
-export const STAGE_KEYS = uniqueValues([...VERIFY_STAGE_KEYS, ...UPLOAD_STAGE_KEYS])
+export const VERIFY_PROGRESS_STAGE_KEYS = VERIFY_PROGRESS_PIPELINE_FLOW_NODES.flatMap(getStageKeys)
+export const STAGE_KEYS = uniqueValues([...VERIFY_STAGE_KEYS, ...UPLOAD_STAGE_KEYS, ...VERIFY_PROGRESS_STAGE_KEYS])
 
 export const VERIFY_PIPELINE_LOG_STAGES = getLogStages(VERIFY_PIPELINE_FLOW_NODES)
 export const UPLOAD_PIPELINE_LOG_STAGES = getLogStages(UPLOAD_PIPELINE_FLOW_NODES)

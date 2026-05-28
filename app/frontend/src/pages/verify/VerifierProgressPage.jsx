@@ -1,7 +1,6 @@
-import { useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import VerifyReportPanels from '../../components/verifier/VerifyReportPanels'
-import { PHASES } from '../../components/verifier/verifierConstants'
+import PipelineProgress from '../../components/verifier/PipelineProgress'
+import { PHASES, VERIFY_PROGRESS_PIPELINE_FLOW_NODES } from '../../components/verifier/verifierConstants'
 import { useVerifierRouteFlow } from '../../hooks/useVerifierRouteFlow'
 
 import '../../styles/verifier.css'
@@ -10,21 +9,7 @@ export default function VerifierProgressPage() {
   const { lectureId } = useParams()
   const navigate = useNavigate()
   const flow = useVerifierRouteFlow(lectureId, 'progress')
-
-  useEffect(() => {
-    if (flow.phase === PHASES.VERIFY_READY && flow.verifier) {
-      navigate(`/verify/${lectureId}/result`, { replace: true })
-    }
-  }, [flow.phase, flow.verifier, lectureId, navigate])
-
-  const headerActions = (
-    <div className="vf-flow-actions">
-      <button className="vf-cancel-btn" onClick={flow.actions.reset}>업로드 취소</button>
-      <button className="vf-confirm-btn" disabled>
-        {flow.phase === PHASES.VERIFY_READY ? '결과 준비 완료' : '검증 진행 중'}
-      </button>
-    </div>
-  )
+  const canOpenResult = flow.phase === PHASES.VERIFY_READY && flow.verifier
 
   if (flow.isLoading) {
     return (
@@ -40,9 +25,27 @@ export default function VerifierProgressPage() {
 
   return (
     <div className="vf-page">
-      <div className="vf-flow-screen">
-        <div className="vf-flow-screen-inner">
-          <VerifyReportPanels flow={flow} headerActions={headerActions} />
+      <div className="vf-status-wrap">
+        <div className="vf-status-inner vf-status-inner--wide">
+          <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
+          <div className="vf-status-label">검증 파이프라인</div>
+          <PipelineProgress
+            stages={flow.pipelineStages}
+            phase={canOpenResult ? PHASES.VERIFY_READY : PHASES.PIPELINE1}
+            errorMessage={flow.errorMessage}
+            statusMessage={flow.currentStage || '검증 파이프라인을 진행 중입니다.'}
+            flowNodes={VERIFY_PROGRESS_PIPELINE_FLOW_NODES}
+          />
+          <div className="vf-status-actions vf-status-actions--inline">
+            <button className="vf-cancel-btn" onClick={flow.actions.reset}>업로드 취소</button>
+            <button
+              className="vf-confirm-btn"
+              disabled={!canOpenResult}
+              onClick={() => navigate(`/verify/${lectureId}/result`)}
+            >
+              {canOpenResult ? '결과 보기' : '검증 진행 중'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
