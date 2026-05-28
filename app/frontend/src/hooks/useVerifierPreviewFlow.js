@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   approveLectureUpload,
   getLectureDetail,
@@ -74,6 +75,7 @@ function verifierArtifactsFromResult(verifier) {
 }
 
 export function useVerifierPreviewFlow() {
+  const navigate = useNavigate()
   const eventSourceRef = useRef(null)
   const activeJobRef = useRef(null)
 
@@ -261,7 +263,11 @@ export function useVerifierPreviewFlow() {
         lecture: createdLecture,
         file,
       }))
-      connectJob(created.id, created.job_id, runningPhase, createdLecture)
+      if (workflowMode === 'verified_upload') {
+        navigate(`/verify/${created.id}/progress`)
+      } else {
+        navigate(`/verify/${created.id}/upload-progress`)
+      }
     } catch (error) {
       setIsBusy(false)
       setErrorMessage(String(error.message || error))
