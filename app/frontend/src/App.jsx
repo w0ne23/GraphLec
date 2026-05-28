@@ -6,6 +6,10 @@ import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
 import DevVerifierPage from './pages/dev/DevVerifierPage'
+import VerifierFinalizePage from './pages/verify/VerifierFinalizePage'
+import VerifierProgressPage from './pages/verify/VerifierProgressPage'
+import VerifierResultPage from './pages/verify/VerifierResultPage'
+import VerifierUploadProgressPage from './pages/verify/VerifierUploadProgressPage'
 import MainLayout    from './components/layout/MainLayout'
 
 export default function App() {
@@ -23,6 +27,10 @@ export default function App() {
             <Route element={<MainLayout />}>
               <Route path="/lectures"   element={<LectureListPage />} />
               <Route path="/verify" element={<VerifierPage />} />
+              <Route path="/verify/:lectureId/progress" element={<VerifierProgressPage />} />
+              <Route path="/verify/:lectureId/result" element={<VerifierResultPage />} />
+              <Route path="/verify/:lectureId/finalize" element={<VerifierFinalizePage />} />
+              <Route path="/verify/:lectureId/upload-progress" element={<VerifierUploadProgressPage />} />
               <Route path="/dev/upload" element={<DevUploadPage />} />
               <Route path="/recommend"  element={<RecommendPage />} />
             </Route>
