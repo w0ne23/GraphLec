@@ -1234,47 +1234,8 @@
     padding-bottom: 184px;
   }
 
-  .vf-compact-stages,
-  .vf-stage-summary-grid,
-  .vf-stage-data-board,
-  .vf-slide-summary-grid,
-  .vf-overview-weighted,
-  .vf-overview-flow,
-  .vf-compression-flow,
-  .vf-aux-strip,
-  .vf-detail-tabs,
-  .vf-claim-core,
-  .vf-claim-stage-grid {
+  .vf-stage-data-board {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .vf-compact-divider {
-    display: none;
-  }
-
-  .vf-compression-map {
-    grid-column: 1 / -1;
-  }
-
-  .vf-flow-arrow {
-    display: none;
-  }
-
-  .vf-flow-divider {
-    display: none;
-  }
-
-  .vf-type-strip-bars {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .vf-stage-head {
-    grid-template-columns: auto minmax(0, 1fr);
-  }
-
-  .vf-stage-head > .vf-bold {
-    grid-column: 1 / -1;
-    justify-self: start;
   }
 
   .vf-record-head {
@@ -1282,21 +1243,8 @@
     gap: 7px;
   }
 
-  .vf-record-head-meta {
-    max-width: 100%;
-    text-align: left;
-  }
-
   .vf-source-transcript-side {
     flex-basis: 150px;
-  }
-
-  .vf-claim-scene-group {
-    grid-template-columns: max-content minmax(0, 1fr);
-  }
-
-  .vf-claim-context-group {
-    grid-template-columns: max-content minmax(0, 1fr);
   }
 
   .vf-claim-row-meta {
@@ -1309,17 +1257,6 @@
   .vf-claim-row-meta-item--type-3,
   .vf-claim-row-meta-item--type-4 {
     max-width: clamp(4rem, 20vw, 5rem);
-  }
-
-  .vf-type-board,
-  .vf-compare-board,
-  .vf-exclusive-board,
-  .vf-classifier-board {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .vf-compare-row {
-    grid-template-columns: 1fr;
   }
 
   .vf-model-decision-strip {
@@ -1340,10 +1277,6 @@
   .vf-text-block {
     grid-template-columns: 1fr;
     gap: 4px;
-  }
-
-  .vf-score-bar {
-    grid-template-columns: 88px minmax(0, 1fr) 46px;
   }
 
   .vf-final-score-summary {
@@ -1394,29 +1327,7 @@
 
 @media (max-width: 540px) {
   .vf-report-metrics,
-  .vf-compact-stages,
-  .vf-stage-summary-grid,
   .vf-stage-data-board,
-  .vf-slide-summary-grid,
-  .vf-overview-weighted,
-  .vf-overview-flow,
-  .vf-compression-flow,
-  .vf-model-actions,
-  .vf-priority-actions,
-  .vf-final-status-actions,
-  .vf-aux-strip,
-  .vf-aux-actions,
-  .vf-type-strip-bars,
-  .vf-detail-tabs,
-  .vf-summary-actions,
-  .vf-summary-actions--triple,
-  .vf-summary-type-list,
-  .vf-claim-core,
-  .vf-claim-stage-grid,
-  .vf-type-board,
-  .vf-compare-board,
-  .vf-exclusive-board,
-  .vf-classifier-board,
   .vf-model-evidence {
     grid-template-columns: 1fr;
   }
@@ -1433,25 +1344,4 @@
     flex-basis: 96px;
   }
 
-  .vf-claim-scene-group,
-  .vf-claim-context-group {
-    grid-template-columns: 1fr;
-  }
-
-  .vf-claim-scene-cell,
-  .vf-claim-context-cell {
-    justify-content: flex-start;
-    border-right: 0;
-    border-bottom: 1px solid var(--b1);
-    text-align: left;
-  }
-
-  .vf-report-row {
-    flex-direction: column;
-    gap: 5px;
-  }
-
-  .vf-report-row-meta {
-    align-self: flex-start;
-  }
 }
