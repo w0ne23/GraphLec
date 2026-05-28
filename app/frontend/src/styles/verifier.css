@@ -1095,10 +1095,6 @@ button.vf-report-step:hover {
   background: linear-gradient(180deg, var(--blue-bg), var(--panel) 130px);
 }
 
-.vf-claim-flow--slide {
-  border-left: 3px solid var(--b2);
-}
-
 .vf-claim-flow-head {
   min-width: 0;
   display: flex;
@@ -1112,7 +1108,8 @@ button.vf-report-step:hover {
   min-width: 0;
 }
 
-.vf-claim-flow-title > span {
+.vf-claim-flow-title > span,
+.vf-claim-flow-head > div:not(.vf-claim-flow-head-actions) > span {
   color: var(--t3);
   font-size: 11px;
   font-weight: 900;

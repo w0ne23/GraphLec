@@ -9,7 +9,6 @@ import {
 import {
   ChipList,
   TextBlock,
-  MouseTooltip,
 } from '../VerifyReportParts'
 
 /**
@@ -18,27 +17,6 @@ import {
  */
 export default function SlideReviewStage({ model, status, resultId }) {
   const rows = model.slideFindings
-  const models = model.slideReviewModels || []
-
-  // 이 스테이지에 특화된 모델 정보 칩
-  const renderModelChip = () => {
-    if (!models.length) return null
-    return (
-      <MouseTooltip
-        className="vf-header-chip vf-header-chip--tooltip"
-        tabIndex={0}
-        tooltip={
-          <>
-            <span className="vf-bold">사용 모델</span>
-            <span className="vf-header-chip-tooltip-value">{models[0]}</span>
-          </>
-        }
-        tooltipClassName="vf-header-chip-tooltip"
-      >
-        모델
-      </MouseTooltip>
-    )
-  }
 
   if (!model.slideFindings.length) {
     return (
@@ -48,9 +26,6 @@ export default function SlideReviewStage({ model, status, resultId }) {
             <span>슬라이드 오류 목록</span>
             <div className="vf-claim-flow-title-row">
               <h2>슬라이드 오류</h2>
-              <div className="vf-header-chip-list">
-                {renderModelChip()}
-              </div>
             </div>
           </div>
           <span className="vf-bold">{statusText(status)}</span>
@@ -61,18 +36,17 @@ export default function SlideReviewStage({ model, status, resultId }) {
   }
 
   return (
-    <section className="vf-claim-flow vf-claim-flow--slide">
+    <section className={`vf-claim-flow vf-claim-flow--${status}`}>
       <div className="vf-claim-flow-head">
-        <div>
+        <div className="vf-claim-flow-title">
           <span>슬라이드 오류 목록</span>
           <div className="vf-claim-flow-title-row">
             <h2>슬라이드 오류</h2>
-            <div className="vf-header-chip-list">
-              {renderModelChip()}
-            </div>
           </div>
         </div>
-        <span className="vf-bold">{rows.length}</span>
+        <div className="vf-claim-flow-head-actions">
+          <span className="vf-bold vf-claim-flow-count">{rows.length}</span>
+        </div>
       </div>
       {rows.length ? (
         <div className="vf-record-list">
