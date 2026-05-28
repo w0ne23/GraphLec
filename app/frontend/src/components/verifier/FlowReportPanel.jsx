@@ -236,6 +236,78 @@ function FlowDetailExpansion({ children, detail, className = '', openClassName =
   )
 }
 
+function FlowSummaryHeader({ title, ariaLabel, isOpen, onToggle }) {
+  return (
+    <div className="vf-flow-summary-column-head-row">
+      <div className="vf-flow-summary-column-head">{title}</div>
+      <button
+        type="button"
+        className="vf-flow-summary-detail-hint"
+        aria-expanded={isOpen}
+        aria-label={ariaLabel}
+        onClick={onToggle}
+      >
+        상세
+      </button>
+    </div>
+  )
+}
+
+function FlowSummarySurface({
+  className,
+  renderSummary,
+  detailContent = null,
+  includeSummaryInOverlay = true,
+}) {
+  return (
+    <div className={className}>
+      <div className="vf-flow-summary-frame">
+        <div className="vf-flow-summary-list">
+          {renderSummary()}
+        </div>
+      </div>
+      {detailContent ? (
+        <div className="vf-flow-summary-overlay">
+          <div className="vf-flow-summary-list">
+            {includeSummaryInOverlay ? renderSummary() : null}
+            {detailContent}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function FlowSummaryNodeRow({ label, value }) {
+  return (
+    <div className="vf-flow-summary-node-row">
+      <div className="vf-flow-summary-node-label">{label}</div>
+      <span className="vf-bold">{value}</span>
+    </div>
+  )
+}
+
+function FlowSummaryNode({ label, value, detailContent }) {
+  return (
+    <FlowSummarySurface
+      className="vf-flow-summary-node"
+      detailContent={detailContent}
+      renderSummary={() => <FlowSummaryNodeRow label={label} value={value} />}
+    />
+  )
+}
+
+function FlowSummaryBranch({ rows, detailContent = null }) {
+  return (
+    <FlowSummarySurface
+      className="vf-flow-summary-branch"
+      detailContent={detailContent}
+      includeSummaryInOverlay={false}
+      renderSummary={() => <FlowBranchRows rows={rows} />}
+    />
+  )
+}
+
 function StageSummaryGrid({ model }) {
   const claimReady = hasDataForTab(model, 'claim_extraction')
   const issueReady = hasDataForTab(model, 'issue_judge')
@@ -258,33 +330,8 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={claimDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <div className="vf-flow-summary-column-head-row">
-                      <div className="vf-flow-summary-column-head">주장 추출</div>
-                      <button type="button" className="vf-flow-summary-detail-hint" aria-expanded={isOpen} aria-label="주장 추출 상세정보" onClick={toggleDetail}>
-                        상세
-                      </button>
-                    </div>
-                    <div className="vf-flow-summary-node">
-                      <div className="vf-flow-summary-frame">
-                        <div className="vf-flow-summary-list">
-                          <div className="vf-flow-summary-node-row">
-                            <div className="vf-flow-summary-node-label">claims</div>
-                            <span className="vf-bold">{claimReady ? model.claims.length : '-'}</span>
-                          </div>
-                        </div>
-                      </div>
-                      {isOpen ? (
-                        <div className="vf-flow-summary-overlay">
-                          <div className="vf-flow-summary-list">
-                            <div className="vf-flow-summary-node-row">
-                              <div className="vf-flow-summary-node-label">claims</div>
-                              <span className="vf-bold">{claimReady ? model.claims.length : '-'}</span>
-                            </div>
-                            {detailContent}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
+                    <FlowSummaryHeader title="주장 추출" ariaLabel="주장 추출 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryNode label="claims" value={claimReady ? model.claims.length : '-'} detailContent={detailContent} />
                   </>
                 )}
               </FlowDetailExpansion>
@@ -296,33 +343,8 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={issueDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <div className="vf-flow-summary-column-head-row">
-                      <div className="vf-flow-summary-column-head">이슈 후보 판단</div>
-                      <button type="button" className="vf-flow-summary-detail-hint" aria-expanded={isOpen} aria-label="이슈 후보 판단 상세정보" onClick={toggleDetail}>
-                        상세
-                      </button>
-                    </div>
-                    <div className="vf-flow-summary-node">
-                      <div className="vf-flow-summary-frame">
-                        <div className="vf-flow-summary-list">
-                          <div className="vf-flow-summary-node-row">
-                            <div className="vf-flow-summary-node-label">issues</div>
-                            <span className="vf-bold">{issueReady ? model.issueCandidates.length : '-'}</span>
-                          </div>
-                        </div>
-                      </div>
-                      {isOpen ? (
-                        <div className="vf-flow-summary-overlay">
-                          <div className="vf-flow-summary-list">
-                            <div className="vf-flow-summary-node-row">
-                              <div className="vf-flow-summary-node-label">issues</div>
-                              <span className="vf-bold">{issueReady ? model.issueCandidates.length : '-'}</span>
-                            </div>
-                            {detailContent}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
+                    <FlowSummaryHeader title="이슈 후보 판단" ariaLabel="이슈 후보 판단 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryNode label="issues" value={issueReady ? model.issueCandidates.length : '-'} detailContent={detailContent} />
                   </>
                 )}
               </FlowDetailExpansion>
@@ -332,26 +354,8 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={typeDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <div className="vf-flow-summary-column-head-row">
-                      <div className="vf-flow-summary-column-head">이슈 유형 분류</div>
-                      <button type="button" className="vf-flow-summary-detail-hint" aria-expanded={isOpen} aria-label="이슈 유형 분류 상세정보" onClick={toggleDetail}>
-                        상세
-                      </button>
-                    </div>
-                    <div className="vf-flow-summary-branch">
-                      <div className="vf-flow-summary-frame">
-                        <div className="vf-flow-summary-list">
-                          <FlowBranchRows rows={issueTypeRows} />
-                        </div>
-                      </div>
-                      {isOpen ? (
-                        <div className="vf-flow-summary-overlay">
-                          <div className="vf-flow-summary-list">
-                            {detailContent}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
+                    <FlowSummaryHeader title="이슈 유형 분류" ariaLabel="이슈 유형 분류 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryBranch rows={issueTypeRows} detailContent={detailContent} />
                   </>
                 )}
               </FlowDetailExpansion>
@@ -363,40 +367,9 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={finalDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <div className="vf-flow-summary-column-head-row">
-                      <div className="vf-flow-summary-column-head">최종 평가</div>
-                      <button type="button" className="vf-flow-summary-detail-hint" aria-expanded={isOpen} aria-label="최종 평가 상세정보" onClick={toggleDetail}>
-                        상세
-                      </button>
-                    </div>
-                    <div className="vf-flow-summary-node">
-                      <div className="vf-flow-summary-frame">
-                        <div className="vf-flow-summary-list">
-                          <div className="vf-flow-summary-node-row">
-                            <div className="vf-flow-summary-node-label">final</div>
-                            <span className="vf-bold">{finalCount}</span>
-                          </div>
-                        </div>
-                      </div>
-                      {isOpen ? (
-                        <div className="vf-flow-summary-overlay">
-                          <div className="vf-flow-summary-list">
-                            <div className="vf-flow-summary-node-row">
-                              <div className="vf-flow-summary-node-label">final</div>
-                              <span className="vf-bold">{finalCount}</span>
-                            </div>
-                            {detailContent}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-                    <div className="vf-flow-summary-branch">
-                      <div className="vf-flow-summary-frame">
-                        <div className="vf-flow-summary-list">
-                          <FlowBranchRows rows={finalTypeRows} />
-                        </div>
-                      </div>
-                    </div>
+                    <FlowSummaryHeader title="최종 평가" ariaLabel="최종 평가 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryNode label="final" value={finalCount} detailContent={detailContent} />
+                    <FlowSummaryBranch rows={finalTypeRows} />
                   </>
                 )}
               </FlowDetailExpansion>
@@ -406,13 +379,7 @@ function StageSummaryGrid({ model }) {
                 <div className="vf-flow-summary-column-head-row">
                   <div className="vf-flow-summary-column-head" aria-hidden="true">&nbsp;</div>
                 </div>
-                <div className="vf-flow-summary-branch">
-                  <div className="vf-flow-summary-frame">
-                    <div className="vf-flow-summary-list">
-                      <FlowBranchRows rows={finalTypeRows} />
-                    </div>
-                  </div>
-                </div>
+                <FlowSummaryBranch rows={finalTypeRows} />
               </div>
             </div>
           </div>
