@@ -163,6 +163,21 @@ export const UPLOAD_PIPELINE_FLOW_NODES = [
   { id: 'done', label: '완료', type: 'major', weight: 2 },
 ]
 
+export const VERIFIER_PREPROCESS_FLOW_NODES = [
+  ...UPLOAD_PIPELINE_FLOW_NODES.filter(node => (
+    node.id === 'upload' ||
+    ['extract', 'text', 'enrichment', 'structure', 'fusion'].includes(node.id)
+  )),
+  { id: 'verify_start', label: '검증하기', type: 'major', weight: 2 },
+]
+
+export const FINALIZE_PIPELINE_FLOW_NODES = [
+  { id: 'verify_start', label: '검증하기', type: 'major', weight: 2 },
+  ...UPLOAD_PIPELINE_FLOW_NODES.filter(node => (
+    ['graph_build', 'lance_index', 'graphrag_index', 'metadata', 'recommender_index', 'done'].includes(node.id)
+  )),
+]
+
 function getStageKeys(node) {
   return node.stages?.map(stage => stage.key) ?? []
 }

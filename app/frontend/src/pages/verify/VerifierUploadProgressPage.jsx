@@ -23,7 +23,7 @@ export default function VerifierUploadProgressPage() {
             flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
           />
           <div className="vf-status-actions">
-            <button className="vf-cancel-btn" onClick={flow.actions.reset}>처음으로</button>
+            <button className="vf-cancel-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
           </div>
         </div>
       </div>
