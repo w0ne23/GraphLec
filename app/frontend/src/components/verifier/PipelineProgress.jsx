@@ -74,6 +74,8 @@ export default function PipelineProgress({
   errorMessage,
   statusMessage,
   flowNodes = PIPELINE_FLOW_NODES,
+  showDetails = true,
+  compact = false,
 }) {
   const activeNode = getActiveNode(flowNodes, stages, phase)
   const activeNodeIndex = flowNodes.findIndex(node => node.id === activeNode?.id)
@@ -101,34 +103,38 @@ export default function PipelineProgress({
   }
 
   return (
-    <div className="vf-pipe">
-      <div className="vf-progress-head">
-        <div className="vf-progress-message">{statusMessage || '분석 준비 중...'}</div>
-      </div>
-      <div className="vf-work-log">
-        {logNode ? (
-          <div className="vf-work-log-lines">
-            {visibleStages.map(stage => {
-              const status = getStageStatus(stages, stage.key)
-              return (
-                <div key={stage.key} className={`vf-work-log-line vf-work-log-line--${status}`}>
-                  <span>{stage.label}</span>
-                  <span className="vf-work-log-line-status">{getStageText(status)}</span>
+    <div className={`vf-pipe${compact ? ' vf-pipe--compact' : ''}`}>
+      {showDetails && (
+        <>
+          <div className="vf-progress-head">
+            <div className="vf-progress-message">{statusMessage || '분석 준비 중...'}</div>
+          </div>
+          <div className="vf-work-log">
+            {logNode ? (
+              <div className="vf-work-log-lines">
+                {visibleStages.map(stage => {
+                  const status = getStageStatus(stages, stage.key)
+                  return (
+                    <div key={stage.key} className={`vf-work-log-line vf-work-log-line--${status}`}>
+                      <span>{stage.label}</span>
+                      <span className="vf-work-log-line-status">{getStageText(status)}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              !showErrorInLog && (
+                <div className="vf-work-log-empty">
+                  {activeNode?.id === 'verified' ? '검토 대기 중' : '작업 대기 중'}
                 </div>
               )
-            })}
+            )}
+            {showErrorInLog && (
+              <div className="vf-pipe-error">오류: {errorMessage}</div>
+            )}
           </div>
-        ) : (
-          !showErrorInLog && (
-            <div className="vf-work-log-empty">
-              {activeNode?.id === 'verified' ? '검토 대기 중' : '작업 대기 중'}
-            </div>
-          )
-        )}
-        {showErrorInLog && (
-          <div className="vf-pipe-error">오류: {errorMessage}</div>
-        )}
-      </div>
+        </>
+      )}
       <div className="vf-flow" style={{ '--flow-count': flowNodes.length }}>
         {flowNodes.map(renderNode)}
       </div>
