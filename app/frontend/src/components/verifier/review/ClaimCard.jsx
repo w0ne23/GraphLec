@@ -80,51 +80,28 @@ function TranscriptRow({ contexts, highlightText }) {
   const items = asArray(contexts).filter(context => context?.text)
   if (!items.length) return null
 
-  function handleToggleKeyDown(event, nextOpen) {
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    event.preventDefault()
-    setOpen(nextOpen)
-  }
-
   return (
     <div className="vf-detail-row vf-transcript-row">
       <dt>원문</dt>
       <dd>
-        {!open && (
-          <span
-            className="vf-transcript-toggle"
-            role="button"
-            tabIndex={0}
-            onClick={() => setOpen(true)}
-            onKeyDown={event => handleToggleKeyDown(event, true)}
-          >
-            원문 보기 ▼
-          </span>
-        )}
+        <button
+          type="button"
+          className="vf-transcript-toggle vf-transcript-toggle--button"
+          aria-expanded={open}
+          onClick={() => setOpen(prev => !prev)}
+        >
+          {open ? '접기 ▲' : '원문 보기 ▼'}
+        </button>
         {open && (
           <div className="vf-transcript-body">
             <div className="vf-transcript-list">
-              {items.map((context, idx) => {
-                const isLast = idx === items.length - 1
-                return (
-                  <p key={`${context.context_id || context.slide_number || 'transcript'}-${idx}`}>
-                    <span className="vf-transcript-text">
-                      <TranscriptText text={context.text} highlightText={highlightText} />
-                    </span>
-                    {isLast && (
-                      <span
-                        className="vf-transcript-toggle vf-transcript-toggle--collapse"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setOpen(false)}
-                        onKeyDown={event => handleToggleKeyDown(event, false)}
-                      >
-                        접기 ▲
-                      </span>
-                    )}
-                  </p>
-                )
-              })}
+              {items.map((context, idx) => (
+                <p key={`${context.context_id || context.slide_number || 'transcript'}-${idx}`}>
+                  <span className="vf-transcript-text">
+                    <TranscriptText text={context.text} highlightText={highlightText} />
+                  </span>
+                </p>
+              ))}
             </div>
           </div>
         )}
