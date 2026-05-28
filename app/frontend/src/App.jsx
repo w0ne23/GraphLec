@@ -7,6 +7,7 @@ import LectureListPage from './pages/LectureListPage'
 import LecturePage   from './pages/LecturePage'
 import VerifierPage  from './pages/VerifierPage'
 import DevVerifierPage from './pages/dev/DevVerifierPage'
+import DevVerifierPreviewPage from './pages/dev/DevVerifierPreviewPage'
 import VerifierFinalizePage from './pages/verify/VerifierFinalizePage'
 import VerifierProgressPage from './pages/verify/VerifierProgressPage'
 import VerifierResultPage from './pages/verify/VerifierResultPage'
@@ -36,6 +37,7 @@ export default function App() {
               <Route path="/verify/:lectureId/finalize" element={<VerifierFinalizePage />} />
               <Route path="/verify/:lectureId/upload-progress" element={<VerifierUploadProgressPage />} />
               <Route path="/dev/upload" element={<DevUploadPage />} />
+              <Route path="/dev/verifier-preview" element={<DevVerifierPreviewPage />} />
               <Route path="/recommend"  element={<RecommendPage />} />
             </Route>
 
