@@ -9,7 +9,6 @@ import {
   contextValueFromId,
   getClaimFlowSource,
   getIssueType,
-  hasIssueInComparison,
   isFinalReviewTarget,
   issueTypeTone,
   sceneValueFromId,
@@ -120,8 +119,6 @@ export function renderClaimExtractionRows(rows) {
 
 function IssueJudgeRow({ row, displayId }) {
   const source = getClaimFlowSource(row)
-  const isIssueCandidate = Boolean(row.issue || hasIssueInComparison(row))
-  const isOkRow = !isIssueCandidate
   const claimText = source.resolved_claim || source.claim_text
 
   return (
@@ -131,13 +128,11 @@ function IssueJudgeRow({ row, displayId }) {
     >
       <summary className="vf-claim-row-summary">
         <div className="vf-claim-row-summary-inner">
-          <span className={`vf-bold vf-claim-row-id ${isIssueCandidate ? 'vf-claim-row-id--issue' : ''}`}>
+          <span className="vf-bold vf-claim-row-id vf-claim-row-id--issue">
             {compactText(displayId || row.claim_id)}
           </span>
           <div className="vf-claim-row-content">
-            <span className={`vf-claim-row-text ${isOkRow ? 'vf-claim-row-text--ok' : ''}`}>
-              {compactText(claimText)}
-            </span>
+            <span className="vf-claim-row-text">{compactText(claimText)}</span>
             <IssueJudgeStatusBadge row={row} />
           </div>
           <span className="vf-claim-row-toggle" aria-hidden="true" />
@@ -147,11 +142,7 @@ function IssueJudgeRow({ row, displayId }) {
         <InlineBlock label="판단 결과">
           {row.comparison && <ModelDecisionStrip models={row.comparison.models} />}
         </InlineBlock>
-        {row.issue ? (
-          <ModelEvidenceSection items={row.issue.source_model_issues} />
-        ) : (
-          <div className="vf-report-note">이 단계에서 이슈 후보로 남지 않은 클레임입니다.</div>
-        )}
+        <ModelEvidenceSection items={row.issue?.source_model_issues} />
       </div>
     </details>
   )

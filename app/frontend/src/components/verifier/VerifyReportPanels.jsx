@@ -488,29 +488,15 @@ function renderClaimListDetail({
   }
 
   if (activeTab === 'issue_judge') {
-    const listFilter = claimListFilters.issue_judge || 'all'
-    const sourceRows = model.claimFlowRows
-    const listRows = listFilter === 'candidate'
-      ? sourceRows.filter(row => row.issue)
-      : sourceRows
-    const rows = claimListView === 'transcript' ? sourceRows : listRows
+    const sourceRows = model.claimFlowRows.filter(row => row.issue)
+    const rows = sourceRows
     const sourceCount = sourceRows.length
     const displayedCount = rows.length
 
     return (
       <ClaimListPanel
         activeTab={activeTab}
-        actions={claimListView === 'list' ? (
-          <ClaimListFilterActions
-            options={[
-              { key: 'all', label: '전체' },
-              { key: 'candidate', label: '이슈 후보' },
-            ]}
-            value={listFilter}
-            onChange={value => onClaimListFilterChange('issue_judge', value)}
-          />
-        ) : null}
-        countLabel={(claimListView === 'list' && listFilter !== 'all') || displayedCount !== sourceCount
+        countLabel={displayedCount !== sourceCount
           ? `${displayedCount} / ${sourceCount}`
           : sourceCount}
         model={model}
@@ -648,18 +634,12 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
   const [activeTab, setActiveTab] = useState(completedDetailKey)
   const [claimListView, setClaimListView] = useState('list')
   const [claimListFilters, setClaimListFilters] = useState({
-    issue_judge: 'all',
     final_verification: 'all',
   })
   const [isProgressDocked, setIsProgressDocked] = useState(false)
 
   useEffect(() => {
-    setActiveTab(completedDetailKey)
-  }, [completedDetailKey])
-
-  useEffect(() => {
     setClaimListFilters({
-      issue_judge: 'all',
       final_verification: 'all',
     })
   }, [activeTab])
