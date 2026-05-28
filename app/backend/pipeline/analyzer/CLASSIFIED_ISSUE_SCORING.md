@@ -88,9 +88,24 @@ context window는 기본 `2`다.
 | `category_severity` | 해당 분류 안에서 오류가 얼마나 심각한지 |
 | `context_resolution` | 제공된 context/슬라이드 문맥이 issue를 얼마나 해소하는지 |
 
+최종 judge prompt는 카테고리 정의와 점수별 판단 기준을 분리한다.
+
+- `CATEGORY_DESCRIPTIONS`: 각 issue category가 무엇을 의미하는지 설명한다.
+- `CATEGORY_SCORE_GUIDES`: category별로 `is_valid_issue`, `category_severity`,
+  `context_resolution`을 어떻게 판단할지 설명한다.
+
+즉, factual error의 정확성/심각성/문맥 해소 기준과 temporal error의
+정확성/심각성/문맥 해소 기준은 서로 다르게 제시된다.
+공통 출력 스키마는 유지하지만, 세 점수의 판단 기준은 category별 guide를 우선 적용한다.
+
 `context_resolution`은 반대로 작동한다.
 문맥이 문제를 많이 해소할수록 값이 커지고,
 최종 점수에서는 `1.0 - context_resolution`로 감점된다.
+
+문맥 해소 효과가 중복 반영되지 않도록 prompt는 모델에게
+문맥 해소 정도를 주로 `context_resolution`에 반영하라고 지시한다.
+다만 문맥을 포함했을 때 애초에 issue가 성립하지 않으면
+`is_valid_issue`도 낮출 수 있다.
 
 ## 모델별 점수 계산
 
