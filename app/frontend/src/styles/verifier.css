@@ -333,6 +333,84 @@
   padding: 0;
 }
 
+.vf-verifier-progress-slider {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.vf-verifier-slide-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.vf-verifier-slide-status span {
+  border: 1px solid var(--b1);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--t3);
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.vf-verifier-slide-status .vf-verifier-slide-status--active {
+  border-color: var(--blue-br);
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+
+.vf-verifier-slide-track {
+  width: 200%;
+  display: flex;
+  align-items: stretch;
+  transition: transform .36s ease;
+}
+
+.vf-verifier-progress-slider--verify .vf-verifier-slide-track {
+  transform: translateX(-50%);
+}
+
+.vf-verifier-slide {
+  width: 50%;
+  min-width: 0;
+  flex: 0 0 50%;
+}
+
+.vf-verifier-slide .vf-pipe {
+  width: 100%;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.vf-report-rail--compact {
+  width: 100%;
+  padding: 0;
+}
+
+.vf-report-rail--compact .vf-report-step {
+  min-height: 52px;
+  padding: 8px 10px;
+}
+
+.vf-report-rail--compact .vf-report-step div {
+  gap: 0;
+}
+
+.vf-report-rail--compact .vf-report-step .vf-bold {
+  font-size: 11px;
+  line-height: 1.25;
+}
+
 .vf-report-rail {
   --vf-report-step-border: 2px;
   position: relative;
@@ -3988,6 +4066,38 @@ button.vf-flow-block:disabled {
   background: var(--panel); border: 1px solid var(--b1);
   border-radius: var(--rl);
   overflow: hidden;
+}
+.vf-pipe--compact {
+  width: 100%;
+  max-width: none;
+  padding: 0;
+}
+.vf-pipe--compact .vf-flow {
+  width: 100%;
+  padding: 0 2px;
+  gap: clamp(2px, calc(3vw / var(--flow-count)), 10px);
+}
+.vf-pipe--compact .vf-flow::before {
+  top: 24px;
+}
+.vf-pipe--compact .vf-flow-node-slot {
+  height: 42px;
+}
+.vf-pipe--compact .vf-flow-node {
+  --flow-node-size: 12px;
+  box-shadow: 0 0 0 4px var(--panel);
+}
+.vf-pipe--compact .vf-flow-item--major .vf-flow-node {
+  --flow-node-size: 15px;
+  outline-width: 2px;
+}
+.vf-pipe--compact .vf-flow-item--run .vf-flow-node {
+  box-shadow: 0 0 0 4px var(--panel), 0 0 0 7px var(--blue-bg);
+}
+.vf-pipe--compact .vf-flow-label {
+  max-width: 72px;
+  min-height: 22px;
+  font-size: 8.5px;
 }
 .vf-progress-head {
   display: flex;

@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import PipelineProgress from './PipelineProgress'
 import { toResultFileUrl } from './review/verifierReviewUtils'
-import { PHASES } from './verifierConstants'
+import { PHASES, UPLOAD_PIPELINE_FLOW_NODES } from './verifierConstants'
 
 const DEV_FILE_BASE = typeof window !== 'undefined' && window.location?.hostname
   ? `http://${window.location.hostname}:8000`
@@ -22,6 +23,19 @@ const REPORT_TAB_ORDER = [
   'final_verification',
   'slide_review',
 ]
+
+const PREPROCESS_STAGE_KEYS = [
+  'preprocess_extract_media',
+  'preprocess_textualize_transcribe',
+  'preprocess_enrich_audio_annotation',
+  'preprocess_classify_scene',
+  'preprocess_fusion',
+]
+
+const PREPROCESS_PIPELINE_FLOW_NODES = UPLOAD_PIPELINE_FLOW_NODES.filter(node => (
+  node.id === 'upload' ||
+  (node.stages || []).some(stage => PREPROCESS_STAGE_KEYS.includes(stage.key))
+))
 
 const ISSUE_TYPE_LABELS = {
   factual_error: 'factual_error',
@@ -562,6 +576,14 @@ function statusText(status) {
   if (status === 'done') return '완료'
   if (status === 'run') return '진행 중'
   return '대기'
+}
+
+function pipelineStageStatus(stages, key) {
+  return stages?.find(stage => stage.stage === key)?.status ?? 'wait'
+}
+
+function isPreprocessComplete(flow) {
+  return PREPROCESS_STAGE_KEYS.every(key => pipelineStageStatus(flow.pipelineStages, key) === 'done')
 }
 
 function isStageDone(status) {
@@ -2473,9 +2495,9 @@ function ContextPreview({ item, resultId }) {
   )
 }
 
-function StageTimeline({ flow, statuses = [], activeTab, onSelectTab }) {
+function StageTimeline({ flow, statuses = [], activeTab, onSelectTab, compact = false }) {
   return (
-    <div className="vf-report-rail vf-report-rail--tabs">
+    <div className={`vf-report-rail vf-report-rail--tabs${compact ? ' vf-report-rail--compact' : ''}`}>
       {VERIFY_STEPS.map((step, index) => {
         const status = statuses[index] || getVerifyStepStatus(flow, index)
         const isActive = activeTab === step.key
@@ -2492,13 +2514,44 @@ function StageTimeline({ flow, statuses = [], activeTab, onSelectTab }) {
             >
               <div>
                 <span className="vf-bold">{step.label}</span>
-                <span className="vf-report-step-status">{statusText(status)}</span>
+                {!compact && <span className="vf-report-step-status">{statusText(status)}</span>}
               </div>
             </button>
             {index < 3 && <span className={`vf-report-step-link vf-report-step-link--${linkStatus}`} aria-hidden="true" />}
           </Fragment>
         )
       })}
+    </div>
+  )
+}
+
+function SlidingVerifierPipelinePanel({ flow, statuses = [], activeTab, onSelectTab }) {
+  const preprocessDone = isPreprocessComplete(flow)
+  const activeSlide = preprocessDone ? 'verify' : 'preprocess'
+  const preprocessDoneCount = PREPROCESS_STAGE_KEYS.filter(key => pipelineStageStatus(flow.pipelineStages, key) === 'done').length
+
+  return (
+    <div className={`vf-verifier-progress-slider vf-verifier-progress-slider--${activeSlide}`}>
+      <div className="vf-verifier-slide-status">
+        <span className={activeSlide === 'preprocess' ? 'vf-verifier-slide-status--active' : ''}>전처리 {preprocessDoneCount}/{PREPROCESS_STAGE_KEYS.length}</span>
+        <span className={activeSlide === 'verify' ? 'vf-verifier-slide-status--active' : ''}>검증 진행</span>
+      </div>
+      <div className="vf-verifier-slide-track">
+        <section className="vf-verifier-slide" aria-label="전처리 파이프라인">
+          <PipelineProgress
+            stages={flow.pipelineStages}
+            phase={PHASES.PIPELINE2}
+            errorMessage={flow.errorMessage}
+            statusMessage={flow.currentStage || '전처리 파이프라인을 진행 중입니다.'}
+            flowNodes={PREPROCESS_PIPELINE_FLOW_NODES}
+            showDetails={false}
+            compact
+          />
+        </section>
+        <section className="vf-verifier-slide" aria-label="검증 진행 과정">
+          <StageTimeline flow={flow} statuses={statuses} activeTab={activeTab} onSelectTab={onSelectTab} compact />
+        </section>
+      </div>
     </div>
   )
 }
@@ -3724,6 +3777,7 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
   const [activeFilter, setActiveFilter] = useState(null)
   const [isProgressDocked, setIsProgressDocked] = useState(false)
   const filterScope = useMemo(() => buildFilterScope(model, activeFilter), [model, activeFilter])
+  const progressTitle = isPreprocessComplete(flow) ? '검증 진행 과정' : '전처리 진행 과정'
 
   useEffect(() => {
     setActiveTab(completedDetailKey)
@@ -3778,16 +3832,16 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
       </div>
       <section ref={progressRef} className="vf-progress-only" aria-label="검증 진행 상태">
         <div className="vf-progress-block-head">
-          <span className="vf-bold">검증 진행 과정</span>
+          <span className="vf-bold">{progressTitle}</span>
         </div>
-        <StageTimeline flow={flow} statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
+        <SlidingVerifierPipelinePanel flow={flow} statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
       </section>
       {isProgressDocked && (
         <section className="vf-progress-dock" aria-label="검증 진행 상태">
           <div className="vf-progress-block-head">
-            <span className="vf-bold">검증 진행 과정</span>
+            <span className="vf-bold">{progressTitle}</span>
           </div>
-          <StageTimeline flow={flow} statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
+          <SlidingVerifierPipelinePanel flow={flow} statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
         </section>
       )}
       {activeTab !== 'slide_review' && (
