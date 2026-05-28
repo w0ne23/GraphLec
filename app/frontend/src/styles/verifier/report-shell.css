@@ -1,0 +1,196 @@
+/* ── 검증 보고서 패널 ── */
+.vf-report {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-bottom: 132px;
+}
+
+.vf-report-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.vf-report-head > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.vf-report-head span {
+  color: var(--t3);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.vf-report-head h1 {
+  margin: 4px 0 0;
+  color: var(--t1);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.vf-report-head > .vf-bold {
+  flex-shrink: 0;
+  border: 1px solid var(--blue-br);
+  border-radius: 4px;
+  background: var(--blue-bg);
+  color: var(--blue);
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.vf-progress-only,
+.vf-stage-data {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--b1);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px;
+}
+
+.vf-progress-only .vf-report-rail {
+  padding: 0;
+}
+
+.vf-progress-block-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.vf-progress-block-head .vf-bold {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: bold;
+}
+
+.vf-progress-dock {
+  position: fixed;
+  left: 50%;
+  bottom: 16px;
+  z-index: 40;
+  width: min(calc(100vw - 48px), 1040px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--b1);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 -12px 32px rgba(15, 23, 42, .16);
+  padding: 12px;
+  transform: translateX(-50%);
+}
+
+.vf-progress-dock .vf-report-rail {
+  padding: 0;
+}
+
+.vf-report-rail {
+  --vf-report-step-border: 2px;
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  padding: 4px 0;
+}
+
+.vf-report-rail--tabs {
+  align-items: stretch;
+}
+
+.vf-report-step {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  flex: 1 1 0;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  border: var(--vf-report-step-border) solid var(--b1);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 9px 10px;
+}
+
+button.vf-report-step {
+  appearance: none;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.vf-report-step-link {
+  flex: 0 0 8px;
+  align-self: center;
+  height: var(--vf-report-step-border);
+  background: var(--b2);
+  pointer-events: none;
+}
+
+.vf-report-step-link--done {
+  background: var(--green-text);
+}
+
+button.vf-report-step:hover {
+  border-color: var(--blue-br);
+}
+
+.vf-report-step--active {
+  border-color: var(--blue);
+  box-shadow: inset 0 0 0 1px var(--blue-br);
+}
+
+.vf-report-step-divider {
+  flex: 0 0 2px;
+  margin: 0 8px;
+  width: 2px;
+  align-self: stretch;
+  background: var(--b2);
+}
+
+.vf-report-step .vf-bold {
+  min-width: 0;
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: bold;
+  line-height: 1.3;
+}
+
+.vf-report-step div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.vf-report-step-status {
+  color: var(--t3);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.vf-report-step--run {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+}
+
+.vf-report-step--run .vf-bold {
+  color: var(--blue);
+}
+
+.vf-report-step--done {
+  border-color: rgba(22, 163, 74, .24);
+  background: var(--green-bg);
+}
+
+.vf-report-step--done .vf-bold {
+  color: var(--t1);
+}

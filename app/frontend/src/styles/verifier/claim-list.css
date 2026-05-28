@@ -1,0 +1,100 @@
+.vf-claim-row-summary {
+  cursor: pointer;
+  min-width: 0;
+  list-style: none;
+}
+
+.vf-claim-row-summary-inner {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) max-content 24px;
+  align-items: center;
+  column-gap: .75rem;
+  padding: 8px;
+}
+
+.vf-claim-table-record .vf-claim-row-summary {
+  gap: 12px;
+}
+
+.vf-claim-row-summary::-webkit-details-marker {
+  display: none;
+}
+
+.vf-claim-row-id {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--b1);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--t2);
+  padding: 3px 6px;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vf-claim-row-id--issue {
+  border-color: var(--b1);
+  background: var(--card);
+  color: var(--t2);
+}
+
+.vf-claim-row--issue-judge .vf-claim-row-id--issue {
+  border-color: var(--b1);
+  background: var(--card);
+  color: var(--t2);
+}
+
+.vf-claim-row-content {
+  min-width: 0;
+  display: contents;
+}
+
+.vf-claim-row-text {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: bold;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vf-claim-row-text--ok {
+  color: var(--t3);
+  font-weight: 700;
+}
+
+.vf-claim-row[open] .vf-claim-row-text {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.vf-claim-row-meta {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  align-self: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.vf-claim-row-meta-item {
+  display: inline-flex;
+  max-width: 4rem;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--b1);
+  border-radius: 5px;
+  background: var(--card);
+  padding: 4px 6px;
+  white-space: nowrap;
+}

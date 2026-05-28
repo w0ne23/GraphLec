@@ -1,0 +1,243 @@
+/* ── 상태 텍스트 ── */
+.vf-status-label {
+  font-size: 12px; font-weight: bold; color: var(--t3);
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.vf-status-label--err { color: var(--red); }
+.vf-status-title  { font-size: 16px; font-weight: bold; color: var(--t1); text-align: center; }
+.vf-done-icon     { font-size: 36px; }
+
+/* ── 버튼 ── */
+.vf-reset-btn {
+  padding: 10px 24px;
+  background: var(--blue); color: #fff;
+  border: none; border-radius: var(--r);
+  font-size: 13px; font-weight: bold;
+  transition: opacity .15s;
+}
+.vf-reset-btn:hover { opacity: .85; }
+.vf-retry-btn {
+  padding: 10px 24px;
+  background: var(--blue);
+  color: #fff;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  font-size: 13px;
+  font-weight: bold;
+  transition: opacity .15s;
+}
+.vf-retry-btn:hover {
+  opacity: .87;
+}
+.vf-confirm-btn {
+  width: 100%; padding: 11px;
+  background: var(--blue); color: #fff;
+  border: none; border-radius: var(--r);
+  font-size: 13px; font-weight: bold;
+  transition: opacity .15s;
+}
+.vf-confirm-btn:hover { opacity: .87; }
+.vf-confirm-btn:disabled { opacity: .45; cursor: not-allowed; }
+.vf-cancel-btn {
+  padding: 10px 24px;
+  background: #fff;
+  color: var(--t1);
+  border: 1px solid var(--b1);
+  border-radius: var(--r);
+  font-size: 13px;
+  font-weight: bold;
+  white-space: nowrap;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.vf-cancel-btn:hover {
+  border-color: var(--b2);
+  color: var(--blue);
+  background: #fff;
+}
+.vf-status-actions {
+  width: min(100%, 680px);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.vf-status-actions .vf-confirm-btn {
+  width: 100%;
+  flex: none;
+}
+.vf-status-actions .vf-cancel-btn {
+  width: auto;
+  flex: none;
+  align-self: center;
+}
+.vf-error-actions { display: flex; gap: 10px; }
+
+.vf-pipe {
+  width: min(100%, 680px);
+  height: auto;
+  padding: 18px 18px 16px;
+  background: var(--panel); border: 1px solid var(--b1);
+  border-radius: var(--rl);
+  overflow: hidden;
+}
+.vf-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  margin-bottom: 10px;
+}
+.vf-progress-message {
+  min-width: 0;
+  color: var(--t1);
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+.vf-work-log {
+  height: 112px;
+  overflow-y: auto;
+  margin-bottom: 18px;
+  padding: 10px 12px;
+  background: var(--card);
+  border: 1px solid var(--b1);
+  border-radius: var(--r);
+}
+.vf-work-log-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.vf-work-log-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  font-size: 11px;
+  color: #6b7280;
+}
+.vf-work-log-line span {
+  min-width: 0;
+  color: #6b7280;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vf-work-log-line-status {
+  color: #6b7280;
+  flex-shrink: 0;
+}
+.vf-work-log-line--run {
+  animation: vf-log-pulse 1.4s ease-in-out infinite;
+}
+@keyframes vf-log-pulse {
+  0%, 100% { opacity: .72; }
+  50% { opacity: 1; }
+}
+.vf-work-log-empty {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-start;
+  color: var(--t2);
+  font-size: 12px;
+}
+.vf-flow {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  height: auto;
+  gap: clamp(4px, calc(4vw / var(--flow-count)), 14px);
+  padding: 8px 4px 4px;
+}
+.vf-flow::before {
+  content: '';
+  position: absolute;
+  top: 31px;
+  left: calc(100% / var(--flow-count) / 2);
+  right: calc(100% / var(--flow-count) / 2);
+  height: 2px;
+  background: var(--b2);
+  z-index: 0;
+}
+.vf-flow-item {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 0;
+}
+.vf-flow-node-slot {
+  height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.vf-flow-node {
+  width: var(--flow-node-size, 15px);
+  height: var(--flow-node-size, 15px);
+  border-radius: 50%;
+  border: 2px solid var(--b2);
+  background: var(--card);
+  outline: 0 solid transparent;
+  outline-offset: 0;
+  box-shadow: 0 0 0 5px var(--panel);
+  transition: border-color .18s, background .18s, box-shadow .18s, outline-color .18s, transform .18s;
+}
+.vf-flow-item--major .vf-flow-node {
+  --flow-node-size: 18px;
+  border-color: var(--b2);
+  background: var(--card);
+  outline: 3px solid var(--b2);
+}
+.vf-flow-item--run .vf-flow-node {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+  box-shadow: 0 0 0 5px var(--panel), 0 0 0 9px var(--blue-bg);
+  animation: vf-node-edge-pulse 1.4s ease-in-out infinite;
+}
+.vf-flow-item--major.vf-flow-item--run .vf-flow-node {
+  border-color: var(--blue);
+  background: var(--blue-bg);
+  outline: 3px solid var(--blue);
+}
+.vf-flow-item--done .vf-flow-node {
+  border-color: var(--green-text);
+  background: var(--green-bg);
+}
+.vf-flow-item--major.vf-flow-item--done .vf-flow-node {
+  border-color: var(--green-text);
+  background: var(--green-bg);
+  outline: 3px solid var(--green-text);
+}
+@keyframes vf-node-edge-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 5px var(--panel), 0 0 0 9px var(--blue-bg);
+  }
+  50% {
+    box-shadow: 0 0 0 5px var(--panel), 0 0 0 9px var(--blue-br);
+  }
+}
+.vf-flow-label {
+  max-width: 76px;
+  min-height: 24px;
+  font-size: 9px;
+  line-height: 1.2;
+  color: var(--t3);
+  text-align: center;
+  white-space: normal;
+}
+.vf-flow-item--run .vf-flow-label {
+  color: var(--blue);
+  font-weight: bold;
+}
+.vf-flow-item--done .vf-flow-label {
+  color: var(--t2);
+}
+.vf-pipe-error  { margin-top: 6px; font-size: 11px; color: var(--red); }
