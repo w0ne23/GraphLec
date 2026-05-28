@@ -1,0 +1,219 @@
+.vf-source-transcript-scene {
+  min-width: 0;
+  overflow: hidden;
+  gap: 0;
+  padding: 12px;
+}
+
+.vf-source-transcript-scene-head {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vf-source-transcript-scene-head .vf-bold {
+  flex-shrink: 0;
+  color: var(--t1);
+  font-weight: bold;
+}
+
+.vf-source-transcript-scene-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vf-source-transcript-scene-body {
+  min-width: 0;
+  display: flex;
+  align-items: start;
+  flex-wrap: nowrap;
+  gap: 18px;
+}
+
+.vf-source-transcript-side {
+  min-width: 0;
+  flex: 0 0 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.vf-source-transcript-thumb {
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--b1);
+  border-radius: 5px;
+  background: var(--card);
+}
+
+.vf-source-transcript-thumb[data-missing="true"] {
+  display: none;
+}
+
+.vf-source-transcript-thumb img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.vf-source-transcript-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  align-self: stretch;
+}
+
+.vf-source-transcript-empty {
+  min-height: 124px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--t3);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.vf-source-transcript-context-block {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+
+.vf-source-transcript-context-block + .vf-source-transcript-context-block {
+  margin-top: 8px;
+}
+
+.vf-source-transcript-context-id {
+  display: inline-block;
+  flex-shrink: 0;
+  color: var(--t1);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1.35;
+}
+
+.vf-source-transcript-context {
+  min-width: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0;
+  color: var(--t2);
+  font-size: 12px;
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+
+.vf-source-transcript-time {
+  color: var(--t3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.vf-source-transcript-claim {
+  cursor: pointer;
+  border-radius: 4px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  background: var(--blue-bg);
+  color: var(--t2);
+  padding: 1px 3px;
+}
+
+.vf-source-transcript-claim--muted {
+  background: var(--card);
+  color: var(--t3);
+}
+
+.vf-source-transcript-claim--claim-extraction {
+  background: var(--blue-bg);
+  color: var(--t2);
+}
+
+.vf-source-transcript-claim--final-review,
+.vf-source-transcript-claim--issue-judge,
+.vf-source-transcript-claim--type-3 {
+  background: var(--amber-bg);
+}
+
+.vf-source-transcript-claim--type-4 {
+  background: var(--red-bg);
+}
+
+.vf-source-transcript-claim--type-1 {
+  background: var(--blue-bg);
+}
+
+.vf-source-transcript-claim--type-2 {
+  background: var(--green-bg);
+}
+
+.vf-source-transcript-claim-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: min(320px, calc(100vw - 32px));
+  border: 1px solid var(--b1);
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, .14);
+  padding: 9px;
+  color: var(--t2);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: normal;
+}
+
+.vf-source-transcript-claim-tooltip > div {
+  color: var(--t1);
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.vf-source-transcript-claim-tooltip p {
+  margin: 0;
+  color: var(--t2);
+  font-size: 11px;
+}
+
+.vf-source-transcript-claim-index {
+  display: inline;
+  margin-right: 0.25rem;
+  border: 0;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 1px currentColor;
+  background: transparent;
+  color: var(--t3);
+  padding-inline: 0.2rem;
+  font-size: 10px;
+  font-weight: 900;
+  line-height: 1;
+  vertical-align: baseline;
+}
+
+
+@media (max-width: 600px) {
+  .vf-source-transcript-side {
+    flex-basis: 150px;
+  }
+}
+
+@media (max-width: 540px) {
+  .vf-source-transcript-scene-body {
+    gap: 10px;
+  }
+
+  .vf-source-transcript-side {
+    flex-basis: 96px;
+  }
+}

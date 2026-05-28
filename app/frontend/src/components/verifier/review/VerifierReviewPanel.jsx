@@ -1,0 +1,510 @@
+import { useMemo, useState } from 'react'
+import VideoPlayer from '../../watch/VideoPlayer'
+import ClaimCard from './ClaimCard'
+import SlideTypoCard from './SlideTypoCard'
+import {
+  ISSUE_FILTERS,
+  ISSUE_FILTER_DESCRIPTIONS,
+  asArray,
+  buildVerifierScenes,
+  buildVerifierSlideMap,
+  countIssueFilters,
+  feedbackItemToClaim,
+  groupTyposBySlide,
+  matchesIssueFilter,
+} from './verifierReviewUtils'
+
+const SECTION_TONE_CLASS = {
+  review: 'vf-section--review',
+  typo: 'vf-section--typo',
+}
+
+const REVIEW_TAB_CLASS = {
+  review: 'vf-review-tab--review',
+  typos: 'vf-review-tab--typos',
+}
+
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
+function ReviewSection({ title, count, tone = '', empty, children }) {
+  return (
+    <section className={cx('vf-section', SECTION_TONE_CLASS[tone])}>
+      <div className="vf-section-head">
+        <h2>{title}</h2>
+        <span>{count}</span>
+      </div>
+      {count > 0 ? children : <div className="vf-empty">{empty}</div>}
+    </section>
+  )
+}
+
+function IssueTypeBreakdown({ items, activeFilter = 'all', onFilterChange }) {
+  const counts = countIssueFilters(items)
+  return (
+    <div className="vf-type-breakdown">
+      {ISSUE_FILTERS.map(filter => {
+        const count = counts[filter.key] || 0
+        return (
+          <button
+            className={cx(
+              'vf-type-pill',
+              activeFilter === filter.key && 'vf-type-pill--active',
+              !count && 'vf-type-pill--empty',
+            )}
+            key={filter.key}
+            onClick={() => onFilterChange?.(activeFilter === filter.key ? 'all' : filter.key)}
+          >
+            <span>{filter.label}</span>
+            <strong>{count || '없음'}</strong>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function IssueFilterDescription({ filter }) {
+  const description = ISSUE_FILTER_DESCRIPTIONS[filter]
+  if (!description) return null
+  const filterItem = ISSUE_FILTERS.find(item => item.key === filter)
+  const label = filterItem ? filterItem.label : filter
+  return (
+    <div className="vf-filter-description">
+      <strong>{label}</strong>
+      <span>{description}</span>
+    </div>
+  )
+}
+
+function SortControls({ value, onChange }) {
+  return (
+    <div className="vf-sort-controls" aria-label="정렬 방식">
+      <button
+        className={cx('vf-sort-btn', value === 'utterance' && 'vf-sort-btn--active')}
+        onClick={() => onChange('utterance')}
+      >
+        발화순
+      </button>
+      <button
+        className={cx('vf-sort-btn', value === 'score' && 'vf-sort-btn--active')}
+        onClick={() => onChange('score')}
+      >
+        신뢰도순
+      </button>
+    </div>
+  )
+}
+
+function VerifierReviewTopbar({ onBack }) {
+  return (
+    <div className="vf-topbar">
+      <div className="vf-topbar-main">
+        {onBack && <button className="vf-topbar-back" onClick={onBack}>← 이전으로</button>}
+        <div className="vf-topbar-title">
+          <strong>Verifier</strong>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function reviewTabClassName(tab, activeTab) {
+  return cx('vf-review-tab', REVIEW_TAB_CLASS[tab], activeTab === tab && 'vf-review-tab--active')
+}
+
+function VerifierReviewHeader({
+  activeTab,
+  lectureTitle,
+  reviewCount,
+  typoCount,
+  onSelectTab,
+  onComplete,
+}) {
+  return (
+    <div className="vf-review-header">
+      <div className="vf-review-header-main">
+        <div className="vf-review-heading">
+          <strong>{lectureTitle}</strong>
+          <span>검토 결과</span>
+        </div>
+        <div className="vf-review-header-actions">
+          <nav className="vf-review-tabs" aria-label="검토 항목">
+            <button className={reviewTabClassName('review', activeTab)} onClick={() => onSelectTab('review')}>
+              <span>검토 필요</span>
+              <strong>{reviewCount}</strong>
+            </button>
+            <button className={reviewTabClassName('typos', activeTab)} onClick={() => onSelectTab('typos')}>
+              <span>슬라이드 오류</span>
+              <strong>{typoCount}</strong>
+            </button>
+          </nav>
+          <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
+            검토 완료
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function VerifierVideoPane({
+  lecture,
+  scenes,
+  currentScene,
+  seekToSeconds,
+  onSceneChange,
+  onClose,
+}) {
+  return (
+    <section className="vf-video-pane">
+      <button className="vf-video-close-btn" onClick={onClose} title="영상 닫기" aria-label="영상 닫기">
+        영상 닫기
+      </button>
+      <VideoPlayer
+        lecture={lecture}
+        scenes={scenes}
+        currentScene={currentScene}
+        seekTo={null}
+        seekToSeconds={seekToSeconds}
+        onSceneChange={onSceneChange}
+      />
+    </section>
+  )
+}
+
+function ReviewConfirmModal({ onCancel, onConfirm }) {
+  return (
+    <div className="vf-confirm-backdrop" role="presentation" onClick={onCancel}>
+      <div
+        className="vf-confirm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="vf-next-confirm-title"
+        onClick={e => e.stopPropagation()}
+      >
+        <h2 id="vf-next-confirm-title">검토 결과를 확정할까요?</h2>
+        <p>확정한 결과를 기준으로 업로드 파이프라인을 계속 진행합니다.</p>
+        <div className="vf-confirm-modal-actions">
+          <button className="vf-modal-secondary-btn" onClick={onCancel}>
+            계속 검토
+          </button>
+          <button className="vf-modal-primary-btn" onClick={onConfirm}>
+            확정
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default function VerifierReviewPanel({ flow }) {
+  const { actions } = flow
+  const verifier = flow.verifier
+  const lecture = flow.lecture
+  const [activeTab, setActiveTab] = useState('review')
+  const [activeIssueFilter, setActiveIssueFilter] = useState('all')
+  const [sortMode, setSortMode] = useState('utterance')
+  const [showNextConfirm, setShowNextConfirm] = useState(false)
+  const [currentScene, setCurrentScene] = useState(0)
+  const resultId = lecture?.id || verifier?.lecture_id || verifier?.id || ''
+
+  const claimById = useMemo(() => {
+    const map = new Map()
+    for (const claim of asArray(verifier?.claims)) {
+      if (claim?.claim_id) map.set(claim.claim_id, claim)
+    }
+    return map
+  }, [verifier])
+
+  const sections = useMemo(() => {
+    const feedbackItems = asArray(verifier?.feedback_items)
+    if (feedbackItems.length > 0) {
+      const normalized = feedbackItems
+        .map(item => feedbackItemToClaim(item, claimById))
+      const needsReview = normalized.filter(item => item.stage === 'professor_check' || item.stage === 'review_needed')
+      const rejected = normalized.filter(item => item.stage === 'rejected')
+      return {
+        needsReview,
+        slideTypos: asArray(verifier?.slide_errors),
+        crossRejected: rejected,
+        inconclusive: [],
+        groundingRejected: [],
+        filtered: rejected,
+        firstStageRejected: [],
+        usesFeedbackItems: true,
+      }
+    }
+
+    const needsReview = [
+      ...asArray(verifier?.final_confirmed_claims),
+      ...asArray(verifier?.needs_review_claims),
+    ]
+    const crossRejected = asArray(verifier?.verifier_rejected_claims)
+    const inconclusive = asArray(verifier?.crosscheck_inconclusive_claims)
+    const groundingRejected = asArray(verifier?.grounding_rejected_claims)
+    const firstStageRejected = asArray(verifier?.first_stage_rejected_claims)
+    return {
+      needsReview,
+      slideTypos: asArray(verifier?.slide_errors),
+      crossRejected,
+      inconclusive,
+      groundingRejected,
+      filtered: [
+        ...crossRejected,
+        ...inconclusive,
+        ...groundingRejected,
+      ],
+      firstStageRejected,
+      usesFeedbackItems: false,
+    }
+  }, [claimById, verifier])
+
+  const scenes = useMemo(
+    () => buildVerifierScenes(verifier, lecture?.scenes, resultId),
+    [lecture?.scenes, resultId, verifier]
+  )
+
+  const lectureWithScenes = useMemo(
+    () => lecture ? { ...lecture, scenes } : lecture,
+    [lecture, scenes]
+  )
+
+  const slideMap = useMemo(
+    () => buildVerifierSlideMap(verifier, scenes, resultId),
+    [resultId, scenes, verifier]
+  )
+
+  const counts = verifier?.counts || {}
+  const reviewCount = sections.needsReview.length
+  const typoCount = counts.slide_errors ?? sections.slideTypos.length
+  const filteredCount = sections.filtered.length + sections.firstStageRejected.length
+
+  function selectTab(tab) {
+    setActiveTab(tab)
+    setActiveIssueFilter('all')
+    actions.toggleClaim('')
+  }
+
+  function confirmNextStep() {
+    setShowNextConfirm(false)
+    actions.confirmReview()
+  }
+
+  function renderClaimList(items, section) {
+    return (
+      <div className="vf-claim-list">
+        {items.map((claim, idx) => {
+          const claimKey = `${section}-${claim.utterance_id || claim.source_claim_key || 'claim'}-${idx}`
+          return (
+            <ClaimCard
+              key={claimKey}
+              claim={claim}
+              expanded={flow.expandedClaimKey === claimKey}
+              onToggle={() => actions.toggleClaim(claimKey)}
+              onWatch={() => actions.watchClaim(claim.start_time)}
+            />
+          )
+        })}
+      </div>
+    )
+  }
+
+  function filterIssueClaims(items) {
+    return items.filter(item => matchesIssueFilter(item, activeIssueFilter))
+  }
+
+  function utteranceSortValue(item) {
+    const start = Number(item.start_time)
+    if (Number.isFinite(start)) return start
+    const firstId = asArray(item.utterance_ids)[0] || item.utterance_id || ''
+    const match = String(firstId).match(/U(\d+)/)
+    return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER
+  }
+
+  function sortClaims(items) {
+    return [...items].sort((a, b) => {
+      if (sortMode === 'score') {
+        const scoreDelta = (Number(b.severity_score ?? b.crosscheck_score) || 0) - (Number(a.severity_score ?? a.crosscheck_score) || 0)
+        if (scoreDelta !== 0) return scoreDelta
+      }
+      return utteranceSortValue(a) - utteranceSortValue(b)
+    })
+  }
+
+  function renderTypoGroups(items, review = false) {
+    return (
+      <div className="vf-typo-list">
+        {groupTyposBySlide(items, slideMap, resultId).map(group => (
+          <SlideTypoCard key={`${review ? 'review' : 'typo'}-${group.key}`} group={group} review={review} />
+        ))}
+      </div>
+    )
+  }
+
+  function renderFilteredSection({ title, items, section, empty, tone = '' }) {
+    if (!items.length) return null
+    const sortedItems = sortClaims(items)
+    return (
+      <ReviewSection key={section} title={title} count={items.length} tone={tone} empty={empty}>
+        <SortControls value={sortMode} onChange={setSortMode} />
+        {renderClaimList(sortedItems, section)}
+      </ReviewSection>
+    )
+  }
+
+  function renderRejectedSubmenu() {
+    if (filteredCount <= 0) return null
+
+    if (sections.usesFeedbackItems) {
+      const sortedRejected = sortClaims(sections.filtered)
+      return (
+        <details className="vf-rejected-submenu">
+          <summary>
+            <span>검토 대상에서 제외된 후보</span>
+            <strong>{filteredCount}</strong>
+          </summary>
+          <p>자동 검증에서 검토 대상으로 올리기 어렵다고 판단한 참고 항목입니다.</p>
+          <SortControls value={sortMode} onChange={setSortMode} />
+          {renderClaimList(sortedRejected, 'rejected')}
+        </details>
+      )
+    }
+
+    const filteredGroups = [
+      {
+        title: '최종 평가 기각',
+        items: sections.crossRejected,
+        section: 'verifier_rejected',
+        empty: '최종 평가에서 기각된 후보가 없습니다.',
+      },
+      {
+        title: '교차검증 불확실',
+        items: sections.inconclusive,
+        section: 'crosscheck_inconclusive',
+        empty: '교차검증에서 불확실로 남은 후보가 없습니다.',
+        tone: 'review',
+      },
+      {
+        title: '근거 기각',
+        items: sections.groundingRejected,
+        section: 'grounding_rejected',
+        empty: '외부 근거로 기각된 후보가 없습니다.',
+      },
+    ]
+
+    return (
+      <details className="vf-rejected-submenu">
+        <summary>
+          <span>검토 대상에서 제외된 후보</span>
+          <strong>{filteredCount}</strong>
+        </summary>
+        <p>자동 검증에서 검토 대상으로 올리기 어렵다고 판단한 참고 항목입니다.</p>
+        {filteredGroups
+          .filter(group => group.items.length > 0)
+          .map(group => renderFilteredSection(group))}
+        <ReviewSection
+          title="1차 판정에서 제외된 claim"
+          count={sections.firstStageRejected.length}
+          empty="1차 판정에서 제외된 claim이 없습니다."
+        >
+          {renderClaimList(sections.firstStageRejected, 'first_stage_rejected')}
+        </ReviewSection>
+      </details>
+    )
+  }
+
+  function renderActivePanel() {
+    if (activeTab === 'review') {
+      const filteredReview = sortClaims(filterIssueClaims(sections.needsReview))
+      return (
+        <ReviewSection
+          title="검토가 필요한 내용"
+          count={sections.needsReview.length}
+          tone="review"
+          empty="검토가 필요한 내용이 없습니다."
+        >
+          <div className="vf-review-control-row">
+            <IssueTypeBreakdown
+              items={sections.needsReview}
+              activeFilter={activeIssueFilter}
+              onFilterChange={setActiveIssueFilter}
+            />
+            <SortControls value={sortMode} onChange={setSortMode} />
+          </div>
+          <IssueFilterDescription filter={activeIssueFilter} />
+          {filteredReview.length > 0
+            ? renderClaimList(filteredReview, 'needs_review')
+            : <div className="vf-empty vf-empty--filter">선택한 유형의 검토 필요 이슈가 없습니다.</div>}
+        </ReviewSection>
+      )
+    }
+
+    if (activeTab === 'typos') {
+      return (
+        <ReviewSection
+          title="슬라이드 오류"
+          count={sections.slideTypos.length}
+          tone="typo"
+          empty="슬라이드 오류가 없습니다."
+        >
+          {renderTypoGroups(sections.slideTypos)}
+        </ReviewSection>
+      )
+    }
+
+    return null
+  }
+
+  if (!verifier) {
+    return (
+      <div className="vf-shell">
+        <VerifierReviewTopbar />
+        <div className="vf-error">Verifier 결과를 불러오는 중입니다.</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="vf-shell">
+      <VerifierReviewTopbar onBack={actions.backToVerifyReady} />
+
+      <div className="vf-body">
+        <section className="vf-review-panel">
+          <VerifierReviewHeader
+            activeTab={activeTab}
+            lectureTitle={lecture.title}
+            reviewCount={reviewCount}
+            typoCount={typoCount}
+            onSelectTab={selectTab}
+            onComplete={() => setShowNextConfirm(true)}
+          />
+          <div className="vf-review-content">
+            {flow.isVideoMode && (
+              <VerifierVideoPane
+                lecture={lectureWithScenes}
+                scenes={scenes}
+                currentScene={currentScene}
+                seekToSeconds={flow.seekToSeconds}
+                onSceneChange={setCurrentScene}
+                onClose={actions.exitVideo}
+              />
+            )}
+            <div className="vf-review-scroll">
+              {renderActivePanel()}
+              {activeTab === 'review' && renderRejectedSubmenu()}
+            </div>
+          </div>
+        </section>
+      </div>
+
+      {showNextConfirm && (
+        <ReviewConfirmModal
+          onCancel={() => setShowNextConfirm(false)}
+          onConfirm={confirmNextStep}
+        />
+      )}
+    </div>
+  )
+}
