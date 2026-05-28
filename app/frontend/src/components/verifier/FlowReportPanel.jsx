@@ -21,6 +21,10 @@ const ISSUE_TYPE_KEYS = [
 
 const UNKNOWN_MODEL_LABEL = '알 수 없음'
 
+function cx(...classes) {
+  return classes.filter(Boolean).join(' ')
+}
+
 function issueJudgeFailedClaimCount(model) {
   return model.issueComparisonRows.filter(item => item.agreement?.status === 'all_models_failed').length
 }
@@ -152,7 +156,7 @@ function FlowDetailRows({ rows, indent = false }) {
       {visibleRows.map(item => (
         <div
           key={item.key || item.label}
-          className={`vf-flow-detail-row ${indent ? 'vf-flow-detail-row--indent' : ''} ${item.compact ? 'vf-flow-detail-row--compact' : ''}`}
+          className={cx('vf-flow-detail-row', indent && 'vf-flow-detail-row--indent', item.compact && 'vf-flow-detail-row--compact')}
         >
           <div className="vf-flow-detail-label">
             <FlowLabel label={item.label} labelCount={item.labelCount} />
@@ -166,7 +170,7 @@ function FlowDetailRows({ rows, indent = false }) {
 }
 
 function FlowDetailDivider({ indent = false }) {
-  return <div className={`vf-flow-detail-divider ${indent ? 'vf-flow-detail-divider--indent' : ''}`} aria-hidden="true" />
+  return <div className={cx('vf-flow-detail-divider', indent && 'vf-flow-detail-divider--indent')} aria-hidden="true" />
 }
 
 function FlowBranchRows({ rows }) {
@@ -188,7 +192,7 @@ function FlowBranchRows({ rows }) {
   )
 }
 
-function FlowDetailExpansion({ children, detail, className = '' }) {
+function FlowDetailExpansion({ children, detail, className = '', openClassName = '' }) {
   const hasDetail = Boolean(detail)
   const [isOpen, setIsOpen] = useState(false)
   const rootRef = useRef(null)
@@ -225,7 +229,7 @@ function FlowDetailExpansion({ children, detail, className = '' }) {
   return (
     <div
       ref={rootRef}
-      className={`${className} ${isOpen ? `${className}--open` : ''}`}
+      className={cx(className, isOpen && openClassName)}
     >
       {children({ isOpen, toggleDetail, detailContent })}
     </div>
@@ -251,7 +255,7 @@ function StageSummaryGrid({ model }) {
         <div className="vf-flow-summary-main">
           <div className="vf-flow-summary-column">
             <div className="vf-flow-summary-block-item">
-              <FlowDetailExpansion className="vf-flow-detail-trigger" detail={claimDetail}>
+              <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={claimDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
                     <div className="vf-flow-summary-column-head-row">
@@ -289,7 +293,7 @@ function StageSummaryGrid({ model }) {
           <div className="vf-flow-summary-arrow" aria-hidden="true" />
           <div className="vf-flow-summary-column">
             <div className="vf-flow-summary-block-item">
-              <FlowDetailExpansion className="vf-flow-detail-trigger" detail={issueDetail}>
+              <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={issueDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
                     <div className="vf-flow-summary-column-head-row">
@@ -325,7 +329,7 @@ function StageSummaryGrid({ model }) {
             </div>
             <div className="vf-flow-summary-arrow" aria-hidden="true" />
             <div className="vf-flow-summary-block-item">
-              <FlowDetailExpansion className="vf-flow-detail-trigger" detail={typeDetail}>
+              <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={typeDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
                     <div className="vf-flow-summary-column-head-row">
@@ -356,7 +360,7 @@ function StageSummaryGrid({ model }) {
           <div className="vf-flow-summary-arrow" aria-hidden="true" />
           <div className="vf-flow-summary-column">
             <div className="vf-flow-summary-block-item">
-              <FlowDetailExpansion className="vf-flow-detail-trigger" detail={finalDetail}>
+              <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={finalDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
                     <div className="vf-flow-summary-column-head-row">

@@ -23,8 +23,13 @@ import {
   ModelDecisionStrip,
   ModelEvidenceAccordion,
   ModelEvidenceSection,
+  RowMeta,
   TextBlock,
 } from '../VerifyReportParts'
+
+function cx(...classes) {
+  return classes.filter(Boolean).join(' ')
+}
 
 function ClaimExtractionRow({ row, displayId }) {
   const source = getClaimFlowSource(row)
@@ -46,7 +51,7 @@ function ClaimExtractionRow({ row, displayId }) {
           <span className="vf-claim-row-toggle" aria-hidden="true" />
         </div>
       </summary>
-      <div className="vf-claim-accordion-body">
+      <div className="vf-claim-accordion-body" data-claim-accordion-body="true">
         <TextBlock label="추출된 주장">{compactText(claimText)}</TextBlock>
         <ChipList items={[source.is_approximate ? 'approx' : '', source.claim_fingerprint]} />
       </div>
@@ -84,7 +89,7 @@ export function renderClaimExtractionRows(rows) {
     <div className="vf-claim-table">
       <div className="vf-claim-table-head">장면</div>
       <div className="vf-claim-table-head">발화 문맥</div>
-      <div className="vf-claim-table-head">주장</div>
+      <div className="vf-claim-table-head vf-claim-table-head--claim">주장</div>
       {groups.map((scene, sceneIndex) => (
         <Fragment key={scene.id}>
           <div
@@ -138,7 +143,7 @@ function IssueJudgeRow({ row, displayId }) {
           <span className="vf-claim-row-toggle" aria-hidden="true" />
         </div>
       </summary>
-      <div className="vf-claim-accordion-body">
+      <div className="vf-claim-accordion-body" data-claim-accordion-body="true">
         <InlineBlock label="판단 결과">
           {row.comparison && <ModelDecisionStrip models={row.comparison.models} />}
         </InlineBlock>
@@ -181,18 +186,12 @@ function IssueClassificationRow({ row, displayId }) {
           <span className="vf-bold vf-claim-row-id">{compactText(displayId || row.claim_id)}</span>
           <div className="vf-claim-row-content">
             <span className="vf-claim-row-text">{compactText(claimText)}</span>
-            <div className="vf-claim-row-meta">
-              {metaItems.map((item, idx) => (
-                <span key={idx} className={`vf-claim-row-meta-item ${item.tone ? `vf-claim-row-meta-item--${item.tone}` : ''}`}>
-                  <span className="vf-bold">{item.value}</span>
-                </span>
-              ))}
-            </div>
+            <RowMeta items={metaItems} />
           </div>
           <span className="vf-claim-row-toggle" aria-hidden="true" />
         </div>
       </summary>
-      <div className="vf-claim-accordion-body">
+      <div className="vf-claim-accordion-body" data-claim-accordion-body="true">
         {type && (
           <>
             <span className="vf-score-section-label">유형별 점수</span>
@@ -234,7 +233,7 @@ function FinalVerificationRow({ row, displayId }) {
         <div className="vf-claim-row-summary-inner">
           <span className="vf-bold vf-claim-row-id">{compactText(displayId || row.claim_id)}</span>
           <div className="vf-claim-row-content">
-            <span className={`vf-claim-row-text ${isOkRow ? 'vf-claim-row-text--ok' : ''}`}>
+            <span className={cx('vf-claim-row-text', isOkRow && 'vf-claim-row-text--ok')}>
               {compactText(claimText)}
             </span>
             <IssueJudgeStatusBadge row={row} severity={severity} />
@@ -242,14 +241,14 @@ function FinalVerificationRow({ row, displayId }) {
           <span className="vf-claim-row-toggle" aria-hidden="true" />
         </div>
       </summary>
-      <div className="vf-claim-accordion-body">
+      <div className="vf-claim-accordion-body" data-claim-accordion-body="true">
         {severity ? (
           <>
             <FinalScoreSummary severity={severity} />
             <ModelEvidenceAccordion items={severity.model_judgments} valueFormat="unit" />
           </>
         ) : (
-          <div className="vf-report-note">최종 평가 데이터가 없습니다.</div>
+          <div className="vf-report-note" data-report-note="true">최종 평가 데이터가 없습니다.</div>
         )}
       </div>
     </details>

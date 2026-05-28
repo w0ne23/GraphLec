@@ -25,6 +25,23 @@ const SCORE_LABELS = {
 const DISTRIBUTION_COLORS = ['var(--blue-fill)', 'var(--green-fill)', 'var(--amber-fill)', 'var(--red-fill)']
 const ISSUE_TYPE_SCORE_KEYS = ['factual_error', 'temporal_error', 'confusing_explanation', 'scope_overclaim']
 
+const ROW_META_TONE_CLASS = {
+  warn: 'vf-claim-row-meta-item--warn',
+  'type-1': 'vf-claim-row-meta-item--type-1',
+  'type-2': 'vf-claim-row-meta-item--type-2',
+  'type-3': 'vf-claim-row-meta-item--type-3',
+  'type-4': 'vf-claim-row-meta-item--type-4',
+}
+
+const ISSUE_STATUS_CLASS = {
+  issue: 'vf-issue-judge-status--issue',
+  review: 'vf-issue-judge-status--review',
+}
+
+function cx(...classes) {
+  return classes.filter(Boolean).join(' ')
+}
+
 function scoreLabel(type) {
   return SCORE_LABELS[type] || typeLabel(type)
 }
@@ -53,7 +70,7 @@ export function RowMeta({ items }) {
       {visibleItems.map(item => (
         <span
           key={`${item.label || 'flag'}-${item.value}`}
-          className={`vf-claim-row-meta-item ${item.tone ? `vf-claim-row-meta-item--${item.tone}` : ''}`}
+          className={cx('vf-claim-row-meta-item', ROW_META_TONE_CLASS[item.tone])}
         >
           {item.label && <span className="vf-claim-row-meta-label">{item.label}</span>}
           <span className="vf-bold">{item.value}</span>
@@ -76,7 +93,7 @@ export function IssueJudgeStatusBadge({ row, severity }) {
   const reserveModelCount = !hasFinalDecision
   if (!hasIssue) {
     return (
-      <span className={`vf-issue-judge-status vf-issue-judge-status--empty ${reserveModelCount ? 'vf-issue-judge-status--with-count' : ''}`} aria-hidden="true">
+      <span className={cx('vf-issue-judge-status', 'vf-issue-judge-status--empty', reserveModelCount && 'vf-issue-judge-status--with-count')} aria-hidden="true">
         <span className="vf-issue-judge-status-count" />
         <span className="vf-issue-judge-status-dot" />
       </span>
@@ -86,7 +103,7 @@ export function IssueJudgeStatusBadge({ row, severity }) {
   const tone = needsReview ? 'review' : 'issue'
 
   return (
-    <span className={`vf-issue-judge-status vf-issue-judge-status--${tone} ${showModelCount ? 'vf-issue-judge-status--with-count' : ''} ${showFinalReasons ? 'vf-issue-judge-status--with-reasons' : ''}`} aria-label={label}>
+    <span className={cx('vf-issue-judge-status', ISSUE_STATUS_CLASS[tone], showModelCount && 'vf-issue-judge-status--with-count', showFinalReasons && 'vf-issue-judge-status--with-reasons')} aria-label={label}>
       {showModelCount && <span className="vf-issue-judge-status-count" aria-label={`${modelCount} models`}>{modelCount}</span>}
       {showFinalReasons && (
         <span className="vf-final-review-reasons">
@@ -150,7 +167,7 @@ export function ChipList({ items }) {
   const chips = items.map(item => compactText(item, '')).filter(Boolean)
   if (!chips.length) return null
   return (
-    <div className="vf-chip-list">
+    <div className="vf-chip-list" data-chip-list="true">
       {chips.map(item => <span key={item}>{item}</span>)}
     </div>
   )
@@ -159,7 +176,7 @@ export function ChipList({ items }) {
 export function TextBlock({ label, children }) {
   if (!compactText(children, '')) return null
   return (
-    <div className="vf-text-block">
+    <div className="vf-text-block" data-text-block="true">
       <span>{label}</span>
       <p>{children}</p>
     </div>
@@ -169,7 +186,7 @@ export function TextBlock({ label, children }) {
 export function InlineBlock({ label, children }) {
   if (!children) return null
   return (
-    <div className="vf-text-block vf-text-block--inline">
+    <div className="vf-text-block vf-text-block--inline" data-text-block="true" data-text-block-inline="true">
       <span>{label}</span>
       {children}
     </div>
@@ -179,7 +196,7 @@ export function InlineBlock({ label, children }) {
 export function ModelEvidenceSection({ items, valueFormat, title = '모델별 판단' }) {
   if (!asArray(items).length) return null
   return (
-    <div className="vf-model-evidence-section">
+    <div className="vf-model-evidence-section" data-model-evidence-section="true">
       <span>{title}</span>
       <ModelEvidence items={items} valueFormat={valueFormat} />
     </div>
@@ -310,7 +327,7 @@ export function DistributionScores({ scores, valueFormat = 'unit' }) {
   const chartStyle = { background: `conic-gradient(${segments.join(', ')})` }
 
   return (
-    <div className="vf-score-distribution">
+    <div className="vf-score-distribution" data-score-distribution="true">
       <div className="vf-score-distribution-visual">
         <div className="vf-score-donut" style={chartStyle} aria-hidden="true" />
       </div>
@@ -499,9 +516,9 @@ export function ContextPreview({ item, resultId }) {
   if (!Object.keys(slide).length && !contexts.length) return null
 
   return (
-    <div className="vf-context-panel">
+    <div className="vf-context-panel" data-image-missing-container="true">
       {imageUrl && (
-        <div className="vf-context-media">
+        <div className="vf-context-media" data-missing-target="true">
           <img src={imageUrl} alt={compactText(slide.title || '슬라이드 이미지')} onError={hideMissingImage} />
         </div>
       )}

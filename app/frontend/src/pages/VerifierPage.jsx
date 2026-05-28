@@ -103,7 +103,7 @@ function VerifyChoiceStep({ flow }) {
 function VerifyPipelineStep({ flow }) {
   const { actions } = flow
   const flowActions = (
-    <div className="vf-flow-actions">
+    <div className="vf-flow-actions" data-flow-actions="true">
       <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
       {flow.phase === PHASES.VERIFY_READY ? (
         <button className="vf-confirm-btn" onClick={actions.openReview}>

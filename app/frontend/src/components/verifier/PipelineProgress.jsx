@@ -3,6 +3,27 @@ import {
   PIPELINE_FLOW_NODES,
 } from './verifierConstants'
 
+const NODE_TYPE_CLASS = {
+  major: 'vf-flow-item--major',
+  minor: '',
+}
+
+const NODE_STATUS_CLASS = {
+  done: 'vf-flow-item--done',
+  run: 'vf-flow-item--run',
+  wait: '',
+}
+
+const WORK_LOG_STATUS_CLASS = {
+  done: '',
+  run: 'vf-work-log-line--run',
+  wait: '',
+}
+
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
 function getStageStatus(stages, key) {
   return stages.find(s => s.stage === key)?.status ?? 'wait'
 }
@@ -84,11 +105,11 @@ export default function PipelineProgress({
   function renderNode(node, nodeIndex) {
     const rawNodeStatus = getNodeStatus(node, stages, phase)
     const nodeStatus = activeNodeIndex >= 0 && nodeIndex > activeNodeIndex ? 'wait' : rawNodeStatus
-    const classes = [
+    const classes = cx(
       'vf-flow-item',
-      `vf-flow-item--${node.type}`,
-      `vf-flow-item--${nodeStatus}`,
-    ].join(' ')
+      NODE_TYPE_CLASS[node.type],
+      NODE_STATUS_CLASS[nodeStatus],
+    )
 
     return (
       <div key={node.id} className={classes}>
@@ -111,7 +132,7 @@ export default function PipelineProgress({
             {visibleStages.map(stage => {
               const status = getStageStatus(stages, stage.key)
               return (
-                <div key={stage.key} className={`vf-work-log-line vf-work-log-line--${status}`}>
+                <div key={stage.key} className={cx('vf-work-log-line', WORK_LOG_STATUS_CLASS[status])}>
                   <span>{stage.label}</span>
                   <span className="vf-work-log-line-status">{getStageText(status)}</span>
                 </div>

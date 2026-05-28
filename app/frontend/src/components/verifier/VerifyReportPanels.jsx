@@ -17,7 +17,7 @@ import {
 } from './VerifyReportParts'
 
 import { 
-  asArray, asObject, compactText, formatTime, 
+  asArray, asObject, compactText, 
   idNumber, sceneIdFromIndex,
   displayStatusForTab, firstFilled, getIssueType, 
   isFinalReviewTarget, claimKey, statusFromSeverityScore, uniqueTexts,
@@ -687,14 +687,14 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
         <div className="vf-progress-block-head">
           <span className="vf-bold">검증 진행 과정</span>
         </div>
-        <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
+        <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} compact />
       </section>
       {isProgressDocked && (
         <section className="vf-progress-dock" aria-label="검증 진행 상태">
           <div className="vf-progress-block-head">
             <span className="vf-bold">검증 진행 과정</span>
           </div>
-          <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} />
+          <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} compact />
         </section>
       )}
       {activeTab !== 'slide_review' ? (

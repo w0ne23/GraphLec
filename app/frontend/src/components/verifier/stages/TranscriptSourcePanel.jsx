@@ -12,7 +12,6 @@ import {
   issueTypeTone,
   getIssueType,
   hasIssueInComparison,
-  safeDomId,
   jumpToClaimRow,
   getClaimFlowSource,
   uniqueTexts,
@@ -21,6 +20,21 @@ import {
 import {
   MouseTooltip,
 } from '../VerifyReportParts'
+
+const TRANSCRIPT_TONE_CLASS = {
+  muted: 'vf-source-transcript-claim--muted',
+  'claim-extraction': 'vf-source-transcript-claim--claim-extraction',
+  'final-review': 'vf-source-transcript-claim--final-review',
+  'issue-judge': 'vf-source-transcript-claim--issue-judge',
+  'type-1': 'vf-source-transcript-claim--type-1',
+  'type-2': 'vf-source-transcript-claim--type-2',
+  'type-3': 'vf-source-transcript-claim--type-3',
+  'type-4': 'vf-source-transcript-claim--type-4',
+}
+
+function cx(...classes) {
+  return classes.filter(Boolean).join(' ')
+}
 
 /**
  * 전사 데이터에서 주장의 색상(Tone)을 결정합니다.
@@ -224,7 +238,7 @@ export default function TranscriptSourcePanel({ model, resultId, rows, activeTab
   const byContext = claimsByContextId(asArray(rows).length ? rows.map(row => transcriptClaimFromRow(row, activeTab)) : model.claims)
 
   return (
-    <div className="vf-record-list vf-source-transcript-list">
+    <div className="vf-record-list">
       {sceneGroups.map((group, groupIndex) => {
         const entries = asArray(group.entries)
         const first = entries[0] || {}
@@ -233,7 +247,7 @@ export default function TranscriptSourcePanel({ model, resultId, rows, activeTab
         const title = transcriptSceneTitle(group, groupIndex)
         const meta = transcriptSceneMeta(group, claimCount)
         return (
-          <article key={group.key} className="vf-record vf-source-transcript-scene">
+          <article key={group.key} className="vf-record vf-source-transcript-scene" data-image-missing-container="true">
             <div className="vf-source-transcript-scene-head">
               <span className="vf-bold">{title}</span>
               <span>| {meta}</span>
@@ -241,7 +255,7 @@ export default function TranscriptSourcePanel({ model, resultId, rows, activeTab
             <div className="vf-source-transcript-scene-body">
               {imageUrl && (
                 <aside className="vf-source-transcript-side">
-                  <div className="vf-source-transcript-thumb">
+                  <div className="vf-source-transcript-thumb" data-missing-target="true">
                     <img src={imageUrl} alt={compactText(group.slide_title || first.slide_title || title || 'scene thumbnail')} onError={hideMissingImage} />
                   </div>
                 </aside>
@@ -270,7 +284,7 @@ export default function TranscriptSourcePanel({ model, resultId, rows, activeTab
                             return (
                               <MouseTooltip
                                 key={`${claimKey(segment.claim)}-${segmentIndex}`}
-                                className={`vf-source-transcript-claim ${segment.claim?._transcriptTone ? `vf-source-transcript-claim--${safeDomId(segment.claim._transcriptTone)}` : ''}`}
+                                className={cx('vf-source-transcript-claim', TRANSCRIPT_TONE_CLASS[segment.claim?._transcriptTone])}
                                 tooltip={claimTooltipContent}
                                 tooltipClassName="vf-source-transcript-claim-tooltip"
                                 tabIndex={0}

@@ -4,9 +4,18 @@ import {
 } from './verifierUtils'
 import { VERIFY_STEPS } from './verifierConstants'
 
-export default function VerifyStageTimeline({ statuses = [], activeTab, onSelectTab }) {
+const STEP_STATUS_CLASS = {
+  done: 'vf-report-step--done',
+  run: 'vf-report-step--run',
+}
+
+function cx(...classes) {
+  return classes.filter(Boolean).join(' ')
+}
+
+export default function VerifyStageTimeline({ statuses = [], activeTab, onSelectTab, compact = false }) {
   return (
-    <div className="vf-report-rail vf-report-rail--tabs">
+    <div className={cx('vf-report-rail', compact && 'vf-report-rail--compact', 'vf-report-rail--tabs')}>
       {VERIFY_STEPS.map((step, index) => {
         const status = statuses[index] || 'wait'
         const isActive = activeTab === step.key
@@ -16,16 +25,16 @@ export default function VerifyStageTimeline({ statuses = [], activeTab, onSelect
             {index === 4 && <span className="vf-report-step-divider" aria-hidden="true" />}
             <button
               type="button"
-              className={`vf-report-step vf-report-step--${status} ${isActive ? 'vf-report-step--active' : ''}`}
+              className={cx('vf-report-step', STEP_STATUS_CLASS[status], isActive && 'vf-report-step--active')}
               onClick={() => onSelectTab(step.key)}
               aria-pressed={isActive}
             >
-              <div>
+              <div className="vf-report-step-body">
                 <span className="vf-bold">{step.label}</span>
                 <span className="vf-report-step-status">{statusText(status)}</span>
               </div>
             </button>
-            {index < 3 && <span className={`vf-report-step-link vf-report-step-link--${linkStatus}`} aria-hidden="true" />}
+            {index < 3 && <span className={cx('vf-report-step-link', linkStatus === 'done' && 'vf-report-step-link--done')} aria-hidden="true" />}
           </Fragment>
         )
       })}

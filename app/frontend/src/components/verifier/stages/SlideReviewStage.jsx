@@ -53,9 +53,13 @@ export default function SlideReviewStage({ model, status, resultId }) {
           {rows.map((item, index) => {
             const imageUrl = resultFileUrl(item.slide_image_path, resultId)
             return (
-              <article key={item.slide_error_id || index} className="vf-record vf-slide-report">
+              <article
+                key={item.slide_error_id || index}
+                className="vf-record vf-slide-report"
+                data-image-missing-container="true"
+              >
                 {imageUrl && (
-                  <div className="vf-slide-thumb">
+                  <div className="vf-slide-thumb" data-missing-target="true">
                     <img src={imageUrl} alt={compactText(item.slide_title || '슬라이드 이미지')} onError={hideMissingImage} />
                   </div>
                 )}

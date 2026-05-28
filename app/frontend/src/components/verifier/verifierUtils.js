@@ -237,8 +237,8 @@ export function resultFileUrl(value, resultId) {
 }
 
 export function hideMissingImage(event) {
-  event.currentTarget.closest('.vf-context-media, .vf-slide-thumb, .vf-source-transcript-thumb')?.setAttribute('data-missing', 'true')
-  event.currentTarget.closest('.vf-context-panel, .vf-slide-report, .vf-source-transcript-scene')?.setAttribute('data-image-missing', 'true')
+  event.currentTarget.closest('[data-missing-target="true"], .vf-context-media, .vf-slide-thumb, .vf-source-transcript-thumb')?.setAttribute('data-missing', 'true')
+  event.currentTarget.closest('[data-image-missing-container="true"], .vf-context-panel, .vf-slide-report, .vf-source-transcript-scene')?.setAttribute('data-image-missing', 'true')
 }
 
 const FINAL_REVIEW_SCORE_THRESHOLD = 0.2
