@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import PipelineProgress from './PipelineProgress'
 import { toResultFileUrl } from './review/verifierReviewUtils'
-import { PHASES, UPLOAD_PIPELINE_FLOW_NODES } from './verifierConstants'
+import { PHASES, VERIFIER_PREPROCESS_FLOW_NODES } from './verifierConstants'
 
 const DEV_FILE_BASE = typeof window !== 'undefined' && window.location?.hostname
   ? `http://${window.location.hostname}:8000`
@@ -31,11 +31,6 @@ const PREPROCESS_STAGE_KEYS = [
   'preprocess_classify_scene',
   'preprocess_fusion',
 ]
-
-const PREPROCESS_PIPELINE_FLOW_NODES = UPLOAD_PIPELINE_FLOW_NODES.filter(node => (
-  node.id === 'upload' ||
-  (node.stages || []).some(stage => PREPROCESS_STAGE_KEYS.includes(stage.key))
-))
 
 const ISSUE_TYPE_LABELS = {
   factual_error: 'factual_error',
@@ -2540,10 +2535,10 @@ function SlidingVerifierPipelinePanel({ flow, statuses = [], activeTab, onSelect
         <section className="vf-verifier-slide" aria-label="전처리 파이프라인">
           <PipelineProgress
             stages={flow.pipelineStages}
-            phase={PHASES.PIPELINE2}
+            phase={preprocessDone ? PHASES.PIPELINE2 : PHASES.VERIFY_CHOICE}
             errorMessage={flow.errorMessage}
             statusMessage={flow.currentStage || '전처리 파이프라인을 진행 중입니다.'}
-            flowNodes={PREPROCESS_PIPELINE_FLOW_NODES}
+            flowNodes={VERIFIER_PREPROCESS_FLOW_NODES}
             showDetails={false}
             compact
           />

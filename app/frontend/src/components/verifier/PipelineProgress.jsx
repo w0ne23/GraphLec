@@ -16,7 +16,7 @@ function summarizeStatuses(statuses) {
 function getMajorStatus(nodeId, phase, stages) {
   if (nodeId === 'upload') return phase === PHASES.UPLOAD ? 'run' : 'done'
   if (nodeId === 'verify_start') {
-    return phase === PHASES.PIPELINE1 || phase === PHASES.VERIFY_READY || phase === PHASES.REVIEWED || phase === PHASES.UPLOAD_RESUME
+    return phase === PHASES.PIPELINE1 || phase === PHASES.VERIFY_READY || phase === PHASES.REVIEWED || phase === PHASES.UPLOAD_RESUME || phase === PHASES.PIPELINE2 || phase === PHASES.DONE
       ? 'done'
       : 'wait'
   }

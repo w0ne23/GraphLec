@@ -1,6 +1,6 @@
 import { useParams } from 'react-router-dom'
 import PipelineProgress from '../../components/verifier/PipelineProgress'
-import { PHASES, UPLOAD_PIPELINE_FLOW_NODES } from '../../components/verifier/verifierConstants'
+import { FINALIZE_PIPELINE_FLOW_NODES, PHASES } from '../../components/verifier/verifierConstants'
 import { useVerifierRouteFlow } from '../../hooks/useVerifierRouteFlow'
 
 import '../../styles/verifier.css'
@@ -20,10 +20,10 @@ export default function VerifierFinalizePage() {
             phase={flow.phase === PHASES.DONE ? PHASES.DONE : PHASES.PIPELINE2}
             errorMessage={flow.errorMessage}
             statusMessage={flow.currentStage || '나머지 파이프라인을 진행 중입니다.'}
-            flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
+            flowNodes={FINALIZE_PIPELINE_FLOW_NODES}
           />
           <div className="vf-status-actions">
-            <button className="vf-cancel-btn" onClick={flow.actions.reset}>처음으로</button>
+            <button className="vf-cancel-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
           </div>
         </div>
       </div>
