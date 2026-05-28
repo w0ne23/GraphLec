@@ -10,14 +10,13 @@ export default function VerifyStageTimeline({ statuses = [], activeTab, onSelect
       {VERIFY_STEPS.map((step, index) => {
         const status = statuses[index] || 'wait'
         const isActive = activeTab === step.key
-        const isContentStep = index < 4
         const linkStatus = status === 'done' ? 'done' : 'idle'
         return (
           <Fragment key={step.key}>
             {index === 4 && <span className="vf-report-step-divider" aria-hidden="true" />}
             <button
               type="button"
-              className={`vf-report-step vf-report-step--${status} ${isActive ? 'vf-report-step--active' : ''} ${isContentStep ? 'vf-report-step--content' : ''}`}
+              className={`vf-report-step vf-report-step--${status} ${isActive ? 'vf-report-step--active' : ''}`}
               onClick={() => onSelectTab(step.key)}
               aria-pressed={isActive}
             >
