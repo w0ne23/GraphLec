@@ -9,6 +9,7 @@ import {
 import {
   PHASES,
   UPLOAD_STAGE_KEYS,
+  VERIFY_PROGRESS_STAGE_KEYS,
   VERIFY_STAGE_KEYS,
   normalizePipelineStages,
 } from '../components/verifier/verifierConstants'
@@ -31,7 +32,7 @@ function verifierArtifactsFromResult(verifier) {
 
 function getKnownStageKeys(phase) {
   if (phase === PHASES.PIPELINE2 || phase === PHASES.DONE) return UPLOAD_STAGE_KEYS
-  return VERIFY_STAGE_KEYS
+  return [...VERIFY_STAGE_KEYS, ...VERIFY_PROGRESS_STAGE_KEYS]
 }
 
 function mergeStageStatus(current, incoming, phase) {
@@ -61,6 +62,37 @@ function phaseFromStatus(status, jobType, routeKind) {
   return PHASES.PIPELINE1
 }
 
+const VERIFIER_RUN_VISUAL_STAGE_KEYS = [
+  'verifier_claim_extraction',
+  'verifier_issue_judge',
+  'verifier_issue_classification',
+  'verifier_final_verification',
+]
+
+function stageStatus(stages, key) {
+  return stages.find(stage => stage.stage === key)?.status ?? 'wait'
+}
+
+function expandVerifierRunStages(stages, phase, visualIndex) {
+  const rows = [...stages]
+  const verifierRunStatus = stageStatus(rows, 'verifier_run')
+  const verifierReady = phase === PHASES.VERIFY_READY || phase === PHASES.REVIEWED || phase === PHASES.UPLOAD_RESUME
+
+  VERIFIER_RUN_VISUAL_STAGE_KEYS.forEach((stage, index) => {
+    let status = 'wait'
+    if (verifierReady || verifierRunStatus === 'done') {
+      status = 'done'
+    } else if (verifierRunStatus === 'run') {
+      const activeIndex = Math.max(0, Math.min(VERIFIER_RUN_VISUAL_STAGE_KEYS.length - 1, visualIndex))
+      if (index < activeIndex) status = 'done'
+      if (index === activeIndex) status = 'run'
+    }
+    rows.push({ stage, status })
+  })
+
+  return normalizePipelineStages(rows)
+}
+
 export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
   const navigate = useNavigate()
   const eventSourceRef = useRef(null)
@@ -76,8 +108,13 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
+  const [verifierRunVisualIndex, setVerifierRunVisualIndex] = useState(0)
 
   const verifierArtifacts = useMemo(() => verifierArtifactsFromResult(verifier), [verifier])
+  const visiblePipelineStages = useMemo(
+    () => expandVerifierRunStages(pipelineStages, phase, verifierRunVisualIndex),
+    [phase, pipelineStages, verifierRunVisualIndex]
+  )
 
   function closeEventSource() {
     if (eventSourceRef.current) {
@@ -178,6 +215,18 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     return closeEventSource
   }, [lectureId, routeKind])
 
+  useEffect(() => {
+    if (phase !== PHASES.PIPELINE1 || stageStatus(pipelineStages, 'verifier_run') !== 'run') {
+      setVerifierRunVisualIndex(0)
+      return undefined
+    }
+
+    const timer = window.setTimeout(() => {
+      setVerifierRunVisualIndex(index => Math.min(VERIFIER_RUN_VISUAL_STAGE_KEYS.length - 1, index + 1))
+    }, 2000)
+    return () => window.clearTimeout(timer)
+  }, [phase, pipelineStages, verifierRunVisualIndex])
+
   async function continueUpload() {
     if (!lectureId || isBusy) return
     setIsBusy(true)
@@ -214,7 +263,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     lecture,
     verifier,
     verifierArtifacts,
-    pipelineStages,
+    pipelineStages: visiblePipelineStages,
     currentStage,
     errorMessage,
     expandedClaimKey,

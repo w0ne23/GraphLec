@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import PipelineProgress from '../../components/verifier/PipelineProgress'
-import VerifyReportPanels from '../../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import {
   PHASES,
   FINALIZE_PIPELINE_FLOW_NODES,
   UPLOAD_PIPELINE_FLOW_NODES,
   UPLOAD_STAGE_KEYS,
+  VERIFY_PROGRESS_PIPELINE_FLOW_NODES,
   normalizePipelineStages,
 } from '../../components/verifier/verifierConstants'
 
@@ -24,7 +24,12 @@ const PREPROCESS_STAGE_KEYS = [
 
 const VERIFY_RUNTIME_STAGE_KEYS = [
   'verifier_build_analyzer_input',
-  'verifier_run',
+]
+const VERIFY_VISUAL_STAGE_KEYS = [
+  'verifier_claim_extraction',
+  'verifier_issue_judge',
+  'verifier_issue_classification',
+  'verifier_final_verification',
 ]
 const FINALIZE_STAGE_KEYS = UPLOAD_STAGE_KEYS.filter(stage => !PREPROCESS_STAGE_KEYS.includes(stage))
 
@@ -137,8 +142,11 @@ function createVerifyPreviewStages(cursor) {
   const rows = stageStatusRows(PREPROCESS_STAGE_KEYS, preprocessCursor)
 
   if (cursor >= PREPROCESS_STAGE_KEYS.length) {
-    const runtimeCursor = Math.min(cursor - PREPROCESS_STAGE_KEYS.length, VERIFY_RUNTIME_STAGE_KEYS.length)
-    rows.push(...stageStatusRows(VERIFY_RUNTIME_STAGE_KEYS, runtimeCursor))
+    const verifyCursor = cursor - PREPROCESS_STAGE_KEYS.length
+    rows.push(...stageStatusRows(VERIFY_RUNTIME_STAGE_KEYS, Math.min(verifyCursor, VERIFY_RUNTIME_STAGE_KEYS.length)))
+    if (verifyCursor >= VERIFY_RUNTIME_STAGE_KEYS.length) {
+      rows.push(...stageStatusRows(VERIFY_VISUAL_STAGE_KEYS, verifyCursor - VERIFY_RUNTIME_STAGE_KEYS.length))
+    }
   }
 
   return normalizePipelineStages(rows)
@@ -186,6 +194,7 @@ function useDevVerifierPreviewFlow() {
         return normalizePipelineStages([
           ...PREPROCESS_STAGE_KEYS.map(stage => ({ stage, status: 'done' })),
           ...VERIFY_RUNTIME_STAGE_KEYS.map(stage => ({ stage, status: 'done' })),
+          ...VERIFY_VISUAL_STAGE_KEYS.map(stage => ({ stage, status: 'done' })),
         ])
       }
       return createVerifyPreviewStages(Math.max(0, cursor))
@@ -300,21 +309,26 @@ function PreviewChoiceStep({ flow }) {
 }
 
 function PreviewVerifyPipelineStep({ flow }) {
-  const headerActions = (
-    <div className="vf-flow-actions">
-      <button className="vf-cancel-btn" onClick={flow.actions.reset}>Preview 종료</button>
-      {flow.phase === PHASES.VERIFY_READY ? (
-        <button className="vf-confirm-btn" onClick={flow.actions.openReview}>결과 보기</button>
-      ) : (
-        <button className="vf-confirm-btn" disabled>검증 진행 중</button>
-      )}
-    </div>
-  )
+  const canOpenResult = flow.phase === PHASES.VERIFY_READY
 
   return (
-    <div className="vf-flow-screen">
-      <div className="vf-flow-screen-inner">
-        <VerifyReportPanels flow={flow} headerActions={headerActions} />
+    <div className="vf-status-wrap">
+      <div className="vf-status-inner vf-status-inner--wide">
+        <div className="vf-status-title">{flow.lecture.title}</div>
+        <div className="vf-status-label">검증 파이프라인 Preview</div>
+        <PipelineProgress
+          stages={flow.pipelineStages}
+          phase={canOpenResult ? PHASES.VERIFY_READY : PHASES.PIPELINE1}
+          errorMessage={flow.errorMessage}
+          statusMessage="2초마다 다음 단계로 넘어갑니다."
+          flowNodes={VERIFY_PROGRESS_PIPELINE_FLOW_NODES}
+        />
+        <div className="vf-status-actions vf-status-actions--inline">
+          <button className="vf-cancel-btn" onClick={flow.actions.reset}>Preview 종료</button>
+          <button className="vf-confirm-btn" disabled={!canOpenResult} onClick={flow.actions.openReview}>
+            {canOpenResult ? '결과 보기' : '검증 진행 중'}
+          </button>
+        </div>
       </div>
     </div>
   )

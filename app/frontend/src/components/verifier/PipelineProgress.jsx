@@ -31,6 +31,9 @@ function getMajorStatus(nodeId, phase, stages) {
 }
 
 function getNodeStatus(node, stages, phase) {
+  if (node.type === 'major' && node.stages?.length) {
+    return summarizeStatuses(node.stages.map(stage => getStageStatus(stages, stage.key)))
+  }
   if (node.type === 'major') return getMajorStatus(node.id, phase, stages)
   return summarizeStatuses((node.stages ?? []).map(stage => getStageStatus(stages, stage.key)))
 }
