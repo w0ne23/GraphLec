@@ -23,6 +23,86 @@
   white-space: nowrap;
 }
 
+.vf-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.vf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: var(--card);
+  font-size: 11px;
+  color: var(--t2);
+}
+
+.vf-chip--scope_error,
+.vf-chip--scope_overclaim {
+  border-color: rgba(217, 119, 6, .32);
+  background: var(--amber-bg);
+  color: var(--amber);
+  font-weight: 800;
+}
+
+.vf-chip--simple_factual_error,
+.vf-chip--factual_error {
+  border-color: rgba(220, 38, 38, .24);
+  background: var(--red-bg);
+  color: var(--red);
+  font-weight: 800;
+}
+
+.vf-chip--outdated,
+.vf-chip--temporal_error {
+  border-color: rgba(124, 58, 237, .28);
+  background: rgba(124, 58, 237, .08);
+  color: #7c3aed;
+  font-weight: 800;
+}
+
+.vf-chip--confusing_explanation {
+  border-color: rgba(37, 99, 235, .24);
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-weight: 800;
+}
+
+.vf-chip--score {
+  border-color: var(--b1);
+  background: var(--panel);
+  color: var(--t1);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.vf-chip--score-agree {
+  border-color: rgba(220, 38, 38, .24);
+  background: var(--red-bg);
+  color: var(--red);
+}
+
+.vf-chip--score-professor_check,
+.vf-chip--score-inconclusive,
+.vf-chip--score-review_needed {
+  border-color: rgba(217, 119, 6, .32);
+  background: var(--amber-bg);
+  color: var(--amber);
+}
+
+.vf-chip--score-rejected,
+.vf-chip--score-disagree {
+  border-color: rgba(100, 116, 139, .22);
+  background: var(--card);
+  color: var(--t3);
+}
+
 .vf-text-block {
   min-width: 0;
   display: flex;
@@ -59,6 +139,131 @@
 .vf-text-block--inline > :not(span:first-child) {
   min-width: 0;
   flex: 1 1 auto;
+}
+
+.vf-issue-judge-status {
+  width: 10px;
+  min-width: 10px;
+  flex: 0 0 10px;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.vf-claim-row-visual-placeholder {
+  width: 10px;
+  min-width: 10px;
+  flex: 0 0 10px;
+}
+
+.vf-issue-judge-status--with-count {
+  width: 34px;
+  min-width: 34px;
+  flex-basis: 34px;
+  justify-content: flex-end;
+}
+
+.vf-issue-judge-status--with-reasons {
+  width: auto;
+  min-width: 0;
+  flex: 0 1 auto;
+  justify-content: flex-end;
+}
+
+.vf-issue-judge-status-count {
+  width: 1.35ch;
+  flex: 0 0 1.35ch;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1;
+  text-align: center;
+}
+
+.vf-final-review-reasons {
+  min-width: 0;
+  max-width: min(42vw, 28rem);
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  overflow: hidden;
+}
+
+.vf-final-review-reason-chip {
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 4px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  padding: 2px 5px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vf-issue-judge-status-dot {
+  width: 10px;
+  min-width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: inset 0 0 0 2px currentColor;
+  background: transparent;
+  color: currentColor;
+  padding: 0;
+  font-size: 0;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.vf-issue-judge-status--issue {
+  color: var(--red);
+}
+
+.vf-issue-judge-status--issue .vf-issue-judge-status-dot,
+.vf-issue-judge-status--review .vf-issue-judge-status-dot {
+  box-shadow: none;
+}
+
+.vf-issue-judge-status--issue .vf-issue-judge-status-dot {
+  background: var(--red);
+  color: #fff;
+}
+
+.vf-claim-row--issue-judge .vf-issue-judge-status--issue {
+  color: var(--amber);
+}
+
+.vf-claim-row--issue-judge .vf-issue-judge-status--issue .vf-issue-judge-status-dot {
+  background: var(--amber-fill);
+  color: #fff;
+}
+
+.vf-issue-judge-status--review {
+  color: var(--amber);
+}
+
+.vf-issue-judge-status--review .vf-issue-judge-status-dot {
+  background: var(--amber-fill);
+  color: #fff;
+}
+
+.vf-issue-judge-status--empty .vf-issue-judge-status-dot {
+  visibility: hidden;
+}
+
+.vf-issue-judge-status--empty .vf-issue-judge-status-count {
+  visibility: hidden;
 }
 
 .vf-text-block--inline .vf-model-decision-strip {
@@ -541,11 +746,39 @@
 
 .vf-context-panel {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
+  align-items: start;
   gap: 9px;
   border-top: 1px solid var(--b1);
   padding-top: 9px;
+}
+
+.vf-context-media {
+  min-width: 0;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid var(--b1);
+  border-radius: 6px;
+  background: var(--card);
+}
+
+.vf-context-media[data-missing="true"] {
+  display: none;
+}
+
+.vf-context-media img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.vf-context-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
 }
 
 .vf-model-decision-strip {
@@ -585,12 +818,6 @@
   color: var(--t3);
 }
 
-.vf-context-panel {
-  display: grid;
-  grid-template-columns: minmax(180px, 260px) minmax(0, 1fr);
-  align-items: start;
-}
-
 .vf-claim-row > .vf-claim-accordion-body > .vf-context-panel {
   border-top: 0;
   padding-top: 0;
@@ -598,4 +825,147 @@
 
 .vf-context-panel[data-image-missing="true"] {
   grid-template-columns: 1fr;
+}
+
+.vf-header-chip-list {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 5px;
+}
+
+.vf-header-chip {
+  position: relative;
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  border: 1px solid var(--b1);
+  border-radius: 5px;
+  background: var(--card);
+  color: var(--t2);
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.vf-header-chip--tooltip {
+  cursor: default;
+}
+
+.vf-mouse-tooltip-trigger {
+  position: relative;
+  overflow: visible;
+}
+
+.vf-mouse-tooltip {
+  position: fixed;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.vf-header-chip-tooltip {
+  display: block;
+  width: max-content;
+  min-width: 0;
+  max-width: none;
+  border: 1px solid var(--b1);
+  border-radius: 7px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(15, 23, 42, .14);
+  padding: 9px;
+  white-space: nowrap;
+}
+
+.vf-header-chip-tooltip .vf-bold {
+  display: block;
+  margin: 0 0 6px;
+  color: var(--t1);
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.vf-header-chip-tooltip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: max-content;
+}
+
+.vf-header-chip-tooltip-list > span {
+  min-width: 0;
+  overflow: visible;
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.vf-header-chip-tooltip-value {
+  display: block;
+  min-width: 0;
+  overflow: visible;
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+@media (max-width: 600px) {
+  .vf-model-decision-strip {
+    justify-content: flex-start;
+  }
+
+  .vf-context-panel,
+  .vf-diff-row {
+    grid-template-columns: 1fr;
+  }
+
+  .vf-context-media {
+    max-width: 420px;
+  }
+
+  .vf-text-block {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .vf-final-score-summary {
+    flex-wrap: wrap;
+  }
+
+  .vf-final-score-summary > .vf-final-score-formula {
+    flex-basis: 100%;
+  }
+
+  .vf-final-score-summary > .vf-final-score-signal {
+    flex: 1 1 100%;
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: space-between;
+  }
+
+  .vf-final-score-summary > .vf-final-score-signal > span:first-child {
+    align-self: auto;
+  }
+
+  .vf-final-score-summary > .vf-final-score-signal > div {
+    display: contents;
+  }
+}
+
+@media (max-width: 540px) {
+  .vf-report-metrics,
+  .vf-model-evidence {
+    grid-template-columns: 1fr;
+  }
+
+  .vf-chip-list span {
+    max-width: 100%;
+  }
 }

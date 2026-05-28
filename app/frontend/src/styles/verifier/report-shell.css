@@ -194,3 +194,27 @@ button.vf-report-step:hover {
 .vf-report-step--done .vf-bold {
   color: var(--t1);
 }
+
+@media (max-width: 600px) {
+  .vf-report-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .vf-report-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .vf-report-step {
+    min-height: 52px;
+  }
+
+  .vf-progress-dock {
+    bottom: 68px;
+    width: calc(100vw - 32px);
+  }
+
+  .vf-report {
+    padding-bottom: 184px;
+  }
+}
