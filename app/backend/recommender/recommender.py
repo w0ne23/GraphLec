@@ -302,6 +302,68 @@ class CommunityReportDocument:
     level:       int
 
 
+def _database_url_sync() -> str:
+    url = os.getenv("DATABASE_URL", "")
+    return url.replace("+asyncpg", "") if url else ""
+
+
+def _video_id_from_db_row(row: dict) -> str:
+    metadata_uri = str(row.get("metadata_uri") or "").strip()
+    if metadata_uri:
+        name = Path(metadata_uri).name
+        if name.endswith("_metadata.json"):
+            return name[:-len("_metadata.json")]
+        if name:
+            return Path(name).stem
+
+    video_path = str(row.get("video_path") or "").strip()
+    if video_path:
+        return Path(video_path).stem
+
+    return str(row.get("lecture_id") or "")
+
+
+def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    sql = """
+        SELECT
+            lm.lecture_id,
+            lm.title,
+            lm.instructor_id,
+            lm.domain,
+            lm.graph_domain,
+            lm.graph_subdomain,
+            lm.difficulty,
+            lm.summary,
+            lm.learning_objectives,
+            lm.keywords,
+            lm.core_concepts,
+            lm.introduced_concepts,
+            lm.visual_concept_terms,
+            lm.pedagogy,
+            lm.duration_sec,
+            lm.metadata_version,
+            lm.metadata_uri,
+            lm.created_at,
+            lm.updated_at,
+            l.video_path,
+            l.created_at AS lecture_created_at
+        FROM lecture_metadata lm
+        JOIN lectures l ON l.id = lm.lecture_id
+        ORDER BY lm.updated_at DESC NULLS LAST, lm.created_at DESC NULLS LAST
+    """
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # ============================================================================
 #  메타데이터 컬렉션
 # ============================================================================
@@ -309,9 +371,10 @@ class CommunityReportDocument:
 class MetadataCollection:
     def __init__(self, metadata_dir: str):
         self.lectures: dict[str, LectureMetadata] = {}
-        self._load(Path(metadata_dir))
+        self._load_files(Path(metadata_dir))
+        self._load_db()
 
-    def _load(self, directory: Path):
+    def _load_files(self, directory: Path):
         if not directory.exists():
             print(f"[Recommender] 메타데이터 디렉토리 없음, 빈 컬렉션으로 시작: {directory}")
             return
@@ -324,28 +387,116 @@ class MetadataCollection:
                 raw = json.load(f)
             items = raw if isinstance(raw, list) else [raw]
             for item in items:
-                lec = LectureMetadata(
-                    video_id          = item["video_id"],
-                    title             = item["title"],
-                    instructor_id     = item.get("instructor_id", ""),
-                    uploaded_at       = item.get("uploaded_at"),
-                    domain            = item.get("domain", "unknown"),
-                    difficulty        = item.get("difficulty", "unknown"),
-                    duration_sec      = item.get("duration_sec", 0.0),
-                    summary           = item.get("summary", ""),
-                    keywords          = item.get("keywords", []),
-                    concept_roles     = item.get("concept_roles", []),
-                    concept_relations = item.get("concept_relations", []),
-                    communities       = item.get("communities", []),
-                    pedagogy          = item.get("pedagogy", {}),
-                    diagnostics       = item.get("diagnostics", {}),
-                    visual_concept_terms = (
-                        item.get("visual_concept_terms")
-                        or item.get("pedagogy", {}).get("visual_concept_terms", [])
-                    ),
-                )
+                lec = self._from_metadata_item(item)
                 self.lectures[lec.video_id] = lec
-        print(f"[로드] {len(self.lectures)}개 강의 메타데이터 로드 완료\n")
+        print(f"[파일 로드] {len(self.lectures)}개 강의 메타데이터 로드 완료")
+
+    def _load_db(self):
+        database_url = _database_url_sync()
+        if not database_url:
+            print("[DB 로드] DATABASE_URL 없음 — 파일 metadata만 사용\n")
+            return
+
+        try:
+            rows = _fetch_lecture_metadata_rows(database_url)
+        except Exception as exc:
+            print(f"[DB 로드] lecture_metadata 로드 실패 — 파일 metadata만 사용: {exc}\n")
+            return
+
+        added = 0
+        merged = 0
+        for row in rows:
+            lec = self._from_db_row(row)
+            existing = self.lectures.get(lec.video_id)
+            if existing:
+                self.lectures[lec.video_id] = self._merge_db_with_existing(existing, lec)
+                merged += 1
+            else:
+                self.lectures[lec.video_id] = lec
+                added += 1
+        print(
+            f"[DB 로드] lecture_metadata {len(rows)}개 로드 "
+            f"(추가 {added}, 병합 {merged}) — 총 {len(self.lectures)}개\n"
+        )
+
+    @staticmethod
+    def _from_metadata_item(item: dict) -> LectureMetadata:
+        return LectureMetadata(
+            video_id          = item["video_id"],
+            title             = item["title"],
+            instructor_id     = item.get("instructor_id", ""),
+            uploaded_at       = item.get("uploaded_at"),
+            domain            = item.get("domain", "unknown"),
+            difficulty        = item.get("difficulty", "unknown"),
+            duration_sec      = item.get("duration_sec", 0.0),
+            summary           = item.get("summary", ""),
+            keywords          = item.get("keywords", []),
+            concept_roles     = item.get("concept_roles", []),
+            concept_relations = item.get("concept_relations", []),
+            communities       = item.get("communities", []),
+            pedagogy          = item.get("pedagogy", {}),
+            diagnostics       = item.get("diagnostics", {}),
+            visual_concept_terms = (
+                item.get("visual_concept_terms")
+                or item.get("pedagogy", {}).get("visual_concept_terms", [])
+            ),
+        )
+
+    @staticmethod
+    def _from_db_row(row: dict) -> LectureMetadata:
+        concept_roles = {
+            "core": row.get("core_concepts") or [],
+            "introduced": row.get("introduced_concepts") or [],
+        }
+        uploaded_at = row.get("lecture_created_at")
+        if hasattr(uploaded_at, "isoformat"):
+            uploaded_at = uploaded_at.isoformat()
+        return LectureMetadata(
+            video_id          = _video_id_from_db_row(row),
+            title             = row.get("title") or "Untitled lecture",
+            instructor_id     = row.get("instructor_id") or "",
+            uploaded_at       = uploaded_at,
+            domain            = row.get("domain") or "unknown",
+            difficulty        = row.get("difficulty") or "unknown",
+            duration_sec      = row.get("duration_sec") or 0.0,
+            summary           = row.get("summary") or "",
+            keywords          = row.get("keywords") or [],
+            concept_roles     = concept_roles,
+            concept_relations = [],
+            communities       = [],
+            pedagogy          = row.get("pedagogy") or {},
+            diagnostics       = {},
+            visual_concept_terms = row.get("visual_concept_terms") or [],
+        )
+
+    @staticmethod
+    def _merge_db_with_existing(existing: LectureMetadata, db_lecture: LectureMetadata) -> LectureMetadata:
+        db_concept_roles = db_lecture.concept_roles
+        concept_roles = (
+            db_concept_roles
+            if (
+                isinstance(db_concept_roles, dict)
+                and (db_concept_roles.get("core") or db_concept_roles.get("introduced"))
+            )
+            else existing.concept_roles
+        )
+        return LectureMetadata(
+            video_id          = existing.video_id,
+            title             = db_lecture.title or existing.title,
+            instructor_id     = db_lecture.instructor_id or existing.instructor_id,
+            uploaded_at       = db_lecture.uploaded_at or existing.uploaded_at,
+            domain            = db_lecture.domain or existing.domain,
+            difficulty        = db_lecture.difficulty or existing.difficulty,
+            duration_sec      = db_lecture.duration_sec or existing.duration_sec,
+            summary           = db_lecture.summary or existing.summary,
+            keywords          = db_lecture.keywords or existing.keywords,
+            concept_roles     = concept_roles,
+            concept_relations = existing.concept_relations,
+            communities       = existing.communities,
+            pedagogy          = db_lecture.pedagogy or existing.pedagogy,
+            diagnostics       = existing.diagnostics,
+            visual_concept_terms = db_lecture.visual_concept_terms or existing.visual_concept_terms,
+        )
 
     def get(self, video_id: str) -> Optional[LectureMetadata]:
         return self.lectures.get(video_id)
