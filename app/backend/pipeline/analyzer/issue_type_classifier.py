@@ -36,6 +36,8 @@ DEFAULT_MODEL_WEIGHTS = {
     "anthropic": 0.4,
     "grok": 0.2,
     "xai": 0.2,
+    "gemini": 0.2,
+    "google": 0.2,
 }
 ISSUE_TYPE_LABELS = {
     "temporal_error": "시대적 오류",
@@ -124,6 +126,60 @@ def collect_issues(payload: dict[str, Any], list_keys: list[str]) -> list[dict[s
     return refs
 
 
+def _load_json(path: str | Path | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    target = Path(path)
+    if not target.exists():
+        return {}
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _build_source_context_lookup(merged_payload: dict[str, Any]) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for slide in merged_payload.get("slides", []) or []:
+        if not isinstance(slide, dict):
+            continue
+        for context in slide.get("contexts", []) or []:
+            if not isinstance(context, dict):
+                continue
+            context_id = str(context.get("context_id") or "").strip()
+            text = str(context.get("text") or "").strip()
+            if context_id and text:
+                lookup[context_id] = " ".join(text.split())
+    return lookup
+
+
+def _guess_merged_clean_path(input_path: Path) -> Path | None:
+    for parent in [input_path.parent, *input_path.parents]:
+        candidates = sorted(parent.glob("*_merged_clean.json"))
+        if candidates:
+            return candidates[0]
+    return None
+
+
+def _attach_source_contexts(refs: list[dict[str, Any]], lookup: dict[str, str]) -> None:
+    if not lookup:
+        return
+    for ref in refs:
+        issue = ref.get("issue") if isinstance(ref.get("issue"), dict) else {}
+        context_ids = issue.get("context_ids")
+        if not isinstance(context_ids, list):
+            context_ids = []
+        ids = [str(issue.get("context_id") or "").strip(), *[str(value or "").strip() for value in context_ids]]
+        source_context = ""
+        for context_id in ids:
+            if context_id and lookup.get(context_id):
+                source_context = lookup[context_id]
+                break
+        if source_context:
+            issue["source_context"] = source_context
+
+
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
@@ -135,11 +191,6 @@ def _issue_brief(ref: dict[str, Any]) -> dict[str, Any]:
         "issue_id": issue.get("issue_id", ""),
         "claim_id": issue.get("claim_id", ""),
         "resolved_claim": issue.get("resolved_claim", ""),
-        "claim_text": issue.get("claim_text", ""),
-        "slide_number": issue.get("slide_number"),
-        "start_time": issue.get("start_time"),
-        "end_time": issue.get("end_time"),
-        "needs_context": issue.get("needs_context"),
     }
 
 
@@ -154,14 +205,15 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 애매한 경우에는 가장 그럴듯한 한 유형에만 몰지 말고, 가능한 유형들에 확률을 나누어 주세요.
 
 분류:
-- temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 부족하거나 더 이상 맞지 않는 정보인 경우.
-- scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
-- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
 - factual_error: 정의, 용어, 동작 원리, 관계, 순서, 메커니즘 등 객관적으로 틀린 사실 오류. 기준일과 무관하게 명제 자체가 틀린 경우.
+- temporal_error: 현재 기준으로 업데이트되지 않은 정보. 과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 부족하거나, 더 이상 맞지 않는 정보인 경우.
+- confusing_explanation: 명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 해당 명제를 다른 의미로 해석할 위험이 있는 설명.
+- scope_overclaim: 조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류. “항상/오직/모든/유일한/전부/완전히/~만” 같은 범위 표현을 제거하거나 완화하면 대체로 맞는 명제가 되는 경우.
 
 판단 기준:
-- resolved_claim을 주 판단 기준으로 사용하고, claim_text는 원문 표현이나 범위 표현 확인용 보조 정보로만 사용하세요.
-- 이전 단계의 issue 설명이나 후보 사유는 제공하지 않으므로, 제공된 resolved_claim과 claim_text만 근거로 판단하세요.
+- resolved_claim만 근거로 판단하세요.
+- 원문 문맥, 슬라이드, 앞뒤 설명을 추정하지 마세요.
+- 이 단계는 issue가 맞는지 최종 판정하는 단계가 아니라, 후속 verifier가 어떤 기준으로 검증해야 하는지 정하는 routing 단계입니다.
 
 중요:
 - 단순히 날짜나 시점 표현이 들어갔다고 temporal_error가 아니다. 제시된 시점에서도 틀린 정의/원리/관계/메커니즘 오류는 factual_error로 본다.
@@ -169,9 +221,7 @@ def _build_prompt(items: list[dict[str, Any]], current_date: str) -> str:
 - 단순히 더 자세한 설명이 가능하다는 이유만으로 confusing_explanation을 선택하지 마세요.
 - "항상", "모든", "오직", "유일한" 같은 단어가 있다는 이유만으로 scope_overclaim로 올리지 마세요.
 - factual_error와 scope_overclaim이 모두 가능하면, 제한 표현이나 범위 단정만 완화하면 대체로 맞는 문장이 되는 경우 scope_overclaim에 더 높은 확률을 주세요. 명제의 핵심 내용 자체가 틀리면 factual_error에 더 높은 확률을 주세요.
-- temporal_error와 scope_overclaim이 모두 가능하면, 문제의 원인이 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
-- 원문 claim_text나 resolved_claim에 "항상", "모든", "오직", "반드시", "~만", "유일한", "전부", "불가능"처럼 범위 표현이 없고, 문맥상 대표 사례/일반 경향을 말한 것으로도 자연스럽게 읽히면 단순히 대안이 존재한다는 이유만으로 scope_overclaim을 높게 주지 마세요.
-- 빠진 대안이나 사례가 업로드/검증 기준일 현재 새롭게 중요해진 기술, 정책, 지원 여부, 사용 추세 때문이라면 temporal_error에 더 높은 확률을 주세요.
+- temporal_error와 scope_overclaim이 모두 가능하면, 현재 기술 생태계 변화로 인해 최신 사례나 대안이 빠져 현재 기준으로 부족한 정보이면 temporal_error에 더 높은 확률을 주세요.
 
 
 응답은 JSON만 출력하세요.
@@ -186,10 +236,10 @@ confidence는 해당 확률 분포 전체에 대한 모델 자신의 신뢰도�
     {{
       "id": "입력 id",
       "probabilities": {{
-        "temporal_error": 0.0,
-        "scope_overclaim": 0.0,
         "factual_error": 0.0,
-        "confusing_explanation": 0.0
+        "temporal_error": 0.0,
+        "confusing_explanation": 0.0,
+        "scope_overclaim": 0.0
       }},
       "reason": "한두 문장 근거",
       "confidence": 0.0
@@ -357,6 +407,16 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
                 default="deepseek-v4-flash",
             ),
         }
+    if lowered in {"gemini", "google"}:
+        return {
+            "provider": "gemini",
+            "alias": raw,
+            "resolved_model": _env_first(
+                "ISSUE_TYPE_CLASSIFIER_GEMINI_MODEL",
+                "VERIFIER_ISSUE_TYPE_CLASSIFIER_GEMINI_MODEL",
+                default="gemini-2.5-flash",
+            ),
+        }
     if lowered.startswith(("gpt", "o1", "o3")):
         return {"provider": "openai", "alias": raw, "resolved_model": raw}
     if lowered.startswith("xai:"):
@@ -371,6 +431,12 @@ def _resolve_model_spec(model_spec: str) -> dict[str, str]:
         return {"provider": "deepseek", "alias": raw, "resolved_model": raw.split("/", 1)[1].strip()}
     if lowered.startswith("deepseek"):
         return {"provider": "deepseek", "alias": raw, "resolved_model": raw}
+    if lowered.startswith("google:"):
+        return {"provider": "gemini", "alias": raw, "resolved_model": raw.split(":", 1)[1].strip()}
+    if lowered.startswith("google/"):
+        return {"provider": "gemini", "alias": raw, "resolved_model": raw.split("/", 1)[1].strip()}
+    if lowered.startswith("gemini"):
+        return {"provider": "gemini", "alias": raw, "resolved_model": raw}
     if lowered.startswith("claude") or lowered.startswith(("sonnet", "haiku", "opus")):
         return {"provider": "anthropic", "alias": raw, "resolved_model": _resolve_anthropic_model(raw)}
     raise ValueError(f"지원하지 않는 모델 지정: {model_spec}")
@@ -421,6 +487,27 @@ def _anthropic_usage(resp: Any, model: str) -> dict[str, Any]:
         "cached_input_tokens": _usage_value(usage, "cache_read_input_tokens"),
         "cache_creation_input_tokens": _usage_value(usage, "cache_creation_input_tokens"),
         "total_tokens": input_tokens + output_tokens,
+    }
+
+
+def _gemini_usage(resp: Any, model: str) -> dict[str, Any]:
+    usage = getattr(resp, "usage_metadata", None) or getattr(resp, "usageMetadata", None)
+    input_tokens = _usage_value(usage, "prompt_token_count", "promptTokenCount")
+    output_tokens = _usage_value(usage, "candidates_token_count", "candidatesTokenCount")
+    reasoning_tokens = _usage_value(usage, "thoughts_token_count", "thoughtsTokenCount")
+    tool_input_tokens = _usage_value(usage, "tool_use_prompt_token_count", "toolUsePromptTokenCount")
+    cached_input_tokens = _usage_value(usage, "cached_content_token_count", "cachedContentTokenCount")
+    total_tokens = _usage_value(usage, "total_token_count", "totalTokenCount")
+    return {
+        "provider": "gemini",
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "tool_input_tokens": tool_input_tokens,
+        "cached_input_tokens": cached_input_tokens,
+        "cache_creation_input_tokens": 0,
+        "total_tokens": total_tokens or input_tokens + output_tokens + reasoning_tokens + tool_input_tokens,
     }
 
 
@@ -542,6 +629,69 @@ def _call_anthropic(*, model: str, prompt: str, max_tokens: int) -> tuple[str, d
     return "".join(text_blocks), _anthropic_usage(resp, model)
 
 
+def _call_gemini(*, model: str, prompt: str, max_tokens: int) -> tuple[str, dict[str, Any]]:
+    try:
+        from google.genai import types
+    except ImportError as exc:
+        raise RuntimeError("google-genai 패키지가 설치되어 있지 않습니다.") from exc
+    try:
+        from ..config import get_gemini_client_sequence
+        from ..utils import api_call_with_retry, is_retryable_api_error
+    except ImportError:
+        from config import get_gemini_client_sequence
+        from utils import api_call_with_retry, is_retryable_api_error
+
+    client_sequence = get_gemini_client_sequence()
+    if not client_sequence:
+        raise RuntimeError("GOOGLE_API_KEY_1, GOOGLE_API_KEY 또는 GEMINI_API_KEY가 설정되지 않았습니다.")
+
+    cfg_kwargs: dict[str, Any] = {
+        "temperature": 0.0,
+        "max_output_tokens": max_tokens,
+        "response_mime_type": "application/json",
+    }
+    thinking_budget = os.getenv("ISSUE_TYPE_CLASSIFIER_GEMINI_THINKING_BUDGET")
+    if thinking_budget is not None and str(thinking_budget).strip() != "":
+        try:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=int(thinking_budget))
+        except ValueError:
+            pass
+
+    contents = [types.Part.from_text(text=prompt)]
+
+    if len(client_sequence) == 1:
+        _client_name, client = client_sequence[0]
+
+        def call_api():
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+
+        resp = api_call_with_retry(call_api)
+        return resp.text or "", _gemini_usage(resp, model)
+
+    last_exc: Exception | None = None
+    for index, (client_name, client) in enumerate(client_sequence):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+            return resp.text or "", _gemini_usage(resp, model)
+        except Exception as exc:
+            last_exc = exc
+            if is_retryable_api_error(exc) and index < len(client_sequence) - 1:
+                print(f"    [gemini:{model}] API ERROR [{client_name}]: {exc}", flush=True)
+                print("      ↺ 다음 Gemini API 키로 전환", flush=True)
+                continue
+            raise
+
+    raise RuntimeError("Gemini 호출 실패") from last_exc
+
+
 def _call_llm(
     *,
     model_spec: str,
@@ -553,6 +703,8 @@ def _call_llm(
     model = resolved["resolved_model"]
     if provider == "anthropic":
         text, usage = _call_anthropic(model=model, prompt=prompt, max_tokens=max_tokens)
+    elif provider == "gemini":
+        text, usage = _call_gemini(model=model, prompt=prompt, max_tokens=max_tokens)
     else:
         text, usage = _call_openai_like(provider=provider, model=model, prompt=prompt, max_tokens=max_tokens)
     return text, usage, resolved
@@ -770,6 +922,8 @@ def _canonical_model_weight_key(model: str, result: dict[str, Any] | None = None
         return "claude"
     if lowered.startswith("grok") or provider == "xai":
         return "grok"
+    if lowered.startswith("gemini") or provider == "gemini":
+        return "gemini"
     return lowered
 
 
@@ -884,6 +1038,7 @@ def _classification_record(
         "resolved_claim": issue.get("resolved_claim", ""),
         "claim_text": issue.get("claim_text", ""),
         "issue": issue.get("issue", ""),
+        "source_context": issue.get("source_context", ""),
         "basis_code": issue.get("basis_code", ""),
         "context_id": issue.get("context_id", ""),
         "context_ids": issue.get("context_ids", []),
@@ -932,6 +1087,7 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "claim_id": record.get("claim_id", ""),
         "resolved_claim": record.get("resolved_claim", ""),
         "claim_text": record.get("claim_text", ""),
+        "source_context": record.get("source_context", ""),
         "final_issue_type": record.get("final_issue_type"),
         "final_issue_type_label": record.get("final_issue_type_label", ""),
         "weighted_scores": record.get("weighted_scores", {}),
@@ -1019,6 +1175,7 @@ def classify_issues(
     payload: dict[str, Any],
     *,
     input_path: str | Path,
+    merged_clean_path: str | Path | None,
     models: list[str],
     list_keys: list[str],
     batch_size: int,
@@ -1032,6 +1189,8 @@ def classify_issues(
 ) -> dict[str, Any]:
     _load_env()
     refs = collect_issues(payload, list_keys)
+    merged_payload = _load_json(merged_clean_path)
+    _attach_source_contexts(refs, _build_source_context_lookup(merged_payload))
     if limit is not None:
         refs = refs[: max(0, limit)]
 
@@ -1203,6 +1362,7 @@ def classify_issues(
         "stage": "verifier_issue_type_classifier",
         "generated_at": _now_iso(),
         "input_path": str(input_path),
+        "merged_clean_path": str(merged_clean_path or ""),
         "current_date": current_date,
         "issue_list_keys": list_keys,
         "models": models,
@@ -1248,6 +1408,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("input_json", help="verifier issue judge JSON path")
     parser.add_argument("-o", "--output", help="output JSON path")
+    parser.add_argument(
+        "--merged-clean",
+        default=None,
+        help="merged_clean JSON used to attach the issue source_context line by context_id",
+    )
     parser.add_argument(
         "--models",
         default=",".join(_default_models()),
@@ -1301,6 +1466,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     input_path = Path(args.input_json)
     output_path = Path(args.output) if args.output else _default_output_path(input_path)
+    merged_clean_path = Path(args.merged_clean) if args.merged_clean else _guess_merged_clean_path(input_path)
 
     payload = json.loads(input_path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -1315,6 +1481,7 @@ def main(argv: list[str] | None = None) -> int:
     result = classify_issues(
         payload,
         input_path=input_path,
+        merged_clean_path=merged_clean_path,
         models=models,
         list_keys=_split_csv(args.issue_list_keys) or list(DEFAULT_LIST_KEYS),
         batch_size=max(1, args.batch_size),

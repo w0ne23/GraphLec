@@ -43,7 +43,7 @@ def extract_claims_only(
 def judge_issue_candidates_only(
     all_claims_by_batch: list[tuple], current_date: str, hint: dict,
     slide_ctx: dict, log_prefix: str = "",
-) -> tuple[list[dict], int, dict]:
+) -> tuple[list[dict], list[dict], int, dict]:
     """Run the classified pipeline's first issue candidate judge."""
     from analyzer.issue_detector import judge_issue_candidates_only as _run
     return _run(all_claims_by_batch, current_date, hint, slide_ctx, log_prefix=log_prefix)

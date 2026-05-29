@@ -179,7 +179,7 @@ def _issue_judge_min_confidence_for_model(model: str) -> float:
                 "VERIFIER_ISSUE_JUDGE_MIN_CONFIDENCE_ANTHROPIC",
             ]
         )
-        default = 0.55
+        default = 0.60
     elif _is_openai_model(model):
         env_candidates.extend(
             [
@@ -258,7 +258,7 @@ def _classified_issue_judge_worker(args_tuple):
         print(f"\n  [{model}] 1차 issue judge 시작 (min_confidence={min_confidence:.2f})", flush=True)
 
         claims_by_batch = [(item["batch"], item["claims"]) for item in claims_serialized]
-        issues, api_calls, token_usage = judge_issue_candidates_only(
+        issues, claim_scores, api_calls, token_usage = judge_issue_candidates_only(
             claims_by_batch,
             ctx["current_date"],
             ctx["hint"],
@@ -271,6 +271,7 @@ def _classified_issue_judge_worker(args_tuple):
             "model": model,
             "ok": True,
             "issues": issues,
+            "claim_scores": claim_scores,
             "api_calls": api_calls,
             "token_usage": token_usage,
         }
@@ -344,9 +345,25 @@ def _issue_judge_payload(
         })
         issues.append(ordered)
 
+    claim_scores = []
+    for score in result.get("claim_scores", []) or []:
+        if not isinstance(score, dict):
+            continue
+        claim_scores.append({
+            "claim_id": score.get("claim_id", ""),
+            "context_id": score.get("context_id", ""),
+            "resolved_claim": score.get("resolved_claim", ""),
+            "claim_text": score.get("claim_text", ""),
+            "claim_type": score.get("claim_type", ""),
+            "basis_code": score.get("basis_code", ""),
+            "confidence": score.get("confidence", 0),
+            "needs_context": score.get("needs_context", False),
+        })
+
     ok = bool(result.get("ok", True))
     summary = {
         "input_claim_count": input_claim_count,
+        "scored_claim_count": len(claim_scores),
         "issue_count": len(issues),
         "api_calls": int(result.get("api_calls", 0) or 0),
         "status": "ok" if ok else "failed",
@@ -361,6 +378,7 @@ def _issue_judge_payload(
         "merged_path": str(merged_path),
         "source_claims_path": claims_path,
         "summary": summary,
+        "claim_scores": claim_scores,
         "issues": issues,
         "token_usage": result.get("token_usage", _empty_token_usage()),
     }
@@ -387,6 +405,7 @@ def _write_issue_judge_model_outputs(
         path = output_dir / f"{base_stem}_issue_judge_{_model_file_slug(model)}.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         paths[model] = str(path)
+        result["claim_scores"] = payload["claim_scores"]
         result["issues"] = payload["issues"]
     return paths
 
@@ -1065,6 +1084,7 @@ def run_classified_issue_pipeline(
         issue_type_result = classify_issues(
             issue_judge_payload,
             input_path=issue_judge_merged_path,
+            merged_clean_path=merged_file,
             models=issue_type_models,
             list_keys=["issues"],
             batch_size=max(1, issue_type_batch_size),
@@ -1234,7 +1254,7 @@ def main():
         "--issue-judge-min-confidence",
         type=float,
         default=None,
-        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 모델별로 GPT 0.8, Claude 0.55",
+        help="1차 issue judge 후보 저장 confidence 기준. 기본값은 모델별로 GPT 0.8, Claude 0.60",
     )
     parser.add_argument("--date", default=None, help="검증 기준 날짜 (YYYY-MM-DD)")
     args = parser.parse_args()

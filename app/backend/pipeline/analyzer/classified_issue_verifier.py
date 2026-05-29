@@ -32,7 +32,11 @@ from .issue_type_classifier import (
 SCHEMA_VERSION = "classified_issue_verifier.v1"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
-DEFAULT_CONTEXT_WINDOW = 2
+DEFAULT_CONTEXT_WINDOW = 3
+CATEGORY_MODEL_WEIGHT_OVERRIDES = {
+    "scope_overclaim": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
+    "confusing_explanation": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
+}
 JUDGMENTS = {
     "valid_issue",
     "partially_resolved",
@@ -47,75 +51,104 @@ CATEGORY_LABELS = {
     "scope_overclaim": "범위 오류",
 }
 
+
 CATEGORY_DESCRIPTIONS = {
     "factual_error": (
-        "정의, 용어, 동작 원리, 관계, 순서, 메커니즘, 수식, 인과관계 등 기준일과 무관하게 명제 자체가 객관적으로 틀린 사실 오류입니다."
+        "정의, 용어, 동작 원리, 관계, 순서, 메커니즘, 수식, 인과관계 등 "
+        "기준일과 무관하게 명제 자체가 객관적으로 틀린 사실 오류 resolved_claim입니다."
     ),
     "temporal_error": (
-        "과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 더 이상 맞지 않거나 현재 학습자에게 outdated 정보로 전달될 수 있는 오류입니다."
+        "과거 어느 시점에는 맞았거나 자연스러웠을 수 있지만, 현재 기준으로는 "
+        "더 이상 맞지 않거나 현재 학습자에게 outdated 정보로 전달될 수 있는 resolved_claim입니다."
     ),
     "confusing_explanation": (
-        "명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 학생이 다른 의미로 해석하거나 잘못된 mental model을 만들 위험이 있는 설명입니다."
+        "명제가 명백히 틀렸다고 단정하기보다는, 비유/예시/생략/표현 방식 때문에 "
+        "학생이 다른 의미로 해석하거나 잘못된 오개념을 만들 위험이 있는 resolved_claim입니다."
     ),
     "scope_overclaim": (
-        "조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 오류입니다. '항상/오직/모든/유일한/전부/완전히/~만' 같은 범위 표현을 완화하면 대체로 맞는 명제가 되는 경우를 포함합니다."
+        "조건, 예외, 범위, 적용 대상을 닫아버려 과도하게 일반화한 resolved_claim입니다. "
+        '"항상/오직/모든/유일한/전부/완전히/~만" 같은 범위 표현을 완화하면 '
+        "대체로 맞는 명제가 되는 경우를 포함합니다."
     ),
 }
+
 
 CATEGORY_SCORE_GUIDES = {
     "factual_error": {
         "is_valid_issue": (
-            "resolved_claim이 정의, 용어, 동작 원리, 관계, 순서, 수식, 인과관계 측면에서 객관적으로 틀렸을 가능성을 평가하세요."
+            "resolved_claim이 정의, 용어, 동작 원리, 관계, 순서, 수식, 인과관계 측면에서 "
+            "객관적으로 틀렸을 가능성을 평가하세요. 문맥과 슬라이드를 포함해도 같은 잘못된 "
+            "명제가 남아 있으면 높게 주고, 문맥상 표현이 바로 정정되었거나 정확한 의미로 "
+            "좁혀지면 낮게 주세요. 영문/외래어 용어를 한글로 옮긴 발음 표기, 음차, 전사 "
+            "흔들림만 문제이고 문맥상 어떤 원어와 개념을 가리키는지 명확하면 사실 오류로 "
+            "높게 채점하지 마세요. 수치 표현에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 "
+            "있고 그 수치가 핵심 개념이 아니라 보조 설명, 감각적 환산, 예시로 쓰였으며 "
+            "일반적으로 통용되는 근사라면 정확한 수치와 차이가 있어도 사실 오류로 높게 "
+            "채점하지 마세요."
         ),
         "category_severity": (
-            "수강자가 핵심 개념, 작동 원리, 문제 풀이 방식, 구현 판단, 후속 개념 이해를 잘못 학습할 위험이 클수록 높게 주세요."
-            "강의 흐름에 큰 영향을 주지 않는 사소한 부정확성이나 용어 흔들림은 낮게 주세요."
+            "학생이 핵심 개념, 작동 원리, 문제 풀이 방식, 구현 판단, 후속 개념 이해를 "
+            "잘못 학습할 위험이 클수록 높게 주세요. 강의 흐름에 큰 영향을 주지 않는 "
+            "사소한 부정확성, 발음 표기 차이, 음차/전사 흔들림, 보조 예시의 일반적 근사 "
+            "표현은 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 context, 슬라이드 텍스트, t1_structure가 잘못된 의미를 얼마나 정정, 보완, 조건화하는지 평가하세요."
-            "명시적 정정이나 충분한 보완이 있으면 높게 주고, 문맥을 봐도 같은 오류가 그대로 남으면 낮게 주세요."
+            "앞뒤 context와 슬라이드 텍스트가 잘못된 의미를 얼마나 정정, 보완, "
+            "조건화하는지 평가하세요. 명시적 정정이나 충분한 보완이 있으면 높게 주고, "
+            "문맥을 봐도 같은 오류가 그대로 남으면 낮게 주세요."
         ),
     },
     "temporal_error": {
         "is_valid_issue": (
-            "claim이 기준일 현재 더 이상 맞지 않거나, 현재 학습자에게 outdated 정보로 전달될 가능성을 평가하세요."
-            "단순히 날짜 표현이 있다는 이유만으로 높게 주지 마세요."
+            "resolved_claim이 기준일 현재 더 이상 맞지 않거나, 현재 학습자에게 outdated 정보로 "
+            "전달될 가능성을 평가하세요. 단순히 강의가 오래되었거나 날짜 표현이 있다는 "
+            "이유만으로 높게 주지 마세요."
         ),
         "category_severity": (
-            "현재 학습자의 도구 선택, 구현 방식, 지원 여부, 정책/버전 판단, 통계나 시장 상황 이해에 실제 영향을 줄수록 높게 주세요."
-            "역사적 배경 설명이거나 현재 학습에 영향이 작으면 낮게 주세요."
+            "현재 학습자의 도구 선택, 구현 방식, 지원 여부, 정책/버전 판단, 통계나 시장 상황 "
+            "이해에 실제 영향을 줄수록 높게 주세요. 역사적 배경 설명이거나 현재 학습에 영향이 적다면 낮게 주세요."
         ),
         "context_resolution": (
-            "문맥상 과거 시점, 역사적 상황, 당시 기준의 설명으로 명확히 제한되어 있으면 높게 주세요."
+            "문맥상 과거 시점, 역사적 상황, 당시 기준의 설명으로 명확히 제한되어 있으면 높게 주세요. "
             "현재 사실처럼 제시되고 보완 설명이 없으면 낮게 주세요."
         ),
     },
     "confusing_explanation": {
         "is_valid_issue": (
-            "비유, 예시, 생략, 모호한 지시어, 압축된 표현 때문에 학생이 claim을 다른 의미로 해석하거나 잘못된 mental model을 만들 가능성을 평가하세요."
-            "단순히 더 친절한 설명이 가능하다는 이유만으로 높게 주지 마세요."
+            "비유, 예시, 생략, 모호한 지시어, 압축된 표현 때문에 학생이 resolved_claim을 다른 의미로 "
+            "해석하거나 잘못된 mental model을 만들 가능성을 평가하세요. 단순히 더 친절한 "
+            "설명이 가능하다는 이유만으로 높게 주지 마세요."
+            "일반적으로 맞는 표현이며, 일반적으로 맞는 설명이면 낮은 점수를 주세요."
         ),
         "category_severity": (
-            "그 오해가 핵심 개념, 절차, 원인-결과, 구성 요소의 역할 이해를 크게 왜곡할수록 높게 주세요."
-            "잠깐 헷갈릴 수 있으나 뒤 학습에 거의 영향을 주지 않는 표현은 낮게 주세요."
+            "그 오해가 핵심 개념, 절차, 원인-결과, 구성 요소의 역할 이해를 크게 왜곡할수록 "
+            "높게 주세요. 잠깐 헷갈릴 수 있으나 뒤 학습에 거의 영향을 주지 않는 표현은 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요."
-            "같은 슬라이드나 인접 context에서 정확한 의미가 충분히 설명되면 높게 주고, 모호한 표현만 남아 있으면 낮게 주세요."
+            "앞뒤 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요. 같은 슬라이드나 인접 context에서 "
+            "정확한 의미가 충분히 설명되면 높게 주고, 모호한 표현만 남아 있으면 낮게 주세요."
         ),
     },
     "scope_overclaim": {
         "is_valid_issue": (
-            "조건, 예외, 적용 범위, 대상 집합을 닫아버린 과도한 일반화가 실제로 남아 있는지 평가하세요."
-            "범위 표현이 강조나 수사에 그치거나 문맥상 대표 사례로 읽히면 낮게 주세요."
+            "조건, 예외, 적용 범위, 대상 집합을 닫아버려 일반적으로 맞지 않는 설명이 실제로 남아 있다면 점수를 높게 주세요."
+            "범위 표현이 강조나 수사에 그치거나 일반적인 사례로 읽히면 낮게 주세요."
+            "강조 표현, 범위 표현, 단정 표현이 문맥상 적절하게 사용되었는지 판단하세요."
+            "이러한 표현이 포함되었다는 이유만으로 점수를 높게 주지 마세요."
+            "점수를 높게 주려면, 해당 표현이 실제로 잘못된 범위 제한, 예외 배제, 조건 누락, 결과 과장으로 이어져야 합니다."
+            "하지만 일반적으로 맞는 표현이며, 설명이면 낮은 점수를 주세요."
+            "단정, 과장으로 인해 일어날 수 있는 반례가 일반적이지 않은 상황에 대한 반례라면, 굉장히 낮은 점수를 주세요."
         ),
         "category_severity": (
-            "그 과잉 단정이 학생의 적용 범위 판단, 예외 처리, 가능/불가능 판단, 전체/일부 구분을 크게 틀리게 만들수록 높게 주세요."
-            "제한 표현을 약간 완화하면 큰 학습 위험 없이 해소되는 경우는 낮게 주세요."
+            "그 과잉 단정이 학생의 적용 범위 판단, 예외, 가능/불가능 판단, 전체/일부 구분을 "
+            "크게 틀리게 만들수록 높게 주세요."
+            "하지만 그 과잉 단정 표현을 포함하여도, 통상적으로 맞는 지식이고, 일반적으로 맞는 설명이면 점수를 낮게 주세요."
         ),
         "context_resolution": (
-            "앞뒤 context와 슬라이드가 조건, 예외, 적용 대상, 범위를 충분히 완화하는지 평가하세요."
-            "문맥상 범위 단정이 완화되면 높게 주고, 닫힌 범위가 그대로 남으면 낮게 주세요."
+            "앞뒤 context와 슬라이드가 조건, 예외, 적용 대상, 범위를 충분히 복원하는지 평가하세요. "
+            "문맥상 범위 단정이 명확히 완화되면 높게 주고, 닫힌 범위가 그대로 남으면 낮게 주세요."
+            "주어진 문맥을 포함하였을 때, 교육상 맥락에서 허용이 가능한 범위라면 점수를 높게 주세요."
+            "앞뒤 context가 해당 resolved_claim에 대해서 계속 설명하고 있으며, 해당 resolved_claim이 앞뒤 문맥과 슬라이드에서 설명하는 것으로 보완이 되거나, 맞는 설명으로 귀결된다면 낮게 주세요."
         ),
     },
 }
@@ -169,6 +202,43 @@ def _default_models() -> list[str]:
 
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def _bundle_slide_number(item: dict[str, Any]) -> int | None:
+    issue = item.get("issue") if isinstance(item.get("issue"), dict) else {}
+    return _slide_number(issue)
+
+
+def _chunk_by_slide_and_category(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    grouped: dict[tuple[int | str, str], list[dict[str, Any]]] = {}
+    order: list[tuple[int | str, str]] = []
+    for item in items:
+        slide_number = _bundle_slide_number(item)
+        slide_key: int | str = slide_number if slide_number is not None else "__unknown_slide__"
+        category = str(item.get("category") or "").strip() or "__unknown_category__"
+        key = (slide_key, category)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(item)
+
+    batches: list[list[dict[str, Any]]] = []
+    for key in order:
+        batches.extend(_chunk(grouped[key], size))
+    return batches
+
+
+def _batch_category_label(items: list[dict[str, Any]]) -> str:
+    categories = []
+    for item in items:
+        category = str(item.get("category") or "").strip()
+        if category and category not in categories:
+            categories.append(category)
+    if not categories:
+        return "mixed"
+    if len(categories) == 1:
+        return categories[0]
+    raise ValueError(f"final verifier batch contains mixed categories: {categories}")
 
 
 def _load_json(path: str | Path | None) -> dict[str, Any]:
@@ -253,23 +323,35 @@ def _build_slide_lookup(*payloads: dict[str, Any]) -> dict[int, dict[str, Any]]:
 def _build_context_lookup(merged_payload: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], dict[int, list[dict[str, Any]]]]:
     by_id: dict[str, dict[str, Any]] = {}
     by_slide: dict[int, list[dict[str, Any]]] = {}
-    for slide in merged_payload.get("slides") or []:
-        if not isinstance(slide, dict):
+    containers: list[dict[str, Any]] = []
+    for key in ("slides", "scenes"):
+        rows = merged_payload.get(key) or []
+        if isinstance(rows, list):
+            containers.extend(row for row in rows if isinstance(row, dict))
+
+    next_index_by_slide: dict[int, int] = {}
+    for container in containers:
+        if not isinstance(container, dict):
             continue
         try:
-            slide_number = int(slide.get("slide_number") or 0)
+            slide_number = int(container.get("slide_number") or container.get("slide_canonical_number") or 0)
         except (TypeError, ValueError):
             continue
-        contexts = slide.get("contexts") or []
+        contexts = container.get("contexts") or []
         if not isinstance(contexts, list):
             continue
-        for index, context in enumerate(contexts):
+        for context in contexts:
             if not isinstance(context, dict):
                 continue
+            global_index = next_index_by_slide.get(slide_number, 0)
+            next_index_by_slide[slide_number] = global_index + 1
             row = dict(context)
             row.setdefault("slide_number", slide_number)
-            row.setdefault("context_index", index)
+            row["context_index"] = global_index
             context_id = str(row.get("context_id") or "").strip()
+            if not context_id:
+                context_id = f"S{slide_number:03d}-C{global_index + 1:03d}"
+                row["context_id"] = context_id
             if context_id:
                 by_id[context_id] = row
             by_slide.setdefault(slide_number, []).append(row)
@@ -284,12 +366,31 @@ def _build_context_lookup(merged_payload: dict[str, Any]) -> tuple[dict[str, dic
 def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "context_id": context.get("context_id", ""),
-        "slide_number": context.get("slide_number"),
         "context_index": context.get("context_index"),
-        "start_time": context.get("start_time"),
-        "end_time": context.get("end_time"),
         "text": context.get("text", ""),
     }
+
+
+def _joined_context_text(contexts: list[dict[str, Any]]) -> str:
+    lines = []
+    for context in contexts:
+        context_id = str(context.get("context_id") or "").strip()
+        text = str(context.get("text") or "").strip()
+        if not text:
+            continue
+        prefix = f"{context_id}: " if context_id else ""
+        lines.append(f"{prefix}{text}")
+    return "\n".join(lines).strip()
+
+
+def _adjacent_slide_number(contexts_by_slide: dict[int, list[dict[str, Any]]], slide_number: int, step: int) -> int | None:
+    numbers = sorted(number for number, rows in contexts_by_slide.items() if rows)
+    if slide_number not in numbers:
+        return None
+    index = numbers.index(slide_number) + step
+    if index < 0 or index >= len(numbers):
+        return None
+    return numbers[index]
 
 
 def _context_window(
@@ -302,49 +403,45 @@ def _context_window(
     context_ids = _issue_context_ids(issue)
     center_contexts = [context_by_id[cid] for cid in context_ids if cid in context_by_id]
     slide_number = _slide_number(issue)
+    if slide_number is None and center_contexts:
+        try:
+            slide_number = int(center_contexts[0].get("slide_number") or 0)
+        except (TypeError, ValueError):
+            slide_number = None
     if not center_contexts and slide_number:
         rows = contexts_by_slide.get(slide_number) or []
         if rows:
             center_contexts = rows[:1]
 
-    around: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for center in center_contexts:
-        try:
-            sn = int(center.get("slide_number") or slide_number or 0)
-            idx = int(center.get("context_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        rows = contexts_by_slide.get(sn) or []
-        for item in rows[max(0, idx - window) : idx + window + 1]:
-            key = str(item.get("context_id") or f"{sn}:{item.get('context_index')}")
-            if key in seen:
+    current_slide_contexts = contexts_by_slide.get(slide_number or -1) or []
+    local_contexts = current_slide_contexts
+    if current_slide_contexts:
+        indices: list[int] = []
+        for context in center_contexts:
+            try:
+                indices.append(int(context.get("context_index", 0) or 0))
+            except (TypeError, ValueError):
                 continue
-            seen.add(key)
-            around.append(_compact_context(item))
+        if indices:
+            start = max(0, min(indices) - max(0, window))
+            end = min(len(current_slide_contexts), max(indices) + max(0, window) + 1)
+            local_contexts = current_slide_contexts[start:end]
 
     return {
         "target_context_ids": context_ids,
-        "target_contexts": [_compact_context(item) for item in center_contexts],
-        "neighbor_contexts": around,
+        "current_slide_transcript": _joined_context_text(local_contexts),
+        "window_contexts": [_compact_context(item) for item in local_contexts],
+        "previous_slide_tail_contexts": [],
+        "next_slide_head_contexts": [],
     }
 
 
 def _compact_slide(slide: dict[str, Any]) -> dict[str, Any]:
-    keys = (
-        "slide_number",
-        "title",
-        "time_range",
-        "slide_text",
-        "t1",
-        "t1_structure",
-        "slide_type",
-        "role",
-        "image_path",
-        "slide_topic_keywords",
-        "slide_emphasis",
-    )
-    return {key: slide.get(key) for key in keys if slide.get(key) not in (None, "", [], {})}
+    return {
+        key: slide.get(key)
+        for key in ("slide_number", "title", "slide_text")
+        if slide.get(key) not in (None, "", [], {})
+    }
 
 
 def _build_context_bundle(
@@ -404,6 +501,49 @@ def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
+    first = items[0] if items else {}
+    issue = first.get("issue") if isinstance(first.get("issue"), dict) else {}
+    location = issue.get("location") if isinstance(issue.get("location"), dict) else {}
+    merged_contexts: dict[str, dict[str, Any]] = {}
+    for item in items:
+        context_bundle = item.get("context_bundle") if isinstance(item.get("context_bundle"), dict) else {}
+        for context in context_bundle.get("window_contexts", []) or []:
+            if not isinstance(context, dict):
+                continue
+            context_id = str(context.get("context_id") or "").strip()
+            if not context_id:
+                continue
+            merged_contexts[context_id] = context
+    ordered_contexts = sorted(
+        merged_contexts.values(),
+        key=lambda item: (
+            int(item.get("context_index", 0) or 0),
+            str(item.get("context_id") or ""),
+        ),
+    )
+    return {
+        "domain": first.get("domain", ""),
+        "subdomain": first.get("subdomain", ""),
+        "location": {"slide_number": location.get("slide_number")},
+        "slide": first.get("slide", {}),
+        "context_bundle": {
+            "current_slide_transcript": _joined_context_text(ordered_contexts),
+            "previous_slide_tail_contexts": [],
+            "next_slide_head_contexts": [],
+        },
+    }
+
+
+def _prompt_payload(items: list[dict[str, Any]]) -> str:
+    return (
+        "batch_context:\n"
+        f"{json.dumps(_prompt_batch_context(items), ensure_ascii=False, indent=2)}\n\n"
+        "issues:\n"
+        f"{json.dumps([_prompt_issue_brief(item) for item in items], ensure_ascii=False, indent=2)}"
+    )
+
+
 def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
     description = CATEGORY_DESCRIPTIONS.get(category, "")
     score_guide = CATEGORY_SCORE_GUIDES.get(category, {})
@@ -428,16 +568,41 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 이 분류에서 context_resolution 판단 기준:
 {score_guide.get("context_resolution", "")}
 
+공통 문맥 해소 판단 순서:
+0. resolved_claim과 claim_text/source_context의 관계를 먼저 확인하세요.
+   resolved_claim이 source_context의 최종 전달 의미를 올바르게 정리한 문장이고,
+   claim_text의 어색함이 말실수, 전사 흔들림, 즉시 재표현, 자기수정 수준이라면
+   claim_text의 표면적 어색함만으로 점수를 높이지 마세요.
+   반대로 resolved_claim이 source_context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
+   resolved_claim의 강해진 부분을 그대로 믿지 말고 source_context 기준으로 낮게 판단하세요.
+
+1. 먼저 target context 안에서 claim이 실제로 어떤 의미로 사용되었는지 판단하세요.
+2. 바로 앞뒤 context가 같은 대상, 같은 관계, 같은 조건을 설명하는 경우에만 해소 근거로 사용하세요.
+3. 문맥이 단순히 같은 주제를 말하거나 일반 배경을 제공하는 정도라면 해소 근거로 보지 마세요.
+4. 문맥이 claim의 강한 표현을 예시, 대비, 강조, 교육적 단순화로 좁혀 주면 context_resolution을 높게 주세요.
+5. 반대로 문맥이 같은 강한 표현을 반복하거나 강화하면 context_resolution을 낮게 주세요.
+6. 문맥이 양쪽으로 읽히면, claim 자체가 일반적으로 맞는 설명인지 먼저 보세요. 일반적으로 맞는 설명이면 해소 쪽으로, 일반적으로 틀린 설명이면 미해소 쪽으로 판단하세요.
+7. slide_text는 target claim을 해석하고 문맥 해소 여부를 판단하기 위한 보조 근거입니다.
+   slide_text에 관련 개념이나 강한 표현이 있다는 이유만으로 is_valid_issue를 높이지 마세요.
+   slide_text가 target claim의 대상, 관계, 조건, 범위를 더 정확하게 설명하면 context_resolution을 높게 주어 issue를 낮추세요.
+   다만 slide_text 자체가 target claim과 같은 잘못된 명제를 직접 반복하거나 강화할 때만 issue를 높이는 근거로 사용할 수 있습니다.
+8. 잘못된 용어/분류명을 직접 발화한 경우, 뒤에서 상위 범주나 포함 관계를 설명하더라도 그 설명이 해당 용어/분류명 자체를 바로잡는지 확인하세요.
+   해당 용어가 직접 정정되지 않았고, 학생이 그 대상을 잘못된 범주명으로 외울 가능성이 남으면 context_resolution을 낮게 주세요.
+   다만 뒤 문맥이나 slide_text가 같은 대상을 더 정확한 용어로 명시하고, 잘못된 용어가 단순 말실수나 재표현 과정으로 해소되면 context_resolution을 높게 줄 수 있습니다.
+   단, 영문/외래어 용어의 한글 발음 표기, 음차, 전사 흔들림만 있고 문맥상 지칭하는 원어와 개념이 명확하면 잘못된 용어/분류명 오류로 보지 마세요.
+9. 수치 claim에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 있고, 해당 수치가 핵심 학습 대상이 아니라 보조 설명, 감각적 환산, 예시로 쓰인 경우에는 정확한 수치와 차이가 있어도 일반적으로 통용되는 근사인지 먼저 판단하세요.
+   일반적으로 통용되는 근사이면 사실 오류로 높게 채점하지 말고, 문맥상 정확한 수치 판단이 핵심일 때만 높게 채점하세요.
+
 입력으로 제공되는 정보:
 - claim의 도메인/서브도메인
-- resolved_claim과 원문 claim_text
-- 해당 context와 앞뒤 context
-- 해당 슬라이드의 텍스트/t1/t1_structure/역할/이미지 경로
+- resolved_claim과 원문 claim_text (전사본에서, claim단위로 구성하여 제공, resolved_claim은 지시어를 보강한 claim, claim_text는 원문기반 claim)
+- 해당 context와 앞뒤 context (전사본을 문맥 단위로 나누어 제공)
+- 해당 슬라이드의 slide_text(merged_clean에서 제공되는 기본 슬라이드 텍스트)
 - 이전 분류 단계의 weighted_scores와 low_margin 정보
 
 출력 점수:
-- is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0.
-- category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0.
+- is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0 issue일수록 1에 수렴.
+- category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0 심각할수록 1에 수렴.
 - context_resolution: 제공된 문맥이 issue를 얼마나 해소하는지. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨.
 
 판정 라벨:
@@ -450,7 +615,7 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
 - 응답은 JSON 객체 하나만 출력하세요.
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
-- reason은 한두 문장으로 쓰세요.
+- reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
 - 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
 - 문맥 해소를 이유로 is_valid_issue와 category_severity를 동시에 과도하게 낮추지 마세요.
@@ -483,6 +648,17 @@ def _parse_response(text: str) -> list[dict[str, Any]]:
     return rows if isinstance(rows, list) else []
 
 
+def _final_model_score(
+    *,
+    category: str,
+    judgment: str,
+    is_valid_issue: float,
+    category_severity: float,
+    context_unresolved: float,
+) -> float:
+    return _clamp01(is_valid_issue * category_severity * context_unresolved)
+
+
 def _normalize_judgment_row(
     row: dict[str, Any],
     *,
@@ -495,7 +671,15 @@ def _normalize_judgment_row(
     is_valid_issue = _clamp01(row.get("is_valid_issue"))
     category_severity = _clamp01(row.get("category_severity"))
     context_resolution = _clamp01(row.get("context_resolution"))
-    final_model_score = _clamp01(is_valid_issue * category_severity * (1.0 - context_resolution))
+    context_unresolved = _clamp01(1.0 - context_resolution)
+    final_model_score = _final_model_score(
+        category=ref["category"],
+        judgment=judgment,
+        is_valid_issue=is_valid_issue,
+        category_severity=category_severity,
+        context_unresolved=context_unresolved,
+    )
+    reason = str(row.get("reason", "") or "").strip()
     return {
         "id": ref["id"],
         "model": model,
@@ -507,7 +691,7 @@ def _normalize_judgment_row(
         "category_severity": category_severity,
         "context_resolution": context_resolution,
         "final_model_score": final_model_score,
-        "reason": str(row.get("reason", "") or "").strip(),
+        "reason": reason,
         "minimal_fix": str(row.get("minimal_fix", "") or "").strip(),
         "status": "ok",
         "parse_error": "",
@@ -515,7 +699,7 @@ def _normalize_judgment_row(
 
 
 def _parse_failed_row(ref: dict[str, Any], model: str, resolved: dict[str, str], error: str) -> dict[str, Any]:
-    return {
+    row = {
         "id": ref["id"],
         "model": model,
         "provider": resolved.get("provider", ""),
@@ -531,6 +715,7 @@ def _parse_failed_row(ref: dict[str, Any], model: str, resolved: dict[str, str],
         "status": "parse_failed",
         "parse_error": error,
     }
+    return row
 
 
 def _call_model_for_batch(
@@ -637,6 +822,48 @@ def _weighted_final_score(
     return round(score, 6), used_weights, round(missing_weight, 6), round(disagreement, 6), bool(disagreement >= 0.35)
 
 
+def _verdict_model_family(verdict: dict[str, Any]) -> str:
+    model = str(verdict.get("model") or "").strip().lower()
+    provider = str(verdict.get("provider") or "").strip().lower()
+    resolved_model = str(verdict.get("resolved_model") or "").strip().lower()
+    if provider in {"openai", "anthropic", "xai"}:
+        return provider
+    if model.startswith(("gpt", "o1", "o3")) or resolved_model.startswith(("gpt", "o1", "o3")):
+        return "gpt"
+    if (
+        model.startswith("claude")
+        or resolved_model.startswith("claude")
+        or any(token in model for token in ("sonnet", "haiku", "opus"))
+        or any(token in resolved_model for token in ("sonnet", "haiku", "opus"))
+    ):
+        return "claude"
+    if model.startswith("grok") or resolved_model.startswith("grok"):
+        return "xai"
+    return model
+
+
+def _effective_model_weights(
+    category: str,
+    verdicts: list[dict[str, Any]],
+    base_weights: dict[str, float],
+) -> dict[str, float]:
+    override = CATEGORY_MODEL_WEIGHT_OVERRIDES.get(category)
+    if not override:
+        return base_weights
+
+    weights: dict[str, float] = {}
+    seen_models = {str(verdict.get("model") or "") for verdict in verdicts if str(verdict.get("model") or "")}
+    for model in seen_models:
+        verdict = next((row for row in verdicts if str(row.get("model") or "") == model), {})
+        family = _verdict_model_family(verdict)
+        weights[model] = float(override.get(family, 0.0) or 0.0)
+
+    total = sum(weights.values())
+    if total <= 0:
+        return base_weights
+    return {model: round(weight / total, 6) for model, weight in weights.items()}
+
+
 def _issue_result_record(
     ref: dict[str, Any],
     verdicts: list[dict[str, Any]],
@@ -644,10 +871,12 @@ def _issue_result_record(
     model_weights: dict[str, float],
 ) -> dict[str, Any]:
     issue = ref["issue"]
+    effective_model_weights = _effective_model_weights(ref["category"], verdicts, model_weights)
     final_score, used_weights, missing_weight, disagreement, needs_manual_review = _weighted_final_score(
         verdicts,
-        model_weights,
+        effective_model_weights,
     )
+    final_status = _status_from_severity(final_score)
     ok_verdicts = [row for row in verdicts if row.get("status") == "ok"]
     avg_is_valid = sum(_clamp01(row.get("is_valid_issue")) for row in ok_verdicts) / len(ok_verdicts) if ok_verdicts else 0.0
     avg_severity = sum(_clamp01(row.get("category_severity")) for row in ok_verdicts) / len(ok_verdicts) if ok_verdicts else 0.0
@@ -820,7 +1049,6 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "summary": reason or f"{category_label} 후보입니다.",
                     "why_wrong": reason,
                     "issue_basis": category_label,
-                    "context_resolution": f"{issue.get('average_context_resolution', 0.0):.2f}",
                     "recommendation": minimal_fix,
                     "correct_info": minimal_fix,
                 },
@@ -848,13 +1076,22 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "final_severity_score": score,
                     "final_severity_percent": issue.get("final_severity_percent", round(score * 100.0, 2)),
                     "average_is_valid_issue": issue.get("average_is_valid_issue", 0.0),
-                    "average_category_severity": issue.get("average_category_severity", 0.0),
-                    "average_context_resolution": issue.get("average_context_resolution", 0.0),
                     "model_disagreement": issue.get("model_disagreement", 0.0),
                     "needs_manual_review": bool(issue.get("needs_manual_review")),
                 },
             }
         )
+        if "average_context_resolution" in issue:
+            feedback_items[-1]["problem"]["context_resolution"] = f"{issue.get('average_context_resolution', 0.0):.2f}"
+            feedback_items[-1]["classified_issue_verifier"]["average_context_resolution"] = issue.get(
+                "average_context_resolution",
+                0.0,
+            )
+        if "average_category_severity" in issue:
+            feedback_items[-1]["classified_issue_verifier"]["average_category_severity"] = issue.get(
+                "average_category_severity",
+                0.0,
+            )
 
     confirmed = [item for item in feedback_items if item.get("status") == "confirmed"]
     review = [item for item in feedback_items if item.get("status") == "professor_check"]
@@ -917,9 +1154,7 @@ def judge_classified_issues(
     _load_env()
     refs = _flatten_issues(payload, limit=limit)
     merged_payload = _load_json(merged_clean_path)
-    textualized_payload = _load_json(slide_textualized_path)
-    classified_payload = _load_json(slide_classified_path)
-    slide_lookup = _build_slide_lookup(merged_payload, textualized_payload, classified_payload)
+    slide_lookup = _build_slide_lookup(merged_payload)
     context_by_id, contexts_by_slide = _build_context_lookup(merged_payload)
     domain = str(merged_payload.get("domain") or "")
     subdomain = str(merged_payload.get("subdomain") or "")
@@ -1017,7 +1252,7 @@ def judge_classified_issues(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "verifier_classified_issue_verifier",
+        "stage": "classified_issue_verifier",
         "source_input_path": str(input_path),
         "source_classification_path": payload.get("source_classification_path", ""),
         "source_issue_path": payload.get("source_issue_path", ""),
@@ -1078,12 +1313,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=int(
-            os.getenv(
-                "VERIFIER_CROSSCHECK_MAX_ISSUES_PER_BATCH",
-                os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "5"),
-            )
-        ),
+        default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE", "4")),
     )
     parser.add_argument("--max-tokens", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_TOKENS", "8192")))
     parser.add_argument("--max-workers", type=int, default=int(os.getenv("CLASSIFIED_ISSUE_VERIFIER_MAX_WORKERS", "1")))
