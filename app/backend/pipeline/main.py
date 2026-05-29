@@ -1544,10 +1544,10 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
     relationships_path = output_graph_dir / "relationships.parquet"
     input_path = input_dir / f"{stem}.txt"
     metrics_path = workspace_dir / "graphrag_index_metrics.json"
-    model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4")
+    model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4-mini")
     embedding_model = os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small")
     method_name = getattr(args, "graphrag_method", "standard")
-    concurrent_requests = int(os.getenv("GRAPHLEC_GRAPHRAG_CONCURRENT_REQUESTS", "4"))
+    concurrent_requests = int(os.getenv("GRAPHLEC_GRAPHRAG_CONCURRENT_REQUESTS", "50"))
     index_retries = int(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRIES", "1"))
     index_retry_wait_sec = _safe_float(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRY_WAIT_SEC", "30"), 30.0)
 
