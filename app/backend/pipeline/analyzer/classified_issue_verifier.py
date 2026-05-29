@@ -624,6 +624,9 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
 - reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
+- 문맥이 issue를 해소하지 못한 정도는 주로 context_unresolved에 반영하세요.
+- 문맥 해소를 이유로 is_valid_issue와 category_severity를 동시에 과도하게 낮추지 마세요.
+- 다만 문맥을 포함했을 때 애초에 issue가 성립하지 않는다면 is_valid_issue도 낮출 수 있습니다.
 
 {_response_contract()}
 
