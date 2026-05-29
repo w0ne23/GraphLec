@@ -1648,13 +1648,36 @@ def stage7b_graphrag_index(args, output_dir: Path) -> dict:
 def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     """Stage 8: 강의 메타데이터 생성."""
     from .generate_metadata import generate_metadata
+    from .metadata_db import load_metadata_json, upsert_lecture_metadata_sync
 
     stem         = Path(args.input).stem
     metadata_dir = Path(getattr(args, "metadata_dir", DEFAULT_RECOMMENDER_METADATA_DIR))
     output_path  = metadata_dir / f"{stem}_metadata.json"
+    lecture_id   = getattr(args, "lecture_id", None)
+
+    def sync_metadata_to_db(elapsed: float, skipped: bool = False) -> dict:
+        db_synced = False
+        if output_path.exists():
+            try:
+                metadata = load_metadata_json(output_path)
+                db_synced = upsert_lecture_metadata_sync(
+                    lecture_id=lecture_id,
+                    metadata=metadata,
+                    metadata_uri=str(output_path),
+                )
+                if db_synced:
+                    print(f"  ✓ lecture_metadata DB 저장 완료: {lecture_id}")
+            except Exception as exc:
+                print(f"  ⚠ lecture_metadata DB 저장 실패 (non-fatal): {exc}")
+        return {
+            "metadata_path": str(output_path),
+            "elapsed": elapsed,
+            "db_synced": db_synced,
+            "skipped": skipped,
+        }
 
     if _is_done(output_path, "Stage 8 메타데이터 생성", args.force):
-        return {"metadata_path": str(output_path), "elapsed": 0.0}
+        return sync_metadata_to_db(elapsed=0.0, skipped=True)
 
     _banner("Stage 8  —  메타데이터 생성  (generate_metadata)")
     t0 = time.time()
@@ -1669,8 +1692,9 @@ def stage8_generate_metadata(args, output_dir: Path, slides_dir: Path) -> dict:
     )
 
     elapsed = time.time() - t0
+    result = sync_metadata_to_db(elapsed=elapsed)
     _done("메타데이터 생성", elapsed)
-    return {"metadata_path": str(output_path), "elapsed": elapsed}
+    return result
 
 
 def stage11_build_recommender_index(args) -> dict:
@@ -2256,6 +2280,8 @@ def get_parser():
     parser.add_argument("--title",      default="", help="강의명 (미입력 시 Gemini 자동 생성)")
     parser.add_argument("--instructor", default="", help="교수자명")
     parser.add_argument("--domain",     default="", help="도메인 (미입력 시 Gemini 자동 추론)")
+    parser.add_argument("--lecture-id", dest="lecture_id", default=None,
+                        help="lecture_metadata DB 저장 대상 lectures.id")
     parser.add_argument("--uploaded-at", dest="uploaded_at", default=None,
                         help="강의 업로드 시각 ISO 문자열")
     
