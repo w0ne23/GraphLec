@@ -1486,6 +1486,42 @@ def _patch_graphrag_extract_prompt(workspace_dir: Path) -> None:
         prompt_path.write_text(text, encoding="utf-8")
 
 
+def _patch_graphrag_settings(workspace_dir: Path, concurrent_requests: int) -> None:
+    """Apply GraphLec runtime defaults to the generated GraphRAG config."""
+    settings_path = workspace_dir / "settings.yaml"
+    if not settings_path.exists():
+        return
+
+    try:
+        import yaml
+    except ImportError as exc:
+        raise RuntimeError("Stage 7B: settings.yaml 수정을 위해 PyYAML이 필요합니다.") from exc
+
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    data["concurrent_requests"] = max(1, int(concurrent_requests))
+    data.setdefault("async_mode", "threaded")
+    settings_path.write_text(
+        yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+
+def _run_graphrag_index_with_retry(cmd: list[str], env: dict[str, str], retries: int, wait_sec: float) -> None:
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            subprocess.run(cmd, check=True, env=env)
+            return
+        except subprocess.CalledProcessError:
+            if attempt >= attempts:
+                raise
+            print(
+                f"  GraphRAG index failed; retrying after {wait_sec:.0f}s "
+                f"({attempt}/{attempts - 1})"
+            )
+            time.sleep(max(0.0, wait_sec))
+
+
 def _graphrag_workspace_dir(args, output_dir: Path, stem: str) -> Path:
     root = getattr(args, "graphrag_root", None)
     if root:
@@ -1511,6 +1547,9 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
     model_name = os.getenv("GRAPHLEC_GRAPHRAG_MODEL", "gpt-5.4")
     embedding_model = os.getenv("GRAPHLEC_GRAPHRAG_EMBEDDING_MODEL", "text-embedding-3-small")
     method_name = getattr(args, "graphrag_method", "standard")
+    concurrent_requests = int(os.getenv("GRAPHLEC_GRAPHRAG_CONCURRENT_REQUESTS", "4"))
+    index_retries = int(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRIES", "1"))
+    index_retry_wait_sec = _safe_float(os.getenv("GRAPHLEC_GRAPHRAG_INDEX_RETRY_WAIT_SEC", "30"), 30.0)
 
     if (
         not args.force
@@ -1564,6 +1603,9 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
                 "model": model_name,
                 "embedding_model": embedding_model,
                 "method": method_name,
+                "concurrent_requests": concurrent_requests,
+                "index_retries": index_retries,
+                "index_retry_wait_sec": index_retry_wait_sec,
                 "started_at_epoch": t0,
                 "workspace_dir": str(workspace_dir),
                 "input_path": str(input_path),
@@ -1592,12 +1634,13 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
         )
         _write_graphrag_env(workspace_dir, api_key)
 
+    _patch_graphrag_settings(workspace_dir, concurrent_requests)
     _patch_graphrag_extract_prompt(workspace_dir)
 
     if args.force and output_graph_dir.exists():
         shutil.rmtree(output_graph_dir)
 
-    subprocess.run(
+    _run_graphrag_index_with_retry(
         [
             graphrag_bin,
             "index",
@@ -1606,8 +1649,9 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
             "--method",
             method_name,
         ],
-        check=True,
         env=env,
+        retries=index_retries,
+        wait_sec=index_retry_wait_sec,
     )
 
     elapsed = time.time() - t0
@@ -1619,6 +1663,9 @@ def build_graphrag_index(args, output_dir: Path) -> dict:
                 "model": model_name,
                 "embedding_model": embedding_model,
                 "method": method_name,
+                "concurrent_requests": concurrent_requests,
+                "index_retries": index_retries,
+                "index_retry_wait_sec": index_retry_wait_sec,
                 "started_at_epoch": t0,
                 "finished_at_epoch": time.time(),
                 "elapsed": elapsed,
