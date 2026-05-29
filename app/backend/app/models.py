@@ -71,8 +71,6 @@ class LectureMetadata(Base):
     __table_args__ = (
         Index("idx_lm_domain", "domain"),
         Index("idx_lm_difficulty", "difficulty"),
-        Index("idx_lm_core_gin", "core_concepts", postgresql_using="gin"),
-        Index("idx_lm_introduced_gin", "introduced_concepts", postgresql_using="gin"),
         Index("idx_lm_keywords_gin", "keywords", postgresql_using="gin"),
     )
 
@@ -90,11 +88,14 @@ class LectureMetadata(Base):
     summary = Column(Text, nullable=True)
     learning_objectives = Column(ARRAY(Text), nullable=True)
     keywords = Column(JSONB, nullable=True)
-    core_concepts = Column(ARRAY(Text), nullable=True)
-    introduced_concepts = Column(ARRAY(Text), nullable=True)
+    concept_roles = Column(JSONB, nullable=True)
+    concept_relations = Column(JSONB, nullable=True)
+    communities = Column(JSONB, nullable=True)
     visual_concept_terms = Column(ARRAY(Text), nullable=True)
     pedagogy = Column(JSONB, nullable=True)
+    diagnostics = Column(JSONB, nullable=True)
     duration_sec = Column(Float, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), nullable=True)
     metadata_version = Column(Integer, nullable=False, default=1)
     metadata_uri = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

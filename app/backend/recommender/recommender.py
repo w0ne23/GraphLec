@@ -339,11 +339,14 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
             lm.summary,
             lm.learning_objectives,
             lm.keywords,
-            lm.core_concepts,
-            lm.introduced_concepts,
+            lm.concept_roles,
+            lm.concept_relations,
+            lm.communities,
             lm.visual_concept_terms,
             lm.pedagogy,
+            lm.diagnostics,
             lm.duration_sec,
+            lm.uploaded_at,
             lm.metadata_version,
             lm.metadata_uri,
             lm.created_at,
@@ -444,11 +447,7 @@ class MetadataCollection:
 
     @staticmethod
     def _from_db_row(row: dict) -> LectureMetadata:
-        concept_roles = {
-            "core": row.get("core_concepts") or [],
-            "introduced": row.get("introduced_concepts") or [],
-        }
-        uploaded_at = row.get("lecture_created_at")
+        uploaded_at = row.get("uploaded_at") or row.get("lecture_created_at")
         if hasattr(uploaded_at, "isoformat"):
             uploaded_at = uploaded_at.isoformat()
         return LectureMetadata(
@@ -461,11 +460,11 @@ class MetadataCollection:
             duration_sec      = row.get("duration_sec") or 0.0,
             summary           = row.get("summary") or "",
             keywords          = row.get("keywords") or [],
-            concept_roles     = concept_roles,
-            concept_relations = [],
-            communities       = [],
+            concept_roles     = row.get("concept_roles") or {},
+            concept_relations = row.get("concept_relations") or [],
+            communities       = row.get("communities") or [],
             pedagogy          = row.get("pedagogy") or {},
-            diagnostics       = {},
+            diagnostics       = row.get("diagnostics") or {},
             visual_concept_terms = row.get("visual_concept_terms") or [],
         )
 
@@ -491,10 +490,10 @@ class MetadataCollection:
             summary           = db_lecture.summary or existing.summary,
             keywords          = db_lecture.keywords or existing.keywords,
             concept_roles     = concept_roles,
-            concept_relations = existing.concept_relations,
-            communities       = existing.communities,
+            concept_relations = db_lecture.concept_relations or existing.concept_relations,
+            communities       = db_lecture.communities or existing.communities,
             pedagogy          = db_lecture.pedagogy or existing.pedagogy,
-            diagnostics       = existing.diagnostics,
+            diagnostics       = db_lecture.diagnostics or existing.diagnostics,
             visual_concept_terms = db_lecture.visual_concept_terms or existing.visual_concept_terms,
         )
 

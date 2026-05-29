@@ -40,23 +40,6 @@ def _text_list(value: Any) -> list[str] | None:
     return result
 
 
-def _concept_role_terms(concept_roles: Any, role: str) -> list[str] | None:
-    if isinstance(concept_roles, dict):
-        return _text_list(concept_roles.get(role))
-
-    if isinstance(concept_roles, list):
-        terms = []
-        for item in concept_roles:
-            if not isinstance(item, dict) or item.get("role") != role:
-                continue
-            text = str(item.get("concept") or item.get("name") or item.get("term") or "").strip()
-            if text:
-                terms.append(text)
-        return terms
-
-    return None
-
-
 def load_metadata_json(metadata_path: str | Path) -> dict[str, Any]:
     path = Path(metadata_path)
     with path.open(encoding="utf-8") as f:
@@ -82,7 +65,6 @@ def upsert_lecture_metadata_sync(
     if not database_url:
         return False
 
-    concept_roles = metadata.get("concept_roles") or {}
     values = {
         "lecture_id": uuid.UUID(lecture_id),
         "title": str(metadata.get("title") or "").strip() or "Untitled lecture",
@@ -94,11 +76,14 @@ def upsert_lecture_metadata_sync(
         "summary": metadata.get("summary"),
         "learning_objectives": _text_list(metadata.get("learning_objectives")),
         "keywords": Json(metadata.get("keywords") or []),
-        "core_concepts": _concept_role_terms(concept_roles, "core"),
-        "introduced_concepts": _concept_role_terms(concept_roles, "introduced"),
+        "concept_roles": Json(metadata.get("concept_roles") or {}),
+        "concept_relations": Json(metadata.get("concept_relations") or []),
+        "communities": Json(metadata.get("communities") or []),
         "visual_concept_terms": _text_list(metadata.get("visual_concept_terms")),
         "pedagogy": Json(metadata.get("pedagogy") or {}),
+        "diagnostics": Json(metadata.get("diagnostics") or {}),
         "duration_sec": metadata.get("duration_sec"),
+        "uploaded_at": metadata.get("uploaded_at"),
         "metadata_version": 1,
         "metadata_uri": metadata_uri,
     }
@@ -115,11 +100,14 @@ def upsert_lecture_metadata_sync(
             summary,
             learning_objectives,
             keywords,
-            core_concepts,
-            introduced_concepts,
+            concept_roles,
+            concept_relations,
+            communities,
             visual_concept_terms,
             pedagogy,
+            diagnostics,
             duration_sec,
+            uploaded_at,
             metadata_version,
             metadata_uri,
             created_at,
@@ -136,11 +124,14 @@ def upsert_lecture_metadata_sync(
             %(summary)s,
             %(learning_objectives)s,
             %(keywords)s,
-            %(core_concepts)s,
-            %(introduced_concepts)s,
+            %(concept_roles)s,
+            %(concept_relations)s,
+            %(communities)s,
             %(visual_concept_terms)s,
             %(pedagogy)s,
+            %(diagnostics)s,
             %(duration_sec)s,
+            %(uploaded_at)s,
             %(metadata_version)s,
             %(metadata_uri)s,
             NOW(),
@@ -156,11 +147,14 @@ def upsert_lecture_metadata_sync(
             summary = EXCLUDED.summary,
             learning_objectives = EXCLUDED.learning_objectives,
             keywords = EXCLUDED.keywords,
-            core_concepts = EXCLUDED.core_concepts,
-            introduced_concepts = EXCLUDED.introduced_concepts,
+            concept_roles = EXCLUDED.concept_roles,
+            concept_relations = EXCLUDED.concept_relations,
+            communities = EXCLUDED.communities,
             visual_concept_terms = EXCLUDED.visual_concept_terms,
             pedagogy = EXCLUDED.pedagogy,
+            diagnostics = EXCLUDED.diagnostics,
             duration_sec = EXCLUDED.duration_sec,
+            uploaded_at = EXCLUDED.uploaded_at,
             metadata_version = EXCLUDED.metadata_version,
             metadata_uri = EXCLUDED.metadata_uri,
             updated_at = NOW()
