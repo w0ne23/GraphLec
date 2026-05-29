@@ -1,6 +1,6 @@
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, UniqueConstraint, Integer
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Column, String, Text, DateTime, ForeignKey, UniqueConstraint, Integer, Float, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
 
@@ -59,6 +59,46 @@ class Lecture(Base):
     @property
     def last_job(self):
         return self.processing_jobs[-1] if self.processing_jobs else None
+
+
+class LectureMetadata(Base):
+    """추천/필터용 강의 메타데이터 요약본.
+
+    전체 원본 metadata JSON은 파일로 유지하고, DB에는 추천 런타임에서 자주 쓰는
+    구조화 필드만 저장한다.
+    """
+    __tablename__ = "lecture_metadata"
+    __table_args__ = (
+        Index("idx_lm_domain", "domain"),
+        Index("idx_lm_difficulty", "difficulty"),
+        Index("idx_lm_core_gin", "core_concepts", postgresql_using="gin"),
+        Index("idx_lm_introduced_gin", "introduced_concepts", postgresql_using="gin"),
+        Index("idx_lm_keywords_gin", "keywords", postgresql_using="gin"),
+    )
+
+    lecture_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("lectures.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    title = Column(Text, nullable=False)
+    instructor_id = Column(Text, nullable=True)
+    domain = Column(Text, nullable=True)
+    graph_domain = Column(Text, nullable=True)
+    graph_subdomain = Column(Text, nullable=True)
+    difficulty = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    learning_objectives = Column(ARRAY(Text), nullable=True)
+    keywords = Column(JSONB, nullable=True)
+    core_concepts = Column(ARRAY(Text), nullable=True)
+    introduced_concepts = Column(ARRAY(Text), nullable=True)
+    visual_concept_terms = Column(ARRAY(Text), nullable=True)
+    pedagogy = Column(JSONB, nullable=True)
+    duration_sec = Column(Float, nullable=True)
+    metadata_version = Column(Integer, nullable=False, default=1)
+    metadata_uri = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class GraphSession(Base):
