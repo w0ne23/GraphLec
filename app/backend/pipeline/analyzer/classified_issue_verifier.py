@@ -92,10 +92,10 @@ CATEGORY_SCORE_GUIDES = {
             "사소한 부정확성, 발음 표기 차이, 음차/전사 흔들림, 보조 예시의 일반적 근사 "
             "표현은 낮게 주세요."
         ),
-        "context_unresolved": (
-            "앞뒤 context와 슬라이드 텍스트를 봐도 잘못된 의미가 얼마나 남는지 평가하세요. "
-            "문맥을 봐도 같은 오류가 그대로 남으면 높게 주고, 명시적 정정이나 충분한 보완이 "
-            "있으면 낮게 주세요."
+        "context_resolution": (
+            "앞뒤 context와 슬라이드 텍스트가 잘못된 의미를 얼마나 정정, 보완, "
+            "조건화하는지 평가하세요. 명시적 정정이나 충분한 보완이 있으면 높게 주고, "
+            "문맥을 봐도 같은 오류가 그대로 남으면 낮게 주세요."
         ),
     },
     "temporal_error": {
@@ -108,9 +108,9 @@ CATEGORY_SCORE_GUIDES = {
             "현재 학습자의 도구 선택, 구현 방식, 지원 여부, 정책/버전 판단, 통계나 시장 상황 "
             "이해에 실제 영향을 줄수록 높게 주세요. 역사적 배경 설명이거나 현재 학습에 영향이 적다면 낮게 주세요."
         ),
-        "context_unresolved": (
-            "현재 사실처럼 제시되고 기준 시점 보완 설명이 없으면 높게 주세요. 문맥상 과거 시점, "
-            "역사적 상황, 당시 기준의 설명으로 명확히 제한되어 있으면 낮게 주세요."
+        "context_resolution": (
+            "문맥상 과거 시점, 역사적 상황, 당시 기준의 설명으로 명확히 제한되어 있으면 높게 주세요. "
+            "현재 사실처럼 제시되고 보완 설명이 없으면 낮게 주세요."
         ),
     },
     "confusing_explanation": {
@@ -124,9 +124,9 @@ CATEGORY_SCORE_GUIDES = {
             "그 오해가 핵심 개념, 절차, 원인-결과, 구성 요소의 역할 이해를 크게 왜곡할수록 "
             "높게 주세요. 잠깐 헷갈릴 수 있으나 뒤 학습에 거의 영향을 주지 않는 표현은 낮게 주세요."
         ),
-        "context_unresolved": (
-            "앞뒤 설명을 본 뒤에도 오해 가능성이 얼마나 남는지 평가하세요. 모호한 표현만 남아 있으면 "
-            "높게 주고, 같은 슬라이드나 인접 context에서 정확한 의미가 충분히 설명되면 낮게 주세요."
+        "context_resolution": (
+            "앞뒤 설명이 오해 가능성을 얼마나 풀어주는지 평가하세요. 같은 슬라이드나 인접 context에서 "
+            "정확한 의미가 충분히 설명되면 높게 주고, 모호한 표현만 남아 있으면 낮게 주세요."
         ),
     },
     "scope_overclaim": {
@@ -144,10 +144,10 @@ CATEGORY_SCORE_GUIDES = {
             "크게 틀리게 만들수록 높게 주세요."
             "하지만 그 과잉 단정 표현을 포함하여도, 통상적으로 맞는 지식이고, 일반적으로 맞는 설명이면 점수를 낮게 주세요."
         ),
-        "context_unresolved": (
-            "앞뒤 context와 슬라이드를 본 뒤에도 닫힌 조건, 예외, 적용 대상, 범위가 얼마나 남는지 "
-            "평가하세요. 닫힌 범위가 그대로 남으면 높게 주고, 문맥상 범위 단정이 명확히 완화되거나 "
-            "교육상 맥락에서 허용 가능한 설명으로 귀결되면 낮게 주세요."
+        "context_resolution": (
+            "앞뒤 context와 슬라이드가 조건, 예외, 적용 대상, 범위를 충분히 복원하는지 평가하세요. "
+            "문맥상 범위 단정이 명확히 완화되거나 교육상 맥락에서 허용 가능한 설명으로 귀결되면 높게 주고, "
+            "닫힌 범위가 그대로 남으면 낮게 주세요."
         ),
     },
 }
@@ -550,7 +550,7 @@ def _response_contract() -> str:
       "judgment": "valid_issue | partially_resolved | not_issue | insufficient_context",
       "is_valid_issue": 0.0,
       "category_severity": 0.0,
-      "context_unresolved": 0.0,
+      "context_resolution": 0.0,
       "reason": "판단 근거 1~2문장",
       "minimal_fix": "필요한 경우만 짧게, 없으면 빈 문자열"
     }
@@ -558,9 +558,9 @@ def _response_contract() -> str:
 }
 
 공통 출력 규칙:
-- is_valid_issue, category_severity, context_unresolved는 0.0 이상 1.0 이하 숫자입니다.
-- context_unresolved는 문맥을 본 뒤에도 문제가 남는 정도입니다. 0.0은 문맥에서 해소됨, 1.0은 해소 안 됨입니다.
-- 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_unresolved를 낮게 주세요."""
+- is_valid_issue, category_severity, context_resolution은 0.0 이상 1.0 이하 숫자입니다.
+- context_resolution은 문맥이 issue를 해소하는 정도입니다. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨입니다.
+- 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_resolution을 높게 주세요."""
 
 
 def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
@@ -582,20 +582,20 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 3. 같은 context 또는 바로 인접 context에서 같은 대상의 속성, 조건, 반환값, 구성요소를 이어서 설명하는 경우,
    앞선 claim만 단독으로 판단하지 말고 이어지는 설명까지 포함해 최종적으로 학생에게 남는 의미를 판단하세요.
    이어지는 설명이 앞선 claim의 누락된 부분을 명확히 보완하여 전체 설명이 일반 도메인 지식 기준으로 자연스럽게 맞아진다면,
-   context_unresolved를 낮게 줄 수 있습니다.
+   context_resolution을 높게 줄 수 있습니다.
    다만 이어지는 설명이 단순히 같은 주제를 말하는 수준이거나, 앞선 claim의 핵심 오류를 직접 보완하지 못한다면
    문맥 해소로 보지 마세요.
 4. 문맥이 단순히 같은 주제를 말하거나 일반 배경을 제공하는 정도라면 해소 근거로 보지 마세요.
-5. 문맥이 claim의 강한 표현을 예시, 대비, 강조, 교육적 단순화로 좁혀 주면 context_unresolved를 낮게 주세요.
-6. 반대로 문맥이 같은 강한 표현을 반복하거나 강화하면 context_unresolved를 높게 주세요.
+5. 문맥이 claim의 강한 표현을 예시, 대비, 강조, 교육적 단순화로 좁혀 주면 context_resolution을 높게 주세요.
+6. 반대로 문맥이 같은 강한 표현을 반복하거나 강화하면 context_resolution을 낮게 주세요.
 7. 문맥이 양쪽으로 읽히면, claim 자체가 일반적으로 맞는 설명인지 먼저 보세요. 일반적으로 맞는 설명이면 해소 쪽으로, 일반적으로 틀린 설명이면 미해소 쪽으로 판단하세요.
 8. slide_text는 target claim을 해석하고 문맥 해소 여부를 판단하기 위한 보조 근거입니다.
    slide_text에 관련 개념이나 강한 표현이 있다는 이유만으로 is_valid_issue를 높이지 마세요.
-   slide_text가 target claim의 대상, 관계, 조건, 범위를 더 정확하게 설명하면 context_unresolved를 낮게 주세요.
+   slide_text가 target claim의 대상, 관계, 조건, 범위를 더 정확하게 설명하면 context_resolution을 높게 주세요.
    다만 slide_text 자체가 target claim과 같은 잘못된 명제를 직접 반복하거나 강화할 때만 issue를 높이는 근거로 사용할 수 있습니다.
 9. 잘못된 용어/분류명을 직접 발화한 경우, 뒤에서 상위 범주나 포함 관계를 설명하더라도 그 설명이 해당 용어/분류명 자체를 바로잡는지 확인하세요.
-   해당 용어가 직접 정정되지 않았고, 학생이 그 대상을 잘못된 범주명으로 외울 가능성이 남으면 context_unresolved를 높게 주세요.
-   다만 뒤 문맥이나 slide_text가 같은 대상을 더 정확한 용어로 명시하고, 잘못된 용어가 단순 말실수나 재표현 과정으로 해소되면 context_unresolved를 낮게 줄 수 있습니다.
+   해당 용어가 직접 정정되지 않았고, 학생이 그 대상을 잘못된 범주명으로 외울 가능성이 남으면 context_resolution을 낮게 주세요.
+   다만 뒤 문맥이나 slide_text가 같은 대상을 더 정확한 용어로 명시하고, 잘못된 용어가 단순 말실수나 재표현 과정으로 해소되면 context_resolution을 높게 줄 수 있습니다.
    단, 영문/외래어 용어의 한글 발음 표기, 음차, 전사 흔들림만 있고 문맥상 지칭하는 원어와 개념이 명확하면 잘못된 용어/분류명 오류로 보지 마세요.
 10. 수치 claim에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 있고, 해당 수치가 핵심 학습 대상이 아니라 보조 설명, 감각적 환산, 예시로 쓰인 경우에는 정확한 수치와 차이가 있어도 일반적으로 통용되는 근사인지 먼저 판단하세요.
    일반적으로 통용되는 근사이면 사실 오류로 높게 채점하지 말고, 문맥상 정확한 수치 판단이 핵심일 때만 높게 채점하세요.
@@ -610,7 +610,7 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 출력 점수:
 - is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0 issue일수록 1에 수렴.
 - category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0 심각할수록 1에 수렴.
-- context_unresolved: 제공된 문맥을 본 뒤에도 issue가 남는 정도. 0.0은 문맥에서 해소됨, 1.0은 해소 안 됨.
+- context_resolution: 제공된 문맥이 issue를 얼마나 해소하는지. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨.
 
 판정 라벨:
 - valid_issue: 이 분류 기준에서 유효한 issue
@@ -624,7 +624,7 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
 - reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
-- 문맥이 issue를 해소하지 못한 정도는 주로 context_unresolved에 반영하세요.
+- 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
 - 문맥 해소를 이유로 is_valid_issue와 category_severity를 동시에 과도하게 낮추지 마세요.
 - 다만 문맥을 포함했을 때 애초에 issue가 성립하지 않는다면 is_valid_issue도 낮출 수 있습니다.
 
@@ -633,7 +633,7 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 판정 분류: {CATEGORY_LABELS.get(category, category)} ({category})
 
 아래 분류 설명과 점수별 판단 기준은 이 요청에서 유일하게 적용할 기준입니다.
-다른 분류로 재분류하지 말고, 이 분류 기준 안에서만 issue의 유효성, 심각성, 문맥 미해소 정도를 판단하세요.
+다른 분류로 재분류하지 말고, 이 분류 기준 안에서만 issue의 유효성, 심각성, 문맥 해소 정도를 판단하세요.
 
 판정 분류 설명:
 {description}
@@ -644,8 +644,8 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 이 분류에서 category_severity 판단 기준:
 {score_guide.get("category_severity", "")}
 
-이 분류에서 context_unresolved 판단 기준:
-{score_guide.get("context_unresolved", "")}
+이 분류에서 context_resolution 판단 기준:
+{score_guide.get("context_resolution", "")}
 
 입력 issue:
 {_prompt_payload(items)}
@@ -680,7 +680,8 @@ def _normalize_judgment_row(
     judgment = raw_judgment if raw_judgment in JUDGMENTS else "insufficient_context"
     is_valid_issue = _clamp01(row.get("is_valid_issue"))
     category_severity = _clamp01(row.get("category_severity"))
-    context_unresolved = _clamp01(row.get("context_unresolved"))
+    context_resolution = _clamp01(row.get("context_resolution"))
+    context_unresolved = _clamp01(1.0 - context_resolution)
     final_model_score = _final_model_score(
         category=ref["category"],
         judgment=judgment,
@@ -698,6 +699,7 @@ def _normalize_judgment_row(
         "judgment": judgment,
         "is_valid_issue": is_valid_issue,
         "category_severity": category_severity,
+        "context_resolution": context_resolution,
         "context_unresolved": context_unresolved,
         "final_model_score": final_model_score,
         "reason": reason,
@@ -717,6 +719,7 @@ def _parse_failed_row(ref: dict[str, Any], model: str, resolved: dict[str, str],
         "judgment": "insufficient_context",
         "is_valid_issue": 0.0,
         "category_severity": 0.0,
+        "context_resolution": 0.0,
         "context_unresolved": 1.0,
         "final_model_score": 0.0,
         "reason": "",
@@ -900,6 +903,11 @@ def _issue_result_record(
         if ok_verdicts
         else 0.0
     )
+    avg_context_resolution = (
+        sum(_clamp01(row.get("context_resolution")) for row in ok_verdicts) / len(ok_verdicts)
+        if ok_verdicts
+        else 0.0
+    )
     return {
         "id": ref["id"],
         "issue_id": issue.get("issue_id", ""),
@@ -926,6 +934,7 @@ def _issue_result_record(
         "final_severity_percent": round(final_score * 100.0, 2),
         "average_is_valid_issue": round(avg_is_valid, 6),
         "average_category_severity": round(avg_severity, 6),
+        "average_context_resolution": round(avg_context_resolution, 6),
         "average_context_unresolved": round(avg_context_unresolved, 6),
         "model_weights": used_weights,
         "missing_model_weight": missing_weight,
@@ -1020,6 +1029,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 model_row["minimal_fix"] = row.get("minimal_fix", "")
             if "category_severity" in row:
                 model_row["category_severity"] = row.get("category_severity", 0.0)
+            if "context_resolution" in row:
+                model_row["context_resolution"] = row.get("context_resolution", 0.0)
             if "context_unresolved" in row:
                 model_row["context_unresolved"] = row.get("context_unresolved", 0.0)
             model_judgments.append(model_row)
@@ -1096,11 +1107,18 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "final_severity_score": score,
                     "final_severity_percent": issue.get("final_severity_percent", round(score * 100.0, 2)),
                     "average_is_valid_issue": issue.get("average_is_valid_issue", 0.0),
+                    "average_context_resolution": issue.get("average_context_resolution", 0.0),
                     "model_disagreement": issue.get("model_disagreement", 0.0),
                     "needs_manual_review": bool(issue.get("needs_manual_review")),
                 },
             }
         )
+        if "average_context_resolution" in issue:
+            feedback_items[-1]["problem"]["context_resolution"] = f"{issue.get('average_context_resolution', 0.0):.2f}"
+            feedback_items[-1]["classified_issue_verifier"]["average_context_resolution"] = issue.get(
+                "average_context_resolution",
+                0.0,
+            )
         if "average_context_unresolved" in issue:
             feedback_items[-1]["problem"]["context_unresolved"] = f"{issue.get('average_context_unresolved', 0.0):.2f}"
             feedback_items[-1]["classified_issue_verifier"]["average_context_unresolved"] = issue.get(
