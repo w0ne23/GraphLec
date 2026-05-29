@@ -602,9 +602,9 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 
 입력으로 제공되는 정보:
 - claim의 도메인/서브도메인
-- resolved_claim과 원문 claim_text
-- 해당 context와 앞뒤 context
-- 해당 슬라이드의 slide_text
+- resolved_claim과 원문 claim_text (전사본에서, claim단위로 구성하여 제공, resolved_claim은 지시어를 보강한 claim, claim_text는 원문기반 claim)
+- 해당 context와 앞뒤 context (전사본을 문맥 단위로 나누어 제공)
+- 해당 슬라이드의 slide_text(merged_clean에서 제공되는 기본 슬라이드 텍스트)
 - 이전 분류 단계의 weighted_scores와 low_margin 정보
 
 출력 점수:
@@ -622,7 +622,7 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
 - 응답은 JSON 객체 하나만 출력하세요.
 - 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
-- reason은 한두 문장으로 쓰되, 반드시 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지를 포함하세요.
+- reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
 - minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
 
 {_response_contract()}
