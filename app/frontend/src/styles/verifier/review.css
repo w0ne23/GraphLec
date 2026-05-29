@@ -86,6 +86,24 @@
   gap: 32px;
 }
 
+.vf-review-detail-btn {
+  flex-shrink: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: bold;
+  transition: border-color .14s, color .14s, background .14s;
+}
+
+.vf-review-detail-btn:hover {
+  border-color: var(--b2);
+  background: var(--hover);
+  color: var(--t1);
+}
+
 .vf-review-tab {
   appearance: none;
   cursor: pointer;
