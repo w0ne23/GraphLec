@@ -191,6 +191,13 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
 
 ```json
 {{
+  "claim_scores": [
+    {{
+      "claim_id": "CL0001",
+      "basis_code": "definition_relation",
+      "confidence": 0.0
+    }}
+  ],
   "issues": [
     {{
       "claim_id": "CL0001",
@@ -204,16 +211,18 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
 ```
 
 지침:
-1. confidence {min_confidence:.2f} 미만은 출력하지 마세요.
-2. 입력 claim_id에 없는 새 claim을 만들지 마세요.
-3. type, issue_type, context_id는 출력하지 마세요.
-4. 같은 claim에서 같은 문제는 한 건만 출력하세요.
-5. 문제가 없으면 {{"issues": []}}만 출력하세요.
-6. basis_code는 위 다섯 코드 중 하나만 출력하세요.
-7. issue, reason, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
-8. resolved_claim과 claim_text는 절대 새로 쓰거나 정리하지 말고 입력 claim의 값을 그대로 복사하세요.
+1. `claim_scores`에는 입력된 모든 claim_id에 대해 정확히 하나씩, 입력 순서대로 confidence와 basis_code를 출력하세요.
+2. `claim_scores`의 confidence는 threshold와 무관하게 0.0~1.0 사이 점수를 출력하세요.
+3. `issues`에는 confidence {min_confidence:.2f} 이상인 후보만 출력하세요.
+4. 입력 claim_id에 없는 새 claim을 만들지 마세요.
+5. type, issue_type, context_id는 출력하지 마세요.
+6. 같은 claim에서 같은 문제는 한 건만 출력하세요.
+7. 문제가 없으면 {{"claim_scores": [...], "issues": []}}만 출력하세요.
+8. basis_code는 위 다섯 코드 중 하나만 출력하세요.
+9. issue, reason, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
+10. resolved_claim과 claim_text는 절대 새로 쓰거나 정리하지 말고 입력 claim의 값을 그대로 복사하세요.
    이 단계는 upstream claim 필드를 수정하는 단계가 아닙니다.
-9. JSON 외 텍스트를 출력하지 마세요.
+11. JSON 외 텍스트를 출력하지 마세요.
 """
 
 
@@ -239,6 +248,48 @@ def _order_issue_candidate_fields(issue: dict) -> dict:
     return ordered
 
 
+def _clamp_confidence(value) -> float:
+    try:
+        number = float(value or 0)
+    except Exception:
+        number = 0.0
+    return max(0.0, min(1.0, number))
+
+
+def _normalize_claim_scores(raw_scores: list, claims: list[dict]) -> list[dict]:
+    scores_by_claim: dict[str, dict] = {}
+    if isinstance(raw_scores, list):
+        for raw_score in raw_scores:
+            if not isinstance(raw_score, dict):
+                continue
+            claim_id = str(raw_score.get("claim_id", "") or "").strip()
+            if not claim_id:
+                continue
+            scores_by_claim[claim_id] = {
+                "claim_id": claim_id,
+                "basis_code": str(raw_score.get("basis_code") or "").strip(),
+                "confidence": _clamp_confidence(raw_score.get("confidence")),
+            }
+
+    normalized = []
+    for claim in claims:
+        claim_id = _claim_id(claim)
+        if not claim_id:
+            continue
+        row = scores_by_claim.get(claim_id, {})
+        normalized.append({
+            "claim_id": claim_id,
+            "context_id": _context_id(claim),
+            "resolved_claim": str(claim.get("resolved_claim") or claim.get("claim_text") or "").strip(),
+            "claim_text": str(claim.get("claim_text") or "").strip(),
+            "claim_type": claim.get("claim_type", ""),
+            "basis_code": row.get("basis_code", ""),
+            "confidence": _clamp_confidence(row.get("confidence")),
+            "needs_context": _claim_needs_context(claim),
+        })
+    return normalized
+
+
 def _judge_issue_candidates(
     claims: list[dict],
     contexts: list[dict],
@@ -250,7 +301,7 @@ def _judge_issue_candidates(
     from . import claim_common as cv
 
     if not claims:
-        return [], False, 0, cv._empty_token_usage()
+        return [], [], False, 0, cv._empty_token_usage()
 
     claim_by_id = {_claim_id(claim): claim for claim in claims if _claim_id(claim)}
     full_prompt = _build_issue_candidate_prompt(claims, contexts, current_date, hint, slide_ctx)
@@ -281,12 +332,14 @@ def _judge_issue_candidates(
             if attempt < cv.VERIFIER_PARSE_RETRIES:
                 print(f"    ↺ 1차 issue judge JSON 파싱 재시도 ({attempt+1}/{cv.VERIFIER_PARSE_RETRIES})")
                 continue
-            return [], True, api_calls, token_usage
+            return [], [], True, api_calls, token_usage
 
         raw = payload.get("issues", [])
+        raw_scores = payload.get("claim_scores", [])
         if not isinstance(raw, list):
-            return [], False, api_calls, token_usage
+            return [], _normalize_claim_scores(raw_scores, claims), False, api_calls, token_usage
 
+        claim_scores = _normalize_claim_scores(raw_scores, claims)
         issues = []
         seen = set()
         for raw_issue in raw:
@@ -297,7 +350,7 @@ def _judge_issue_candidates(
             if not source_claim:
                 continue
             try:
-                confidence = float(raw_issue.get("confidence", 0) or 0)
+                confidence = _clamp_confidence(raw_issue.get("confidence"))
             except Exception:
                 confidence = 0.0
             if confidence < issue_judge_min_confidence():
@@ -333,9 +386,9 @@ def _judge_issue_candidates(
             }
             issues.append(_order_issue_candidate_fields(issue))
 
-        return issues, False, api_calls, token_usage
+        return issues, claim_scores, False, api_calls, token_usage
 
-    return [], True, api_calls, token_usage
+    return [], [], True, api_calls, token_usage
 
 
 def recover_issue_candidate_judgement(
@@ -346,12 +399,13 @@ def recover_issue_candidate_judgement(
     context_map: dict,
     slide_ctx: dict,
     label: str,
-) -> tuple[list[dict], bool, int, dict, bool]:
+) -> tuple[list[dict], list[dict], bool, int, dict, bool]:
     from . import claim_common as cv
 
     total_api_calls = 0
     total_token_usage = cv._empty_token_usage()
     last_issues: list[dict] = []
+    last_claim_scores: list[dict] = []
     parse_failed = False
     last_exc = None
 
@@ -359,20 +413,21 @@ def recover_issue_candidate_judgement(
         if attempt > 0:
             print(f"    ↺ {label} 1차 issue judge 재처리 ({attempt}/{cv.VERIFIER_BATCH_RECOVERY_RETRIES})")
         try:
-            issues, parse_failed, api_calls, token_usage = _judge_issue_candidates(
+            issues, claim_scores, parse_failed, api_calls, token_usage = _judge_issue_candidates(
                 claims, contexts, current_date, hint, context_map, slide_ctx
             )
             total_api_calls += api_calls
             total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)
             last_issues = issues
+            last_claim_scores = claim_scores
             if not parse_failed:
-                return issues, False, total_api_calls, total_token_usage, True
+                return issues, claim_scores, False, total_api_calls, total_token_usage, True
         except Exception as e:
             last_exc = e
 
     if last_exc and not last_issues and total_api_calls == 0:
         raise last_exc
-    return last_issues, True, total_api_calls, total_token_usage, False
+    return last_issues, last_claim_scores, True, total_api_calls, total_token_usage, False
 
 
 def judge_issue_candidates_only(
@@ -381,13 +436,14 @@ def judge_issue_candidates_only(
     hint: dict,
     slide_ctx: dict,
     log_prefix: str = "",
-) -> tuple[list[dict], int, dict]:
+) -> tuple[list[dict], list[dict], int, dict]:
     """Run only the first issue judge and return issue candidates."""
     from . import claim_common as cv
 
     total_api = 0
     total_token_usage = cv._empty_token_usage()
     all_issues = []
+    all_claim_scores = []
     prefix = f"[{log_prefix}] " if log_prefix else ""
     total_batches = sum(1 for _, claims in all_claims_by_batch if claims)
     jobs = []
@@ -402,7 +458,7 @@ def judge_issue_candidates_only(
     def _run_job(job):
         active_idx, batch_idx, batch, claims, batch_map, ids = job
         print(f"  {prefix}1차 issue judge ({active_idx}/{total_batches}) {ids}", flush=True)
-        issues, parse_failed, api_calls, token_usage, ok = recover_issue_candidate_judgement(
+        issues, claim_scores, parse_failed, api_calls, token_usage, ok = recover_issue_candidate_judgement(
             claims,
             batch,
             current_date,
@@ -413,7 +469,7 @@ def judge_issue_candidates_only(
         )
         if not ok:
             print(f"    ⚠️ 1차 issue judge 실패: {ids} — 이 batch는 빈 결과로 기록됩니다.")
-        return active_idx, issues, api_calls, token_usage
+        return active_idx, issues, claim_scores, api_calls, token_usage
 
     worker_count = min(_issue_judge_batch_max_workers(), max(1, len(jobs)))
     if worker_count > 1 and len(jobs) > 1:
@@ -434,8 +490,9 @@ def judge_issue_candidates_only(
     else:
         ordered_results = [_run_job(job) for job in jobs]
 
-    for _active_idx, issues, api_calls, token_usage in ordered_results:
+    for _active_idx, issues, claim_scores, api_calls, token_usage in ordered_results:
         all_issues.extend(issues)
+        all_claim_scores.extend(claim_scores)
         total_api += api_calls
         total_token_usage = cv._merge_token_usage(total_token_usage, token_usage)
 
@@ -445,7 +502,7 @@ def judge_issue_candidates_only(
         issue.clear()
         issue.update(ordered)
 
-    return all_issues, total_api, total_token_usage
+    return all_issues, all_claim_scores, total_api, total_token_usage
 
 
 def _split_judge_prompt_for_cache(prompt: str) -> tuple[str | None, str]:
