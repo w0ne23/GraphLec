@@ -22,7 +22,7 @@ const SCORE_LABELS = {
   final: '최종 점수',
 }
 
-const DISTRIBUTION_COLORS = ['var(--blue-fill)', 'var(--green-fill)', 'var(--amber-fill)', 'var(--red-fill)']
+const DISTRIBUTION_COLORS = ['var(--chart-blue)', 'var(--chart-green)', 'var(--chart-amber)', 'var(--chart-red)']
 const ISSUE_TYPE_SCORE_KEYS = ['factual_error', 'temporal_error', 'confusing_explanation', 'scope_overclaim']
 
 const ROW_META_TONE_CLASS = {
