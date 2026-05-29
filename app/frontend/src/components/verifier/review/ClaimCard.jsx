@@ -11,6 +11,29 @@ import {
   uniqueDetailValue,
 } from './verifierReviewUtils'
 
+const ISSUE_CHIP_CLASS = {
+  confusing_explanation: 'vf-chip--confusing_explanation',
+  factual_error: 'vf-chip--factual_error',
+  outdated: 'vf-chip--outdated',
+  scope_error: 'vf-chip--scope_error',
+  scope_overclaim: 'vf-chip--scope_overclaim',
+  simple_factual_error: 'vf-chip--simple_factual_error',
+  temporal_error: 'vf-chip--temporal_error',
+}
+
+const SCORE_CHIP_CLASS = {
+  agree: 'vf-chip--score-agree',
+  disagree: 'vf-chip--score-disagree',
+  inconclusive: 'vf-chip--score-inconclusive',
+  professor_check: 'vf-chip--score-professor_check',
+  rejected: 'vf-chip--score-rejected',
+  review_needed: 'vf-chip--score-review_needed',
+}
+
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
 function DetailRow({ label, value }) {
   if (value === undefined || value === null || value === '') return null
   return (
@@ -41,7 +64,7 @@ function TranscriptText({ text, highlightText }) {
 function WatchLocationRow({ canWatch, onWatch }) {
   if (!canWatch) return null
   return (
-    <div className="vf-detail-row vf-watch-location-row">
+    <div className="vf-detail-row">
       <dt>영상 위치</dt>
       <dd>
         <button className="vf-transcript-toggle vf-transcript-toggle--button" type="button" onClick={onWatch}>
@@ -57,51 +80,28 @@ function TranscriptRow({ contexts, highlightText }) {
   const items = asArray(contexts).filter(context => context?.text)
   if (!items.length) return null
 
-  function handleToggleKeyDown(event, nextOpen) {
-    if (event.key !== 'Enter' && event.key !== ' ') return
-    event.preventDefault()
-    setOpen(nextOpen)
-  }
-
   return (
     <div className="vf-detail-row vf-transcript-row">
       <dt>원문</dt>
       <dd>
-        {!open && (
-          <span
-            className="vf-transcript-toggle"
-            role="button"
-            tabIndex={0}
-            onClick={() => setOpen(true)}
-            onKeyDown={event => handleToggleKeyDown(event, true)}
-          >
-            원문 보기 ▼
-          </span>
-        )}
+        <button
+          type="button"
+          className="vf-transcript-toggle vf-transcript-toggle--button"
+          aria-expanded={open}
+          onClick={() => setOpen(prev => !prev)}
+        >
+          {open ? '접기 ▲' : '원문 보기 ▼'}
+        </button>
         {open && (
           <div className="vf-transcript-body">
             <div className="vf-transcript-list">
-              {items.map((context, idx) => {
-                const isLast = idx === items.length - 1
-                return (
-                  <p key={`${context.context_id || context.slide_number || 'transcript'}-${idx}`}>
-                    <span className="vf-transcript-text">
-                      <TranscriptText text={context.text} highlightText={highlightText} />
-                    </span>
-                    {isLast && (
-                      <span
-                        className="vf-transcript-toggle vf-transcript-toggle--collapse"
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => setOpen(false)}
-                        onKeyDown={event => handleToggleKeyDown(event, false)}
-                      >
-                        접기 ▲
-                      </span>
-                    )}
-                  </p>
-                )
-              })}
+              {items.map((context, idx) => (
+                <p key={`${context.context_id || context.slide_number || 'transcript'}-${idx}`}>
+                  <span className="vf-transcript-text">
+                    <TranscriptText text={context.text} highlightText={highlightText} />
+                  </span>
+                </p>
+              ))}
             </div>
           </div>
         )}
@@ -174,16 +174,18 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
   const evidenceInContext = uniqueDetailValue(claim.evidence_in_context, [claim.issue, whyWrong])
   const hasClaimChips = displayIssueKey || hasCrosscheckScore
   const locationLabel = [claim.scene_label, claim.slide_title].filter(Boolean).join(' ')
+  const issueChipClass = ISSUE_CHIP_CLASS[displayIssueKey]
+  const scoreChipClass = SCORE_CHIP_CLASS[crosscheckStatus]
 
   return (
-    <article className={`vf-claim-card ${expanded ? 'vf-claim-card--expanded' : ''}`}>
+    <article className={cx('vf-claim-card', expanded && 'vf-claim-card--expanded')}>
       <div className="vf-claim-summary">
         <button className="vf-claim-main" onClick={onToggle}>
           {hasClaimChips && (
             <div className="vf-chip-row">
-              {displayIssueKey && <span className={`vf-chip vf-chip--${displayIssueKey}`}>{displayIssueLabel}</span>}
+              {displayIssueKey && <span className={cx('vf-chip', issueChipClass)}>{displayIssueLabel}</span>}
               {hasCrosscheckScore && (
-                <span className={`vf-chip vf-chip--score vf-chip--score-${crosscheckStatus || 'unknown'}`}>
+                <span className={cx('vf-chip', 'vf-chip--score', scoreChipClass)}>
                   {scoreLabel(claim.crosscheck_score)}
                 </span>
               )}
@@ -202,7 +204,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             )}
           </div>
           <span
-            className={`vf-claim-toggle ${expanded ? 'vf-claim-toggle--open' : ''}`}
+            className={cx('vf-claim-toggle', expanded && 'vf-claim-toggle--open')}
             aria-hidden="true"
           />
         </button>

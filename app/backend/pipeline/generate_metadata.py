@@ -1245,7 +1245,7 @@ def _gemini(prompt: str) -> str:
         from .cost_report import record_model_call
 
         record_model_call(
-            stage="graph_generate_metadata",
+            stage="stage8_metadata",
             provider="google",
             model=MODEL,
             response=resp,

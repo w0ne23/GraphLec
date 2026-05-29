@@ -369,7 +369,7 @@ def _filter_topic_keywords_by_llm(segments: list[dict], candidate_keywords: set[
             from .cost_report import record_model_call
 
             record_model_call(
-                stage="preprocess_process_audio_emphasis_keyword",
+                stage="stage3b_emphasis_keyword",
                 provider="google",
                 model=GEMINI_GENERATIVE_MODEL,
                 response=response,

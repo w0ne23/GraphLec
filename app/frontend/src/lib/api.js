@@ -1,13 +1,12 @@
 const API_BASE = '/api'
 const RECOMMENDER_BASE = import.meta.env.VITE_RECOMMENDER_API_BASE || '/recommender-api'
 
-export async function uploadLecture({ file, title, category, description, workflowMode = 'legacy_full' }) {
+export async function uploadLecture({ file, title, category, description }) {
   const formData = new FormData();
   formData.append('video', file);
   formData.append('title', title);
   formData.append('category', category);
   formData.append('description', description);
-  formData.append('workflow_mode', workflowMode);
 
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',
@@ -23,7 +22,6 @@ export async function uploadLecture({ file, title, category, description, workfl
   return {
     id: data.id,
     job_id: data.job_id,
-    job_type: data.job_type,
     title: data.title || title,
     category: data.category || category,
     description: data.description || description,
@@ -71,7 +69,6 @@ async function _fetchResults(params) {
       items: items.map(lec => ({
         id: lec.id,
         job_id: lec.job_id,
-        job_type: lec.job_type,
         title: lec.title || 'Untitled',
         category: lec.category || '기타',
         status: lec.status,
@@ -128,28 +125,6 @@ export async function retryLecture(lectureId) {
   const data = await res.json();
   // 새로 생성된 job_id를 반환 — 프론트에서 SSE 재연결에 사용
   return { job_id: data.job_id };
-}
-
-export async function approveLectureUpload(lectureId) {
-  const res = await fetch(`${API_BASE}/jobs/${lectureId}/approve`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Approve failed');
-  }
-  return res.json();
-}
-
-export async function rejectLectureUpload(lectureId) {
-  const res = await fetch(`${API_BASE}/jobs/${lectureId}/reject`, {
-    method: 'POST',
-  });
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Reject failed');
-  }
-  return res.json();
 }
 
 export async function getLectureGraph(lectureId) {

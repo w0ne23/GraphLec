@@ -4,6 +4,10 @@ import {
   formatPercent,
 } from './verifierReviewUtils'
 
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
 function TypoItem({ typo }) {
   const candidates = asArray(typo.correction_candidates)
   const runCount = Number(typo.run_count || 0)
@@ -36,8 +40,8 @@ function TypoItem({ typo }) {
 
 export default function SlideTypoCard({ group, review = false }) {
   return (
-    <article className={`vf-typo-slide-card ${review ? 'vf-typo-slide-card--review' : ''}`}>
-      <div className={`vf-typo-slide-layout ${group.imageUrl ? '' : 'vf-typo-slide-layout--no-image'}`}>
+    <article className={cx('vf-typo-slide-card', review && 'vf-typo-slide-card--review')}>
+      <div className={cx('vf-typo-slide-layout', !group.imageUrl && 'vf-typo-slide-layout--no-image')}>
         {group.imageUrl && (
           <div className="vf-typo-slide-image">
             <img src={group.imageUrl} alt={`Slide ${group.slideNumber}`} loading="lazy" />
@@ -48,7 +52,7 @@ export default function SlideTypoCard({ group, review = false }) {
             <strong>slide {group.slideNumber}</strong>
             <span>{group.items.length}건</span>
           </div>
-          <div className="vf-typo-items">
+          <div>
             {group.items.map(typo => (
               <TypoItem
                 key={`${group.key}-${typo.problematic_text}-${typo.corrected_text}-${typo._typoIndex}`}

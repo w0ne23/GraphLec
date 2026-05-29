@@ -14,9 +14,23 @@ import {
   matchesIssueFilter,
 } from './verifierReviewUtils'
 
+const SECTION_TONE_CLASS = {
+  review: 'vf-section--review',
+  typo: 'vf-section--typo',
+}
+
+const REVIEW_TAB_CLASS = {
+  review: 'vf-review-tab--review',
+  typos: 'vf-review-tab--typos',
+}
+
+function cx(...classNames) {
+  return classNames.filter(Boolean).join(' ')
+}
+
 function ReviewSection({ title, count, tone = '', empty, children }) {
   return (
-    <section className={`vf-section ${tone ? `vf-section--${tone}` : ''}`}>
+    <section className={cx('vf-section', SECTION_TONE_CLASS[tone])}>
       <div className="vf-section-head">
         <h2>{title}</h2>
         <span>{count}</span>
@@ -34,7 +48,11 @@ function IssueTypeBreakdown({ items, activeFilter = 'all', onFilterChange }) {
         const count = counts[filter.key] || 0
         return (
           <button
-            className={`vf-type-pill ${activeFilter === filter.key ? 'vf-type-pill--active' : ''} ${count ? '' : 'vf-type-pill--empty'}`}
+            className={cx(
+              'vf-type-pill',
+              activeFilter === filter.key && 'vf-type-pill--active',
+              !count && 'vf-type-pill--empty',
+            )}
             key={filter.key}
             onClick={() => onFilterChange?.(activeFilter === filter.key ? 'all' : filter.key)}
           >
@@ -64,13 +82,13 @@ function SortControls({ value, onChange }) {
   return (
     <div className="vf-sort-controls" aria-label="정렬 방식">
       <button
-        className={value === 'utterance' ? 'vf-sort-btn vf-sort-btn--active' : 'vf-sort-btn'}
+        className={cx('vf-sort-btn', value === 'utterance' && 'vf-sort-btn--active')}
         onClick={() => onChange('utterance')}
       >
         발화순
       </button>
       <button
-        className={value === 'score' ? 'vf-sort-btn vf-sort-btn--active' : 'vf-sort-btn'}
+        className={cx('vf-sort-btn', value === 'score' && 'vf-sort-btn--active')}
         onClick={() => onChange('score')}
       >
         신뢰도순
@@ -93,7 +111,7 @@ function VerifierReviewTopbar({ onBack }) {
 }
 
 function reviewTabClassName(tab, activeTab) {
-  return `vf-review-tab vf-review-tab--${tab} ${activeTab === tab ? 'vf-review-tab--active' : ''}`
+  return cx('vf-review-tab', REVIEW_TAB_CLASS[tab], activeTab === tab && 'vf-review-tab--active')
 }
 
 function VerifierReviewHeader({
@@ -103,7 +121,6 @@ function VerifierReviewHeader({
   typoCount,
   onSelectTab,
   onComplete,
-  onReject,
 }) {
   return (
     <div className="vf-review-header">
@@ -126,11 +143,6 @@ function VerifierReviewHeader({
           <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
             검토 완료
           </button>
-          {onReject && (
-            <button className="vf-cancel-btn vf-review-reject-btn" onClick={onReject}>
-              업로드 거절
-            </button>
-          )}
         </div>
       </div>
     </div>
@@ -467,7 +479,6 @@ export default function VerifierReviewPanel({ flow }) {
             typoCount={typoCount}
             onSelectTab={selectTab}
             onComplete={() => setShowNextConfirm(true)}
-            onReject={actions.rejectUpload}
           />
           <div className="vf-review-content">
             {flow.isVideoMode && (
