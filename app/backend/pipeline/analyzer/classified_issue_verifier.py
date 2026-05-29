@@ -491,10 +491,13 @@ def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
 
 def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
     first = items[0] if items else {}
-    issue = first.get("issue") if isinstance(first.get("issue"), dict) else {}
-    location = issue.get("location") if isinstance(issue.get("location"), dict) else {}
     merged_contexts: dict[str, dict[str, Any]] = {}
+    slides: dict[str, dict[str, Any]] = {}
     for item in items:
+        slide = item.get("slide") if isinstance(item.get("slide"), dict) else {}
+        slide_number = slide.get("slide_number")
+        if slide_number not in (None, "", [], {}):
+            slides[str(slide_number)] = slide
         context_bundle = item.get("context_bundle") if isinstance(item.get("context_bundle"), dict) else {}
         for context in context_bundle.get("window_contexts", []) or []:
             if not isinstance(context, dict):
@@ -506,6 +509,7 @@ def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
     ordered_contexts = sorted(
         merged_contexts.values(),
         key=lambda item: (
+            int(item.get("slide_number", 0) or 0),
             int(item.get("context_index", 0) or 0),
             str(item.get("context_id") or ""),
         ),
@@ -513,8 +517,10 @@ def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "domain": first.get("domain", ""),
         "subdomain": first.get("subdomain", ""),
-        "location": {"slide_number": location.get("slide_number")},
-        "slide": first.get("slide", {}),
+        "slides": sorted(
+            slides.values(),
+            key=lambda item: int(item.get("slide_number", 0) or 0),
+        ),
         "context_bundle": {
             "current_slide_transcript": _joined_context_text(ordered_contexts),
             "previous_slide_tail_contexts": [],
@@ -524,27 +530,13 @@ def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _prompt_payload(items: list[dict[str, Any]]) -> str:
-    return (
-        "batch_context:\n"
-        f"{json.dumps(_prompt_batch_context(items), ensure_ascii=False, indent=2)}\n\n"
-        "issues:\n"
-        f"{json.dumps([_prompt_issue_brief(item) for item in items], ensure_ascii=False, indent=2)}"
-    )
-
-
-def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str) -> str:
-    description = CATEGORY_DESCRIPTIONS.get(category, "")
-    score_guide = CATEGORY_SCORE_GUIDES.get(category, {})
-    rows = [_prompt_issue_brief(item) for item in items]
-    return f"""당신은 강의 verifier의 최종 FACT check 심사자입니다.
-
-
-def _prompt_payload(items: list[dict[str, Any]]) -> str:
-    return (
-        "batch_context:\n"
-        f"{json.dumps(_prompt_batch_context(items), ensure_ascii=False, indent=2)}\n\n"
-        "issues:\n"
-        f"{json.dumps([_prompt_issue_brief(item) for item in items], ensure_ascii=False, indent=2)}"
+    return json.dumps(
+        {
+            "batch_context": _prompt_batch_context(items),
+            "issues": [_prompt_issue_brief(item) for item in items],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -580,78 +572,6 @@ def _response_contract() -> str:
 - slide_text_observation에는 slide.t1_structure나 슬라이드 표/대비 항목에서 무엇을 읽었는지 쓰세요. 슬라이드가 실질 근거가 아니면 빈 문자열로 두세요.
 - score_basis는 세 점수 각각을 왜 그렇게 줬는지 분리해서 작성하세요. 같은 문장을 복붙하지 말고, 각 점수축의 판단 이유를 따로 쓰세요.
 - 바로 뒤 또는 같은 슬라이드의 설명이 같은 대상/관계/조건을 정확히 풀어주면 context_unresolved를 낮게 주세요."""
-
-공통 문맥 해소 판단 순서:
-0. resolved_claim과 claim_text/source_context의 관계를 먼저 확인하세요.
-   resolved_claim이 source_context의 최종 전달 의미를 올바르게 정리한 문장이고,
-   claim_text의 어색함이 말실수, 전사 흔들림, 즉시 재표현, 자기수정 수준이라면
-   claim_text의 표면적 어색함만으로 점수를 높이지 마세요.
-   반대로 resolved_claim이 source_context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
-   resolved_claim의 강해진 부분을 그대로 믿지 말고 source_context 기준으로 낮게 판단하세요.
-
-1. 먼저 target context 안에서 claim이 실제로 어떤 의미로 사용되었는지 판단하세요.
-2. 바로 앞뒤 context가 같은 대상, 같은 관계, 같은 조건을 설명하는 경우에만 해소 근거로 사용하세요.
-3. 문맥이 단순히 같은 주제를 말하거나 일반 배경을 제공하는 정도라면 해소 근거로 보지 마세요.
-4. 문맥이 claim의 강한 표현을 예시, 대비, 강조, 교육적 단순화로 좁혀 주면 context_resolution을 높게 주세요.
-5. 반대로 문맥이 같은 강한 표현을 반복하거나 강화하면 context_resolution을 낮게 주세요.
-6. 문맥이 양쪽으로 읽히면, claim 자체가 일반적으로 맞는 설명인지 먼저 보세요. 일반적으로 맞는 설명이면 해소 쪽으로, 일반적으로 틀린 설명이면 미해소 쪽으로 판단하세요.
-7. slide_text는 target claim을 해석하고 문맥 해소 여부를 판단하기 위한 보조 근거입니다.
-   slide_text에 관련 개념이나 강한 표현이 있다는 이유만으로 is_valid_issue를 높이지 마세요.
-   slide_text가 target claim의 대상, 관계, 조건, 범위를 더 정확하게 설명하면 context_resolution을 높게 주어 issue를 낮추세요.
-   다만 slide_text 자체가 target claim과 같은 잘못된 명제를 직접 반복하거나 강화할 때만 issue를 높이는 근거로 사용할 수 있습니다.
-8. 잘못된 용어/분류명을 직접 발화한 경우, 뒤에서 상위 범주나 포함 관계를 설명하더라도 그 설명이 해당 용어/분류명 자체를 바로잡는지 확인하세요.
-   해당 용어가 직접 정정되지 않았고, 학생이 그 대상을 잘못된 범주명으로 외울 가능성이 남으면 context_resolution을 낮게 주세요.
-   다만 뒤 문맥이나 slide_text가 같은 대상을 더 정확한 용어로 명시하고, 잘못된 용어가 단순 말실수나 재표현 과정으로 해소되면 context_resolution을 높게 줄 수 있습니다.
-   단, 영문/외래어 용어의 한글 발음 표기, 음차, 전사 흔들림만 있고 문맥상 지칭하는 원어와 개념이 명확하면 잘못된 용어/분류명 오류로 보지 마세요.
-9. 수치 claim에서 약, 한, 대략, 정도, 조금 같은 근사 표현이 있고, 해당 수치가 핵심 학습 대상이 아니라 보조 설명, 감각적 환산, 예시로 쓰인 경우에는 정확한 수치와 차이가 있어도 일반적으로 통용되는 근사인지 먼저 판단하세요.
-   일반적으로 통용되는 근사이면 사실 오류로 높게 채점하지 말고, 문맥상 정확한 수치 판단이 핵심일 때만 높게 채점하세요.
-
-입력으로 제공되는 정보:
-- claim의 도메인/서브도메인
-- resolved_claim과 원문 claim_text (전사본에서, claim단위로 구성하여 제공, resolved_claim은 지시어를 보강한 claim, claim_text는 원문기반 claim)
-- 해당 context와 앞뒤 context (전사본을 문맥 단위로 나누어 제공)
-- 해당 슬라이드의 slide_text(merged_clean에서 제공되는 기본 슬라이드 텍스트)
-- 이전 분류 단계의 weighted_scores와 low_margin 정보
-
-출력 점수:
-- is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0 issue일수록 1에 수렴.
-- category_severity: 이 분류 안에서 오류가 얼마나 심각한지. 0.0~1.0 심각할수록 1에 수렴.
-- context_resolution: 제공된 문맥이 issue를 얼마나 해소하는지. 0.0은 전혀 해소 안 됨, 1.0은 거의 완전히 해소됨.
-
-판정 라벨:
-- valid_issue: 이 분류 기준에서 유효한 issue
-- partially_resolved: issue 가능성은 있으나 문맥으로 일부 해소됨
-- not_issue: 이 분류 기준에서는 issue가 아님
-- insufficient_context: 제공 자료만으로 판단하기 어려움
-
-중요:
-- 모든 입력 id에 대해 judgments 항목을 하나씩 포함하세요.
-- 응답은 JSON 객체 하나만 출력하세요.
-- 점수는 모두 0.0 이상 1.0 이하 숫자여야 합니다.
-- reason은 한두 문장으로 쓰되, 반드시 다음 순서로 작성하세요: 1) claim이 일반 도메인 지식 기준으로 맞는지/틀린지, 2) 틀렸다면 현재 분류 기준 때문에 틀린 것인지, 3) 제공 문맥이 이를 해소했는지.
-- minimal_fix는 가능하면 claim을 어떻게 완화/수정하면 되는지 짧게 쓰고, 없으면 빈 문자열로 두세요.
-- 문맥이 issue를 해소하는 정도는 주로 context_resolution에 반영하세요.
-- 문맥 해소를 이유로 is_valid_issue와 category_severity를 동시에 과도하게 낮추지 마세요.
-- 다만 문맥을 포함했을 때 애초에 issue가 성립하지 않는다면 is_valid_issue도 낮출 수 있습니다.
-
-```json
-{{
-  "judgments": [
-    {
-      "id": "입력 id",
-      "judgment": "valid_issue | partially_resolved | not_issue | insufficient_context",
-      "is_valid_issue": 0.0,
-      "reason": "실제 전달 명제가 맞는지/틀린지와 C형 판단 이유 1문장",
-      "evidence": "판단에 직접 사용한 context_id 또는 짧은 원문 근거"
-    }
-  ]
-}
-
-C형 출력 규칙:
-- is_valid_issue는 0.0 이상 1.0 이하 숫자입니다.
-- reason은 한 문장으로만 쓰세요.
-- evidence는 실제로 본 전사 문맥 근거만 짧게 쓰세요.
-- category_severity, context_unresolved, score_basis, slide_text_observation, minimal_fix는 출력하지 마세요."""
 
 
 def _build_factual_error_prompt(items: list[dict[str, Any]], current_date: str) -> str:
