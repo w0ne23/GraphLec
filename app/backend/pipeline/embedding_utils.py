@@ -58,7 +58,7 @@ def _embed_with_retry(
                     else len(str(contents))
                 )
                 record_model_call(
-                    stage="graph_lance_embedding" if task_type == "RETRIEVAL_DOCUMENT" else "embedding_query",
+                    stage="stage7_lance_embedding" if task_type == "RETRIEVAL_DOCUMENT" else "embedding_query",
                     provider="google",
                     model=model,
                     response=r,

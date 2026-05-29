@@ -42,13 +42,12 @@ def _resolve_stage_model(stage: str) -> str:
     judge_model = os.getenv("VERIFIER_CLAIM_JUDGE_MODEL", VERIFIER_CLAIM_JUDGE_MODEL).strip()
     slide_error_model = os.getenv("VERIFIER_SLIDE_ERROR_MODEL", VERIFIER_SLIDE_ERROR_MODEL).strip()
     strong = judge_model or _default_judge_model(base)
-    stage = _normalize_usage_stage(stage)
 
-    if stage == "verifier_extract_claims":
+    if stage == "extract":
         return extract_model or base
-    if stage == "verifier_judge_issues":
+    if stage == "judge":
         return strong
-    if stage == "verifier_check_slide_errors":
+    if stage == "slide_error":
         return slide_error_model or strong
     return base
 
@@ -133,17 +132,7 @@ def _supports_json_object_response_format(model: str) -> bool:
     )
 
 
-TOKEN_USAGE_STAGES = (
-    "verifier_extract_claims",
-    "verifier_judge_issues",
-    "verifier_check_slide_errors",
-)
-TOKEN_USAGE_STAGE_ALIASES = {
-    "extract": "verifier_extract_claims",
-    "judge": "verifier_judge_issues",
-    "issue_judge": "verifier_judge_issues",
-    "slide_error": "verifier_check_slide_errors",
-}
+TOKEN_USAGE_STAGES = ("extract", "judge", "slide_error")
 TOKEN_USAGE_FIELDS = (
     "input_tokens",
     "output_tokens",
@@ -153,11 +142,6 @@ TOKEN_USAGE_FIELDS = (
     "cache_creation_input_tokens",
     "total_tokens",
 )
-
-
-def _normalize_usage_stage(stage: str) -> str:
-    stage = str(stage or "").strip()
-    return TOKEN_USAGE_STAGE_ALIASES.get(stage, stage)
 
 
 def _new_token_bucket() -> dict:
@@ -314,12 +298,10 @@ def _merge_token_usage(*usages: dict) -> dict:
         if usage.get("stage"):
             _add_call_usage(merged, usage)
             continue
-        source_stages = set(TOKEN_USAGE_STAGES) | set(TOKEN_USAGE_STAGE_ALIASES)
-        for source_stage in source_stages:
-            bucket = usage.get(source_stage)
+        for stage in TOKEN_USAGE_STAGES:
+            bucket = usage.get(stage)
             if not isinstance(bucket, dict):
                 continue
-            stage = _normalize_usage_stage(source_stage)
             for field in TOKEN_USAGE_FIELDS:
                 merged[stage][field] += _safe_int(bucket.get(field))
 
@@ -336,7 +318,7 @@ def _add_call_usage(token_usage: dict, call_usage: dict) -> dict:
     if not isinstance(call_usage, dict):
         return token_usage
 
-    stage = _normalize_usage_stage(call_usage.get("stage", ""))
+    stage = str(call_usage.get("stage", "") or "")
     if not stage:
         return token_usage
     if stage not in token_usage:
