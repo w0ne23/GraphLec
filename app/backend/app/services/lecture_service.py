@@ -17,7 +17,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
+from app.models import (
+    ACTIVE_STATUSES,
+    JOB_TYPE_LEGACY_FULL,
+    Lecture,
+    ProcessingJob,
+    GraphSession,
+    ChatSession,
+    ChatMessage,
+)
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -49,6 +57,7 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
 
     res = {
         "job_id": str(job.id),
+        "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
         "status": job.status,
         "current_stage": job.current_stage,
         "error_message": job.error_message,
@@ -108,12 +117,129 @@ def _read_json_file(path: Path) -> dict:
     return {}
 
 
+def _read_jsonl_file(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    try:
+        if not path.exists() or path.stat().st_size <= 0:
+            return rows
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            item = json.loads(line)
+            if isinstance(item, dict):
+                rows.append(item)
+    except Exception:
+        return []
+    return rows
+
+
 def _first_existing_json(paths: list[Path]) -> dict:
     for path in paths:
         data = _read_json_file(path)
         if data:
             return data
     return {}
+
+
+def _local_storage_path(value: Any) -> Path | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if path.exists():
+        return path
+    normalized = raw.replace("\\", "/")
+    marker = "local_storage/"
+    if marker in normalized:
+        candidate = Path(LOCAL_STORAGE_DIR) / normalized.split(marker, 1)[1]
+        if candidate.exists():
+            return candidate
+    if normalized.startswith("/files/"):
+        candidate = Path(LOCAL_STORAGE_DIR) / normalized.removeprefix("/files/")
+        if candidate.exists():
+            return candidate
+    return path
+
+
+def _load_verifier_artifacts(data: dict, output_dir: Path, analyzer_dir: Path, stem: str) -> dict:
+    artifact_paths = data.get("classified_issue_artifacts", {}) or {}
+
+    def artifact_json(key: str, *fallbacks: Path) -> dict:
+        candidates: list[Path] = []
+        path = _local_storage_path(artifact_paths.get(key))
+        if path:
+            candidates.append(path)
+        candidates.extend(fallbacks)
+        return _first_existing_json(candidates)
+
+    def artifact_jsonl(key: str, *fallbacks: Path) -> list[dict]:
+        candidates: list[Path] = []
+        path = _local_storage_path(artifact_paths.get(key))
+        if path:
+            candidates.append(path)
+        candidates.extend(fallbacks)
+        for candidate in candidates:
+            rows = _read_jsonl_file(candidate)
+            if rows:
+                return rows
+        return []
+
+    issue_judge_summary = artifact_json(
+        "issue_judge_summary",
+        analyzer_dir / f"{stem}_issue_judge_summary.json",
+    )
+    issue_judge_compare_path = _local_storage_path(issue_judge_summary.get("issue_judge_comparison_path"))
+    issue_judge_compare = _first_existing_json([
+        path for path in [
+            issue_judge_compare_path,
+            analyzer_dir / f"{stem}_issue_judge_compare.json",
+        ]
+        if path
+    ])
+
+    artifacts = {
+        "urls": {
+            key: make_file_url(str(path)) if path else None
+            for key, path in artifact_paths.items()
+        },
+        "mergedClean": artifact_json(
+            "merged_clean",
+            analyzer_dir / f"{stem}_merged_clean.json",
+        ),
+        "claims": artifact_json(
+            "claims_json",
+            analyzer_dir / f"{stem}_claims.json",
+        ),
+        "claimsJsonl": artifact_jsonl(
+            "claims_jsonl",
+            analyzer_dir / f"{stem}_claims.jsonl",
+        ),
+        "issueJudge": artifact_json(
+            "issue_judge",
+            analyzer_dir / f"{stem}_issue_judge.json",
+        ),
+        "issueJudgeSummary": issue_judge_summary,
+        "issueJudgeCompare": issue_judge_compare,
+        "issueTypes": artifact_json(
+            "issue_types",
+            analyzer_dir / f"{stem}_issue_types.json",
+        ),
+        "classifiedIssues": artifact_json(
+            "classified_issues",
+            analyzer_dir / f"{stem}_classified_issues.json",
+        ),
+        "classifiedIssueVerifier": artifact_json(
+            "classified_issue_verifier",
+            analyzer_dir / f"{stem}_classified_issue_verifier.json",
+        ) or (data.get("views", {}) or {}).get("classified_issue_verifier", {}),
+        "slideErrors": artifact_json(
+            "slide_errors",
+            analyzer_dir / f"{stem}_slide_errors.json",
+        ),
+        "verification": data,
+    }
+    return artifacts
 
 
 def _float_val(value: Any, default: float = 0.0) -> float:
@@ -375,8 +501,6 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-ACTIVE_STATUSES = {'pending', 'running'}
-
 async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
         select(Lecture, ProcessingJob)
@@ -398,6 +522,8 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
         is_done = job_status == "done"
         out.append({
             "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "current_stage": job.current_stage if job and not is_done else None,
             "error_message": job.error_message if job else None,
@@ -425,6 +551,7 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
+        job_type=JOB_TYPE_LEGACY_FULL,
         status="pending",
         current_stage="Resuming pipeline...",
         error_message=None,
@@ -509,6 +636,7 @@ async def list_all_results(
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
@@ -550,6 +678,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     return {
         "id": str(lecture.id),
         "job_id": str(job.id) if job else None,
+        "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
         "category": info.get("domain") or lecture.category or "기타",
@@ -1537,6 +1666,7 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         _filter_served_slide_errors(data.get("slide_error_needs_review", []) or []),
         slide_image_urls,
     )
+    verifier_artifacts = _load_verifier_artifacts(data, output_dir, analyzer_dir, stem)
 
     return {
         "lecture_id": str(detail["id"]),
@@ -1595,6 +1725,7 @@ async def get_content_verification(db: AsyncSession, lecture_id: str) -> Dict[st
         "slide_error_path": data.get("slide_error_path", ""),
         "claim_decision_flow_summary": summary,
         "classified_issue_artifacts": data.get("classified_issue_artifacts", {}) or {},
+        "verifier_artifacts": verifier_artifacts,
         "classified_issue_verifier_path": data.get("classified_issue_verifier_path", ""),
         "classified_issue_verifier": (data.get("views", {}) or {}).get("classified_issue_verifier", {}),
     }

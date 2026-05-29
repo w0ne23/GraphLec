@@ -844,7 +844,7 @@ class T1Extractor:
                     from .cost_report import record_model_call
 
                     record_model_call(
-                        stage="stage2a_slide_textualizer",
+                        stage="preprocess_textualize_slides",
                         provider="google",
                         model=self.config.gemini_model,
                         response=response,

@@ -626,7 +626,7 @@ def _call_visual_json_model(
                     from .cost_report import record_model_call
 
                     record_model_call(
-                        stage="stage3a_annotation_analyzer",
+                        stage="preprocess_analyze_slide_annotations",
                         provider="openai",
                         model=model,
                         response=response,
@@ -681,7 +681,7 @@ def _call_visual_json_model(
         from .cost_report import record_model_call
 
         record_model_call(
-            stage="stage3a_annotation_analyzer",
+            stage="preprocess_analyze_slide_annotations",
             provider="google",
             model=model,
             response=response,

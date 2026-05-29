@@ -378,7 +378,7 @@ def _transcribe_chunks_from_audio(
                 "speech_ranges": [{"start": s, "end": e} for s, e in ranges],
             }
             record_audio_call(
-                stage="stage2b_transcriber",
+                stage="preprocess_transcribe_audio",
                 provider="groq",
                 model="whisper-large-v3-turbo",
                 audio_seconds=dur,
