@@ -373,7 +373,7 @@ def _issue_judge_payload(
 
     return {
         "schema_version": "issue_judge_model.v1",
-        "stage": "verifier_claim_to_issue_judge",
+        "stage": "claim_to_issue_judge",
         "model": model,
         "merged_path": str(merged_path),
         "source_claims_path": claims_path,
@@ -511,7 +511,7 @@ def _build_issue_judge_comparison(
 
     return {
         "schema_version": "issue_judge_comparison.v1",
-        "stage": "verifier_claim_to_issue_judge",
+        "stage": "claim_to_issue_judge",
         "models": models,
         "source_claims_path": claims_path,
         "issue_judge_result_paths": issue_judge_paths,
@@ -611,7 +611,7 @@ def _write_issue_judge_merged_output(
     }
     payload = {
         "schema_version": "issue_judge_merged.v1",
-        "stage": "verifier_claim_to_issue_judge_merged",
+        "stage": "claim_to_issue_judge_merged",
         "merged_path": str(merged_path),
         "source_claims_path": claims_path,
         "models": models,
@@ -774,7 +774,7 @@ def run_issue_judge_only(
 
     summary = {
         "schema_version": "issue_judge_summary.v1",
-        "stage": "verifier_claim_to_issue_judge",
+        "stage": "claim_to_issue_judge",
         "merged_path": str(merged_file),
         "source_claims_path": str(claims_path),
         "models": models,

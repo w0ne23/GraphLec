@@ -432,7 +432,7 @@ def _check_single_slide(
             image_bytes=img_bytes,
             thinking_budget=0,
             response_format=response_format,
-            stage="verifier_check_slide_errors",
+            stage="slide_error",
         )
         api_calls += 1
         cc._add_call_usage(token_usage, call_usage)
@@ -468,7 +468,7 @@ def detect_classified_slide_errors(
 
     _load_env()
     current_date = current_date or datetime.now().date().isoformat()
-    model = str(cc._resolve_stage_model("verifier_check_slide_errors") or "").strip()
+    model = str(cc._resolve_stage_model("slide_error") or "").strip()
     models = [model] if model else (models or _default_models())
     min_score = DEFAULT_MIN_SCORE if min_score is None else max(0.0, min(1.0, min_score))
 
@@ -595,7 +595,7 @@ def detect_classified_slide_errors(
 
     return {
         "schema_version": SCHEMA_VERSION,
-        "stage": "verifier_classified_slide_error_checker",
+        "stage": "classified_slide_error_checker",
         "generated_at": _now_iso(),
         "current_date": current_date,
         "merged_clean_path": str(merged_clean_path),

@@ -11,55 +11,11 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import (
-    JOB_STATUS_DONE,
-    JOB_STATUS_ERROR,
-    JOB_STATUS_REJECTED,
-    JOB_STATUS_WAITING_APPROVAL,
-    JOB_TYPE_DIRECT_UPLOAD,
-    JOB_TYPE_GRAPH_UPLOAD,
-    JOB_TYPE_LEGACY_FULL,
-    JOB_TYPE_VERIFIED_UPLOAD,
-    Lecture,
-    ProcessingJob,
-)
+from app.models import Lecture, ProcessingJob
 from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
-SSE_TERMINAL_STATUSES = {
-    JOB_STATUS_DONE,
-    JOB_STATUS_ERROR,
-    JOB_STATUS_WAITING_APPROVAL,
-    JOB_STATUS_REJECTED,
-}
-
-
-def _normalize_upload_job_type(value: str) -> str:
-    token = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
-    aliases = {
-        "legacy": JOB_TYPE_LEGACY_FULL,
-        "legacy_full": JOB_TYPE_LEGACY_FULL,
-        "direct": JOB_TYPE_DIRECT_UPLOAD,
-        "direct_upload": JOB_TYPE_DIRECT_UPLOAD,
-        "verified": JOB_TYPE_VERIFIED_UPLOAD,
-        "verify": JOB_TYPE_VERIFIED_UPLOAD,
-        "verified_upload": JOB_TYPE_VERIFIED_UPLOAD,
-    }
-    if token not in aliases:
-        raise HTTPException(status_code=400, detail="Invalid workflow_mode")
-    return aliases[token]
-
-
-async def _get_waiting_approval_job(db: AsyncSession, lecture_id: str) -> ProcessingJob:
-    job = await lecture_service.get_latest_job(db, lecture_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-    if job.status != JOB_STATUS_WAITING_APPROVAL:
-        raise HTTPException(status_code=409, detail="Lecture is not waiting for approval")
-    if (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) != JOB_TYPE_VERIFIED_UPLOAD:
-        raise HTTPException(status_code=409, detail="Latest job is not a verified upload")
-    return job
 
 
 @router.get("")
@@ -96,14 +52,13 @@ async def stream_job_status(
                     break
                 payload = {
                     "job_id": str(job.id),
-                    "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
                     "lecture_status": job.status,
                     "current_stage": job.current_stage,
                     "error_message": job.error_message,
                     "pipeline_stages": job.pipeline_stages or [],
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
-                if job.status in SSE_TERMINAL_STATUSES:
+                if job.status in ("done", "error"):
                     break
             except Exception as e:
                 logger.error(f"SSE error for lecture {lecture_id}: {e}")
@@ -122,10 +77,8 @@ async def create_job(
     title: str = Form(...),
     category: str = Form("컴퓨터 과학"),
     description: str = Form(""),
-    workflow_mode: str = Form(JOB_TYPE_LEGACY_FULL),
     db: AsyncSession = Depends(get_db),
 ):
-    job_type = _normalize_upload_job_type(workflow_mode)
     lecture_id = uuid.uuid4()
     base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
@@ -169,7 +122,6 @@ async def create_job(
         new_job = ProcessingJob(
             id=job_id,
             lecture_id=lecture_id,
-            job_type=job_type,
             status="pending",
         )
         db.add(new_job)
@@ -188,8 +140,6 @@ async def create_job(
         "title": final_title,
         "category": category,
         "description": description,
-        "job_id": str(new_job.id),
-        "job_type": new_job.job_type,
         "status": "pending",
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
@@ -201,39 +151,6 @@ async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
     if not success:
         raise HTTPException(status_code=404, detail="Lecture not found")
     return {"status": "success"}
-
-
-@router.post("/{lecture_id}/approve")
-async def approve_verified_upload(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    waiting_job = await _get_waiting_approval_job(db, lecture_id)
-    graph_job = ProcessingJob(
-        id=uuid.uuid4(),
-        lecture_id=waiting_job.lecture_id,
-        job_type=JOB_TYPE_GRAPH_UPLOAD,
-        status="pending",
-        current_stage="Graph upload pending",
-        error_message=None,
-        pipeline_stages=[],
-    )
-    db.add(graph_job)
-    await db.commit()
-    await db.refresh(graph_job)
-    return {
-        "status": "success",
-        "lecture_id": lecture_id,
-        "job_id": str(graph_job.id),
-        "job_type": graph_job.job_type,
-        "job_status": graph_job.status,
-    }
-
-
-@router.post("/{lecture_id}/reject")
-async def reject_verified_upload(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    await _get_waiting_approval_job(db, lecture_id)
-    success = await lecture_service.delete_lecture(db, lecture_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Lecture not found")
-    return {"status": "success", "lecture_id": lecture_id, "deleted": True}
 
 
 @router.post("/{lecture_id}/retry")
