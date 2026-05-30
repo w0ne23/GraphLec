@@ -8,6 +8,7 @@ import '../../styles/verifier.css'
 export default function VerifierDirectPage() {
   const { lectureId } = useParams()
   const flow = useVerifierRouteFlow(lectureId, 'direct')
+  const isDone = flow.phase === PHASES.DONE
 
   return (
     <div className="vf-page">
@@ -22,8 +23,14 @@ export default function VerifierDirectPage() {
             statusMessage={flow.currentStage || '업로드 파이프라인을 진행 중입니다.'}
             flowNodes={UPLOAD_PIPELINE_FLOW_NODES}
           />
-          <div className="vf-status-actions">
-            <button className="vf-cancel-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
+          <div className="vf-status-actions vf-status-actions--inline">
+            <button
+              className={isDone ? 'vf-reset-btn' : 'vf-cancel-btn'}
+              onClick={isDone ? flow.actions.reset : flow.actions.cancelUpload}
+              disabled={flow.isBusy}
+            >
+              {isDone ? '새 강의 업로드' : '업로드 취소'}
+            </button>
           </div>
         </div>
       </div>

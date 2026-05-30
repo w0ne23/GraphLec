@@ -44,6 +44,11 @@ PIPELINE_STAGE_KEYS = [
     "preprocess_textualize_transcribe",
     "preprocess_enrich_audio_annotation",
     "verifier_build_analyzer_input",
+    "verifier_claim_extraction",
+    "verifier_issue_judge",
+    "verifier_issue_classification",
+    "verifier_final_verification",
+    "verify_slide_errors",
     "verifier_run",
     "graph_classify_scene",
     "graph_fusion",
@@ -60,6 +65,26 @@ GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS = {
     "preprocess_enrich_audio_annotation",
 }
 
+PIPELINE_STAGE_LABELS = {
+    "preprocess_extract_media": "슬라이드 추출 및 오디오 품질 분석",
+    "preprocess_textualize_transcribe": "슬라이드 텍스트화 및 전체 전사",
+    "preprocess_enrich_audio_annotation": "필기 강조 및 오디오 후처리",
+    "verifier_build_analyzer_input": "검증 입력 데이터 구성",
+    "verifier_claim_extraction": "주장 후보 추출",
+    "verifier_issue_judge": "이슈 후보 판단",
+    "verifier_issue_classification": "이슈 유형 분류",
+    "verifier_final_verification": "최종 평가",
+    "verify_slide_errors": "슬라이드 오류 검사",
+    "verifier_run": "강의 내용 검증 실행",
+    "graph_classify_scene": "강의 구조 파악",
+    "graph_fusion": "데이터 통합",
+    "graph_triples": "그래프 데이터 생성",
+    "graph_lance_index": "벡터 검색 인덱스 생성",
+    "graph_graphrag_index": "GraphRAG 인덱스 생성",
+    "graph_metadata": "강의 메타데이터 생성",
+    "graph_recommender_index": "강의 추천 인덱스 생성",
+}
+
 
 def _initial_stage_state(job_type: str) -> dict[str, str]:
     stages = {key: "wait" for key in PIPELINE_STAGE_KEYS}
@@ -67,6 +92,17 @@ def _initial_stage_state(job_type: str) -> dict[str, str]:
         for key in GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS:
             stages[key] = "done"
     return stages
+
+
+def _stage_text(stage_key: str, status: str) -> str:
+    label = PIPELINE_STAGE_LABELS.get(stage_key, stage_key)
+    if status == "run":
+        return f"{label} 진행 중"
+    if status == "done":
+        return f"{label} 완료"
+    if status == "error":
+        return f"{label} 실패"
+    return f"{label} 대기 중"
 
 
 def pipeline_process(
@@ -107,7 +143,7 @@ def pipeline_process(
             if stage_key in stages_state:
                 stages_state[stage_key] = status
             stages_array = [{"stage": k, "status": v} for k, v in stages_state.items()]
-            stage_text   = f"Processing {stage_key}..." if status == "run" else f"Finished {stage_key}"
+            stage_text = _stage_text(stage_key, status)
             update_job_stage_sync(job_id, stages_array, stage_text)
             logger.info(f"[{job_id}] Progress: {stage_key} -> {status}")
 
@@ -122,7 +158,7 @@ def pipeline_process(
                     import pipeline.main as pipeline_main
 
                     init_array = [{"stage": k, "status": v} for k, v in stages_state.items()]
-                    update_job_stage_sync(job_id, init_array, "Starting pipeline")
+                    update_job_stage_sync(job_id, init_array, "파이프라인을 시작합니다.")
 
                     args = pipeline_main.get_parser().parse_args([
                         "--input",        str(video_path),
@@ -206,7 +242,7 @@ async def worker_loop():
                         job_type_val   = job["job_type"] or JOB_TYPE_LEGACY_FULL
                         await db.execute(text("""
                             UPDATE processing_jobs
-                            SET status = 'running', current_stage = 'Starting pipeline'
+                            SET status = 'running', current_stage = '파이프라인을 시작합니다.'
                             WHERE id = :id
                         """), {"id": job_id_val})
                         await db.commit()
@@ -257,9 +293,9 @@ async def worker_loop():
                             else JOB_STATUS_DONE
                         )
                         final_stage = (
-                            "Waiting approval"
+                            "검증 결과 확인 대기 중"
                             if final_status == JOB_STATUS_WAITING_APPROVAL
-                            else "Finished"
+                            else "분석이 완료되었습니다."
                         )
                         await db.execute(text("""
                             UPDATE processing_jobs
@@ -270,7 +306,7 @@ async def worker_loop():
                         logger.error(f"--- [Worker ERROR] {job_id_str}: {error} ---")
                         await db.execute(text("""
                             UPDATE processing_jobs
-                            SET status = 'error', error_message = :err, current_stage = 'Failed'
+                            SET status = 'error', error_message = :err, current_stage = '분석 중 오류가 발생했습니다.'
                             WHERE id = :id
                         """), {"id": job_id_val, "err": error})
                     await db.commit()

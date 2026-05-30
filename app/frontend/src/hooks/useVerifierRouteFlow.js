@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   approveLectureUpload,
+  deleteLecture,
   getLectureDetail,
   getLectureVerifier,
   retryGraphUpload,
@@ -76,36 +77,8 @@ function phaseFromStatus(status, jobType, routeKind) {
   return PHASES.PIPELINE1
 }
 
-const VERIFIER_RUN_VISUAL_STAGE_KEYS = [
-  'verifier_claim_extraction',
-  'verifier_issue_judge',
-  'verifier_issue_classification',
-  'verifier_final_verification',
-  'verify_slide_errors',
-]
-
 function stageStatus(stages, key) {
   return stages.find(stage => stage.stage === key)?.status ?? 'wait'
-}
-
-function expandVerifierRunStages(stages, phase, visualIndex) {
-  const rows = [...stages]
-  const verifierRunStatus = stageStatus(rows, 'verifier_run')
-  const verifierReady = phase === PHASES.VERIFY_READY || phase === PHASES.REVIEWED || phase === PHASES.UPLOAD_RESUME
-
-  VERIFIER_RUN_VISUAL_STAGE_KEYS.forEach((stage, index) => {
-    let status = 'wait'
-    if (verifierReady || verifierRunStatus === 'done') {
-      status = 'done'
-    } else if (verifierRunStatus === 'run') {
-      const activeIndex = Math.max(0, Math.min(VERIFIER_RUN_VISUAL_STAGE_KEYS.length - 1, visualIndex))
-      if (index < activeIndex) status = 'done'
-      if (index === activeIndex) status = 'run'
-    }
-    rows.push({ stage, status })
-  })
-
-  return normalizePipelineStages(rows)
 }
 
 export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
@@ -123,13 +96,8 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
-  const [verifierRunVisualIndex, setVerifierRunVisualIndex] = useState(0)
 
   const verifierArtifacts = useMemo(() => verifierArtifactsFromResult(verifier), [verifier])
-  const visiblePipelineStages = useMemo(
-    () => expandVerifierRunStages(pipelineStages, phase, verifierRunVisualIndex),
-    [phase, pipelineStages, verifierRunVisualIndex]
-  )
 
   function closeEventSource() {
     if (eventSourceRef.current) {
@@ -239,18 +207,6 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     return closeEventSource
   }, [lectureId, routeKind])
 
-  useEffect(() => {
-    if (phase !== PHASES.PIPELINE1 || stageStatus(pipelineStages, 'verifier_run') !== 'run') {
-      setVerifierRunVisualIndex(0)
-      return undefined
-    }
-
-    const timer = window.setTimeout(() => {
-      setVerifierRunVisualIndex(index => Math.min(VERIFIER_RUN_VISUAL_STAGE_KEYS.length - 1, index + 1))
-    }, 2000)
-    return () => window.clearTimeout(timer)
-  }, [phase, pipelineStages, verifierRunVisualIndex])
-
   async function continueUpload() {
     if (!lectureId || isBusy) return
     setIsBusy(true)
@@ -291,12 +247,30 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     }
   }
 
+  async function cancelUpload() {
+    if (!lectureId || isBusy) return
+    if (!window.confirm('업로드를 취소하고 생성된 파일을 삭제할까요?')) return
+
+    closeEventSource()
+    setIsBusy(true)
+    setErrorMessage('')
+
+    try {
+      await deleteLecture(lectureId)
+      navigate('/upload')
+    } catch (error) {
+      setIsBusy(false)
+      setErrorMessage(String(error?.message || error))
+      setPhase(PHASES.ERROR)
+    }
+  }
+
   return {
     phase,
     lecture,
     verifier,
     verifierArtifacts,
-    pipelineStages: visiblePipelineStages,
+    pipelineStages,
     currentStage,
     errorMessage,
     expandedClaimKey,
@@ -308,6 +282,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
       continueUpload,
       confirmReview: continueUpload,
       retryGraphGeneration,
+      cancelUpload,
       backToVerifyReady: () => navigate(`/upload/${lectureId}/progress`),
       reset: () => navigate('/upload'),
       toggleClaim: key => setExpandedClaimKey(prev => prev === key ? '' : key),

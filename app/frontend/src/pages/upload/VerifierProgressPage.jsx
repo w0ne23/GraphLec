@@ -37,7 +37,9 @@ export default function VerifierProgressPage() {
             flowNodes={VERIFY_PROGRESS_PIPELINE_FLOW_NODES}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            <button className="vf-cancel-btn" onClick={flow.actions.reset}>업로드 취소</button>
+            <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={flow.isBusy}>
+              업로드 취소
+            </button>
             <button
               className="vf-confirm-btn"
               disabled={!canOpenResult}

@@ -64,8 +64,8 @@ function VerifierUploadStep({ flow }) {
           </div>
         </div>
 
-        <button className="vf-submit-btn" onClick={actions.upload} disabled={!flow.file}>
-          다음
+        <button className="vf-submit-btn" onClick={actions.upload} disabled={!flow.file || flow.isBusy}>
+          {flow.isBusy ? '처리 중' : '다음'}
         </button>
       </div>
     </div>
@@ -83,12 +83,12 @@ function VerifyChoiceStep({ flow }) {
           <h1>{flow.title || flow.lecture.title}</h1>
         </div>
         <div className="vf-choice-grid">
-          <button className="vf-choice-card vf-choice-card--primary" onClick={actions.startVerify}>
+          <button className="vf-choice-card vf-choice-card--primary" onClick={actions.startVerify} disabled={flow.isBusy}>
             <span>권장</span>
-            <strong>검증하기</strong>
-            <em>검증 보고서를 생성한 뒤 결과 확인</em>
+            <strong>{flow.isBusy ? '검증 준비 중' : '검증하기'}</strong>
+            <em>{flow.isBusy ? '업로드 작업을 생성하고 있습니다' : '검증 보고서를 생성한 뒤 결과 확인'}</em>
           </button>
-          <button className="vf-choice-card" onClick={actions.skipVerify}>
+          <button className="vf-choice-card" onClick={actions.skipVerify} disabled={flow.isBusy}>
             <span>선택</span>
             <strong>검증 건너뛰기</strong>
             <em>검증 없이 다음 단계로 진행</em>

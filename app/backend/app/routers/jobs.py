@@ -139,7 +139,7 @@ async def create_job(
     except Exception as e:
         shutil.rmtree(input_dir, ignore_errors=True)
         logger.error(f"File save failed for lecture {lecture_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+        raise HTTPException(status_code=500, detail="업로드 파일을 저장하지 못했습니다.")
 
     try:
         new_lecture = Lecture(
@@ -168,7 +168,7 @@ async def create_job(
         await db.rollback()
         shutil.rmtree(input_dir, ignore_errors=True)
         logger.error(f"DB commit failed for lecture {lecture_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create job")
+        raise HTTPException(status_code=500, detail="업로드 작업을 생성하지 못했습니다.")
 
     return {
         "id": str(lecture_id),

@@ -134,6 +134,12 @@ export function useVerifierUploadFlow() {
     setPipelineStages(normalizePipelineStages())
   }
 
+  function setSubmittingState(message) {
+    setCurrentStage(message)
+    setErrorMessage('')
+    setIsBusy(true)
+  }
+
   async function loadVerifierResult(lectureId, fallbackLecture) {
     const [detailResult, verifierResult] = await Promise.allSettled([
       getLectureDetail(lectureId),
@@ -235,8 +241,7 @@ export function useVerifierUploadFlow() {
   async function startUpload(workflowMode, runningPhase) {
     if (!file || isBusy) return
     const uploadTitle = title.trim() || fileTitle(file)
-    setRunningState(
-      runningPhase,
+    setSubmittingState(
       workflowMode === 'verified_upload' ? '검증 파이프라인을 시작합니다.' : '업로드 파이프라인을 시작합니다.'
     )
 
@@ -262,7 +267,7 @@ export function useVerifierUploadFlow() {
     } catch (error) {
       setIsBusy(false)
       setErrorMessage(String(error.message || error))
-      setPhase(PHASES.ERROR)
+      setPhase(PHASES.VERIFY_CHOICE)
     }
   }
 

@@ -8,6 +8,7 @@ import '../../styles/verifier.css'
 export default function VerifierFinalizePage() {
   const { lectureId } = useParams()
   const flow = useVerifierRouteFlow(lectureId, 'finalize')
+  const isDone = flow.phase === PHASES.DONE
   const progressPhase = flow.phase === PHASES.DONE
     ? PHASES.DONE
     : flow.phase === PHASES.ERROR
@@ -27,7 +28,7 @@ export default function VerifierFinalizePage() {
             statusMessage={flow.currentStage || '나머지 파이프라인을 진행 중입니다.'}
             flowNodes={FINALIZE_PIPELINE_FLOW_NODES}
           />
-          <div className="vf-status-actions">
+          <div className="vf-status-actions vf-status-actions--inline">
             {flow.phase === PHASES.ERROR && (
               <button
                 className="vf-confirm-btn"
@@ -37,7 +38,13 @@ export default function VerifierFinalizePage() {
                 {flow.isBusy ? '재시도 중' : '그래프 생성 재시도'}
               </button>
             )}
-            <button className="vf-cancel-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
+            <button
+              className={isDone ? 'vf-reset-btn' : 'vf-cancel-btn'}
+              onClick={isDone ? flow.actions.reset : flow.actions.cancelUpload}
+              disabled={flow.isBusy}
+            >
+              {isDone ? '새 강의 업로드' : '업로드 취소'}
+            </button>
           </div>
         </div>
       </div>

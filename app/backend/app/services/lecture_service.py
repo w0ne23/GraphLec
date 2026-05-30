@@ -504,7 +504,7 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
         raise HTTPException(status_code=409, detail="No verified upload is waiting for approval")
 
     approval_job.status = JOB_STATUS_DONE
-    approval_job.current_stage = "Approved"
+    approval_job.current_stage = "승인 완료"
     approval_job.error_message = None
 
     graph_job = existing_graph_job
@@ -515,7 +515,7 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
             lecture_id=ident_uuid,
             job_type=JOB_TYPE_GRAPH_UPLOAD,
             status=JOB_STATUS_PENDING,
-            current_stage="Queued graph generation",
+            current_stage="그래프 생성을 대기 중입니다.",
             error_message=None,
             pipeline_stages=[],
         )
@@ -1764,7 +1764,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
     failed_graph_job = failed_graph_result.scalar_one_or_none()
     if failed_graph_job:
         failed_graph_job.status = JOB_STATUS_PENDING
-        failed_graph_job.current_stage = "Retrying graph generation"
+        failed_graph_job.current_stage = "그래프 생성을 다시 시작합니다."
         failed_graph_job.error_message = None
         failed_graph_job.pipeline_stages = []
         await db.commit()
@@ -1800,7 +1800,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
         lecture_id=ident_uuid,
         job_type=JOB_TYPE_GRAPH_UPLOAD,
         status=JOB_STATUS_PENDING,
-        current_stage="Queued graph retry",
+        current_stage="그래프 재시도를 대기 중입니다.",
         error_message=None,
         pipeline_stages=[],
     )
