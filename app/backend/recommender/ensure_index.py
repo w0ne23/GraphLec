@@ -7,8 +7,9 @@ from pathlib import Path
 import lancedb
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
-if str(_BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_ROOT))
+if str(_BACKEND_ROOT) in sys.path:
+    sys.path.remove(str(_BACKEND_ROOT))
+sys.path.insert(0, str(_BACKEND_ROOT))
 
 try:
     from recommender.build_index import TABLE_NAME, build_index, load_metadata

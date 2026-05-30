@@ -17,8 +17,8 @@ build_index.py
   import_graph.py → generate_metadata.py → build_index.py
 """
 
-import json
 import os
+import sys
 import time
 import argparse
 from pathlib import Path
@@ -31,6 +31,11 @@ load_dotenv()
 _client    = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_2"))
 MODEL_NAME = "gemini-embedding-001"
 TABLE_NAME = "lectures"
+
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+if str(_BACKEND_ROOT) in sys.path:
+    sys.path.remove(str(_BACKEND_ROOT))
+sys.path.insert(0, str(_BACKEND_ROOT))
 
 
 def _resolve_repo_root() -> Path:
@@ -71,20 +76,25 @@ def embed_texts(texts: list[str], batch_size: int = 20) -> list[list[float]]:
 
 
 def load_metadata(metadata_dir: Path) -> list[dict]:
-    if not metadata_dir.exists():
-        print(f"[build_index] 메타데이터 디렉토리 없음, 인덱스 구축 생략: {metadata_dir}")
-        return []
+    from recommender.recommender import MetadataCollection
+
+    collection = MetadataCollection(str(metadata_dir))
     records = []
-    files   = list(metadata_dir.glob("*_metadata.json"))
-    if not files:
-        raise FileNotFoundError(f"메타데이터 파일 없음: {metadata_dir}")
-    for path in files:
-        with open(path, encoding="utf-8") as f:
-            items = json.load(f)
-        if isinstance(items, dict):
-            items = [items]
-        records.extend(items)
+    for lec in collection.all():
+        records.append({
+            "video_id": lec.video_id,
+            "title": lec.title,
+            "domain": lec.domain,
+            "summary": lec.summary,
+            "keywords": lec.keywords,
+        })
     return records
+
+
+def _keyword_label(item) -> str:
+    if isinstance(item, dict):
+        return str(item.get("keyword") or item.get("term") or item.get("name") or "").strip()
+    return str(item or "").strip()
 
 
 def build_index(metadata_dir: str = DEFAULT_METADATA_DIR, db_dir: str = DEFAULT_DB_DIR):
@@ -102,7 +112,7 @@ def build_index(metadata_dir: str = DEFAULT_METADATA_DIR, db_dir: str = DEFAULT_
         for m in metas
     ]
     keyword_texts = [
-        " ".join(k["keyword"] for k in m.get("keywords", []))
+        " ".join(label for k in m.get("keywords", []) if (label := _keyword_label(k)))
         for m in metas
     ]
     summary_texts = [m.get("summary", "") for m in metas]
