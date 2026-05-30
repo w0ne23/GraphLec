@@ -52,12 +52,6 @@ def _context_ids(claim: dict) -> list[str]:
     return [cid] if cid else []
 
 
-def _claim_needs_context(claim: dict) -> bool:
-    if "needs_context" in claim:
-        return bool(claim.get("needs_context"))
-    return str(claim.get("resolution_status") or "").strip().lower() == "unresolved"
-
-
 def _build_shared_judge_context(contexts: list[dict], slide_ctx: dict) -> str:
     from . import claim_common as cv
 
@@ -118,10 +112,6 @@ def _build_issue_candidate_prompt(
             lines.append(
                 f"   antecedent_context_ids: {', '.join(str(x) for x in c.get('antecedent_context_ids') or [])}"
             )
-        if _claim_needs_context(c):
-            lines.append("   문맥필요: true")
-            if c.get("context_note"):
-                lines.append(f"   문맥비고: {c.get('context_note', '')}")
         claim_lines.append("\n".join(lines))
 
     return f"""당신은 강의 claim 목록에서 1차 issue 후보만 선별하는 판정자입니다.
@@ -201,8 +191,6 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
   "issues": [
     {{
       "claim_id": "CL0001",
-      "resolved_claim": "입력 claim의 resolved_claim을 그대로 복사",
-      "claim_text": "입력 claim의 claim_text를 그대로 복사",
       "basis_code": "definition_relation",
       "confidence": 0.0
     }}
@@ -220,8 +208,7 @@ confidence는 최종 오류 확률이 아니라, 위의 지침을 확인한 후,
 7. 문제가 없으면 {{"claim_scores": [...], "issues": []}}만 출력하세요.
 8. basis_code는 위 다섯 코드 중 하나만 출력하세요.
 9. issue, reason, candidate_reason, student_wrong_takeaway, wrong_claim 같은 설명/재작성 필드는 출력하지 마세요.
-10. resolved_claim과 claim_text는 절대 새로 쓰거나 정리하지 말고 입력 claim의 값을 그대로 복사하세요.
-   이 단계는 upstream claim 필드를 수정하는 단계가 아닙니다.
+10. issues에는 claim_id, basis_code, confidence만 출력하세요. claim_text/resolved_claim은 서버가 claim_id로 원본 claim에서 붙입니다.
 11. JSON 외 텍스트를 출력하지 마세요.
 """
 
@@ -241,7 +228,6 @@ def _order_issue_candidate_fields(issue: dict) -> dict:
         "start_time",
         "end_time",
         "claim_type",
-        "needs_context",
     )
     ordered = {key: issue[key] for key in preferred if key in issue}
     ordered.update({key: value for key, value in issue.items() if key not in ordered})
@@ -285,7 +271,6 @@ def _normalize_claim_scores(raw_scores: list, claims: list[dict]) -> list[dict]:
             "claim_type": claim.get("claim_type", ""),
             "basis_code": row.get("basis_code", ""),
             "confidence": _clamp_confidence(row.get("confidence")),
-            "needs_context": _claim_needs_context(claim),
         })
     return normalized
 
@@ -382,7 +367,6 @@ def _judge_issue_candidates(
                 "start_time": ref.get("start_time", source_claim.get("start_time")),
                 "end_time": ref.get("end_time", source_claim.get("end_time")),
                 "claim_type": source_claim.get("claim_type", ""),
-                "needs_context": _claim_needs_context(source_claim),
             }
             issues.append(_order_issue_candidate_fields(issue))
 

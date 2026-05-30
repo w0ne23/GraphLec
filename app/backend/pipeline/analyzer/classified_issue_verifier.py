@@ -430,8 +430,6 @@ def _context_window(
         "target_context_ids": context_ids,
         "current_slide_transcript": _joined_context_text(local_contexts),
         "window_contexts": [_compact_context(item) for item in local_contexts],
-        "previous_slide_tail_contexts": [],
-        "next_slide_head_contexts": [],
     }
 
 
@@ -480,8 +478,6 @@ def _prompt_issue_brief(item: dict[str, Any]) -> dict[str, Any]:
         "id": item.get("id"),
         "issue_id": issue.get("issue_id", ""),
         "claim_id": issue.get("claim_id", ""),
-        "category": item.get("category", ""),
-        "category_label": item.get("category_label", ""),
         "claim_text": issue.get("claim_text", ""),
         "resolved_claim": issue.get("resolved_claim", ""),
         "target_context_ids": context_bundle.get("target_context_ids", []),
@@ -522,8 +518,6 @@ def _prompt_batch_context(items: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "context_bundle": {
             "current_slide_transcript": _joined_context_text(ordered_contexts),
-            "previous_slide_tail_contexts": [],
-            "next_slide_head_contexts": [],
         },
     }
 
@@ -571,12 +565,12 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 오늘 날짜: {current_date}
 
 공통 문맥 해소 판단 순서:
-0. resolved_claim과 claim_text/source_context의 관계를 먼저 확인하세요.
-   resolved_claim이 source_context의 최종 전달 의미를 올바르게 정리한 문장이고,
+0. resolved_claim과 claim_text/target context의 관계를 먼저 확인하세요.
+   resolved_claim이 target context의 최종 전달 의미를 올바르게 정리한 문장이고,
    claim_text의 어색함이 말실수, 전사 흔들림, 즉시 재표현, 자기수정 수준이라면
    claim_text의 표면적 어색함만으로 점수를 높이지 마세요.
-   반대로 resolved_claim이 source_context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
-   resolved_claim의 강해진 부분을 그대로 믿지 말고 source_context 기준으로 낮게 판단하세요.
+   반대로 resolved_claim이 target context의 실제 전달 의미보다 더 강하거나 넓게 정리되었다면,
+   resolved_claim의 강해진 부분을 그대로 믿지 말고 target context 기준으로 낮게 판단하세요.
 1. 먼저 target context 안에서 claim이 실제로 어떤 의미로 사용되었는지 판단하세요.
 2. 바로 앞뒤 context가 같은 대상, 같은 관계, 같은 조건을 설명하는 경우에만 해소 근거로 사용하세요.
 3. 같은 context 또는 바로 인접 context에서 같은 대상의 속성, 조건, 반환값, 구성요소를 이어서 설명하는 경우,
@@ -605,7 +599,6 @@ def _build_prompt(category: str, items: list[dict[str, Any]], current_date: str)
 - resolved_claim과 원문 claim_text (전사본에서, claim단위로 구성하여 제공, resolved_claim은 지시어를 보강한 claim, claim_text는 원문기반 claim)
 - 해당 context와 앞뒤 context (전사본을 문맥 단위로 나누어 제공)
 - 해당 슬라이드의 slide_text(merged_clean에서 제공되는 기본 슬라이드 텍스트)
-- 이전 분류 단계의 weighted_scores와 low_margin 정보
 
 출력 점수:
 - is_valid_issue: 이 분류 기준으로 실제 issue일 가능성. 0.0~1.0 issue일수록 1에 수렴.

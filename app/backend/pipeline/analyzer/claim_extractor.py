@@ -544,7 +544,6 @@ def _extract_claims(
                 c.pop("antecedent_context_ids", None)
                 c.pop("claim_fingerprint", None)
                 c.pop("is_approximate", None)
-                c.pop("needs_context", None)
                 c.pop("context_note", None)
                 c.pop("verification_question", None)
                 c.pop("verificationQuestion", None)

@@ -336,7 +336,6 @@ def _issue_judge_payload(
             "slide_number": row.get("slide_number"),
             "start_time": row.get("start_time"),
             "end_time": row.get("end_time"),
-            "needs_context": row.get("needs_context", False),
         }
         ordered.update({
             key: value
@@ -357,7 +356,6 @@ def _issue_judge_payload(
             "claim_type": score.get("claim_type", ""),
             "basis_code": score.get("basis_code", ""),
             "confidence": score.get("confidence", 0),
-            "needs_context": score.get("needs_context", False),
         })
 
     ok = bool(result.get("ok", True))

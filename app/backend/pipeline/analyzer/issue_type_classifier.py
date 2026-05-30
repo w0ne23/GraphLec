@@ -138,58 +138,12 @@ def collect_issues(payload: dict[str, Any], list_keys: list[str]) -> list[dict[s
     return refs
 
 
-def _load_json(path: str | Path | None) -> dict[str, Any]:
-    if not path:
-        return {}
-    target = Path(path)
-    if not target.exists():
-        return {}
-    try:
-        payload = json.loads(target.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _build_source_context_lookup(merged_payload: dict[str, Any]) -> dict[str, str]:
-    lookup: dict[str, str] = {}
-    for slide in merged_payload.get("slides", []) or []:
-        if not isinstance(slide, dict):
-            continue
-        for context in slide.get("contexts", []) or []:
-            if not isinstance(context, dict):
-                continue
-            context_id = str(context.get("context_id") or "").strip()
-            text = str(context.get("text") or "").strip()
-            if context_id and text:
-                lookup[context_id] = " ".join(text.split())
-    return lookup
-
-
 def _guess_merged_clean_path(input_path: Path) -> Path | None:
     for parent in [input_path.parent, *input_path.parents]:
         candidates = sorted(parent.glob("*_merged_clean.json"))
         if candidates:
             return candidates[0]
     return None
-
-
-def _attach_source_contexts(refs: list[dict[str, Any]], lookup: dict[str, str]) -> None:
-    if not lookup:
-        return
-    for ref in refs:
-        issue = ref.get("issue") if isinstance(ref.get("issue"), dict) else {}
-        context_ids = issue.get("context_ids")
-        if not isinstance(context_ids, list):
-            context_ids = []
-        ids = [str(issue.get("context_id") or "").strip(), *[str(value or "").strip() for value in context_ids]]
-        source_context = ""
-        for context_id in ids:
-            if context_id and lookup.get(context_id):
-                source_context = lookup[context_id]
-                break
-        if source_context:
-            issue["source_context"] = source_context
 
 
 def _chunk(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
@@ -1059,14 +1013,12 @@ def _classification_record(
         "resolved_claim": issue.get("resolved_claim", ""),
         "claim_text": issue.get("claim_text", ""),
         "issue": issue.get("issue", ""),
-        "source_context": issue.get("source_context", ""),
         "basis_code": issue.get("basis_code", ""),
         "context_id": issue.get("context_id", ""),
         "context_ids": issue.get("context_ids", []),
         "slide_number": issue.get("slide_number"),
         "start_time": issue.get("start_time"),
         "end_time": issue.get("end_time"),
-        "needs_context": issue.get("needs_context"),
         "final_issue_type": final_type,
         "final_issue_type_label": _issue_type_label(final_type),
         "ensemble_confidence": ensemble_confidence,
@@ -1108,7 +1060,6 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "claim_id": record.get("claim_id", ""),
         "resolved_claim": record.get("resolved_claim", ""),
         "claim_text": record.get("claim_text", ""),
-        "source_context": record.get("source_context", ""),
         "final_issue_type": record.get("final_issue_type"),
         "final_issue_type_label": record.get("final_issue_type_label", ""),
         "weighted_scores": record.get("weighted_scores", {}),
@@ -1123,7 +1074,6 @@ def _next_stage_item(record: dict[str, Any]) -> dict[str, Any]:
         "context": {
             "context_id": record.get("context_id", ""),
             "context_ids": record.get("context_ids", []),
-            "needs_context": record.get("needs_context"),
         },
     }
 
@@ -1197,8 +1147,6 @@ def classify_issues(
 ) -> dict[str, Any]:
     _load_env()
     refs = collect_issues(payload, list_keys)
-    merged_payload = _load_json(merged_clean_path)
-    _attach_source_contexts(refs, _build_source_context_lookup(merged_payload))
     if limit is not None:
         refs = refs[: max(0, limit)]
 
@@ -1381,7 +1329,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--merged-clean",
         default=None,
-        help="merged_clean JSON used to attach the issue source_context line by context_id",
+        help="merged_clean JSON path retained for output metadata compatibility",
     )
     parser.add_argument(
         "--models",

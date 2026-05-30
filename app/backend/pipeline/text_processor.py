@@ -9,7 +9,6 @@ import json
 import os
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -38,11 +37,6 @@ SUBDOMAIN_CHOICES = [
 
 _token_usage: dict[str, int] = {"input": 0, "output": 0, "calls": 0}
 _override_client: Optional[genai.Client] = gemini_client_2
-
-_KO_PARTICLES = re.compile(
-    r"(은|는|이|가|을|를|에|에서|의|와|과|로|으로|도|만|부터|까지|에게|한테|께|처럼|보다|마다|이나|나|라|이라|든지|이든지|라고|이라고|라는|이라는)$"
-)
-
 
 def set_client(client: genai.Client) -> None:
     global _override_client
@@ -91,63 +85,6 @@ def api_call_with_retry(func, max_retries: int = 5, initial_wait: int = 10):
 
 def _normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
-
-
-def _is_spacing_only(orig: str, corrected: str) -> bool:
-    return orig.replace(" ", "") == corrected.replace(" ", "")
-
-
-def _strip_particle(token: str) -> str:
-    return _KO_PARTICLES.sub("", token)
-
-
-def _is_english_term_fix(orig: str, corrected: str) -> bool:
-    orig_no_space = re.sub(r"[A-Za-z0-9_.()]+", "", orig).replace(" ", "")
-    corr_no_space = re.sub(r"[A-Za-z0-9_.()]+", "", corrected).replace(" ", "")
-    if orig_no_space != corr_no_space:
-        return False
-    orig_eng = set(re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", orig))
-    corr_eng = set(re.findall(r"[A-Za-z_][A-Za-z0-9_.]*", corrected))
-    return orig_eng != corr_eng
-
-
-def _is_variable_or_abbrev_fix(orig: str, corrected: str) -> bool:
-    orig_tokens = set(orig.split())
-    corr_tokens = set(corrected.split())
-    new_tokens = corr_tokens - orig_tokens
-    if not new_tokens:
-        return False
-    code_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
-    for token in new_tokens:
-        stripped = _strip_particle(token)
-        if stripped and code_pattern.match(stripped):
-            return True
-    return False
-
-
-def _is_safe_auto_correction(orig: str, corrected: str, is_cs: bool = False) -> bool:
-    """Return True only for corrections that cannot change lecture meaning."""
-    if not orig or not corrected:
-        return False
-    if _normalize_text(orig) == _normalize_text(corrected):
-        return False
-    if _is_spacing_only(orig, corrected):
-        return True
-    if _is_english_term_fix(orig, corrected):
-        return True
-    if is_cs and _is_variable_or_abbrev_fix(orig, corrected):
-        return True
-    return False
-
-
-def _candidate_only(text: str, risk: str, reason: str) -> dict:
-    return {
-        "candidate_text": text,
-        "applied_text": "",
-        "risk": risk,
-        "apply": False,
-        "reason": reason,
-    }
 
 
 def _applied(text: str, risk: str, reason: str) -> dict:
@@ -388,8 +325,12 @@ def _load_integrated_slide_texts(
     scene_meta_by_index: Optional[dict[int, dict]] = None,
 ) -> dict[int, dict]:
     result: dict[int, dict] = {}
-    for slide in integrated_data.get("scenes", []):
-        scene_no = slide.get("scene_number", slide.get("slide_number"))
+    slide_rows = integrated_data.get("scenes") or integrated_data.get("slides") or []
+    for slide in slide_rows:
+        scene_no = slide.get(
+            "scene_number",
+            slide.get("representative_scene_number", slide.get("slide_number")),
+        )
         slide_no = slide.get("slide_number")
         if scene_meta_by_index and isinstance(scene_no, int):
             logical_slide_no = scene_meta_by_index.get(scene_no, {}).get("slide_number")
@@ -589,60 +530,34 @@ def merge_two_passes(
     pass2: dict[int, str],
     subdomain: str = "",
 ) -> dict[int, dict]:
-    is_cs = subdomain in ("컴퓨터공학", "소프트웨어공학", "정보통신", "전산학")
     corrections: dict[int, dict] = {}
     all_indices = set(pass1.keys()) | set(pass2.keys())
-    orig_map = {global_i: seg.get("text_original", seg["text"]) for global_i, seg in batch}
 
     for global_i in all_indices:
         p1 = pass1.get(global_i)
         p2 = pass2.get(global_i)
-        original = orig_map.get(global_i, "")
-
-        if p1 and p2:
-            if _normalize_text(p1) == _normalize_text(p2):
-                if _is_safe_auto_correction(original, p1, is_cs=is_cs):
-                    corrections[global_i] = _applied(p1, "low", "pass1+pass2 일치, 안전 교정")
-                else:
-                    corrections[global_i] = _candidate_only(
-                        p1,
-                        "high",
-                        "pass1+pass2 일치했지만 의미 변경 가능성으로 원문 유지",
-                    )
-            else:
-                if _is_safe_auto_correction(original, p2, is_cs=is_cs):
-                    corrections[global_i] = _applied(p2, "low", "pass2 안전 교정 채택")
-                elif _is_safe_auto_correction(original, p1, is_cs=is_cs):
-                    corrections[global_i] = _applied(p1, "low", "pass1 안전 교정 채택")
-                else:
-                    corrections[global_i] = _candidate_only(
-                        p2,
-                        "high",
-                        "pass1/pass2 상이, 의미 변경 가능성으로 원문 유지",
-                    )
-        elif p1 and not p2:
-            if _is_safe_auto_correction(original, p1, is_cs=is_cs):
-                corrections[global_i] = _applied(p1, "low", "pass1 안전 교정")
-            else:
-                corrections[global_i] = _candidate_only(
-                    p1,
-                    "high",
-                    "pass1만 교정, 의미 변경 가능성으로 원문 유지",
-                )
-        elif p2 and not p1:
-            if _is_spacing_only(original, p2):
-                corrections[global_i] = _applied(p2, "low", "pass2 띄어쓰기 교정만 (안전)")
-            elif is_cs and _is_variable_or_abbrev_fix(original, p2):
-                corrections[global_i] = _applied(p2, "low", "pass2 변수명/약어 표기 반영 (CS)")
-            elif _is_english_term_fix(original, p2):
-                corrections[global_i] = _applied(p2, "low", "pass2 영문 용어 교정 (ASR 오인식)")
-            else:
-                corrections[global_i] = _candidate_only(
-                    p2,
-                    "high",
-                    "pass2만 교정 (슬라이드 영향 가능성)",
-                )
+        if p2:
+            corrections[global_i] = _applied(p2, "low", "pass2 채택 (1차 교정본 기반)")
+        elif p1:
+            corrections[global_i] = _applied(p1, "low", "pass1만 교정 (문맥 기반)")
     return corrections
+
+
+def _build_pass2_batch_from_pass1(
+    batch: list[tuple[int, dict]],
+    pass1: dict[int, str],
+) -> list[tuple[int, dict]]:
+    pass2_batch: list[tuple[int, dict]] = []
+    for global_i, seg in batch:
+        pass1_text = pass1.get(global_i)
+        if not pass1_text:
+            pass2_batch.append((global_i, seg))
+            continue
+        seg_for_pass2 = seg.copy()
+        seg_for_pass2["text_original"] = pass1_text
+        seg_for_pass2["text"] = pass1_text
+        pass2_batch.append((global_i, seg_for_pass2))
+    return pass2_batch
 
 
 def correct_segments_two_pass(
@@ -727,13 +642,11 @@ def correct_segments_two_pass(
         sub_batches = [group[b:b + BATCH_SIZE] for b in range(0, len(group), BATCH_SIZE)]
         for sub in sub_batches:
             if use_pass2:
-                with ThreadPoolExecutor(max_workers=2) as pool:
-                    future_pass1 = pool.submit(_correct_batch_pass1, sub, slide_title=slide_title, glossary=glossary)
-                    future_pass2 = pool.submit(_correct_batch_pass2, sub, context)
-                    pass1 = future_pass1.result()
-                    print("①", end="", flush=True)
-                    pass2 = future_pass2.result()
-                    print("②", end="", flush=True)
+                pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
+                print("①", end="", flush=True)
+                pass2_batch = _build_pass2_batch_from_pass1(sub, pass1)
+                pass2 = _correct_batch_pass2(pass2_batch, context)
+                print("②", end="", flush=True)
                 merged = merge_two_passes(sub, pass1, pass2, subdomain=subdomain)
             else:
                 pass1 = _correct_batch_pass1(sub, slide_title=slide_title, glossary=glossary)
