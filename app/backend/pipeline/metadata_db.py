@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +65,7 @@ def upsert_lecture_metadata_sync(
         return False
 
     values = {
-        "lecture_id": uuid.UUID(lecture_id),
+        "lecture_id": str(lecture_id),
         "title": str(metadata.get("title") or "").strip() or "Untitled lecture",
         "instructor_id": metadata.get("instructor_id"),
         "domain": metadata.get("domain"),

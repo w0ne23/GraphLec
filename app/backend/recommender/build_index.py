@@ -33,8 +33,9 @@ MODEL_NAME = "gemini-embedding-001"
 TABLE_NAME = "lectures"
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
-if str(_BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_ROOT))
+if str(_BACKEND_ROOT) in sys.path:
+    sys.path.remove(str(_BACKEND_ROOT))
+sys.path.insert(0, str(_BACKEND_ROOT))
 
 
 def _resolve_repo_root() -> Path:
