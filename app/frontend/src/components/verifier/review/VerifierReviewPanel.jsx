@@ -121,6 +121,8 @@ function VerifierReviewHeader({
   typoCount,
   onSelectTab,
   onOpenDetail,
+  onCancelUpload,
+  isCancelling,
   onComplete,
 }) {
   return (
@@ -146,6 +148,11 @@ function VerifierReviewHeader({
               <strong>{typoCount}</strong>
             </button>
           </nav>
+          {onCancelUpload && (
+            <button className="vf-cancel-btn vf-review-cancel-btn" onClick={onCancelUpload} disabled={isCancelling}>
+              업로드 취소
+            </button>
+          )}
           <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
             검토 완료
           </button>
@@ -485,6 +492,8 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             typoCount={typoCount}
             onSelectTab={selectTab}
             onOpenDetail={onOpenDetail}
+            onCancelUpload={actions.cancelUpload}
+            isCancelling={flow.isBusy}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">

@@ -48,7 +48,7 @@ function getMajorStatus(nodeId, phase, stages) {
     if (phase === PHASES.VERIFY_READY) return 'run'
     if (phase === PHASES.REVIEWED || phase === PHASES.PIPELINE2 || phase === PHASES.DONE) return 'done'
     if (getStageStatus(stages, 'verify_slide_errors') === 'done') return 'done'
-    if (getStageStatus(stages, 'stage10_run_analyzers') === 'done') return 'done'
+    if (getStageStatus(stages, 'verifier_run') === 'done') return 'done'
     return 'wait'
   }
   if (nodeId === 'done') return phase === PHASES.DONE ? 'run' : 'wait'
@@ -81,6 +81,31 @@ function getStageText(status) {
   if (status === 'prior') return '이전 완료'
   if (status === 'run') return '진행 중...'
   return '대기 중'
+}
+
+function getStageLabel(flowNodes, stageKey) {
+  for (const node of flowNodes) {
+    const stage = node.stages?.find(item => item.key === stageKey)
+    if (stage) return stage.label
+  }
+  return stageKey
+}
+
+function getStatusMessageText(message, flowNodes) {
+  const raw = String(message || '').trim()
+  if (!raw) return '분석 준비 중...'
+
+  if (raw === 'Starting pipeline') return '파이프라인을 시작합니다.'
+  if (raw === 'Finished') return '분석이 완료되었습니다.'
+  if (raw === 'Waiting approval' || raw === 'Waiting for approval') return '검증 결과 확인 대기 중'
+
+  const processing = raw.match(/^Processing\s+(.+?)(?:\.\.\.)?$/)
+  if (processing) return `${getStageLabel(flowNodes, processing[1])} 진행 중`
+
+  const finished = raw.match(/^Finished\s+(.+?)$/)
+  if (finished) return `${getStageLabel(flowNodes, finished[1])} 완료`
+
+  return raw
 }
 
 function getNodeStatusText(status) {
@@ -116,6 +141,7 @@ export default function PipelineProgress({
   const logNode = getLogNode(activeNode, flowNodes)
   const visibleStages = getVisibleLogStages(logNode, stages)
   const showErrorInLog = phase === PHASES.ERROR && errorMessage
+  const displayStatusMessage = getStatusMessageText(statusMessage, flowNodes)
 
   function renderNode(node, nodeIndex) {
     const rawNodeStatus = getNodeStatus(node, stages, phase, priorNodeIdSet)
@@ -144,7 +170,7 @@ export default function PipelineProgress({
   return (
     <div className="vf-pipe">
       <div className="vf-progress-head">
-        <div className="vf-progress-message">{statusMessage || '분석 준비 중...'}</div>
+        <div className="vf-progress-message">{displayStatusMessage}</div>
       </div>
       <div className="vf-work-log">
         {logNode ? (

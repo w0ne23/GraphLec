@@ -185,6 +185,12 @@
   white-space: nowrap;
 }
 
+.vf-review-cancel-btn {
+  flex: none;
+  min-height: 38px;
+  padding: 0 14px;
+}
+
 .vf-body {
   flex: 1;
   min-height: 0;
