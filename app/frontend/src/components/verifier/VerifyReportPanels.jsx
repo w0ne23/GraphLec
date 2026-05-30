@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { PHASES, VERIFY_STEPS } from './verifierConstants'
-import FlowReportPanel from './FlowReportPanel'
+import { VERIFY_STEPS } from './verifierConstants'
 import SlideReviewReportPanel from './SlideReviewReportPanel'
 import VerifyStageTimeline from './VerifyStageTimeline'
 import ClaimListPanel from './stages/ClaimListPanel'
@@ -363,79 +362,6 @@ function buildReportModel(verifier, artifacts = {}) {
   }
 }
 
-function getVerifyStepStatus(flow, index) {
-  if (flow.phase === PHASES.VERIFY_READY || flow.phase === PHASES.REVIEWED || flow.phase === PHASES.UPLOAD_RESUME) {
-    return 'done'
-  }
-  if (flow.phase !== PHASES.PIPELINE1) return 'wait'
-
-  const activeIndex = Math.min(VERIFY_STEPS.length - 1, Math.max(0, Number(flow.stageGroupIndex) || 0))
-  if (index < activeIndex) return 'done'
-  if (index === activeIndex) return 'run'
-  return 'wait'
-}
-
-function getCompletedVerifyStageCount(flow) {
-  if (flow.phase === PHASES.VERIFY_READY || flow.phase === PHASES.REVIEWED || flow.phase === PHASES.UPLOAD_RESUME) {
-    return VERIFY_STEPS.length
-  }
-  if (flow.phase !== PHASES.PIPELINE1) return 0
-  const stageIndex = Number(flow.stageGroupIndex)
-  return Math.max(0, Math.min(VERIFY_STEPS.length, Number.isFinite(stageIndex) ? stageIndex : 0))
-}
-
-function getCompletedDetailKey(completedStageCount) {
-  const completedIndex = Math.min(
-    VERIFY_STEPS.length - 1,
-    Math.max(0, Number(completedStageCount) - 1)
-  )
-  return VERIFY_STEPS[completedIndex]?.key || 'claim_extraction'
-}
-
-function getVisibleVerifier(verifier, completedStageCount) {
-  if (completedStageCount >= VERIFY_STEPS.length) return verifier
-
-  return {
-    schema_version: verifier?.schema_version,
-    mode: verifier?.mode,
-    models: verifier?.models,
-    claims: completedStageCount >= 1 ? verifier?.claims : [],
-    merged_claims: completedStageCount >= 1 ? verifier?.merged_claims : [],
-    extracted_claims: completedStageCount >= 1 ? verifier?.extracted_claims : [],
-    issues: completedStageCount >= 4 ? verifier?.issues : [],
-    feedback_items: [],
-    final_confirmed_claims: [],
-    needs_review_claims: [],
-    verifier_rejected_claims: [],
-    crosscheck_inconclusive_claims: [],
-    crosscheck_rejected_claims: [],
-    first_stage_rejected_claims: [],
-    grounding_rejected_claims: [],
-    slide_rejected_claims: [],
-    slide_errors: [],
-    summary: {},
-    counts: {},
-    classified_issue_artifacts: verifier?.classified_issue_artifacts,
-  }
-}
-
-function getVisibleArtifacts(artifacts, completedStageCount) {
-  return {
-    urls: artifacts?.urls,
-    mergedClean: completedStageCount >= 1 ? artifacts?.mergedClean : null,
-    claims: completedStageCount >= 1 ? artifacts?.claims : null,
-    claimsJsonl: completedStageCount >= 1 ? artifacts?.claimsJsonl : [],
-    issueJudge: completedStageCount >= 2 ? artifacts?.issueJudge : null,
-    issueJudgeSummary: completedStageCount >= 2 ? artifacts?.issueJudgeSummary : null,
-    issueJudgeCompare: completedStageCount >= 2 ? artifacts?.issueJudgeCompare : null,
-    issueTypes: completedStageCount >= 3 ? artifacts?.issueTypes : null,
-    classifiedIssues: completedStageCount >= 3 ? artifacts?.classifiedIssues : null,
-    classifiedIssueVerifier: completedStageCount >= 4 ? artifacts?.classifiedIssueVerifier : null,
-    slideErrors: completedStageCount >= 5 ? artifacts?.slideErrors : null,
-    verification: completedStageCount >= 4 ? artifacts?.verification : null,
-  }
-}
-
 function ClaimListFilterActions({ options, value, onChange }) {
   return (
     <div className="vf-claim-view-switch vf-claim-view-switch--inline">
@@ -611,27 +537,16 @@ function renderActiveDetail({ activeTab, model, status, resultId, claimListView,
 
 export default function VerifyReportPanels({ flow, headerActions = null }) {
   const progressRef = useRef(null)
-  const completedVerifyStageCount = getCompletedVerifyStageCount(flow)
-  const visibleVerifier = useMemo(
-    () => getVisibleVerifier(flow.verifier, completedVerifyStageCount),
-    [flow.verifier, completedVerifyStageCount]
-  )
-  const visibleArtifacts = useMemo(
-    () => getVisibleArtifacts(flow.verifierArtifacts, completedVerifyStageCount),
-    [flow.verifierArtifacts, completedVerifyStageCount]
-  )
   const model = useMemo(
-    () => buildReportModel(visibleVerifier, visibleArtifacts),
-    [visibleVerifier, visibleArtifacts]
+    () => buildReportModel(flow.verifier, flow.verifierArtifacts),
+    [flow.verifier, flow.verifierArtifacts]
   )
   const resultId = flow.lecture?.id || flow.verifier?.lecture_id || flow.verifier?.id || ''
-  const pipelineStatuses = useMemo(() => VERIFY_STEPS.map((_, index) => getVerifyStepStatus(flow, index)), [flow])
   const statuses = useMemo(() => (
-    VERIFY_STEPS.map((step, index) => displayStatusForTab(model, step.key, pipelineStatuses[index]))
-  ), [model, pipelineStatuses])
-  const slideStatus = displayStatusForTab(model, 'slide_review', pipelineStatuses[4])
-  const completedDetailKey = getCompletedDetailKey(completedVerifyStageCount)
-  const [activeTab, setActiveTab] = useState(completedDetailKey)
+    VERIFY_STEPS.map(step => displayStatusForTab(model, step.key, 'wait'))
+  ), [model])
+  const slideStatus = displayStatusForTab(model, 'slide_review', 'wait')
+  const [activeTab, setActiveTab] = useState('claim_extraction')
   const [claimListView, setClaimListView] = useState('list')
   const [claimListFilters, setClaimListFilters] = useState({
     final_verification: 'all',
@@ -697,9 +612,7 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
           <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} compact />
         </section>
       )}
-      {activeTab !== 'slide_review' ? (
-        <FlowReportPanel model={model} />
-      ) : (
+      {activeTab === 'slide_review' && (
         <SlideReviewReportPanel model={model} />
       )}
       <div className="vf-detail">

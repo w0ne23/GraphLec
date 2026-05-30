@@ -120,6 +120,7 @@ function VerifierReviewHeader({
   reviewCount,
   typoCount,
   onSelectTab,
+  onOpenDetail,
   onComplete,
 }) {
   return (
@@ -130,6 +131,11 @@ function VerifierReviewHeader({
           <span>검토 결과</span>
         </div>
         <div className="vf-review-header-actions">
+          {onOpenDetail && (
+            <button className="vf-review-detail-btn" onClick={onOpenDetail}>
+              상세보기
+            </button>
+          )}
           <nav className="vf-review-tabs" aria-label="검토 항목">
             <button className={reviewTabClassName('review', activeTab)} onClick={() => onSelectTab('review')}>
               <span>검토 필요</span>
@@ -199,7 +205,7 @@ function ReviewConfirmModal({ onCancel, onConfirm }) {
   )
 }
 
-export default function VerifierReviewPanel({ flow }) {
+export default function VerifierReviewPanel({ flow, onOpenDetail }) {
   const { actions } = flow
   const verifier = flow.verifier
   const lecture = flow.lecture
@@ -478,6 +484,7 @@ export default function VerifierReviewPanel({ flow }) {
             reviewCount={reviewCount}
             typoCount={typoCount}
             onSelectTab={selectTab}
+            onOpenDetail={onOpenDetail}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">
