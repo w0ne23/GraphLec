@@ -374,7 +374,11 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
 class MetadataCollection:
     def __init__(self, metadata_dir: str):
         self.lectures: dict[str, LectureMetadata] = {}
-        self._load_files(Path(metadata_dir))
+        use_file_metadata = os.getenv("RECOMMENDER_USE_FILE_METADATA", "1").lower() not in {"0", "false", "no"}
+        if use_file_metadata:
+            self._load_files(Path(metadata_dir))
+        else:
+            print("[파일 로드] RECOMMENDER_USE_FILE_METADATA=0 — 파일 metadata 로드 생략")
         self._load_db()
 
     def _load_files(self, directory: Path):

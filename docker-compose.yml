@@ -168,6 +168,7 @@ services:
       - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
       - METADATA_DIR=/app/metadata
       - RECOMMENDER_DB_DIR=/lance/lancedb
+      - RECOMMENDER_USE_FILE_METADATA=${RECOMMENDER_USE_FILE_METADATA:-1}
     volumes:
       - ./app/backend:/app
       - lance_data:/lance
