@@ -12,6 +12,13 @@ from contextlib import redirect_stdout, redirect_stderr
 
 from sqlalchemy import text
 from app.db import AsyncSessionLocal
+from app.models import (
+    JOB_STATUS_DONE,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_VERIFIED_UPLOAD,
+)
 from app.services.job_service import update_job_stage_sync
 
 # Setup logging
@@ -32,8 +39,44 @@ else:
 PROJECT_ROOT      = Path("/pipeline") if Path("/pipeline").exists() else PROJECT_ROOT_DIR
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 
+PIPELINE_STAGE_KEYS = [
+    "preprocess_extract_media",
+    "preprocess_textualize_transcribe",
+    "preprocess_enrich_audio_annotation",
+    "verifier_build_analyzer_input",
+    "verifier_run",
+    "graph_classify_scene",
+    "graph_fusion",
+    "graph_triples",
+    "graph_lance_index",
+    "graph_graphrag_index",
+    "graph_metadata",
+    "graph_recommender_index",
+]
 
-def pipeline_process(job_id: str, lecture_id: str, input_path: str, uploaded_at: str | None = None, title: str = ""):
+GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS = {
+    "preprocess_extract_media",
+    "preprocess_textualize_transcribe",
+    "preprocess_enrich_audio_annotation",
+}
+
+
+def _initial_stage_state(job_type: str) -> dict[str, str]:
+    stages = {key: "wait" for key in PIPELINE_STAGE_KEYS}
+    if job_type == JOB_TYPE_GRAPH_UPLOAD:
+        for key in GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS:
+            stages[key] = "done"
+    return stages
+
+
+def pipeline_process(
+    job_id: str,
+    lecture_id: str,
+    input_path: str,
+    job_type: str,
+    uploaded_at: str | None = None,
+    title: str = "",
+):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
 
     # spawn된 자식 프로세스는 부모의 sys.path를 상속받지 않으므로 pipeline 패키지를 import하기 위해 명시적으로 경로를 추가한다.
@@ -48,7 +91,8 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str, uploaded_at:
         if not video_path.is_absolute():
             video_path = Path(pipeline_path) / input_path
 
-        logger.info(f"--- [Child Process {job_id}] Target video: {video_path} ---")
+        job_type = (job_type or JOB_TYPE_LEGACY_FULL).strip() or JOB_TYPE_LEGACY_FULL
+        logger.info(f"--- [Child Process {job_id}] Target video: {video_path} ({job_type}) ---")
 
         output_dir    = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id
         slides_dir    = output_dir / "slides"
@@ -57,11 +101,7 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str, uploaded_at:
         output_dir.mkdir(parents=True, exist_ok=True)
         slides_dir.mkdir(parents=True, exist_ok=True)
 
-        stages_state = {
-            "scene": "wait", "voice": "wait", "stt": "wait",
-            "integrate": "wait", "graph": "wait",
-            "summarize": "wait", "metadata": "wait",
-        }
+        stages_state = _initial_stage_state(job_type)
 
         def on_progress(stage_key: str, status: str):
             if stage_key in stages_state:
@@ -94,8 +134,9 @@ def pipeline_process(job_id: str, lecture_id: str, input_path: str, uploaded_at:
                         "--lecture-id",   lecture_id,
                     ] + (["--title", title] if title else [])
                       + (["--uploaded-at", uploaded_at] if uploaded_at else []))
+                    args.job_type = job_type
                     os.environ["PYTHONUNBUFFERED"] = "1"
-                    logger.info(f"[{job_id}] Starting pipeline...")
+                    logger.info(f"[{job_id}] Starting pipeline job_type={job_type}...")
                     pipeline_main.run_pipeline(args, progress_callback=on_progress)
 
                 except ImportError as ie:
@@ -138,10 +179,12 @@ async def worker_loop():
                 job_lecture_id = None
                 job_input_path = None
                 job_uploaded_at = None
+                job_title = ""
+                job_type_val = None
 
                 async with AsyncSessionLocal() as db:
                     result = await db.execute(text("""
-                        SELECT pj.id, pj.lecture_id, l.video_path, l.created_at, l.title
+                        SELECT pj.id, pj.lecture_id, pj.job_type, l.video_path, l.created_at, l.title
                         FROM processing_jobs pj
                         JOIN lectures l ON l.id = pj.lecture_id
                         WHERE pj.status = 'pending'
@@ -160,6 +203,7 @@ async def worker_loop():
                             if job["created_at"]
                             else None
                         )
+                        job_type_val   = job["job_type"] or JOB_TYPE_LEGACY_FULL
                         await db.execute(text("""
                             UPDATE processing_jobs
                             SET status = 'running', current_stage = 'Starting pipeline'
@@ -173,7 +217,8 @@ async def worker_loop():
 
                 job_id_str     = str(job_id_val)
                 job_lecture_str = str(job_lecture_id)
-                logger.info(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}) ---")
+                job_type_str = str(job_type_val or JOB_TYPE_LEGACY_FULL)
+                logger.info(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}, type: {job_type_str}) ---")
 
                 try:
                     loop = asyncio.get_running_loop()
@@ -183,6 +228,7 @@ async def worker_loop():
                         job_id_str,
                         job_lecture_str,
                         job_input_path,
+                        job_type_str,
                         job_uploaded_at,
                         job_title,
                     )
@@ -205,11 +251,21 @@ async def worker_loop():
 
                 async with AsyncSessionLocal() as db:
                     if success:
+                        final_status = (
+                            JOB_STATUS_WAITING_APPROVAL
+                            if job_type_str == JOB_TYPE_VERIFIED_UPLOAD
+                            else JOB_STATUS_DONE
+                        )
+                        final_stage = (
+                            "Waiting approval"
+                            if final_status == JOB_STATUS_WAITING_APPROVAL
+                            else "Finished"
+                        )
                         await db.execute(text("""
                             UPDATE processing_jobs
-                            SET status = 'done', current_stage = 'Finished'
+                            SET status = :status, current_stage = :stage
                             WHERE id = :id
-                        """), {"id": job_id_val})
+                        """), {"id": job_id_val, "status": final_status, "stage": final_stage})
                     else:
                         logger.error(f"--- [Worker ERROR] {job_id_str}: {error} ---")
                         await db.execute(text("""

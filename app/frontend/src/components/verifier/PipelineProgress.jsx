@@ -48,7 +48,7 @@ function getMajorStatus(nodeId, phase, stages) {
     if (phase === PHASES.VERIFY_READY) return 'run'
     if (phase === PHASES.REVIEWED || phase === PHASES.PIPELINE2 || phase === PHASES.DONE) return 'done'
     if (getStageStatus(stages, 'verify_slide_errors') === 'done') return 'done'
-    if (getStageStatus(stages, 'stage10_run_analyzers') === 'done') return 'done'
+    if (getStageStatus(stages, 'verifier_run') === 'done') return 'done'
     return 'wait'
   }
   if (nodeId === 'done') return phase === PHASES.DONE ? 'run' : 'wait'

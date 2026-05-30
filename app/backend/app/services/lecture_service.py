@@ -17,7 +17,22 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
+from app.models import (
+    ACTIVE_STATUSES,
+    JOB_STATUS_DONE,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFIED_UPLOAD,
+    Lecture,
+    ProcessingJob,
+    GraphSession,
+    ChatSession,
+    ChatMessage,
+)
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -49,6 +64,7 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
 
     res = {
         "job_id": str(job.id),
+        "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
         "status": job.status,
         "current_stage": job.current_stage,
         "error_message": job.error_message,
@@ -375,8 +391,6 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-ACTIVE_STATUSES = {'pending', 'running'}
-
 async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
         select(Lecture, ProcessingJob)
@@ -398,6 +412,8 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
         is_done = job_status == "done"
         out.append({
             "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "current_stage": job.current_stage if job and not is_done else None,
             "error_message": job.error_message if job else None,
@@ -422,9 +438,13 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     if not lecture:
         return None
 
+    latest_job = await get_latest_job(db, str(ident_uuid))
+    job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
+        job_type=job_type,
         status="pending",
         current_stage="Resuming pipeline...",
         error_message=None,
@@ -433,7 +453,84 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     db.add(new_job)
     await db.commit()
     await db.refresh(new_job)
-    return {"status": "success", "job_id": str(new_job.id)}
+    return {"status": "success", "job_id": str(new_job.id), "job_type": new_job.job_type}
+
+
+async def approve_verified_upload(db: AsyncSession, lecture_id: str):
+    """Approve a verified upload and enqueue graph generation as a new job."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, str(ident_uuid))
+    if not lecture:
+        return None
+
+    existing_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    existing_graph_job = existing_graph_result.scalar_one_or_none()
+
+    approval_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_WAITING_APPROVAL,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    approval_job = approval_result.scalar_one_or_none()
+
+    if not approval_job:
+        if existing_graph_job:
+            return {
+                "status": "success",
+                "approved_job_id": None,
+                "job_id": str(existing_graph_job.id),
+                "job_type": existing_graph_job.job_type,
+                "already_queued": True,
+            }
+        raise HTTPException(status_code=409, detail="No verified upload is waiting for approval")
+
+    approval_job.status = JOB_STATUS_DONE
+    approval_job.current_stage = "Approved"
+    approval_job.error_message = None
+
+    graph_job = existing_graph_job
+    already_queued = graph_job is not None
+    if graph_job is None:
+        graph_job = ProcessingJob(
+            id=uuid.uuid4(),
+            lecture_id=ident_uuid,
+            job_type=JOB_TYPE_GRAPH_UPLOAD,
+            status=JOB_STATUS_PENDING,
+            current_stage="Queued graph generation",
+            error_message=None,
+            pipeline_stages=[],
+        )
+        db.add(graph_job)
+
+    await db.commit()
+    await db.refresh(approval_job)
+    await db.refresh(graph_job)
+    return {
+        "status": "success",
+        "approved_job_id": str(approval_job.id),
+        "job_id": str(graph_job.id),
+        "job_type": graph_job.job_type,
+        "already_queued": already_queued,
+    }
 
 
 async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
@@ -509,6 +606,7 @@ async def list_all_results(
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
@@ -550,6 +648,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     return {
         "id": str(lecture.id),
         "job_id": str(job.id) if job else None,
+        "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
         "category": info.get("domain") or lecture.category or "기타",
@@ -1620,13 +1719,98 @@ async def get_graph_info(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     return {"lecture_id": lecture_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
 
 
-async def retry_graph_only(db: AsyncSession, lecture_id: str) -> bool:
-    """lecture_id로 최신 job을 그래프 재적재 상태로 초기화"""
-    job = await get_latest_job(db, lecture_id)
-    if not job:
-        return False
-    job.status = "pending"
-    job.current_stage = "Retrying Graph Ingestion..."
-    job.error_message = None
+async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] | None:
+    """Retry only the graph_upload portion for a verified upload."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, str(ident_uuid))
+    if not lecture:
+        return None
+
+    active_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    active_graph_job = active_graph_result.scalar_one_or_none()
+    if active_graph_job:
+        return {
+            "status": "success",
+            "job_id": str(active_graph_job.id),
+            "job_type": active_graph_job.job_type,
+            "already_queued": True,
+            "retried_existing": False,
+        }
+
+    failed_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_ERROR,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    failed_graph_job = failed_graph_result.scalar_one_or_none()
+    if failed_graph_job:
+        failed_graph_job.status = JOB_STATUS_PENDING
+        failed_graph_job.current_stage = "Retrying graph generation"
+        failed_graph_job.error_message = None
+        failed_graph_job.pipeline_stages = []
+        await db.commit()
+        await db.refresh(failed_graph_job)
+        return {
+            "status": "success",
+            "job_id": str(failed_graph_job.id),
+            "job_type": failed_graph_job.job_type,
+            "already_queued": False,
+            "retried_existing": True,
+        }
+
+    approved_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_DONE,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    approved_job = approved_result.scalar_one_or_none()
+    if not approved_job:
+        raise HTTPException(status_code=409, detail="No approved verified upload is ready for graph retry")
+
+    manifest_path = Path(lecture.output_dir) / f"{ident_uuid}_preprocess_result.json"
+    if not manifest_path.exists() or manifest_path.stat().st_size <= 0:
+        raise HTTPException(status_code=409, detail="Preprocess manifest is missing for graph retry")
+
+    graph_job = ProcessingJob(
+        id=uuid.uuid4(),
+        lecture_id=ident_uuid,
+        job_type=JOB_TYPE_GRAPH_UPLOAD,
+        status=JOB_STATUS_PENDING,
+        current_stage="Queued graph retry",
+        error_message=None,
+        pipeline_stages=[],
+    )
+    db.add(graph_job)
     await db.commit()
-    return True
+    await db.refresh(graph_job)
+    return {
+        "status": "success",
+        "job_id": str(graph_job.id),
+        "job_type": graph_job.job_type,
+        "already_queued": False,
+        "retried_existing": False,
+    }

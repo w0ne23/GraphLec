@@ -196,12 +196,10 @@ function createStageGroups(flowNodes) {
 const VERIFY_PROGRESS_STAGE_GROUPS = createStageGroups(VERIFY_PROGRESS_PIPELINE_FLOW_NODES)
 const UPLOAD_STAGE_GROUPS = createStageGroups(UPLOAD_PIPELINE_FLOW_NODES)
 const VERIFY_TO_UPLOAD_PRIOR_STAGE_KEYS = [
-  'stage1a_extract',
-  'stage1b_audio_analyze',
-  'stage2a_textualize',
-  'stage2b_transcribe',
+  'preprocess_extract_media',
+  'preprocess_textualize_transcribe',
 ]
-const VERIFY_TO_UPLOAD_DONE_STAGE_KEYS = ['stage3a_annotation']
+const VERIFY_TO_UPLOAD_DONE_STAGE_KEYS = ['preprocess_enrich_audio_annotation']
 const VERIFY_TO_UPLOAD_PRIOR_NODE_IDS = [
   'data_extract',
   'content_extract',

@@ -41,7 +41,6 @@ import logging
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock
 from typing import Any, Callable, Optional
 
 import librosa
@@ -63,6 +62,16 @@ DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
     "RECOMMENDER_DB_DIR",
     "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
 )
+JOB_TYPE_LEGACY_FULL = "legacy_full"
+JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
+JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
+JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
+PIPELINE_JOB_TYPES = {
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_VERIFIED_UPLOAD,
+    JOB_TYPE_GRAPH_UPLOAD,
+}
 # 외부 라이브러리 노이즈 로그 억제
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -91,6 +100,11 @@ def _banner(title: str):
     print("\n" + "═" * 70)
     print(f"  {title}")
     print("═" * 70)
+
+
+def _normalize_pipeline_job_type(value: str | None) -> str:
+    job_type = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
+    return job_type if job_type in PIPELINE_JOB_TYPES else JOB_TYPE_LEGACY_FULL
 
 
 def _done(label: str, elapsed: float):
@@ -1726,6 +1740,464 @@ def stage11_build_recommender_index(args) -> dict:
 # 메인 파이프라인
 # ──────────────────────────────────────────────────────────────
 
+def run_preprocess_pipeline(
+    args,
+    *,
+    stem: str,
+    output_dir: Path,
+    slides_dir: Path,
+    paths: dict,
+    timings: dict[str, float],
+    notify_stage,
+) -> dict:
+    """Run shared preprocessing stages used by verifier and graph workflows."""
+    # ── Stage 1 (병렬 A/B) ──
+    _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
+    t_parallel = time.time()
+    audio_analyze_result: dict = {}
+
+    notify_stage("preprocess_extract_media", "run")
+
+    if args.skip_extract:
+        log.info("Stage 1A 건너뜀 (--skip-extract)")
+        meta_path = str(paths["metadata"])
+        timings["Stage 1A 슬라이드 추출"] = 0.0
+        audio_analyze_result = stage1b_audio_analyze(args, output_dir)
+        timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
+    else:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            future_1a = executor.submit(stage1_extract, args, slides_dir, output_dir)
+            future_1b = executor.submit(stage1b_audio_analyze, args, output_dir)
+            for future in as_completed([future_1a, future_1b]):
+                if future is future_1a:
+                    r1 = future.result()
+                    meta_path = r1["meta_path"]
+                    timings["Stage 1A 슬라이드 추출"] = r1["elapsed"]
+                else:
+                    audio_analyze_result = future.result()
+                    timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
+
+    duration = audio_analyze_result.get("duration", 0.0)
+    timings["Stage 1 병렬 총"] = time.time() - t_parallel
+
+    notify_stage("preprocess_extract_media", "done")
+
+    print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
+    print("─" * 70)
+
+    # ── Stage 2 (병렬 A/B) ──
+    _banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
+    t_parallel = time.time()
+    transcript_result: dict = {}
+
+    notify_stage("preprocess_textualize_transcribe", "run")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_2a = executor.submit(stage2_textualize, args, slides_dir, output_dir)
+        future_2b = executor.submit(stage2b_transcribe, args, meta_path, duration, output_dir)
+        for future in as_completed([future_2a, future_2b]):
+            if future is future_2a:
+                r2 = future.result()
+                textualized_path = r2["textualized_path"]
+                timings["Stage 2A 슬라이드 텍스트화"] = r2["elapsed"]
+            else:
+                transcript_result = future.result()
+                timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
+
+    timings["Stage 2 병렬 총"] = time.time() - t_parallel
+    notify_stage("preprocess_textualize_transcribe", "done")
+    print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
+    print("─" * 70)
+
+    # ── Stage 3 (병렬 A/B) ──
+    _banner("Stage 3  —  병렬 실행 (annotation + 오디오 후처리)")
+    t_parallel = time.time()
+    audio_result: dict = {}
+    annotation_result: dict = {}
+    notify_stage("preprocess_enrich_audio_annotation", "run")
+
+    transcript_raw_path = transcript_result.get(
+        "transcript_raw_path",
+        str(output_dir / f"{stem}_transcript_raw.json"),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_a = executor.submit(stage3a_annotation, args, slides_dir, output_dir)
+        future_b = executor.submit(
+            stage3b_audio,
+            args,
+            meta_path,
+            textualized_path,
+            duration,
+            output_dir,
+            transcript_raw_path,
+        )
+        for future in as_completed([future_a, future_b]):
+            if future is future_a:
+                annotation_result = future.result()
+                timings["Stage 3A annotation"] = annotation_result["elapsed"]
+            else:
+                audio_result = future.result()
+
+    timings["Stage 3 병렬 총"] = time.time() - t_parallel
+    notify_stage("preprocess_enrich_audio_annotation", "done")
+
+    print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
+    print("─" * 70)
+
+    preprocess_result = {
+        "meta_path": meta_path,
+        "duration": duration,
+        "textualized_path": textualized_path,
+        "transcript_result": transcript_result,
+        "transcript_raw_path": transcript_raw_path,
+        "annotation_result": annotation_result,
+        "annotation_path": annotation_result.get("annotation_path", str(paths["annotation"])),
+        "audio_result": audio_result,
+    }
+    save_preprocess_manifest(stem, output_dir, preprocess_result)
+    return preprocess_result
+
+
+def save_preprocess_manifest(stem: str, output_dir: Path, preprocess_result: dict) -> Path:
+    """Persist the in-memory preprocess payload so graph_upload can resume later."""
+    audio_result = preprocess_result.get("audio_result") or {}
+    annotation_result = preprocess_result.get("annotation_result") or {}
+    transcript_result = preprocess_result.get("transcript_result") or {}
+    manifest = {
+        "schema_version": 1,
+        "stem": stem,
+        "meta_path": preprocess_result.get("meta_path"),
+        "duration": preprocess_result.get("duration"),
+        "textualized_path": preprocess_result.get("textualized_path"),
+        "transcript_result": {
+            "transcript_raw_path": transcript_result.get("transcript_raw_path"),
+        },
+        "transcript_raw_path": preprocess_result.get("transcript_raw_path"),
+        "annotation_result": {
+            "annotation_path": annotation_result.get("annotation_path") or preprocess_result.get("annotation_path"),
+        },
+        "annotation_path": preprocess_result.get("annotation_path"),
+        "audio_result": {
+            "segments_path": audio_result.get("segments_path"),
+            "silences_path": audio_result.get("silences_path"),
+            "emphasis_path": audio_result.get("emphasis_path"),
+            "annotated_segments": audio_result.get("annotated_segments") or [],
+            "annotated_groups": audio_result.get("annotated_groups") or [],
+            "scenes_structure": audio_result.get("scenes_structure"),
+            "slide_ranges": audio_result.get("slide_ranges") or [],
+            "duration": audio_result.get("duration", preprocess_result.get("duration", 0.0)),
+        },
+    }
+    manifest_path = output_dir / f"{stem}_preprocess_result.json"
+    _save_json(manifest_path, manifest)
+    return manifest_path
+
+
+def load_preprocess_result_from_outputs(stem: str, output_dir: Path, paths: dict) -> dict:
+    """Restore preprocess_result from the manifest written by run_preprocess_pipeline."""
+    manifest_path = output_dir / f"{stem}_preprocess_result.json"
+    if not manifest_path.exists() or manifest_path.stat().st_size <= 0:
+        raise FileNotFoundError(
+            f"graph_upload 실행에 필요한 preprocess manifest가 없습니다: {manifest_path}"
+        )
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    audio_result = manifest.get("audio_result") or {}
+    annotation_result = manifest.get("annotation_result") or {}
+    transcript_result = manifest.get("transcript_result") or {}
+
+    restored = {
+        "meta_path": manifest.get("meta_path") or str(paths["metadata"]),
+        "duration": manifest.get("duration", audio_result.get("duration", 0.0)),
+        "textualized_path": manifest.get("textualized_path") or str(paths["textualized"]),
+        "transcript_result": {
+            "transcript_raw_path": (
+                transcript_result.get("transcript_raw_path")
+                or manifest.get("transcript_raw_path")
+                or str(output_dir / f"{stem}_transcript_raw.json")
+            ),
+            "elapsed": 0.0,
+        },
+        "transcript_raw_path": (
+            manifest.get("transcript_raw_path")
+            or transcript_result.get("transcript_raw_path")
+            or str(output_dir / f"{stem}_transcript_raw.json")
+        ),
+        "annotation_result": {
+            "annotation_path": (
+                annotation_result.get("annotation_path")
+                or manifest.get("annotation_path")
+                or str(paths["annotation"])
+            ),
+            "elapsed": 0.0,
+        },
+        "annotation_path": (
+            manifest.get("annotation_path")
+            or annotation_result.get("annotation_path")
+            or str(paths["annotation"])
+        ),
+        "audio_result": {
+            "segments_path": audio_result.get("segments_path") or str(paths["segments"]),
+            "silences_path": audio_result.get("silences_path") or str(paths["silences"]),
+            "emphasis_path": audio_result.get("emphasis_path") or str(paths["emphasis"]),
+            "annotated_segments": audio_result.get("annotated_segments") or [],
+            "annotated_groups": audio_result.get("annotated_groups") or [],
+            "scenes_structure": audio_result.get("scenes_structure"),
+            "slide_ranges": audio_result.get("slide_ranges") or [],
+            "duration": audio_result.get("duration", manifest.get("duration", 0.0)),
+        },
+    }
+
+    required_paths = [
+        ("metadata", restored["meta_path"]),
+        ("textualized", restored["textualized_path"]),
+        ("annotation", restored["annotation_path"]),
+        ("segments", restored["audio_result"]["segments_path"]),
+        ("silences", restored["audio_result"]["silences_path"]),
+        ("emphasis", restored["audio_result"]["emphasis_path"]),
+    ]
+    missing = [f"{label}: {path}" for label, path in required_paths if not path or not Path(path).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "graph_upload 실행에 필요한 preprocess 산출물이 없습니다:\n" + "\n".join(missing)
+        )
+    return restored
+
+
+def run_verifier_pipeline(
+    args,
+    *,
+    preprocess_result: dict,
+    output_dir: Path,
+    paths: dict,
+    timings: dict[str, float],
+    background: bool = True,
+    notify_stage=lambda _stage, _status: None,
+) -> dict:
+    """Build verifier input and run the verifier path.
+
+    Synchronous verifier execution is intentionally not wired yet; the current
+    legacy path uses the existing background analyzer subprocess.
+    """
+    if not background and not (
+        getattr(args, "stop_after_claim_extract", False)
+        or getattr(args, "stop_after_issue_judge", False)
+        or getattr(args, "skip_analyzer", False)
+    ):
+        raise NotImplementedError("synchronous verifier execution is not wired yet")
+
+    meta_path = preprocess_result["meta_path"]
+    duration = preprocess_result["duration"]
+    textualized_path = preprocess_result["textualized_path"]
+    audio_result = preprocess_result["audio_result"]
+
+    notify_stage("verifier_build_analyzer_input", "run")
+    r9 = stage9_build_analyzer_merged_clean(
+        args,
+        meta_path=meta_path,
+        textualized_path=textualized_path,
+        segments_path=audio_result.get("segments_path", str(paths["segments"])),
+        output_dir=output_dir,
+        duration=audio_result.get("duration", duration),
+        slides_structure=audio_result.get("slides_structure"),
+    )
+    timings["Stage 9 analyzer 입력 생성"] = r9["elapsed"]
+    notify_stage("verifier_build_analyzer_input", "done")
+
+    r10: dict = {}
+    r10a: dict = {}
+    r10b: dict = {}
+
+    notify_stage("verifier_run", "run")
+    if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
+        r10a = stage10_extract_claims(
+            args,
+            merged_clean_path=r9["merged_clean_path"],
+            output_dir=output_dir,
+        )
+        timings["Stage 10A claim 추출"] = r10a["elapsed"]
+        if getattr(args, "stop_after_issue_judge", False):
+            r10b = stage10_issue_judge(
+                args,
+                merged_clean_path=r9["merged_clean_path"],
+                output_dir=output_dir,
+                claims_jsonl=r10a["claims_jsonl"],
+            )
+            timings["Stage 10B 1차 issue judge"] = r10b["elapsed"]
+        timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+    elif getattr(args, "skip_analyzer", False):
+        timings["Stage 10 verifier 백그라운드 시작"] = 0.0
+    else:
+        r10 = stage10_spawn_analyzers_subprocess(
+            args,
+            merged_clean_path=r9["merged_clean_path"],
+            output_dir=output_dir,
+        )
+        timings["Stage 10 verifier 백그라운드 시작"] = r10["elapsed"]
+    notify_stage("verifier_run", "done")
+
+    return {
+        "analyzer_input": r9,
+        "verifier_result": r10,
+        "claims_result": r10a,
+        "issue_judge_result": r10b,
+    }
+
+
+def run_graph_pipeline(
+    args,
+    *,
+    preprocess_result: dict,
+    output_dir: Path,
+    slides_dir: Path,
+    paths: dict,
+    timings: dict[str, float],
+    stage_status: dict[str, str],
+    notify_stage,
+    write_timings,
+    record_timing,
+) -> dict:
+    """Run graph-building stages after shared preprocessing and verifier start."""
+    meta_path = preprocess_result["meta_path"]
+    textualized_path = preprocess_result["textualized_path"]
+    annotation_result = preprocess_result["annotation_result"]
+    audio_result = preprocess_result["audio_result"]
+
+    # ── Stage 4 (병렬 C/D) ──
+    _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
+    t_parallel = time.time()
+    classified_result: dict = {}
+    by_scene_result: dict = {}
+
+    silences_path = audio_result.get("silences_path", str(paths["silences"]))
+    annotation_path = annotation_result.get("annotation_path", str(paths["annotation"]))
+
+    notify_stage("graph_classify_scene", "run")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_c = executor.submit(
+            stage4a_classify, args, textualized_path, meta_path, silences_path, output_dir
+        )
+        future_d = executor.submit(stage4b_save_by_scene, args, audio_result, output_dir)
+        for future in as_completed([future_c, future_d]):
+            if future is future_c:
+                classified_result = future.result()
+                timings["Stage 4A 분류"] = classified_result.get("elapsed", 0.0)
+            else:
+                by_scene_result = future.result()
+                timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
+
+    timings["Stage 4 병렬 총"] = time.time() - t_parallel
+    notify_stage("graph_classify_scene", "done")
+    print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
+    print("─" * 70)
+
+    # ── Stage 5 (직렬) ──
+    notify_stage("graph_fusion", "run")
+
+    r5 = stage5_fusion(
+        args,
+        textualized_path=textualized_path,
+        annotation_path=annotation_path,
+        audio_result=audio_result,
+        output_dir=output_dir,
+    )
+    timings["Stage 5 퓨전"] = r5["elapsed"]
+    notify_stage("graph_fusion", "done")
+
+    r6: dict = {}
+    if args.skip_graph_triples:
+        print("\n  ⏭  Stage 6 그래프 트리플 생성 — 사용자 옵션으로 스킵")
+        print("─" * 70)
+        timings["Stage 6 그래프 트리플"] = 0.0
+        timings["Neo4j 적재"] = 0.0
+        notify_stage("graph_triples", "done")
+    else:
+        notify_stage("graph_triples", "run")
+        r6 = stage6_graph_triples(args, output_dir, slides_dir)
+        timings["Stage 6 그래프 트리플"] = r6["elapsed"]
+        notify_stage("graph_triples", "done")
+
+        print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
+        print("─" * 70)
+        timings["Neo4j 적재"] = 0.0
+
+    r7: dict = {}
+    if args.skip_lance_index:
+        print("\n  ⏭  Stage 7 Lance 인덱스 — 사용자 옵션으로 스킵")
+        print("─" * 70)
+        timings["Stage 7 Lance 인덱스"] = 0.0
+        notify_stage("graph_lance_index", "done")
+    else:
+        notify_stage("graph_lance_index", "run")
+        r7 = stage7_lance_index(args, output_dir, slides_dir)
+        timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
+        notify_stage("graph_lance_index", "done")
+
+    r7b: dict = {}
+    if getattr(args, "skip_graphrag_index", False):
+        print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
+        print("─" * 70)
+        record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
+        notify_stage("graph_graphrag_index", "done")
+    else:
+        notify_stage("graph_graphrag_index", "run")
+        stage_status["Stage 7B GraphRAG 인덱스"] = "run"
+        write_timings("Stage 7B GraphRAG 인덱스")
+        r7b = stage7b_graphrag_index(args, output_dir)
+        record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
+        notify_stage("graph_graphrag_index", "done")
+
+    # ── Stage 8 (직렬): 메타데이터 생성 ──
+    r8: dict = {}
+    if getattr(args, "skip_metadata", False):
+        print("\n  ⏭  Stage 8 메타데이터 생성 — 사용자 옵션으로 스킵")
+        print("─" * 70)
+        timings["Stage 8 메타데이터 생성"] = 0.0
+        notify_stage("graph_metadata", "done")
+    else:
+        notify_stage("graph_metadata", "run")
+        r8 = stage8_generate_metadata(args, output_dir, slides_dir)
+        timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+        notify_stage("graph_metadata", "done")
+
+    # ── Stage 11 (직렬): 추천 인덱스 생성 ──
+    r11: dict = {}
+    if getattr(args, "skip_recommender_index", False):
+        print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
+        print("─" * 70)
+        timings["Stage 11 추천 인덱스 생성"] = 0.0
+        notify_stage("graph_recommender_index", "done")
+    else:
+        notify_stage("graph_recommender_index", "run")
+        r11 = stage11_build_recommender_index(args)
+        timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
+        notify_stage("graph_recommender_index", "done")
+
+    return {
+        "classified_result": classified_result,
+        "by_scene_result": by_scene_result,
+        "fusion_result": r5,
+        "graph_triples_result": r6,
+        "lance_result": r7,
+        "graphrag_result": r7b,
+        "metadata_result": r8,
+        "recommender_result": r11,
+        "annotation_path": annotation_path,
+    }
+
+
+def _print_generated_files(output_files: list[str]) -> None:
+    print("\n  생성된 파일:")
+    for path_str in output_files:
+        if not path_str:
+            continue
+        p = Path(path_str)
+        print(f"    {'✓' if p.exists() else '✗'}  {p}")
+
+
 def run_pipeline(args, progress_callback=None):
     total_start = time.time()
     timings: dict[str, float] = {}
@@ -1743,6 +2215,7 @@ def run_pipeline(args, progress_callback=None):
     stem = Path(args.input).stem
     slides_dir = Path(args.slides)
     output_dir = Path(args.output)
+    job_type = _normalize_pipeline_job_type(getattr(args, "job_type", None))
     output_dir.mkdir(parents=True, exist_ok=True)
     slides_dir.mkdir(parents=True, exist_ok=True)
     timing_path = output_dir / "pipeline_timings.json"
@@ -1784,6 +2257,7 @@ def run_pipeline(args, progress_callback=None):
     print(f"  입력 영상 : {args.input}")
     print(f"  슬라이드  : {slides_dir}")
     print(f"  출력      : {output_dir}")
+    print(f"  workflow  : {job_type}")
     if args.force:
         print("  ⚠️  --force: 모든 단계 강제 재실행")
 
@@ -1792,153 +2266,66 @@ def run_pipeline(args, progress_callback=None):
         r10: dict = {}
         r10a: dict = {}
         r10b: dict = {}
-        r7b: dict = {}
+        run_verifier = job_type in {JOB_TYPE_LEGACY_FULL, JOB_TYPE_VERIFIED_UPLOAD}
+        run_preprocess = job_type in {
+            JOB_TYPE_LEGACY_FULL,
+            JOB_TYPE_DIRECT_UPLOAD,
+            JOB_TYPE_VERIFIED_UPLOAD,
+        }
+        run_graph = job_type in {
+            JOB_TYPE_LEGACY_FULL,
+            JOB_TYPE_DIRECT_UPLOAD,
+            JOB_TYPE_GRAPH_UPLOAD,
+        }
 
-        # ── Stage 1 (병렬 A/B) ──
-        _banner("Stage 1  —  병렬 실행 (슬라이드 추출 + 오디오 품질 분석)")
-        t_parallel = time.time()
-        audio_analyze_result: dict = {}
-        
-        notify_stage("scene", "run")
-        notify_stage("voice", "run")
-
-        if args.skip_extract:
-            log.info("Stage 1A 건너뜀 (--skip-extract)")
-            meta_path = str(paths["metadata"])
+        if job_type == JOB_TYPE_GRAPH_UPLOAD:
+            preprocess_result = load_preprocess_result_from_outputs(stem, output_dir, paths)
+            print("\n  ⏭  preprocess 단계 — 저장된 산출물 manifest에서 복원")
+            print("─" * 70)
             timings["Stage 1A 슬라이드 추출"] = 0.0
-            audio_analyze_result = stage1b_audio_analyze(args, output_dir)
-            timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
-        else:
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                future_1a = executor.submit(stage1_extract, args, slides_dir, output_dir)
-                future_1b = executor.submit(stage1b_audio_analyze, args, output_dir)
-                for future in as_completed([future_1a, future_1b]):
-                    if future is future_1a:
-                        r1 = future.result()
-                        meta_path = r1["meta_path"]
-                        timings["Stage 1A 슬라이드 추출"] = r1["elapsed"]
-                    else:
-                        audio_analyze_result = future.result()
-                        timings["Stage 1B 오디오 품질 분석"] = audio_analyze_result["elapsed"]
-
-        duration = audio_analyze_result.get("duration", 0.0)
-        timings["Stage 1 병렬 총"] = time.time() - t_parallel
-        
-        notify_stage("scene", "done")
-        notify_stage("voice", "done")
-        
-        print(f"\n  ✓ Stage 1 완료  ({timings['Stage 1 병렬 총']:.1f}초)")
-        print("─" * 70)
-
-        # ── Stage 2 (병렬 A/B) ──
-        _banner("Stage 2  —  병렬 실행 (슬라이드 텍스트화 + 전체 전사)")
-        t_parallel = time.time()
-        transcript_result: dict = {}
-
-        notify_stage("stt", "run")
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_2a = executor.submit(stage2_textualize, args, slides_dir, output_dir)
-            future_2b = executor.submit(stage2b_transcribe, args, meta_path, duration, output_dir)
-            for future in as_completed([future_2a, future_2b]):
-                if future is future_2a:
-                    r2 = future.result()
-                    textualized_path = r2["textualized_path"]
-                    timings["Stage 2A 슬라이드 텍스트화"] = r2["elapsed"]
-                else:
-                    transcript_result = future.result()
-                    timings["Stage 2B 전체 전사"] = transcript_result["elapsed"]
-
-        timings["Stage 2 병렬 총"] = time.time() - t_parallel
-        notify_stage("stt", "done")
-        print(f"\n  ✓ Stage 2 완료  ({timings['Stage 2 병렬 총']:.1f}초)")
-        print("─" * 70)
-
-        # ── Stage 3 (병렬 A/B) ──
-        _banner("Stage 3  —  병렬 실행 (annotation + 오디오 후처리)")
-        t_parallel = time.time()
-        audio_result: dict = {}
-        annotation_result: dict = {}
-        analyzer_lock = Lock()
-        analyzer_started = {"done": False}
-
-        transcript_raw_path = transcript_result.get(
-            "transcript_raw_path",
-            str(output_dir / f"{stem}_transcript_raw.json"),
-        )
-
-        def _start_analyzer_early(audio_payload: dict) -> None:
-            with analyzer_lock:
-                if analyzer_started["done"]:
-                    return
-                local_r9 = stage9_build_analyzer_merged_clean(
-                    args,
-                    meta_path=meta_path,
-                    textualized_path=textualized_path,
-                    segments_path=audio_payload.get("segments_path", str(paths["segments"])),
-                    output_dir=output_dir,
-                    duration=audio_payload.get("duration", duration),
-                    slides_structure=audio_payload.get("slides_structure"),
-                )
-                timings["Stage 9 analyzer 입력 생성"] = local_r9["elapsed"]
-                r9.update(local_r9)
-                if getattr(args, "stop_after_claim_extract", False) or getattr(args, "stop_after_issue_judge", False):
-                    local_r10a = stage10_extract_claims(
-                        args,
-                        merged_clean_path=local_r9["merged_clean_path"],
-                        output_dir=output_dir,
-                    )
-                    timings["Stage 10A claim 추출"] = local_r10a["elapsed"]
-                    r10a.update(local_r10a)
-                    if getattr(args, "stop_after_issue_judge", False):
-                        local_r10b = stage10_issue_judge(
-                            args,
-                            merged_clean_path=local_r9["merged_clean_path"],
-                            output_dir=output_dir,
-                            claims_jsonl=local_r10a["claims_jsonl"],
-                        )
-                        timings["Stage 10B 1차 issue judge"] = local_r10b["elapsed"]
-                        r10b.update(local_r10b)
-                    timings["Stage 10 verifier 백그라운드 시작"] = 0.0
-                elif getattr(args, "skip_analyzer", False):
-                    timings["Stage 10 verifier 백그라운드 시작"] = 0.0
-                else:
-                    local_r10 = stage10_spawn_analyzers_subprocess(
-                        args,
-                        merged_clean_path=local_r9["merged_clean_path"],
-                        output_dir=output_dir,
-                    )
-                    timings["Stage 10 verifier 백그라운드 시작"] = local_r10["elapsed"]
-                    r10.update(local_r10)
-                analyzer_started["done"] = True
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_a = executor.submit(stage3a_annotation, args, slides_dir, output_dir)
-            future_b = executor.submit(
-                stage3b_audio,
+            timings["Stage 1B 오디오 품질 분석"] = 0.0
+            timings["Stage 1 병렬 총"] = 0.0
+            timings["Stage 2A 슬라이드 텍스트화"] = 0.0
+            timings["Stage 2B 전체 전사"] = 0.0
+            timings["Stage 2 병렬 총"] = 0.0
+            timings["Stage 3A annotation"] = 0.0
+            timings["Stage 3 병렬 총"] = 0.0
+        elif run_preprocess:
+            preprocess_result = run_preprocess_pipeline(
                 args,
-                meta_path,
-                textualized_path,
-                duration,
-                output_dir,
-                transcript_raw_path,
-                _start_analyzer_early,
+                stem=stem,
+                output_dir=output_dir,
+                slides_dir=slides_dir,
+                paths=paths,
+                timings=timings,
+                notify_stage=notify_stage,
             )
-            for future in as_completed([future_a, future_b]):
-                if future is future_a:
-                    annotation_result = future.result()
-                    timings["Stage 3A annotation"] = annotation_result["elapsed"]
-                else:
-                    audio_result = future.result()
-                    if not analyzer_started["done"]:
-                        _start_analyzer_early(audio_result)
+        else:
+            raise RuntimeError(f"지원하지 않는 workflow 타입입니다: {job_type}")
+        textualized_path = preprocess_result["textualized_path"]
+        audio_result = preprocess_result["audio_result"]
 
-        timings["Stage 3 병렬 총"] = time.time() - t_parallel
+        if run_verifier:
+            verifier_result = run_verifier_pipeline(
+                args,
+                preprocess_result=preprocess_result,
+                output_dir=output_dir,
+                paths=paths,
+                timings=timings,
+                background=True,
+                notify_stage=notify_stage,
+            )
+            r9 = verifier_result["analyzer_input"]
+            r10 = verifier_result["verifier_result"]
+            r10a = verifier_result["claims_result"]
+            r10b = verifier_result["issue_judge_result"]
+        else:
+            print("\n  ⏭  verifier 단계 — workflow 설정으로 스킵")
+            print("─" * 70)
+            timings["Stage 9 analyzer 입력 생성"] = 0.0
+            timings["Stage 10 verifier 백그라운드 시작"] = 0.0
 
-        print(f"\n  ✓ Stage 3 완료  ({timings['Stage 3 병렬 총']:.1f}초)")
-        print("─" * 70)
-
-        if (
+        if run_verifier and (
             getattr(args, "stop_after_claim_extract", False)
             or getattr(args, "stop_after_issue_judge", False)
             or getattr(args, "stop_after_verifier_start", False)
@@ -1968,89 +2355,59 @@ def run_pipeline(args, progress_callback=None):
                 print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
             return
 
-        # ── Stage 4 (병렬 C/D) ──
-        _banner("Stage 4  —  병렬 실행 (classifier + by_scene 저장)")
-        t_parallel = time.time()
-        classified_result: dict = {}
-        by_scene_result: dict = {}
+        if job_type == JOB_TYPE_VERIFIED_UPLOAD:
+            print("\n  ⏹  verified_upload: graph 단계는 승인 이후 graph_upload에서 실행합니다.")
+            output_files = [
+                audio_result.get("segments_path", ""),
+                audio_result.get("silences_path", ""),
+                audio_result.get("emphasis_path", ""),
+                preprocess_result.get("annotation_path", ""),
+                textualized_path,
+                r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
+                r10a.get("claims_jsonl", ""),
+                r10a.get("claims_json", ""),
+                r10b.get("issue_judge_summary", ""),
+                r10b.get("issue_judge_comparison", ""),
+                *list((r10b.get("issue_judge_paths") or {}).values()),
+                r10.get("log_path", ""),
+            ]
+            for analyzer_path in (
+                r10.get("claim_output", ""),
+                r10.get("claim_report", ""),
+            ):
+                if analyzer_path and Path(analyzer_path).exists():
+                    output_files.append(analyzer_path)
+            _print_generated_files(output_files)
+            if r10.get("spawned"):
+                print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
+                print(f"  로그 파일: {r10.get('log_path')}")
+                print()
+            return
 
-        silences_path = audio_result.get("silences_path", str(paths["silences"]))
-        annotation_path = annotation_result.get("annotation_path", str(paths["annotation"]))
+        if not run_graph:
+            print("\n  ⏭  graph 단계 — workflow 설정으로 스킵")
+            print("─" * 70)
+            return
 
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            future_c = executor.submit(
-                stage4a_classify, args, textualized_path, meta_path, silences_path, output_dir
-            )
-            future_d = executor.submit(stage4b_save_by_scene, args, audio_result, output_dir)
-            for future in as_completed([future_c, future_d]):
-                if future is future_c:
-                    classified_result = future.result()
-                    timings["Stage 4A 분류"] = classified_result.get("elapsed", 0.0)
-                else:
-                    by_scene_result = future.result()
-                    timings["Stage 4B by_scene 저장"] = by_scene_result.get("elapsed", 0.0)
-
-        timings["Stage 4 병렬 총"] = time.time() - t_parallel
-        print(f"\n  ✓ Stage 4 완료  ({timings['Stage 4 병렬 총']:.1f}초)")
-        print("─" * 70)
-
-        # ── Stage 5 (직렬) ──
-        notify_stage("integrate", "run")
-        
-        r5 = stage5_fusion(
+        graph_result = run_graph_pipeline(
             args,
-            textualized_path=textualized_path,
-            annotation_path=annotation_path,
-            audio_result=audio_result,
             output_dir=output_dir,
+            slides_dir=slides_dir,
+            preprocess_result=preprocess_result,
+            paths=paths,
+            timings=timings,
+            stage_status=stage_status,
+            notify_stage=notify_stage,
+            write_timings=write_timings,
+            record_timing=record_timing,
         )
-        timings["Stage 5 퓨전"] = r5["elapsed"]
-
-        r6: dict = {}
-        if args.skip_graph_triples:
-            print("\n  ⏭  Stage 6 그래프 트리플 생성 — 사용자 옵션으로 스킵")
-            print("─" * 70)
-            timings["Stage 6 그래프 트리플"] = 0.0
-            timings["Neo4j 적재"] = 0.0
-        else:
-            r6 = stage6_graph_triples(args, output_dir, slides_dir)
-            timings["Stage 6 그래프 트리플"] = r6["elapsed"]
-
-            print("\n  ⏭  Neo4j 적재 — 강의 시청 화면 진입 시 자동 적재")
-            print("─" * 70)
-            timings["Neo4j 적재"] = 0.0
-                
-        notify_stage("integrate", "done")
-
-        if args.skip_lance_index:
-            print("\n  ⏭  Stage 7 Lance 인덱스 — 사용자 옵션으로 스킵")
-            print("─" * 70)
-            timings["Stage 7 Lance 인덱스"] = 0.0
-        else:
-            notify_stage("summarize", "run")
-            r7 = stage7_lance_index(args, output_dir, slides_dir)
-            timings["Stage 7 Lance 인덱스"] = r7.get("elapsed", 0.0)
-            notify_stage("summarize", "done")
-
-        if getattr(args, "skip_graphrag_index", False):
-            print("\n  ⏭  Stage 7B GraphRAG 인덱스 — 사용자 옵션으로 스킵")
-            print("─" * 70)
-            record_timing("Stage 7B GraphRAG 인덱스", 0.0, "skipped")
-        else:
-            stage_status["Stage 7B GraphRAG 인덱스"] = "run"
-            write_timings("Stage 7B GraphRAG 인덱스")
-            r7b = stage7b_graphrag_index(args, output_dir)
-            record_timing("Stage 7B GraphRAG 인덱스", r7b.get("elapsed", 0.0), "done")
-
-        # ── Stage 8 (직렬): 메타데이터 생성 ──  ← 여기 추가
-        r8: dict = {}
-        if getattr(args, "skip_metadata", False):
-            print("\n  ⏭  Stage 8 메타데이터 생성 — 사용자 옵션으로 스킵")
-            print("─" * 70)
-            timings["Stage 8 메타데이터 생성"] = 0.0
-        else:
-            r8 = stage8_generate_metadata(args, output_dir, slides_dir)
-            timings["Stage 8 메타데이터 생성"] = r8["elapsed"]
+        classified_result = graph_result["classified_result"]
+        by_scene_result = graph_result["by_scene_result"]
+        r5 = graph_result["fusion_result"]
+        r6 = graph_result["graph_triples_result"]
+        r7b = graph_result["graphrag_result"]
+        r8 = graph_result["metadata_result"]
+        annotation_path = graph_result["annotation_path"]
 
         if not timings.get("Stage 9 analyzer 입력 생성"):
             timings["Stage 9 analyzer 입력 생성"] = 0.0
@@ -2063,17 +2420,6 @@ def run_pipeline(args, progress_callback=None):
         if "Stage 10B 1차 issue judge" not in timings and getattr(args, "stop_after_issue_judge", False):
             timings["Stage 10B 1차 issue judge"] = 0.0
 
-        # ── Stage 11 (직렬): 추천 인덱스 생성 ──
-        if getattr(args, "skip_recommender_index", False):
-            print("\n  ⏭  Stage 11 추천 인덱스 생성 — 사용자 옵션으로 스킵")
-            print("─" * 70)
-            timings["Stage 11 추천 인덱스 생성"] = 0.0
-        else:
-            r11 = stage11_build_recommender_index(args)
-            timings["Stage 11 추천 인덱스 생성"] = r11["elapsed"]
-
-        # ── 생성된 파일 목록 ──
-        print("\n  생성된 파일:")
         output_files = [
             audio_result.get("segments_path", ""),
             audio_result.get("silences_path", ""),
@@ -2092,25 +2438,24 @@ def run_pipeline(args, progress_callback=None):
             r7b.get("relationships_parquet", ""),
             r8.get("metadata_path", ""),
             str(Path(getattr(args, "recommender_db_dir", DEFAULT_RECOMMENDER_DB_DIR))),
-            r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
-            r10a.get("claims_jsonl", ""),
-            r10a.get("claims_json", ""),
-            r10b.get("issue_judge_summary", ""),
-            r10b.get("issue_judge_comparison", ""),
-            *list((r10b.get("issue_judge_paths") or {}).values()),
-            r10.get("log_path", ""),
         ]
-        for analyzer_path in (
-            r10.get("claim_output", ""),
-            r10.get("claim_report", ""),
-        ):
-            if analyzer_path and Path(analyzer_path).exists():
-                output_files.append(analyzer_path)
-        for path_str in output_files:
-            if not path_str:
-                continue
-            p = Path(path_str)
-            print(f"    {'✓' if p.exists() else '✗'}  {p}")
+        if run_verifier:
+            output_files.extend([
+                r9.get("merged_clean_path", str(output_dir / f"{stem}_analyzer" / f"{stem}_merged_clean.json")),
+                r10a.get("claims_jsonl", ""),
+                r10a.get("claims_json", ""),
+                r10b.get("issue_judge_summary", ""),
+                r10b.get("issue_judge_comparison", ""),
+                *list((r10b.get("issue_judge_paths") or {}).values()),
+                r10.get("log_path", ""),
+            ])
+            for analyzer_path in (
+                r10.get("claim_output", ""),
+                r10.get("claim_report", ""),
+            ):
+                if analyzer_path and Path(analyzer_path).exists():
+                    output_files.append(analyzer_path)
+        _print_generated_files(output_files)
         if r10.get("spawned"):
             print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
             print(f"  로그 파일: {r10.get('log_path')}")
@@ -2284,6 +2629,9 @@ def get_parser():
                         help="lecture_metadata DB 저장 대상 lectures.id")
     parser.add_argument("--uploaded-at", dest="uploaded_at", default=None,
                         help="강의 업로드 시각 ISO 문자열")
+    parser.add_argument("--job-type", dest="job_type", default=JOB_TYPE_LEGACY_FULL,
+                        choices=sorted(PIPELINE_JOB_TYPES),
+                        help=f"실행 workflow 타입 (default: {JOB_TYPE_LEGACY_FULL})")
     
     return parser
 
