@@ -725,6 +725,7 @@ async def list_all_results(
     category: Optional[str] = None,
     search: Optional[str] = None,
     scope: str = 'browse',
+    verified_only: bool = False,
 ) -> Dict[str, Any]:
     query = (
         select(Lecture, ProcessingJob, LectureMetadata)
@@ -750,6 +751,8 @@ async def list_all_results(
         if scope == 'upload' and job_status in ACTIVE_STATUSES:
             continue
 
+        if verified_only and not bool(getattr(lecture, "is_verified", False)):
+            continue
         if category and domain != normalize_domain_value(category):
             continue
         if search and search.lower() not in (lecture.title or '').lower():

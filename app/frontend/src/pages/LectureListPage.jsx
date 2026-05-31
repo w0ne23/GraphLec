@@ -40,12 +40,14 @@ export default function LectureListPage() {
   
   // ── 1. 조건 상태 (All, 카테고리, 검색) ──
   const [activeCategory, setActiveCategory] = useState('전체')
+  const [activeVerifiedOnly, setActiveVerifiedOnly] = useState(false)
   const [searchInput, setSearchInput] = useState('') // 타이핑 중인 값
   const [activeSearch, setActiveSearch] = useState('') // 실제 API에 요청할 검색어
   
   // ── 2. 상세검색 패널 상태 ──
   const [showFilterPanel, setShowFilterPanel] = useState(false)
   const [pendingCategory, setPendingCategory] = useState('전체')
+  const [pendingVerifiedOnly, setPendingVerifiedOnly] = useState(false)
 
   // ── 3. 페이지네이션 상태 ──
   const [currentPage, setCurrentPage] = useState(1)
@@ -59,7 +61,8 @@ export default function LectureListPage() {
       page: currentPage,
       limit: ITEMS_PER_PAGE,
       category: activeCategory === '전체' ? null : activeCategory,
-      search: activeSearch 
+      search: activeSearch,
+      verifiedOnly: activeVerifiedOnly,
     })
       .then(res => {
         setLectures(res.items)
@@ -67,7 +70,7 @@ export default function LectureListPage() {
         setTotalCount(res.totalItems || res.items.length)
       })
       .finally(() => setLoading(false))
-  }, [currentPage, activeCategory, activeSearch])
+  }, [currentPage, activeCategory, activeSearch, activeVerifiedOnly])
 
   // 검색 실행 핸들러 (엔터 키 또는 버튼 클릭)
   const handleSearchSubmit = (e) => {
@@ -80,6 +83,7 @@ export default function LectureListPage() {
   // 필터 적용 핸들러
   const applyFilters = () => {
     setActiveCategory(pendingCategory)
+    setActiveVerifiedOnly(pendingVerifiedOnly)
     setCurrentPage(1)
     setShowFilterPanel(false)
   }
@@ -87,6 +91,7 @@ export default function LectureListPage() {
   // 필터 초기화 핸들러
   const resetFilters = () => {
     setPendingCategory('전체')
+    setPendingVerifiedOnly(false)
   }
 
   return (
@@ -129,6 +134,12 @@ export default function LectureListPage() {
                   >
                     전체
                   </button>
+                  <button
+                    className={`ll-chip ll-chip--verified ${pendingVerifiedOnly ? 'active' : ''}`}
+                    onClick={() => setPendingVerifiedOnly(value => !value)}
+                  >
+                    검증 완료
+                  </button>
                 </div>
 
                 <div className="ll-chip-divider" />
@@ -164,6 +175,19 @@ export default function LectureListPage() {
                     <button className="ll-active-remove" onClick={() => {
                       setActiveCategory('전체')
                       setPendingCategory('전체')
+                      setCurrentPage(1)
+                    }}>✕</button>
+                  </span>
+                </div>
+              )}
+              {activeVerifiedOnly && (
+                <div className="ll-active-filters">
+                  <span className="ll-active-chip ll-active-chip--verified">
+                    검증 완료
+                    <button className="ll-active-remove" onClick={() => {
+                      setActiveVerifiedOnly(false)
+                      setPendingVerifiedOnly(false)
+                      setCurrentPage(1)
                     }}>✕</button>
                   </span>
                 </div>

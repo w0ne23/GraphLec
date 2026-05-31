@@ -59,6 +59,7 @@ async function _fetchResults(params) {
     if (params.page) query.append('page', params.page)
     if (params.category && params.category !== '전체') query.append('category', params.category)
     if (params.search) query.append('search', params.search)
+    if (params.verifiedOnly) query.append('verified_only', 'true')
 
     const res = await fetch(`${API_BASE}/results?${query.toString()}`)
     if (!res.ok) throw new Error('Failed to fetch lectures')

@@ -18,10 +18,12 @@ async def list_results(
     category: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     scope: str = Query('browse'),
+    verified_only: bool = Query(False),
 ):
     return await lecture_service.list_all_results(
         db, page=page, limit=limit,
-        category=category, search=search, scope=scope
+        category=category, search=search, scope=scope,
+        verified_only=verified_only,
     )
 
 
