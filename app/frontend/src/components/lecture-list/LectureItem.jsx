@@ -55,7 +55,17 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
       </div>
       
       <div className="lecture-card-info">
-        <div className="lecture-card-category">{categoryLabel}</div>
+        <div className="lecture-card-label-row">
+          <div className="lecture-card-category">{categoryLabel}</div>
+          {lecture.is_verified && (
+            <div className="lecture-card-verify-badge" aria-label="검증 완료" tabIndex={0}>
+              ✓
+              <span className="lecture-card-verify-tooltip" role="tooltip">
+                검증 완료된 강의입니다
+              </span>
+            </div>
+          )}
+        </div>
         <h3 className="lecture-card-title">{lecture.title}</h3>
         <div className="lecture-card-meta">
           {metaLabel}

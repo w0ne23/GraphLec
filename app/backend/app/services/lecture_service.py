@@ -564,6 +564,7 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
             "title": lecture.title or str(lecture.id),
             "category": domain,
             "domain": domain,
+            "is_verified": bool(getattr(lecture, "is_verified", False)),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         })
@@ -639,6 +640,8 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
 
     if not approval_job:
         if existing_graph_job:
+            lecture.is_verified = True
+            await db.commit()
             return {
                 "status": "success",
                 "approved_job_id": None,
@@ -651,6 +654,7 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
     approval_job.status = JOB_STATUS_DONE
     approval_job.current_stage = "승인 완료"
     approval_job.error_message = None
+    lecture.is_verified = True
 
     graph_job = existing_graph_job
     already_queued = graph_job is not None
@@ -759,6 +763,7 @@ async def list_all_results(
             "title": lecture.title or str(lecture.id),
             "category": domain,
             "domain": domain,
+            "is_verified": bool(getattr(lecture, "is_verified", False)),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
             "error_message": job.error_message if job else None,
@@ -804,6 +809,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
         "category": info.get("domain") or normalize_domain_value(lecture.category),
+        "is_verified": bool(getattr(lecture, "is_verified", False)),
         "description": lecture.description,
         "summary": info.get("summary") or "",
         "keywords": info.get("keywords") or [],

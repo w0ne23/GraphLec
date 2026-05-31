@@ -179,6 +179,7 @@ async def create_job(
         "job_id": str(new_job.id),
         "job_type": new_job.job_type,
         "status": "pending",
+        "is_verified": False,
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
 

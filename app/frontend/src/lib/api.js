@@ -28,6 +28,7 @@ export async function uploadLecture({ file, title, category, description, workfl
     category: data.category || category,
     description: data.description || description,
     status: data.status || 'pending',
+    is_verified: Boolean(data.is_verified),
     created_at: data.created_at,
   };
 }
@@ -76,6 +77,7 @@ async function _fetchResults(params) {
         category: lec.category || lec.domain || 'etc',
         domain: lec.domain || lec.category || 'etc',
         status: lec.status,
+        is_verified: Boolean(lec.is_verified),
         created_at: lec.created_at,
         thumbnail_url: lec.thumbnail_url,
         error_message: lec.error_message,
