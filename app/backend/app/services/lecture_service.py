@@ -28,6 +28,7 @@ from app.models import (
     JOB_TYPE_LEGACY_FULL,
     JOB_TYPE_VERIFIED_UPLOAD,
     Lecture,
+    LectureMetadata,
     ProcessingJob,
     GraphSession,
     ChatSession,
@@ -48,6 +49,70 @@ PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file_
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
+DOMAIN_VALUES = {
+    "engineering",
+    "natural_science",
+    "humanities",
+    "social_science",
+    "arts",
+    "health_sciences",
+    "sports",
+    "education",
+    "etc",
+}
+DOMAIN_ALIASES = {
+    "eng": "engineering",
+    "eng/cs": "engineering",
+    "eng/electrical": "engineering",
+    "eng/mechanical": "engineering",
+    "eng/civil": "engineering",
+    "eng/chemical": "engineering",
+    "eng/industrial": "engineering",
+    "eng/biomedical": "engineering",
+    "eng/aerospace": "engineering",
+    "eng/materials": "engineering",
+    "eng/environmental": "engineering",
+    "sci": "natural_science",
+    "sci/physics": "natural_science",
+    "sci/chemistry": "natural_science",
+    "sci/biology": "natural_science",
+    "sci/earth_science": "natural_science",
+    "sci/astronomy": "natural_science",
+    "sci/ecology": "natural_science",
+    "hum": "humanities",
+    "hum/philosophy": "humanities",
+    "hum/history": "humanities",
+    "hum/linguistics": "humanities",
+    "hum/literature": "humanities",
+    "hum/art_history": "humanities",
+    "hum/religion": "humanities",
+    "soc": "social_science",
+    "soc/economics": "social_science",
+    "soc/business": "social_science",
+    "soc/law": "social_science",
+    "soc/political_science": "social_science",
+    "soc/sociology": "social_science",
+    "soc/psychology": "social_science",
+    "med": "health_sciences",
+    "med/anatomy": "health_sciences",
+    "med/physiology": "health_sciences",
+    "med/pharmacology": "health_sciences",
+    "med/clinical": "health_sciences",
+    "med/public_health": "health_sciences",
+    "med/nursing": "health_sciences",
+    "art": "arts",
+    "art/fine_arts": "arts",
+    "art/music": "arts",
+    "art/design": "arts",
+    "art/film": "arts",
+    "art/theater": "arts",
+    "art/physical_education": "sports",
+    "art/sports_science": "sports",
+    "gen": "etc",
+    "gen/other": "etc",
+    "default category": "etc",
+    "기타": "etc",
+}
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
@@ -95,6 +160,44 @@ def make_file_url(abs_path: Optional[str]) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def normalize_domain_value(value: Any) -> str:
+    token = _str_cell(value).strip()
+    if not token:
+        return "etc"
+    normalized = token.lower().replace("-", "_")
+    if normalized in DOMAIN_VALUES:
+        return normalized
+    return DOMAIN_ALIASES.get(normalized) or DOMAIN_ALIASES.get(token) or "etc"
+
+
+def _lecture_domain_value(lecture: Lecture, metadata: Optional[dict] = None) -> str:
+    metadata = metadata or {}
+    return normalize_domain_value(
+        metadata.get("graph_domain")
+        or metadata.get("domain")
+        or getattr(lecture, "category", None)
+    )
+
+
+def _lecture_metadata_dict(row: Optional[LectureMetadata]) -> dict:
+    if not row:
+        return {}
+    return {
+        "domain": row.domain,
+        "graph_domain": row.graph_domain,
+        "graph_subdomain": row.graph_subdomain,
+    }
+
+
+def _lecture_file_metadata(lecture: Lecture) -> dict:
+    if not lecture.output_dir:
+        return {}
+    return _first_existing_json([
+        Path(lecture.output_dir) / "metadata" / f"{lecture.id}_metadata.json",
+        Path(lecture.output_dir) / f"{lecture.id}_metadata.json",
+    ])
 
 
 def _first_existing_file(paths: list[Path]) -> Optional[Path]:
@@ -217,14 +320,9 @@ def _read_video_domain(output_dir: Path, stem: str) -> tuple[str, str]:
     return "", ""
 
 
-def _format_domain_label(domain: str, subdomain: str, fallback: str) -> str:
-    domain = _str_cell(domain).strip()
-    subdomain = _str_cell(subdomain).strip()
-    if domain and subdomain:
-        return f"{domain} / {subdomain}"
-    if domain:
-        return domain
-    return _str_cell(fallback) or "기타"
+def _format_domain_label(domain: str, fallback: str) -> str:
+    normalized = normalize_domain_value(domain or fallback)
+    return normalized or "etc"
 
 
 def _visual_asset_stats_from_fused(fused: dict) -> dict:
@@ -320,7 +418,10 @@ def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> 
     graph_subdomain = _str_cell(metadata.get("graph_subdomain"))
     if not graph_domain:
         graph_domain, graph_subdomain = _read_video_domain(output_dir, stem)
-    domain = _format_domain_label(graph_domain, graph_subdomain, fallback_category)
+    domain = _format_domain_label(
+        graph_domain or metadata.get("domain"),
+        fallback_category,
+    )
     visual_stats = _visual_asset_stats_from_fused(fused)
     keywords = [
         kw for kw in (_keyword_label(item) for item in (metadata.get("keywords") or []))
@@ -432,8 +533,9 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
 
 async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
-        select(Lecture, ProcessingJob)
+        select(Lecture, ProcessingJob, LectureMetadata)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .outerjoin(LectureMetadata, LectureMetadata.lecture_id == Lecture.id)
         .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
@@ -441,10 +543,12 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
 
     seen = set()
     out = []
-    for lecture, job in rows:
+    for lecture, job, lecture_metadata in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
+        metadata = _lecture_metadata_dict(lecture_metadata) or _lecture_file_metadata(lecture)
+        domain = _lecture_domain_value(lecture, metadata)
         job_status = job.status if job else 'unknown'
         if status_filter == 'active' and job_status not in ACTIVE_STATUSES:
             continue
@@ -458,7 +562,8 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
             "error_message": job.error_message if job else None,
             "pipeline_stages": job.pipeline_stages or [] if job and not is_done else [],
             "title": lecture.title or str(lecture.id),
-            "category": lecture.category or "기타",
+            "category": domain,
+            "domain": domain,
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         })
@@ -618,8 +723,9 @@ async def list_all_results(
     scope: str = 'browse',
 ) -> Dict[str, Any]:
     query = (
-        select(Lecture, ProcessingJob)
+        select(Lecture, ProcessingJob, LectureMetadata)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .outerjoin(LectureMetadata, LectureMetadata.lecture_id == Lecture.id)
         .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
@@ -627,10 +733,12 @@ async def list_all_results(
 
     seen = set()
     out = []
-    for lecture, job in rows:
+    for lecture, job, lecture_metadata in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
+        metadata = _lecture_metadata_dict(lecture_metadata) or _lecture_file_metadata(lecture)
+        domain = _lecture_domain_value(lecture, metadata)
         job_status = job.status if job else 'unknown'
 
         if scope == 'browse' and job_status != 'done':
@@ -638,7 +746,7 @@ async def list_all_results(
         if scope == 'upload' and job_status in ACTIVE_STATUSES:
             continue
 
-        if category and lecture.category != category:
+        if category and domain != normalize_domain_value(category):
             continue
         if search and search.lower() not in (lecture.title or '').lower():
             continue
@@ -649,7 +757,8 @@ async def list_all_results(
             "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
-            "category": lecture.category or "기타",
+            "category": domain,
+            "domain": domain,
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
             "error_message": job.error_message if job else None,
@@ -676,7 +785,9 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     output_dir = Path(lecture.output_dir) if lecture.output_dir else None
     info = _build_lecture_info(output_dir, stem, lecture.category or "기타") if output_dir else {
         "summary": "",
-        "domain": lecture.category or "기타",
+        "domain": normalize_domain_value(lecture.category),
+        "graph_domain": "",
+        "graph_subdomain": "",
         "keywords": [],
         "highlights": [],
         "stats": {
@@ -692,11 +803,13 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
-        "category": info.get("domain") or lecture.category or "기타",
+        "category": info.get("domain") or normalize_domain_value(lecture.category),
         "description": lecture.description,
         "summary": info.get("summary") or "",
         "keywords": info.get("keywords") or [],
-        "domain": info.get("domain") or lecture.category or "기타",
+        "domain": info.get("domain") or normalize_domain_value(lecture.category),
+        "graph_domain": info.get("graph_domain") or "",
+        "graph_subdomain": info.get("graph_subdomain") or "",
         "info": info,
         "stem": stem,
         "video_url": make_file_url(lecture.video_path),

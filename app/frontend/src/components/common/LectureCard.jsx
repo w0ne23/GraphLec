@@ -1,8 +1,25 @@
 const THUMB_COLORS = {
-  '컴퓨터 과학':    '#1e3a5f',
-  '데이터 사이언스': '#1a3d2b',
-  '소프트웨어 공학': '#2d1f3d',
-  '수학':           '#3d2a1a',
+  engineering: '#1e3a5f',
+  natural_science: '#3d2a1a',
+  humanities: '#4b3426',
+  social_science: '#314155',
+  arts: '#5a2d54',
+  health_sciences: '#1f4c3b',
+  sports: '#45512a',
+  education: '#3f3b67',
+  etc: '#4b5563',
+}
+
+const THUMB_ICONS = {
+  engineering: '🧠',
+  natural_science: '📐',
+  humanities: '📚',
+  social_science: '🏛️',
+  arts: '🎨',
+  health_sciences: '⚕️',
+  sports: '🏃',
+  education: '🎓',
+  etc: '🎬',
 }
 
 const STATUS_MAP = {
@@ -29,7 +46,7 @@ export default function LectureCard({ lecture, showStatus = false, onSelect }) {
     <div className="card" onClick={handleClick}>
       <div className="lecture-card-thumb" style={{ background: thumbBg }}>
         <div className="lecture-card-thumb-icon">
-          {{ '컴퓨터 과학': '🧠', '데이터 사이언스': '📊', '소프트웨어 공학': '⚙️', '수학': '📐' }[lecture.category] ?? '🎬'}
+          {THUMB_ICONS[lecture.category] ?? THUMB_ICONS.etc}
         </div>
         {showStatus && (
           <div className={`lecture-card-status-badge ${status.cls}`}>

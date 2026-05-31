@@ -13,7 +13,7 @@ import {
   normalizePipelineStages,
 } from '../components/verifier/verifierConstants'
 
-const DEFAULT_CATEGORY = 'Default Category'
+const DEFAULT_CATEGORY = 'etc'
 
 const EMPTY_FLOW = {
   lecture: {

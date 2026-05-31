@@ -5,7 +5,30 @@ import LectureItem from '../components/lecture-list/LectureItem'
 
 import '../styles/lecture-list.css'
 
-const CATEGORIES = ['전체', '컴퓨터 과학', '수학', '데이터 사이언스', '소프트웨어 공학']
+const CATEGORIES = [
+  '전체',
+  'engineering',
+  'natural_science',
+  'humanities',
+  'social_science',
+  'arts',
+  'health_sciences',
+  'sports',
+  'education',
+  'etc',
+]
+const CATEGORY_LABELS = {
+  전체: '전체',
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문학',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건의료',
+  sports: '스포츠',
+  education: '교육',
+  etc: '기타',
+}
 const ITEMS_PER_PAGE = 12
 
 export default function LectureListPage() {
@@ -110,9 +133,8 @@ export default function LectureListPage() {
 
                 <div className="ll-chip-divider" />
 
-                {/* 서브그룹: Engineering */}
                 <div className="ll-filter-subgroup">
-                  <h5 className="ll-filter-sublabel">Engineering</h5>
+                  <h5 className="ll-filter-sublabel">도메인</h5>
                   <div className="ll-filter-chips">
                     {CATEGORIES.filter(cat => cat !== '전체').map(cat => (
                       <button
@@ -120,7 +142,7 @@ export default function LectureListPage() {
                         className={`ll-chip ${pendingCategory === cat ? 'active' : ''}`}
                         onClick={() => setPendingCategory(cat)}
                       >
-                        {cat}
+                        {CATEGORY_LABELS[cat] ?? cat}
                       </button>
                     ))}
                   </div>
@@ -138,7 +160,7 @@ export default function LectureListPage() {
               {activeCategory !== '전체' && (
                 <div className="ll-active-filters">
                   <span className="ll-active-chip">
-                    {activeCategory}
+                    {CATEGORY_LABELS[activeCategory] ?? activeCategory}
                     <button className="ll-active-remove" onClick={() => {
                       setActiveCategory('전체')
                       setPendingCategory('전체')

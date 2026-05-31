@@ -32,7 +32,7 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
           />
         ) : null}
         <span className="lecture-card-thumb-icon" hidden={Boolean(lecture.thumbnail_url)}>
-          {lecture.category === '수학' ? '📐' : '🎬'}
+          {lecture.category === 'natural_science' ? '📐' : '🎬'}
         </span>
         {!isDummy && !isDone && (
           <span className={`lecture-card-status-badge status-${lecture.status}`}>
