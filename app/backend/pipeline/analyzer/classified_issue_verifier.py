@@ -32,7 +32,7 @@ from .issue_type_classifier import (
 SCHEMA_VERSION = "classified_issue_verifier.v1"
 DEFAULT_MODEL_WEIGHTS = "gpt=0.4,claude=0.4,grok=0.2"
 DEFAULT_MODELS = ("gpt", "claude", "grok")
-DEFAULT_CONTEXT_WINDOW = 3
+DEFAULT_CONTEXT_WINDOW = 5
 CATEGORY_MODEL_WEIGHT_OVERRIDES = {
     "scope_overclaim": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
     "confusing_explanation": {"gpt": 0.3, "openai": 0.3, "claude": 0.5, "anthropic": 0.5, "grok": 0.2, "xai": 0.2},
@@ -47,8 +47,8 @@ JUDGMENTS = {
 CATEGORY_LABELS = {
     "factual_error": "사실 오류",
     "temporal_error": "시대적 오류",
-    "confusing_explanation": "혼동 오류",
-    "scope_overclaim": "범위 오류",
+    "confusing_explanation": "혼동 가능 설명",
+    "scope_overclaim": "범위 과잉 단정",
 }
 
 

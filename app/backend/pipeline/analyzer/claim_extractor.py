@@ -34,13 +34,13 @@ def _claim_extract_batch_mode() -> str:
 
 def _claim_extract_context_window() -> tuple[int, int]:
     return (
-        _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 2, minimum=0),
+        _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_PREV", 1, minimum=0),
         _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_NEXT", 1, minimum=0),
     )
 
 
 def _claim_extract_context_group_size() -> int:
-    return _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE", 4, minimum=1)
+    return _read_int_env("VERIFIER_CLAIM_EXTRACT_CONTEXT_GROUP_SIZE", 3, minimum=1)
 
 
 def _read_int_env(name: str, default: int, *, minimum: int = 1) -> int:
