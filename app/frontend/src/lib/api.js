@@ -28,6 +28,7 @@ export async function uploadLecture({ file, title, category, description, workfl
     category: data.category || category,
     description: data.description || description,
     status: data.status || 'pending',
+    is_verified: Boolean(data.is_verified),
     created_at: data.created_at,
   };
 }
@@ -58,6 +59,7 @@ async function _fetchResults(params) {
     if (params.page) query.append('page', params.page)
     if (params.category && params.category !== '전체') query.append('category', params.category)
     if (params.search) query.append('search', params.search)
+    if (params.verifiedOnly) query.append('verified_only', 'true')
 
     const res = await fetch(`${API_BASE}/results?${query.toString()}`)
     if (!res.ok) throw new Error('Failed to fetch lectures')
@@ -73,9 +75,12 @@ async function _fetchResults(params) {
         job_id: lec.job_id,
         job_type: lec.job_type,
         title: lec.title || 'Untitled',
-        category: lec.category || '기타',
+        category: lec.category || lec.domain || 'etc',
+        domain: lec.domain || lec.category || 'etc',
         status: lec.status,
+        is_verified: Boolean(lec.is_verified),
         created_at: lec.created_at,
+        thumbnail_url: lec.thumbnail_url,
         error_message: lec.error_message,
         pipeline_stages: lec.pipeline_stages || [],
         tags: lec.tags || [],

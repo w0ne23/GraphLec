@@ -27,12 +27,23 @@ TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
 TRANSITION_TAIL_SEC = float(os.getenv("MERGE_TRANSITION_TAIL_SEC", "0.2"))
 ASSIGN_MAX_GAP_SEC = float(os.getenv("MERGE_ASSIGN_MAX_GAP_SEC", "3.0"))
 
-DOMAIN_CHOICES = ["공학", "자연과학", "인문학", "사회과학", "예술"]
+DOMAIN_CHOICES = [
+    "engineering",
+    "natural_science",
+    "humanities",
+    "social_science",
+    "arts",
+    "health_sciences",
+    "sports",
+    "education",
+    "etc",
+]
 SUBDOMAIN_CHOICES = [
-    "컴퓨터공학", "전자공학", "기계공학",
-    "물리학", "화학", "생물학",
-    "역사학", "철학", "문학",
-    "경제학", "정치학", "사회학",
+    "computer_science", "electrical_engineering", "mechanical_engineering",
+    "physics", "chemistry", "biology", "mathematics",
+    "history", "philosophy", "literature",
+    "economics", "political_science", "sociology",
+    "nursing", "public_health", "sports_science", "education",
 ]
 
 _token_usage: dict[str, int] = {"input": 0, "output": 0, "calls": 0}
@@ -116,7 +127,7 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
 {", ".join(SUBDOMAIN_CHOICES)}
 
 위 선택지에서 가장 적합한 것을 하나씩 골라 JSON만 출력하세요.
-선택지에 없으면 가장 가까운 것을 고르세요.
+판단이 애매하거나 선택지에 없으면 domain은 "etc", subdomain은 ""로 두세요.
 {{"domain": "...", "subdomain": "..."}}"""
 
     def call():
@@ -139,16 +150,16 @@ def classify_lecture_domain(slide_titles: list[str], transcript_sample: str) -> 
         elif "```" in raw:
             raw = raw.split("```")[1].split("```")[0].strip()
         parsed = json.loads(raw)
-        domain = parsed.get("domain", "")
-        subdomain = parsed.get("subdomain", "")
+        domain = str(parsed.get("domain", "") or "").strip().lower().replace("-", "_")
+        subdomain = str(parsed.get("subdomain", "") or "").strip().lower().replace("-", "_")
         if domain not in DOMAIN_CHOICES:
-            domain = ""
+            domain = "etc"
         if subdomain not in SUBDOMAIN_CHOICES:
             subdomain = ""
         return {"domain": domain, "subdomain": subdomain}
     except Exception as exc:
         print(f"  [도메인 분류 오류] {exc}")
-        return {"domain": "", "subdomain": ""}
+        return {"domain": "etc", "subdomain": ""}
 
 
 def _build_occurrence_index(scene_occurrences: dict[int, list[dict]]) -> list[dict]:

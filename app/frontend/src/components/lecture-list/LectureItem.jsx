@@ -6,11 +6,24 @@
  * @param {string}   viewMode   - 'grid' | 'list' (기본값 'grid')
  * @param {function} onClick    - 카드 클릭 시 호출되는 핸들러
  */
+const CATEGORY_LABELS = {
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문학',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건의료',
+  sports: '스포츠',
+  education: '교육',
+  etc: '기타',
+}
+
 export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
   const isDone = lecture.status === 'done';
   const isDummy = lecture.is_dummy || lecture.source === 'metadata';
   const isPlayable = isDone && !isDummy;
   const metaLabel = lecture.created_at ? new Date(lecture.created_at).toLocaleDateString() : '';
+  const categoryLabel = CATEGORY_LABELS[lecture.category] ?? lecture.category;
   
   return (
     <article 
@@ -19,8 +32,20 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
       style={{ cursor: isPlayable ? 'pointer' : 'default' }}
     >
       <div className="lecture-card-thumb" style={{ background: 'var(--card)' }}>
-        <span className="lecture-card-thumb-icon">
-          {lecture.category === '수학' ? '📐' : '🎬'}
+        {lecture.thumbnail_url ? (
+          <img
+            className="lecture-card-thumb-image"
+            src={lecture.thumbnail_url}
+            alt=""
+            loading="lazy"
+            onError={(event) => {
+              event.currentTarget.hidden = true
+              event.currentTarget.nextElementSibling?.removeAttribute('hidden')
+            }}
+          />
+        ) : null}
+        <span className="lecture-card-thumb-icon" hidden={Boolean(lecture.thumbnail_url)}>
+          {lecture.category === 'natural_science' ? '📐' : '🎬'}
         </span>
         {!isDummy && !isDone && (
           <span className={`lecture-card-status-badge status-${lecture.status}`}>
@@ -30,7 +55,17 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
       </div>
       
       <div className="lecture-card-info">
-        <div className="lecture-card-category">{lecture.category}</div>
+        <div className="lecture-card-label-row">
+          <div className="lecture-card-category">{categoryLabel}</div>
+          {lecture.is_verified && (
+            <div className="lecture-card-verify-badge" aria-label="검증 완료" tabIndex={0}>
+              ✓
+              <span className="lecture-card-verify-tooltip" role="tooltip">
+                검증 완료된 강의입니다
+              </span>
+            </div>
+          )}
+        </div>
         <h3 className="lecture-card-title">{lecture.title}</h3>
         <div className="lecture-card-meta">
           {metaLabel}

@@ -90,6 +90,11 @@ export default function LectureInfoModal({ lecture, scenes = [], onClose }) {
               <strong>카테고리:</strong> {domain}<br />
               <strong>업로드:</strong> {uploadedAt}
             </div>
+            {lecture.is_verified && (
+              <div className="lim-verify-note">
+                강의자가 검토 완료한 강의입니다.
+              </div>
+            )}
           </div>
         </div>
       </div>

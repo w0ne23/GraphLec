@@ -107,12 +107,13 @@ async def stream_job_status(
 async def create_job(
     video: UploadFile = File(...),
     title: str = Form(...),
-    category: str = Form("컴퓨터 과학"),
+    category: str = Form("etc"),
     description: str = Form(""),
     workflow_mode: str = Form(JOB_TYPE_LEGACY_FULL),
     db: AsyncSession = Depends(get_db),
 ):
     job_type = _normalize_upload_job_type(workflow_mode)
+    normalized_category = lecture_service.normalize_domain_value(category)
     lecture_id = uuid.uuid4()
     base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
@@ -145,7 +146,7 @@ async def create_job(
         new_lecture = Lecture(
             id=lecture_id,
             title=final_title,
-            category=category,
+            category=normalized_category,
             description=description,
             video_path=str(input_path),
             output_dir=str(output_dir),
@@ -173,11 +174,12 @@ async def create_job(
     return {
         "id": str(lecture_id),
         "title": final_title,
-        "category": category,
+        "category": normalized_category,
         "description": description,
         "job_id": str(new_job.id),
         "job_type": new_job.job_type,
         "status": "pending",
+        "is_verified": False,
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
 

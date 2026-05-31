@@ -302,6 +302,12 @@ async def worker_loop():
                             SET status = :status, current_stage = :stage
                             WHERE id = :id
                         """), {"id": job_id_val, "status": final_status, "stage": final_stage})
+                        if final_status == JOB_STATUS_WAITING_APPROVAL:
+                            await db.execute(text("""
+                                UPDATE lectures
+                                SET is_verified = TRUE
+                                WHERE id = :lecture_id
+                            """), {"lecture_id": job_lecture_id})
                     else:
                         logger.error(f"--- [Worker ERROR] {job_id_str}: {error} ---")
                         await db.execute(text("""
