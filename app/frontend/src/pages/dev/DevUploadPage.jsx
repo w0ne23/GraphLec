@@ -8,6 +8,18 @@ const STAGE_LABELS = ['장면 감지', '음성 분석', 'STT 전사', '분석 �
 const STAGE_KEYS   = ['scene', 'voice', 'stt', 'integrate', 'graph', 'summarize', 'metadata']
 const DEFAULT_CATEGORY = 'etc'
 
+const CATEGORY_LABELS = {
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문학',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건의료',
+  sports: '스포츠',
+  education: '교육',
+  etc: '기타',
+}
+
 const STATUS_MAP = {
   done:       { label: '분석 완료', cls: 'status-done' },
   processing: { label: '분석 중',   cls: 'status-proc' },
@@ -293,14 +305,31 @@ export default function DevUploadPage() {
                 const st = STATUS_MAP[lec.status] ?? STATUS_MAP.pending
                 const thumbBg = THUMB_COLOR[lec.category] ?? '#1e2333'
                 const thumbIcon = THUMB_ICON[lec.category] ?? '🎬'
+                const categoryLabel = CATEGORY_LABELS[lec.category] ?? lec.category
 
                 return (
                   <div key={lec.id}>
                     <div className={`upload-row${lec.status === 'done' ? ' upload-row--done' : ''}`} onClick={() => lec.status === 'done' && navigate(`/lectures/${lec.id}`)}>
-                      <div className="upload-row-thumb" style={{ background: thumbBg }}><span className="upload-row-thumb-icon">{thumbIcon}</span></div>
+                      <div className="upload-row-thumb" style={{ background: thumbBg }}>
+                        {lec.thumbnail_url ? (
+                          <img
+                            className="upload-row-thumb-image"
+                            src={lec.thumbnail_url}
+                            alt=""
+                            loading="lazy"
+                            onError={(event) => {
+                              event.currentTarget.hidden = true
+                              event.currentTarget.nextElementSibling?.removeAttribute('hidden')
+                            }}
+                          />
+                        ) : null}
+                        <span className="upload-row-thumb-icon" hidden={Boolean(lec.thumbnail_url)}>
+                          {thumbIcon}
+                        </span>
+                      </div>
                       <div className="upload-row-main">
                         <div className="upload-row-title">{lec.title}</div>
-                        <div className="upload-row-meta"><span className="upload-row-cat">{lec.category}</span></div>
+                        <div className="upload-row-meta"><span className="upload-row-cat">{categoryLabel}</span></div>
                       </div>
                       <div className="upload-row-date">{new Date(lec.created_at).toLocaleDateString('ko-KR')}</div>
                       <div className="upload-row-status"><span className={`upload-status-badge ${st.cls}`}>{st.label}</span></div>
