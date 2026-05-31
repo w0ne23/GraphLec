@@ -426,7 +426,13 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
     sql = """
         SELECT
             lm.lecture_id,
-            lm.title,
+            CASE
+                WHEN lm.title IS NULL
+                  OR btrim(lm.title) = ''
+                  OR lm.title = 'Untitled lecture'
+                THEN l.title
+                ELSE lm.title
+            END AS title,
             lm.instructor_id,
             lm.domain,
             lm.graph_domain,
