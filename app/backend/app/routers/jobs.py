@@ -11,11 +11,37 @@ import asyncio
 import json
 
 from app.db import AsyncSessionLocal, get_db
-from app.models import Lecture, ProcessingJob
+from app.models import (
+    JOB_STATUS_DONE,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_REJECTED,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFIED_UPLOAD,
+    Lecture,
+    ProcessingJob,
+)
 from app.services import lecture_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs")
+
+
+def _normalize_upload_job_type(value: str) -> str:
+    token = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
+    aliases = {
+        "legacy": JOB_TYPE_LEGACY_FULL,
+        "legacy_full": JOB_TYPE_LEGACY_FULL,
+        "direct": JOB_TYPE_DIRECT_UPLOAD,
+        "direct_upload": JOB_TYPE_DIRECT_UPLOAD,
+        "verified": JOB_TYPE_VERIFIED_UPLOAD,
+        "verify": JOB_TYPE_VERIFIED_UPLOAD,
+        "verified_upload": JOB_TYPE_VERIFIED_UPLOAD,
+    }
+    if token not in aliases:
+        raise HTTPException(status_code=400, detail="Invalid workflow_mode")
+    return aliases[token]
 
 
 @router.get("")
@@ -52,13 +78,19 @@ async def stream_job_status(
                     break
                 payload = {
                     "job_id": str(job.id),
+                    "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
                     "lecture_status": job.status,
                     "current_stage": job.current_stage,
                     "error_message": job.error_message,
                     "pipeline_stages": job.pipeline_stages or [],
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
-                if job.status in ("done", "error"):
+                if job.status in {
+                    JOB_STATUS_DONE,
+                    JOB_STATUS_ERROR,
+                    JOB_STATUS_WAITING_APPROVAL,
+                    JOB_STATUS_REJECTED,
+                }:
                     break
             except Exception as e:
                 logger.error(f"SSE error for lecture {lecture_id}: {e}")
@@ -75,10 +107,13 @@ async def stream_job_status(
 async def create_job(
     video: UploadFile = File(...),
     title: str = Form(...),
-    category: str = Form("컴퓨터 과학"),
+    category: str = Form("etc"),
     description: str = Form(""),
+    workflow_mode: str = Form(JOB_TYPE_LEGACY_FULL),
     db: AsyncSession = Depends(get_db),
 ):
+    job_type = _normalize_upload_job_type(workflow_mode)
+    normalized_category = lecture_service.normalize_domain_value(category)
     lecture_id = uuid.uuid4()
     base_dir = Path(lecture_service.LOCAL_STORAGE_DIR)
 
@@ -105,13 +140,13 @@ async def create_job(
     except Exception as e:
         shutil.rmtree(input_dir, ignore_errors=True)
         logger.error(f"File save failed for lecture {lecture_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to save uploaded file")
+        raise HTTPException(status_code=500, detail="업로드 파일을 저장하지 못했습니다.")
 
     try:
         new_lecture = Lecture(
             id=lecture_id,
             title=final_title,
-            category=category,
+            category=normalized_category,
             description=description,
             video_path=str(input_path),
             output_dir=str(output_dir),
@@ -122,6 +157,7 @@ async def create_job(
         new_job = ProcessingJob(
             id=job_id,
             lecture_id=lecture_id,
+            job_type=job_type,
             status="pending",
         )
         db.add(new_job)
@@ -133,14 +169,17 @@ async def create_job(
         await db.rollback()
         shutil.rmtree(input_dir, ignore_errors=True)
         logger.error(f"DB commit failed for lecture {lecture_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create job")
+        raise HTTPException(status_code=500, detail="업로드 작업을 생성하지 못했습니다.")
 
     return {
         "id": str(lecture_id),
         "title": final_title,
-        "category": category,
+        "category": normalized_category,
         "description": description,
+        "job_id": str(new_job.id),
+        "job_type": new_job.job_type,
         "status": "pending",
+        "is_verified": False,
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
 
@@ -161,9 +200,17 @@ async def retry_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
     return result
 
 
+@router.post("/{lecture_id}/approve")
+async def approve_verified_upload(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    result = await lecture_service.approve_verified_upload(db, lecture_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    return result
+
+
 @router.post("/{lecture_id}/retry_graph")
 async def retry_graph_ingestion(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    success = await lecture_service.retry_graph_only(db, lecture_id)
-    if not success:
+    result = await lecture_service.retry_graph_only(db, lecture_id)
+    if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
-    return {"status": "success"}
+    return result

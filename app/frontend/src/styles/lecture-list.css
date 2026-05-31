@@ -179,6 +179,12 @@
   color: #fff;
 }
 
+.ll-chip--verified.active {
+  background: var(--blue-bg);
+  border-color: var(--blue-br);
+  color: var(--blue);
+}
+
 .ll-filter-actions {
   display: flex;
   justify-content: flex-end;
@@ -265,6 +271,16 @@
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
+  color: var(--blue);
+}
+
+.ll-active-chip--verified {
+  background: var(--blue-bg);
+  border-color: var(--blue-br);
+  color: var(--blue);
+}
+
+.ll-active-chip--verified .ll-active-remove {
   color: var(--blue);
 }
 

@@ -1,12 +1,13 @@
 const API_BASE = '/api'
 const RECOMMENDER_BASE = import.meta.env.VITE_RECOMMENDER_API_BASE || '/recommender-api'
 
-export async function uploadLecture({ file, title, category, description }) {
+export async function uploadLecture({ file, title, category, description, workflowMode = 'legacy_full' }) {
   const formData = new FormData();
   formData.append('video', file);
   formData.append('title', title);
   formData.append('category', category);
   formData.append('description', description);
+  formData.append('workflow_mode', workflowMode);
 
   const res = await fetch(`${API_BASE}/jobs`, {
     method: 'POST',
@@ -22,10 +23,12 @@ export async function uploadLecture({ file, title, category, description }) {
   return {
     id: data.id,
     job_id: data.job_id,
+    job_type: data.job_type,
     title: data.title || title,
     category: data.category || category,
     description: data.description || description,
     status: data.status || 'pending',
+    is_verified: Boolean(data.is_verified),
     created_at: data.created_at,
   };
 }
@@ -56,6 +59,7 @@ async function _fetchResults(params) {
     if (params.page) query.append('page', params.page)
     if (params.category && params.category !== '전체') query.append('category', params.category)
     if (params.search) query.append('search', params.search)
+    if (params.verifiedOnly) query.append('verified_only', 'true')
 
     const res = await fetch(`${API_BASE}/results?${query.toString()}`)
     if (!res.ok) throw new Error('Failed to fetch lectures')
@@ -69,10 +73,14 @@ async function _fetchResults(params) {
       items: items.map(lec => ({
         id: lec.id,
         job_id: lec.job_id,
+        job_type: lec.job_type,
         title: lec.title || 'Untitled',
-        category: lec.category || '기타',
+        category: lec.category || lec.domain || 'etc',
+        domain: lec.domain || lec.category || 'etc',
         status: lec.status,
+        is_verified: Boolean(lec.is_verified),
         created_at: lec.created_at,
+        thumbnail_url: lec.thumbnail_url,
         error_message: lec.error_message,
         pipeline_stages: lec.pipeline_stages || [],
         tags: lec.tags || [],
@@ -125,6 +133,28 @@ export async function retryLecture(lectureId) {
   const data = await res.json();
   // 새로 생성된 job_id를 반환 — 프론트에서 SSE 재연결에 사용
   return { job_id: data.job_id };
+}
+
+export async function approveLectureUpload(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/approve`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Approve failed');
+  }
+  return res.json();
+}
+
+export async function retryGraphUpload(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry_graph`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || 'Graph retry failed');
+  }
+  return res.json();
 }
 
 export async function getLectureGraph(lectureId) {

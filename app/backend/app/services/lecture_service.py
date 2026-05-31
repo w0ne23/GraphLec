@@ -17,7 +17,23 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from app.models import Lecture, ProcessingJob, GraphSession, ChatSession, ChatMessage
+from app.models import (
+    ACTIVE_STATUSES,
+    JOB_STATUS_DONE,
+    JOB_STATUS_ERROR,
+    JOB_STATUS_PENDING,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFIED_UPLOAD,
+    Lecture,
+    LectureMetadata,
+    ProcessingJob,
+    GraphSession,
+    ChatSession,
+    ChatMessage,
+)
 from app.services.neo4j_service import (
     neo4j_session,
     get_stem_load_lock,
@@ -33,6 +49,70 @@ PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file_
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
+DOMAIN_VALUES = {
+    "engineering",
+    "natural_science",
+    "humanities",
+    "social_science",
+    "arts",
+    "health_sciences",
+    "sports",
+    "education",
+    "etc",
+}
+DOMAIN_ALIASES = {
+    "eng": "engineering",
+    "eng/cs": "engineering",
+    "eng/electrical": "engineering",
+    "eng/mechanical": "engineering",
+    "eng/civil": "engineering",
+    "eng/chemical": "engineering",
+    "eng/industrial": "engineering",
+    "eng/biomedical": "engineering",
+    "eng/aerospace": "engineering",
+    "eng/materials": "engineering",
+    "eng/environmental": "engineering",
+    "sci": "natural_science",
+    "sci/physics": "natural_science",
+    "sci/chemistry": "natural_science",
+    "sci/biology": "natural_science",
+    "sci/earth_science": "natural_science",
+    "sci/astronomy": "natural_science",
+    "sci/ecology": "natural_science",
+    "hum": "humanities",
+    "hum/philosophy": "humanities",
+    "hum/history": "humanities",
+    "hum/linguistics": "humanities",
+    "hum/literature": "humanities",
+    "hum/art_history": "humanities",
+    "hum/religion": "humanities",
+    "soc": "social_science",
+    "soc/economics": "social_science",
+    "soc/business": "social_science",
+    "soc/law": "social_science",
+    "soc/political_science": "social_science",
+    "soc/sociology": "social_science",
+    "soc/psychology": "social_science",
+    "med": "health_sciences",
+    "med/anatomy": "health_sciences",
+    "med/physiology": "health_sciences",
+    "med/pharmacology": "health_sciences",
+    "med/clinical": "health_sciences",
+    "med/public_health": "health_sciences",
+    "med/nursing": "health_sciences",
+    "art": "arts",
+    "art/fine_arts": "arts",
+    "art/music": "arts",
+    "art/design": "arts",
+    "art/film": "arts",
+    "art/theater": "arts",
+    "art/physical_education": "sports",
+    "art/sports_science": "sports",
+    "gen": "etc",
+    "gen/other": "etc",
+    "default category": "etc",
+    "기타": "etc",
+}
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
@@ -49,6 +129,7 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
 
     res = {
         "job_id": str(job.id),
+        "job_type": getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL,
         "status": job.status,
         "current_stage": job.current_stage,
         "error_message": job.error_message,
@@ -79,6 +160,83 @@ def make_file_url(abs_path: Optional[str]) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def normalize_domain_value(value: Any) -> str:
+    token = _str_cell(value).strip()
+    if not token:
+        return "etc"
+    normalized = token.lower().replace("-", "_")
+    if normalized in DOMAIN_VALUES:
+        return normalized
+    return DOMAIN_ALIASES.get(normalized) or DOMAIN_ALIASES.get(token) or "etc"
+
+
+def _lecture_domain_value(lecture: Lecture, metadata: Optional[dict] = None) -> str:
+    metadata = metadata or {}
+    return normalize_domain_value(
+        metadata.get("graph_domain")
+        or metadata.get("domain")
+        or getattr(lecture, "category", None)
+    )
+
+
+def _lecture_metadata_dict(row: Optional[LectureMetadata]) -> dict:
+    if not row:
+        return {}
+    return {
+        "domain": row.domain,
+        "graph_domain": row.graph_domain,
+        "graph_subdomain": row.graph_subdomain,
+    }
+
+
+def _lecture_file_metadata(lecture: Lecture) -> dict:
+    if not lecture.output_dir:
+        return {}
+    return _first_existing_json([
+        Path(lecture.output_dir) / "metadata" / f"{lecture.id}_metadata.json",
+        Path(lecture.output_dir) / f"{lecture.id}_metadata.json",
+    ])
+
+
+def _first_existing_file(paths: list[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.is_file():
+            return path
+    return None
+
+
+def _lecture_thumbnail_url(output_dir_value: Optional[str]) -> Optional[str]:
+    if not output_dir_value:
+        return None
+
+    output_dir = Path(output_dir_value)
+    candidates: list[Path] = []
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        candidates.extend([
+            output_dir / "slides" / f"scene_001_base.{ext}",
+            output_dir / "slides_staged" / "scenes" / f"scene_001_base.{ext}",
+            output_dir / "slides_staged" / "review_slides" / f"scene_001_base.{ext}",
+            output_dir / f"scene_001_base.{ext}",
+        ])
+
+    first_scene = _first_existing_file(candidates)
+    if first_scene:
+        return make_file_url(str(first_scene))
+
+    base_images: list[Path] = []
+    for base_dir in (
+        output_dir / "slides",
+        output_dir / "slides_staged" / "scenes",
+        output_dir / "slides_staged" / "review_slides",
+        output_dir,
+    ):
+        if base_dir.is_dir():
+            base_images.extend(sorted(base_dir.glob("scene_*_base.*")))
+
+    first_base = _first_existing_file(base_images)
+    return make_file_url(str(first_base)) if first_base else None
 
 
 # ── 그래프 유틸 ──────────────────────────────────────────────────────────────
@@ -162,14 +320,9 @@ def _read_video_domain(output_dir: Path, stem: str) -> tuple[str, str]:
     return "", ""
 
 
-def _format_domain_label(domain: str, subdomain: str, fallback: str) -> str:
-    domain = _str_cell(domain).strip()
-    subdomain = _str_cell(subdomain).strip()
-    if domain and subdomain:
-        return f"{domain} / {subdomain}"
-    if domain:
-        return domain
-    return _str_cell(fallback) or "기타"
+def _format_domain_label(domain: str, fallback: str) -> str:
+    normalized = normalize_domain_value(domain or fallback)
+    return normalized or "etc"
 
 
 def _visual_asset_stats_from_fused(fused: dict) -> dict:
@@ -265,7 +418,10 @@ def _build_lecture_info(output_dir: Path, stem: str, fallback_category: str) -> 
     graph_subdomain = _str_cell(metadata.get("graph_subdomain"))
     if not graph_domain:
         graph_domain, graph_subdomain = _read_video_domain(output_dir, stem)
-    domain = _format_domain_label(graph_domain, graph_subdomain, fallback_category)
+    domain = _format_domain_label(
+        graph_domain or metadata.get("domain"),
+        fallback_category,
+    )
     visual_stats = _visual_asset_stats_from_fused(fused)
     keywords = [
         kw for kw in (_keyword_label(item) for item in (metadata.get("keywords") or []))
@@ -375,12 +531,11 @@ async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, An
     return format_job_dict(row[0], row[1])
 
 
-ACTIVE_STATUSES = {'pending', 'running'}
-
 async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     query = (
-        select(Lecture, ProcessingJob)
+        select(Lecture, ProcessingJob, LectureMetadata)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .outerjoin(LectureMetadata, LectureMetadata.lecture_id == Lecture.id)
         .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
@@ -388,23 +543,30 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
 
     seen = set()
     out = []
-    for lecture, job in rows:
+    for lecture, job, lecture_metadata in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
+        metadata = _lecture_metadata_dict(lecture_metadata) or _lecture_file_metadata(lecture)
+        domain = _lecture_domain_value(lecture, metadata)
         job_status = job.status if job else 'unknown'
         if status_filter == 'active' and job_status not in ACTIVE_STATUSES:
             continue
         is_done = job_status == "done"
         out.append({
             "id": str(lecture.id),
+            "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "current_stage": job.current_stage if job and not is_done else None,
             "error_message": job.error_message if job else None,
             "pipeline_stages": job.pipeline_stages or [] if job and not is_done else [],
             "title": lecture.title or str(lecture.id),
-            "category": lecture.category or "기타",
+            "category": domain,
+            "domain": domain,
+            "is_verified": bool(getattr(lecture, "is_verified", False)),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         })
     return out
 
@@ -422,9 +584,13 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     if not lecture:
         return None
 
+    latest_job = await get_latest_job(db, str(ident_uuid))
+    job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
+        job_type=job_type,
         status="pending",
         current_stage="Resuming pipeline...",
         error_message=None,
@@ -433,7 +599,87 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     db.add(new_job)
     await db.commit()
     await db.refresh(new_job)
-    return {"status": "success", "job_id": str(new_job.id)}
+    return {"status": "success", "job_id": str(new_job.id), "job_type": new_job.job_type}
+
+
+async def approve_verified_upload(db: AsyncSession, lecture_id: str):
+    """Approve a verified upload and enqueue graph generation as a new job."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, str(ident_uuid))
+    if not lecture:
+        return None
+
+    existing_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    existing_graph_job = existing_graph_result.scalar_one_or_none()
+
+    approval_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_WAITING_APPROVAL,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    approval_job = approval_result.scalar_one_or_none()
+
+    if not approval_job:
+        if existing_graph_job:
+            lecture.is_verified = True
+            await db.commit()
+            return {
+                "status": "success",
+                "approved_job_id": None,
+                "job_id": str(existing_graph_job.id),
+                "job_type": existing_graph_job.job_type,
+                "already_queued": True,
+            }
+        raise HTTPException(status_code=409, detail="No verified upload is waiting for approval")
+
+    approval_job.status = JOB_STATUS_DONE
+    approval_job.current_stage = "승인 완료"
+    approval_job.error_message = None
+    lecture.is_verified = True
+
+    graph_job = existing_graph_job
+    already_queued = graph_job is not None
+    if graph_job is None:
+        graph_job = ProcessingJob(
+            id=uuid.uuid4(),
+            lecture_id=ident_uuid,
+            job_type=JOB_TYPE_GRAPH_UPLOAD,
+            status=JOB_STATUS_PENDING,
+            current_stage="그래프 생성을 대기 중입니다.",
+            error_message=None,
+            pipeline_stages=[],
+        )
+        db.add(graph_job)
+
+    await db.commit()
+    await db.refresh(approval_job)
+    await db.refresh(graph_job)
+    return {
+        "status": "success",
+        "approved_job_id": str(approval_job.id),
+        "job_id": str(graph_job.id),
+        "job_type": graph_job.job_type,
+        "already_queued": already_queued,
+    }
 
 
 async def delete_lecture(db: AsyncSession, lecture_id: str) -> bool:
@@ -479,10 +725,12 @@ async def list_all_results(
     category: Optional[str] = None,
     search: Optional[str] = None,
     scope: str = 'browse',
+    verified_only: bool = False,
 ) -> Dict[str, Any]:
     query = (
-        select(Lecture, ProcessingJob)
+        select(Lecture, ProcessingJob, LectureMetadata)
         .outerjoin(ProcessingJob, ProcessingJob.lecture_id == Lecture.id)
+        .outerjoin(LectureMetadata, LectureMetadata.lecture_id == Lecture.id)
         .order_by(Lecture.created_at.desc(), ProcessingJob.created_at.desc())
     )
     result = await db.execute(query)
@@ -490,10 +738,12 @@ async def list_all_results(
 
     seen = set()
     out = []
-    for lecture, job in rows:
+    for lecture, job, lecture_metadata in rows:
         if lecture.id in seen:
             continue
         seen.add(lecture.id)
+        metadata = _lecture_metadata_dict(lecture_metadata) or _lecture_file_metadata(lecture)
+        domain = _lecture_domain_value(lecture, metadata)
         job_status = job.status if job else 'unknown'
 
         if scope == 'browse' and job_status != 'done':
@@ -501,7 +751,9 @@ async def list_all_results(
         if scope == 'upload' and job_status in ACTIVE_STATUSES:
             continue
 
-        if category and lecture.category != category:
+        if verified_only and not bool(getattr(lecture, "is_verified", False)):
+            continue
+        if category and domain != normalize_domain_value(category):
             continue
         if search and search.lower() not in (lecture.title or '').lower():
             continue
@@ -509,10 +761,14 @@ async def list_all_results(
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
+            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
-            "category": lecture.category or "기타",
+            "category": domain,
+            "domain": domain,
+            "is_verified": bool(getattr(lecture, "is_verified", False)),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
             "error_message": job.error_message if job else None,
             "pipeline_stages": job.pipeline_stages or [] if job else [],
         })
@@ -537,7 +793,9 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     output_dir = Path(lecture.output_dir) if lecture.output_dir else None
     info = _build_lecture_info(output_dir, stem, lecture.category or "기타") if output_dir else {
         "summary": "",
-        "domain": lecture.category or "기타",
+        "domain": normalize_domain_value(lecture.category),
+        "graph_domain": "",
+        "graph_subdomain": "",
         "keywords": [],
         "highlights": [],
         "stats": {
@@ -550,16 +808,21 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
     return {
         "id": str(lecture.id),
         "job_id": str(job.id) if job else None,
+        "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
         "status": job.status if job else "unknown",
         "title": lecture.title or stem,
-        "category": info.get("domain") or lecture.category or "기타",
+        "category": info.get("domain") or normalize_domain_value(lecture.category),
+        "is_verified": bool(getattr(lecture, "is_verified", False)),
         "description": lecture.description,
         "summary": info.get("summary") or "",
         "keywords": info.get("keywords") or [],
-        "domain": info.get("domain") or lecture.category or "기타",
+        "domain": info.get("domain") or normalize_domain_value(lecture.category),
+        "graph_domain": info.get("graph_domain") or "",
+        "graph_subdomain": info.get("graph_subdomain") or "",
         "info": info,
         "stem": stem,
         "video_url": make_file_url(lecture.video_path),
+        "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         "output_dir": lecture.output_dir,
         "graphrag_workspace": str(Path(lecture.output_dir) / "graphrag") if lecture.output_dir else None,
         "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
@@ -1620,13 +1883,98 @@ async def get_graph_info(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
     return {"lecture_id": lecture_id, "stem": stem, "graph_exists": node_count > 0, "node_count": node_count}
 
 
-async def retry_graph_only(db: AsyncSession, lecture_id: str) -> bool:
-    """lecture_id로 최신 job을 그래프 재적재 상태로 초기화"""
-    job = await get_latest_job(db, lecture_id)
-    if not job:
-        return False
-    job.status = "pending"
-    job.current_stage = "Retrying Graph Ingestion..."
-    job.error_message = None
+async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] | None:
+    """Retry only the graph_upload portion for a verified upload."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    lecture = await _get_lecture(db, str(ident_uuid))
+    if not lecture:
+        return None
+
+    active_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    active_graph_job = active_graph_result.scalar_one_or_none()
+    if active_graph_job:
+        return {
+            "status": "success",
+            "job_id": str(active_graph_job.id),
+            "job_type": active_graph_job.job_type,
+            "already_queued": True,
+            "retried_existing": False,
+        }
+
+    failed_graph_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_ERROR,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+        .with_for_update()
+    )
+    failed_graph_job = failed_graph_result.scalar_one_or_none()
+    if failed_graph_job:
+        failed_graph_job.status = JOB_STATUS_PENDING
+        failed_graph_job.current_stage = "그래프 생성을 다시 시작합니다."
+        failed_graph_job.error_message = None
+        failed_graph_job.pipeline_stages = []
+        await db.commit()
+        await db.refresh(failed_graph_job)
+        return {
+            "status": "success",
+            "job_id": str(failed_graph_job.id),
+            "job_type": failed_graph_job.job_type,
+            "already_queued": False,
+            "retried_existing": True,
+        }
+
+    approved_result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
+            ProcessingJob.status == JOB_STATUS_DONE,
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    approved_job = approved_result.scalar_one_or_none()
+    if not approved_job:
+        raise HTTPException(status_code=409, detail="No approved verified upload is ready for graph retry")
+
+    manifest_path = Path(lecture.output_dir) / f"{ident_uuid}_preprocess_result.json"
+    if not manifest_path.exists() or manifest_path.stat().st_size <= 0:
+        raise HTTPException(status_code=409, detail="Preprocess manifest is missing for graph retry")
+
+    graph_job = ProcessingJob(
+        id=uuid.uuid4(),
+        lecture_id=ident_uuid,
+        job_type=JOB_TYPE_GRAPH_UPLOAD,
+        status=JOB_STATUS_PENDING,
+        current_stage="그래프 재시도를 대기 중입니다.",
+        error_message=None,
+        pipeline_stages=[],
+    )
+    db.add(graph_job)
     await db.commit()
-    return True
+    await db.refresh(graph_job)
+    return {
+        "status": "success",
+        "job_id": str(graph_job.id),
+        "job_type": graph_job.job_type,
+        "already_queued": False,
+        "retried_existing": False,
+    }

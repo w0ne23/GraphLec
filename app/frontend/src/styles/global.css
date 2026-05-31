@@ -6,47 +6,72 @@
 
 /* ── CSS 변수 (라이트 테마) ─────────────────────────────────── */
 :root {
+  /* 기본 색상 */
+  --white: #ffffff;
+  --black: #111827;
+
+  /* 그레이 */
+  --gray-50: #f5f6fa;
+  --gray-100: #f0f2f7;
+  --gray-200: #e4e6ef;
+  --gray-300: #c8cde0;
+  --gray-400: #9ca3af;
+  --gray-600: #4b5563;
+  --light-gray: var(--gray-300);
+  --gray: var(--gray-400);
+  --dark-gray: var(--gray-600);
+
   /* 배경 */
-  --bg:    #f0f2f7;
-  --panel: #ffffff;
-  --card:  #f5f6fa;
-  --hover: #eef0f6;
+  --bg: var(--gray-100);
+  --panel: var(--white);
+  --card: var(--gray-50);
+  --hover: var(--gray-100);
 
   /* 보더 */
-  --b1: #e4e6ef;
-  --b2: #c8cde0;
+  --b1: var(--gray-200);
+  --b2: var(--gray-300);
 
   /* 텍스트 */
-  --t1: #111827;
-  --t2: #4b5563;
-  --t3: #9ca3af;
+  --t1: var(--black);
+  --t2: var(--dark-gray);
+  --t3: var(--gray);
 
   /* 블루 (primary) */
-  --blue:    #2563eb;
+  --blue: #3b82f6;
   --blue-fill: #2563eb;
+  --blue-text: #1d4ed8;
   --blue-bg: #eff6ff;
   --blue-br: #bfdbfe;
 
   /* 앰버 (강조) */
-  --amber:    #d97706;
-  --amber-fill: #f59e0b;
-  --amber-bg: rgba(245,158,11,.10);
+  --amber: #f59e0b;
+  --amber-fill: #d97706;
+  --amber-text: #b45309;
+  --amber-bg: #fffbeb;
 
   /* 그린 (positive) */
-  --green:      #3dad3d;
+  --green: #22c55e;
   --green-text: #15803d;
   --green-fill: #16a34a;
   --green-bg:   #f0fdf4;
 
   /* 레드 (negative) */
-  --red:    #dc2626;
+  --red: #ef4444;
   --red-fill: #dc2626;
+  --red-text: #b91c1c;
   --red-bg: #fef2f2;
 
   /* 퍼플 (관리자) */
-  --purple:  #7c3aed;
+  --purple: #8b5cf6;
   --purple-fill: #7c3aed;
+  --purple-text: #6d28d9;
   --purp-bg: #f5f3ff;
+
+  /* 차트 */
+  --chart-blue: var(--blue);
+  --chart-green: var(--green);
+  --chart-amber: var(--amber);
+  --chart-red: var(--red);
 
   /* 반경 */
   --r:  6px;

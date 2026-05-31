@@ -347,19 +347,20 @@
 .lim-title { font-size: 15px; font-weight: 700; color: var(--t1); }
 .lim-close { background: none; border: none; font-size: 14px; color: var(--t3); cursor: pointer; }
 .lim-close:hover { color: var(--t1); }
-.lim-body { overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 20px; }
-.lim-block h4 { font-size: 13px; font-weight: 700; color: var(--t2); margin-bottom: 8px; }
+.lim-body { overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 14px; }
+.lim-block h4 { font-size: 13px; font-weight: 700; color: var(--t2); margin-bottom: 6px; }
 .lim-block p { font-size: 13px; color: var(--t1); line-height: 1.6; }
 .lim-highlight-list { display: flex; flex-direction: column; gap: 5px; font-size: 13px; color: var(--t1); line-height: 1.6; }
 .lim-highlight-row { font-size: inherit; line-height: inherit; }
 .lim-kw-cloud { display: flex; flex-wrap: wrap; gap: 6px; }
 .lim-kw { background: var(--blue-bg); border: 1px solid var(--blue-br); border-radius: 20px; padding: 2px 10px; font-size: 12px; color: var(--blue); }
 .lim-empty { font-size: 12px; color: var(--t3); }
-.lim-stat-row { display: flex; gap: 12px; margin-bottom: 12px; }
-.lim-stat-box { flex: 1; background: var(--bg); border: 1px solid var(--b1); border-radius: 8px; padding: 10px; text-align: center; }
-.lim-stat-num { font-size: 22px; font-weight: 700; }
+.lim-stat-row { display: flex; gap: 10px; margin-bottom: 10px; }
+.lim-stat-box { flex: 1; background: var(--bg); border: 1px solid var(--b1); border-radius: 8px; padding: 8px 10px; text-align: center; }
+.lim-stat-num { font-size: 20px; font-weight: 700; }
 .lim-stat-lbl { font-size: 11px; color: var(--t3); margin-top: 2px; }
 .lim-meta { font-size: 13px; color: var(--t2); line-height: 1.8; }
+.lim-verify-note { margin-top: 8px; padding: 7px 10px; border: 1px solid var(--blue-br); border-radius: 6px; background: rgba(239,246,255,.72); color: var(--blue); font-size: 12px; font-weight: 700; line-height: 1.45; }
 
 /* VideoPlayer Layout */
 .lp-video-area { background: #000; display: flex; flex-direction: column; }

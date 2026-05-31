@@ -63,54 +63,149 @@ DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
 DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
 _TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 _DOMAIN_ALIASES = {
-    "컴퓨터공학": "eng/cs",
-    "컴공": "eng/cs",
-    "computer science": "eng/cs",
-    "cs": "eng/cs",
-    "경제학": "soc/econ",
-    "경제": "soc/econ",
-    "경영": "soc/business",
-    "비즈니스": "soc/business",
-    "마케팅": "soc/business",
-    "수학": "math",
-    "의학": "med",
-    "의료": "med",
-    "생물학": "sci/bio",
-    "생명과학": "sci/bio",
-    "화학": "sci/chem",
-    "물리학": "sci/phy",
-    "물리": "sci/phy",
-    "환경": "sci/env",
-    "기후": "sci/env",
-    "철학": "hum/phil",
-    "역사": "hum/hist",
-    "세계사": "hum/hist",
-    "한국사": "hum/hist",
-    "언어학": "hum/ling",
-    "교육": "soc/edu",
-    "교육학": "soc/edu",
-    "사회학": "soc",
-    "사회": "soc",
-    "디자인": "art/design",
+    "컴퓨터공학": "engineering",
+    "컴공": "engineering",
+    "computer science": "engineering",
+    "cs": "engineering",
+    "공학": "engineering",
+    "경제학": "social_science",
+    "경제": "social_science",
+    "경영": "social_science",
+    "비즈니스": "social_science",
+    "마케팅": "social_science",
+    "수학": "natural_science",
+    "자연과학": "natural_science",
+    "의학": "health_sciences",
+    "의료": "health_sciences",
+    "보건": "health_sciences",
+    "생물학": "natural_science",
+    "생명과학": "natural_science",
+    "화학": "natural_science",
+    "물리학": "natural_science",
+    "물리": "natural_science",
+    "환경": "natural_science",
+    "기후": "natural_science",
+    "철학": "humanities",
+    "역사": "humanities",
+    "세계사": "humanities",
+    "한국사": "humanities",
+    "언어학": "humanities",
+    "교육": "education",
+    "교육학": "education",
+    "사회학": "social_science",
+    "사회": "social_science",
+    "디자인": "arts",
+    "예술": "arts",
+    "체육": "sports",
+    "스포츠": "sports",
+}
+_SUBDOMAIN_ALIASES = {
+    "컴퓨터공학": ("engineering", "computer_science"),
+    "컴공": ("engineering", "computer_science"),
+    "computer science": ("engineering", "computer_science"),
+    "cs": ("engineering", "computer_science"),
+    "전기공학": ("engineering", "electrical_engineering"),
+    "전자공학": ("engineering", "electrical_engineering"),
+    "기계공학": ("engineering", "mechanical_engineering"),
+    "화학공학": ("engineering", "chemical_engineering"),
+    "산업공학": ("engineering", "industrial_engineering"),
+    "경제학": ("social_science", "economics"),
+    "경제": ("social_science", "economics"),
+    "경영학": ("social_science", "business"),
+    "경영": ("social_science", "business"),
+    "비즈니스": ("social_science", "business"),
+    "법학": ("social_science", "law"),
+    "정치학": ("social_science", "political_science"),
+    "사회학": ("social_science", "sociology"),
+    "심리학": ("social_science", "psychology"),
+    "교육학": ("education", "education"),
+    "물리학": ("natural_science", "physics"),
+    "물리": ("natural_science", "physics"),
+    "화학": ("natural_science", "chemistry"),
+    "수학": ("natural_science", "mathematics"),
+    "mathematics": ("natural_science", "mathematics"),
+    "math": ("natural_science", "mathematics"),
+    "생물학": ("natural_science", "biology"),
+    "생명과학": ("natural_science", "biology"),
+    "천문학": ("natural_science", "astronomy"),
+    "생태학": ("natural_science", "ecology"),
+    "철학": ("humanities", "philosophy"),
+    "역사학": ("humanities", "history"),
+    "역사": ("humanities", "history"),
+    "언어학": ("humanities", "linguistics"),
+    "문학": ("humanities", "literature"),
+    "종교학": ("humanities", "religion"),
+    "미술": ("arts", "fine_arts"),
+    "음악": ("arts", "music"),
+    "디자인": ("arts", "design"),
+    "영화": ("arts", "film"),
+    "연극": ("arts", "theater"),
+    "해부학": ("health_sciences", "anatomy"),
+    "생리학": ("health_sciences", "physiology"),
+    "약리학": ("health_sciences", "pharmacology"),
+    "공중보건": ("health_sciences", "public_health"),
+    "간호학": ("health_sciences", "nursing"),
+    "체육": ("sports", "physical_education"),
+    "스포츠과학": ("sports", "sports_science"),
 }
 _DOMAIN_LABELS = {
-    "art/design": "디자인",
-    "eng/cs": "컴퓨터공학",
-    "hum": "인문학",
-    "hum/hist": "역사",
-    "hum/ling": "언어학",
-    "hum/phil": "철학",
-    "math": "수학",
-    "med": "의학",
-    "sci/bio": "생물학",
-    "sci/chem": "화학",
-    "sci/env": "환경과학",
-    "sci/phy": "물리학",
-    "soc": "사회과학",
-    "soc/business": "경영",
-    "soc/econ": "경제학",
-    "soc/edu": "교육학",
+    "engineering": "공학",
+    "natural_science": "자연과학",
+    "humanities": "인문학",
+    "social_science": "사회과학",
+    "arts": "예술",
+    "health_sciences": "보건의료",
+    "sports": "스포츠",
+    "education": "교육",
+    "etc": "기타",
 }
+
+
+def _canonical_domain(value: str) -> str:
+    token = str(value or "").strip().lower().replace("-", "_")
+    if token in _DOMAIN_LABELS:
+        return token
+    top = token.split("/", 1)[0]
+    return {
+        "eng": "engineering",
+        "sci": "natural_science",
+        "math": "natural_science",
+        "hum": "humanities",
+        "soc": "social_science",
+        "med": "health_sciences",
+        "art": "arts",
+        "gen": "etc",
+    }.get(top, "etc")
+
+
+def _normalize_subdomain(value: str) -> str:
+    return str(value or "").strip().lower().replace("-", "_")
+
+
+def _infer_domain_filters(
+    query: str,
+    available_domains: list[str],
+    available_subdomains: list[str],
+) -> tuple[Optional[str], Optional[str]]:
+    normalized = str(query or "").lower()
+    compact = re.sub(r"\s+", "", normalized)
+    for alias, (domain, subdomain) in _SUBDOMAIN_ALIASES.items():
+        alias_normalized = alias.lower()
+        alias_compact = re.sub(r"\s+", "", alias_normalized)
+        if (
+            (alias_normalized in normalized or alias_compact in compact)
+            and domain in available_domains
+            and subdomain in available_subdomains
+        ):
+            return domain, subdomain
+    for alias, domain in _DOMAIN_ALIASES.items():
+        alias_normalized = alias.lower()
+        alias_compact = re.sub(r"\s+", "", alias_normalized)
+        if (alias_normalized in normalized or alias_compact in compact) and domain in available_domains:
+            return domain, None
+    return None, None
+
+
 _TOPIC_EXPANSIONS = {
     "파이썬": [
         "Python",
@@ -255,6 +350,7 @@ class LectureMetadata:
     instructor_id:     str
     uploaded_at:       Optional[str]
     domain:            str
+    graph_subdomain:   str
     difficulty:        str   # "beginner" | "intermediate" | "advanced"
     duration_sec:      float
     summary:           str
@@ -302,6 +398,77 @@ class CommunityReportDocument:
     level:       int
 
 
+def _database_url_sync() -> str:
+    url = os.getenv("DATABASE_URL", "")
+    return url.replace("+asyncpg", "") if url else ""
+
+
+def _video_id_from_db_row(row: dict) -> str:
+    metadata_uri = str(row.get("metadata_uri") or "").strip()
+    if metadata_uri:
+        name = Path(metadata_uri).name
+        if name.endswith("_metadata.json"):
+            return name[:-len("_metadata.json")]
+        if name:
+            return Path(name).stem
+
+    video_path = str(row.get("video_path") or "").strip()
+    if video_path:
+        return Path(video_path).stem
+
+    return str(row.get("lecture_id") or "")
+
+
+def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+
+    sql = """
+        SELECT
+            lm.lecture_id,
+            CASE
+                WHEN lm.title IS NULL
+                  OR btrim(lm.title) = ''
+                  OR lm.title = 'Untitled lecture'
+                THEN l.title
+                ELSE lm.title
+            END AS title,
+            lm.instructor_id,
+            lm.domain,
+            lm.graph_domain,
+            lm.graph_subdomain,
+            lm.difficulty,
+            lm.summary,
+            lm.learning_objectives,
+            lm.keywords,
+            lm.concept_roles,
+            lm.concept_relations,
+            lm.communities,
+            lm.visual_concept_terms,
+            lm.pedagogy,
+            lm.diagnostics,
+            lm.duration_sec,
+            lm.uploaded_at,
+            lm.metadata_version,
+            lm.metadata_uri,
+            lm.created_at,
+            lm.updated_at,
+            l.video_path,
+            l.created_at AS lecture_created_at
+        FROM lecture_metadata lm
+        JOIN lectures l ON l.id = lm.lecture_id
+        ORDER BY lm.updated_at DESC NULLS LAST, lm.created_at DESC NULLS LAST
+    """
+
+    conn = psycopg2.connect(database_url)
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql)
+            return [dict(row) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 # ============================================================================
 #  메타데이터 컬렉션
 # ============================================================================
@@ -309,9 +476,14 @@ class CommunityReportDocument:
 class MetadataCollection:
     def __init__(self, metadata_dir: str):
         self.lectures: dict[str, LectureMetadata] = {}
-        self._load(Path(metadata_dir))
+        use_file_metadata = os.getenv("RECOMMENDER_USE_FILE_METADATA", "1").lower() not in {"0", "false", "no"}
+        if use_file_metadata:
+            self._load_files(Path(metadata_dir))
+        else:
+            print("[파일 로드] RECOMMENDER_USE_FILE_METADATA=0 — 파일 metadata 로드 생략")
+        self._load_db()
 
-    def _load(self, directory: Path):
+    def _load_files(self, directory: Path):
         if not directory.exists():
             print(f"[Recommender] 메타데이터 디렉토리 없음, 빈 컬렉션으로 시작: {directory}")
             return
@@ -324,28 +496,115 @@ class MetadataCollection:
                 raw = json.load(f)
             items = raw if isinstance(raw, list) else [raw]
             for item in items:
-                lec = LectureMetadata(
-                    video_id          = item["video_id"],
-                    title             = item["title"],
-                    instructor_id     = item.get("instructor_id", ""),
-                    uploaded_at       = item.get("uploaded_at"),
-                    domain            = item.get("domain", "unknown"),
-                    difficulty        = item.get("difficulty", "unknown"),
-                    duration_sec      = item.get("duration_sec", 0.0),
-                    summary           = item.get("summary", ""),
-                    keywords          = item.get("keywords", []),
-                    concept_roles     = item.get("concept_roles", []),
-                    concept_relations = item.get("concept_relations", []),
-                    communities       = item.get("communities", []),
-                    pedagogy          = item.get("pedagogy", {}),
-                    diagnostics       = item.get("diagnostics", {}),
-                    visual_concept_terms = (
-                        item.get("visual_concept_terms")
-                        or item.get("pedagogy", {}).get("visual_concept_terms", [])
-                    ),
-                )
+                lec = self._from_metadata_item(item)
                 self.lectures[lec.video_id] = lec
-        print(f"[로드] {len(self.lectures)}개 강의 메타데이터 로드 완료\n")
+        print(f"[파일 로드] {len(self.lectures)}개 강의 메타데이터 로드 완료")
+
+    def _load_db(self):
+        database_url = _database_url_sync()
+        if not database_url:
+            print("[DB 로드] DATABASE_URL 없음 — 파일 metadata만 사용\n")
+            return
+
+        try:
+            rows = _fetch_lecture_metadata_rows(database_url)
+        except Exception as exc:
+            print(f"[DB 로드] lecture_metadata 로드 실패 — 파일 metadata만 사용: {exc}\n")
+            return
+
+        added = 0
+        merged = 0
+        for row in rows:
+            lec = self._from_db_row(row)
+            existing = self.lectures.get(lec.video_id)
+            if existing:
+                self.lectures[lec.video_id] = self._merge_db_with_existing(existing, lec)
+                merged += 1
+            else:
+                self.lectures[lec.video_id] = lec
+                added += 1
+        print(
+            f"[DB 로드] lecture_metadata {len(rows)}개 로드 "
+            f"(추가 {added}, 병합 {merged}) — 총 {len(self.lectures)}개\n"
+        )
+
+    @staticmethod
+    def _from_metadata_item(item: dict) -> LectureMetadata:
+        return LectureMetadata(
+            video_id          = item["video_id"],
+            title             = item["title"],
+            instructor_id     = item.get("instructor_id", ""),
+            uploaded_at       = item.get("uploaded_at"),
+            domain            = _canonical_domain(item.get("graph_domain") or item.get("domain")),
+            graph_subdomain   = _normalize_subdomain(item.get("graph_subdomain")),
+            difficulty        = item.get("difficulty", "unknown"),
+            duration_sec      = item.get("duration_sec", 0.0),
+            summary           = item.get("summary", ""),
+            keywords          = item.get("keywords", []),
+            concept_roles     = item.get("concept_roles", []),
+            concept_relations = item.get("concept_relations", []),
+            communities       = item.get("communities", []),
+            pedagogy          = item.get("pedagogy", {}),
+            diagnostics       = item.get("diagnostics", {}),
+            visual_concept_terms = (
+                item.get("visual_concept_terms")
+                or item.get("pedagogy", {}).get("visual_concept_terms", [])
+            ),
+        )
+
+    @staticmethod
+    def _from_db_row(row: dict) -> LectureMetadata:
+        uploaded_at = row.get("uploaded_at") or row.get("lecture_created_at")
+        if hasattr(uploaded_at, "isoformat"):
+            uploaded_at = uploaded_at.isoformat()
+        return LectureMetadata(
+            video_id          = _video_id_from_db_row(row),
+            title             = row.get("title") or "Untitled lecture",
+            instructor_id     = row.get("instructor_id") or "",
+            uploaded_at       = uploaded_at,
+            domain            = _canonical_domain(row.get("graph_domain") or row.get("domain")),
+            graph_subdomain   = _normalize_subdomain(row.get("graph_subdomain")),
+            difficulty        = row.get("difficulty") or "unknown",
+            duration_sec      = row.get("duration_sec") or 0.0,
+            summary           = row.get("summary") or "",
+            keywords          = row.get("keywords") or [],
+            concept_roles     = row.get("concept_roles") or {},
+            concept_relations = row.get("concept_relations") or [],
+            communities       = row.get("communities") or [],
+            pedagogy          = row.get("pedagogy") or {},
+            diagnostics       = row.get("diagnostics") or {},
+            visual_concept_terms = row.get("visual_concept_terms") or [],
+        )
+
+    @staticmethod
+    def _merge_db_with_existing(existing: LectureMetadata, db_lecture: LectureMetadata) -> LectureMetadata:
+        db_concept_roles = db_lecture.concept_roles
+        concept_roles = (
+            db_concept_roles
+            if (
+                isinstance(db_concept_roles, dict)
+                and (db_concept_roles.get("core") or db_concept_roles.get("introduced"))
+            )
+            else existing.concept_roles
+        )
+        return LectureMetadata(
+            video_id          = existing.video_id,
+            title             = db_lecture.title or existing.title,
+            instructor_id     = db_lecture.instructor_id or existing.instructor_id,
+            uploaded_at       = db_lecture.uploaded_at or existing.uploaded_at,
+            domain            = _canonical_domain(db_lecture.domain or existing.domain),
+            graph_subdomain   = db_lecture.graph_subdomain or existing.graph_subdomain,
+            difficulty        = db_lecture.difficulty or existing.difficulty,
+            duration_sec      = db_lecture.duration_sec or existing.duration_sec,
+            summary           = db_lecture.summary or existing.summary,
+            keywords          = db_lecture.keywords or existing.keywords,
+            concept_roles     = concept_roles,
+            concept_relations = db_lecture.concept_relations or existing.concept_relations,
+            communities       = db_lecture.communities or existing.communities,
+            pedagogy          = db_lecture.pedagogy or existing.pedagogy,
+            diagnostics       = db_lecture.diagnostics or existing.diagnostics,
+            visual_concept_terms = db_lecture.visual_concept_terms or existing.visual_concept_terms,
+        )
 
     def get(self, video_id: str) -> Optional[LectureMetadata]:
         return self.lectures.get(video_id)
@@ -355,6 +614,9 @@ class MetadataCollection:
 
     def available_domains(self) -> list[str]:
         return sorted({lec.domain for lec in self.lectures.values()})
+
+    def available_subdomains(self) -> list[str]:
+        return sorted({lec.graph_subdomain for lec in self.lectures.values() if lec.graph_subdomain})
 
     def available_keywords(self) -> list[str]:
         """focus_concept 선택용 keyword pool"""
@@ -667,6 +929,7 @@ class CommunityIndex:
 def _fast_list_by_domain_analysis(
     query: str,
     available_domains: list[str],
+    available_subdomains: list[str],
 ) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]]:
     normalized = _normalize_term(query)
     has_list_signal = any(
@@ -688,9 +951,9 @@ def _fast_list_by_domain_analysis(
     if "전체 강의" in normalized or "모든 강의" in normalized:
         return "list_by_domain", query, [], [], None, None, None, {}
 
-    for alias, domain in _DOMAIN_ALIASES.items():
-        if alias in normalized and domain in available_domains:
-            return "list_by_domain", query, [], [], domain, None, None, {}
+    domain, subdomain = _infer_domain_filters(query, available_domains, available_subdomains)
+    if domain:
+        return "list_by_domain", query, [], [], domain, None, None, {"subdomain": subdomain}
 
     return None
 
@@ -1422,6 +1685,7 @@ class RecommendResult:
     reason:       str
     summary:      str
     tier:         str   # "direct" | "related"
+    keywords:     list[dict]
 
 
 @dataclass
@@ -1432,6 +1696,7 @@ class QueryContext:
     query_keywords:    list[str]
     inferred_keywords: list[str]
     domain:            Optional[str]
+    subdomain:         Optional[str]
     focus_concept:     Optional[str]
     duration_max_sec:  Optional[int]
     comparison_intent: bool
@@ -1481,19 +1746,12 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
 
 def _display_score(internal_score: float, tier: str) -> int:
     """
-    내부 랭킹 점수를 사용자 표시용 추천 적합도로 보정한다.
+    내부 랭킹 점수를 사용자 표시용 추천 적합도로 변환한다.
     추천 순위와 tier 판단에는 영향을 주지 않는다.
     """
     # 0.30~0.85 내부 점수를 55~95점대로 완만하게 매핑한다.
     normalized = (internal_score - 0.30) / 0.55
     score = 55 + max(0.0, min(normalized, 1.0)) * 40
-
-    if tier == "direct":
-        score = max(score, 75)
-    elif tier == "related":
-        score = min(max(score, 55), 82)
-    else:
-        score = min(max(score, 45), 70)
 
     return int(round(score))
 
@@ -1507,6 +1765,7 @@ class Recommender:
         self.collection          = MetadataCollection(metadata_dir)
         self.cfg                 = config or RecommenderConfig()
         self._available_domains  = self.collection.available_domains()
+        self._available_subdomains = self.collection.available_subdomains()
         self._available_keywords = self.collection.available_keywords()
 
         # LanceDB 전체 레코드 사전 로드 (요청마다 디스크 읽기 방지).
@@ -1537,6 +1796,7 @@ class Recommender:
                 f"{len(metadata_lectures) - len(indexed_lectures)}개는 metadata 기반으로만 점수화합니다.\n"
             )
         print(f"[도메인]    {self._available_domains}")
+        print(f"[세부도메인] {self._available_subdomains}")
         print(f"[키워드 풀] {len(self._available_keywords)}개\n")
         print(
             f"[Lexical]   {len(self._lexical_stats.doc_freq)}개 term, "
@@ -1559,13 +1819,24 @@ class Recommender:
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
-        fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains)
+        fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains, self._available_subdomains)
         if fast_analysis:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = fast_analysis
         else:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = analyze_query(
                 query, self._available_domains, self._available_keywords
             )
+        subdomain = _normalize_subdomain(conditions.get("subdomain"))
+        if not subdomain:
+            inferred_domain, inferred_subdomain = _infer_domain_filters(
+                query,
+                self._available_domains,
+                self._available_subdomains,
+            )
+            domain = inferred_domain or domain
+            subdomain = _normalize_subdomain(inferred_subdomain)
+        if subdomain not in self._available_subdomains:
+            subdomain = None
         inferred_keywords = _append_topic_expansions(
             query_keywords,
             inferred_keywords,
@@ -1584,6 +1855,7 @@ class Recommender:
         print(f"[원본 키워드] {query_keywords}")
         print(f"[확장 키워드] {inferred_keywords}")
         print(f"[추론 도메인] {domain or '미확정'}")
+        print(f"[추론 세부]   {subdomain or '미확정'}")
         print(f"[깊이 개념]   {focus_concept or '없음'}")
         print(f"[비교 의도]   {'있음' if comparison_intent else '없음'}")
         print(f"[검증 조건]   {'있음' if issue_free_preference else '없음'}")
@@ -1603,6 +1875,7 @@ class Recommender:
             query_keywords    = query_keywords,
             inferred_keywords = inferred_keywords,
             domain            = domain,
+            subdomain         = subdomain,
             focus_concept     = focus_concept,
             duration_max_sec  = duration_max_sec,
             comparison_intent = comparison_intent,
@@ -1622,11 +1895,15 @@ class Recommender:
         for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
                 continue
+            if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
+                continue
             lectures.append(lec)
 
         lectures.sort(key=lambda lec: lec.title or lec.video_id)
 
         scope = _DOMAIN_LABELS.get(ctx.domain, ctx.domain) if ctx.domain else "전체"
+        if ctx.subdomain:
+            scope = f"{scope} / {ctx.subdomain}"
         reason = "전체 강의 목록입니다." if not ctx.domain else f"{scope} 분야 강의 목록입니다."
         results = []
         for lec in lectures[:top_k]:
@@ -1642,6 +1919,7 @@ class Recommender:
                 reason        = reason,
                 summary       = lec.summary,
                 tier          = "list",
+                keywords      = lec.keywords or [],
             ))
         return results
 
@@ -1676,12 +1954,14 @@ class Recommender:
         """
         if not self.cfg.USE_METADATA_PREFILTER:
             return None
-        if not (ctx.domain or ctx.duration_max_sec):
+        if not (ctx.domain or ctx.subdomain or ctx.duration_max_sec):
             return None
 
         preferred = set()
         for lec in self.collection.all():
             if ctx.domain and lec.domain != ctx.domain:
+                continue
+            if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
                 continue
             if ctx.duration_max_sec and lec.duration_sec > (
                 ctx.duration_max_sec + self.cfg.METADATA_DURATION_GRACE_SEC
@@ -1843,9 +2123,9 @@ class Recommender:
 
     def _recency_boost_weight(self, domain: str) -> float:
         normalized = _normalize_term(domain)
-        if normalized.startswith("eng/cs"):
+        if normalized == "engineering":
             return self.cfg.W_RECENCY_BOOST_FAST
-        if normalized.startswith(("soc/business", "soc/econ", "med")):
+        if normalized in {"social_science", "health_sciences"}:
             return self.cfg.W_RECENCY_BOOST_MEDIUM
         return self.cfg.W_RECENCY_BOOST_SLOW
 
@@ -2049,7 +2329,13 @@ class Recommender:
         )
 
         # domain boost 신호
-        domain_score = 1.0 if (ctx.domain and lec.domain == ctx.domain) else 0.0
+        domain_score = 0.0
+        subdomain_score = 0.0
+        if ctx.domain and lec.domain == ctx.domain:
+            domain_score = 1.0
+        if ctx.subdomain and lec.graph_subdomain == ctx.subdomain:
+            subdomain_score = 1.0
+            domain_score = 1.0
 
         # depth boost 신호 — BFS 홉 거리 기반
         depth_score = _compute_depth_score(ctx.focus_concept, lec) if ctx.focus_concept else 0.0
@@ -2109,7 +2395,7 @@ class Recommender:
             recency_weight
         )
         raw_boost = (
-            self.cfg.W_DOMAIN_BOOST     * domain_score    +
+            self.cfg.W_DOMAIN_BOOST     * (subdomain_score or domain_score) +
             self.cfg.W_DEPTH_BOOST      * depth_score +
             (self.cfg.W_DURATION_BOOST * duration_fit_score if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST * application_score if ctx.application_preference else 0.0) +
@@ -2151,10 +2437,10 @@ class Recommender:
             total *= self.cfg.Q_KW_MISMATCH_PENALTY
 
         # 도메인 상위 카테고리 불일치 패널티
-        if ctx.domain:
-            query_top = ctx.domain.split("/")[0]
-            lec_top   = lec.domain.split("/")[0]
-            if query_top != lec_top:
+        if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
+            total *= self.cfg.DOMAIN_MISMATCH_PENALTY
+        elif ctx.domain:
+            if ctx.domain != lec.domain:
                 total *= self.cfg.DOMAIN_MISMATCH_PENALTY
 
         return {
@@ -2172,8 +2458,12 @@ class Recommender:
             "dm_keyword_legacy":    round(dm.get("keyword_legacy", dm["keyword"]), 4),
             "dm_summary":           round(dm["summary"], 4),
             "domain_score":         round(domain_score, 4),
+            "subdomain_score":      round(subdomain_score, 4),
             "q_kw_matched":         dm.get("q_kw_matched", True),
-            "domain_mismatch":      bool(ctx.domain and ctx.domain.split("/")[0] != lec.domain.split("/")[0]),
+            "domain_mismatch":      bool(
+                (ctx.subdomain and ctx.subdomain != lec.graph_subdomain)
+                or (ctx.domain and ctx.domain != lec.domain)
+            ),
             "graph_score":          round(graph_score, 4),
             "community_score":      round(community_score, 4),
             "visual_score":         round(visual_score, 4),
@@ -2347,6 +2637,7 @@ class Recommender:
                 reason       = _build_reason(detail, tier),
                 summary      = lec.summary,
                 tier         = tier,
+                keywords     = lec.keywords or [],
             ))
             if len(results) >= top_k:
                 break

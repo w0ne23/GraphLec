@@ -5,7 +5,30 @@ import LectureItem from '../components/lecture-list/LectureItem'
 
 import '../styles/lecture-list.css'
 
-const CATEGORIES = ['전체', '컴퓨터 과학', '수학', '데이터 사이언스', '소프트웨어 공학']
+const CATEGORIES = [
+  '전체',
+  'engineering',
+  'natural_science',
+  'humanities',
+  'social_science',
+  'arts',
+  'health_sciences',
+  'sports',
+  'education',
+  'etc',
+]
+const CATEGORY_LABELS = {
+  전체: '전체',
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문학',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건의료',
+  sports: '스포츠',
+  education: '교육',
+  etc: '기타',
+}
 const ITEMS_PER_PAGE = 12
 
 export default function LectureListPage() {
@@ -17,12 +40,14 @@ export default function LectureListPage() {
   
   // ── 1. 조건 상태 (All, 카테고리, 검색) ──
   const [activeCategory, setActiveCategory] = useState('전체')
+  const [activeVerifiedOnly, setActiveVerifiedOnly] = useState(false)
   const [searchInput, setSearchInput] = useState('') // 타이핑 중인 값
   const [activeSearch, setActiveSearch] = useState('') // 실제 API에 요청할 검색어
   
   // ── 2. 상세검색 패널 상태 ──
   const [showFilterPanel, setShowFilterPanel] = useState(false)
   const [pendingCategory, setPendingCategory] = useState('전체')
+  const [pendingVerifiedOnly, setPendingVerifiedOnly] = useState(false)
 
   // ── 3. 페이지네이션 상태 ──
   const [currentPage, setCurrentPage] = useState(1)
@@ -36,7 +61,8 @@ export default function LectureListPage() {
       page: currentPage,
       limit: ITEMS_PER_PAGE,
       category: activeCategory === '전체' ? null : activeCategory,
-      search: activeSearch 
+      search: activeSearch,
+      verifiedOnly: activeVerifiedOnly,
     })
       .then(res => {
         setLectures(res.items)
@@ -44,7 +70,7 @@ export default function LectureListPage() {
         setTotalCount(res.totalItems || res.items.length)
       })
       .finally(() => setLoading(false))
-  }, [currentPage, activeCategory, activeSearch])
+  }, [currentPage, activeCategory, activeSearch, activeVerifiedOnly])
 
   // 검색 실행 핸들러 (엔터 키 또는 버튼 클릭)
   const handleSearchSubmit = (e) => {
@@ -57,6 +83,7 @@ export default function LectureListPage() {
   // 필터 적용 핸들러
   const applyFilters = () => {
     setActiveCategory(pendingCategory)
+    setActiveVerifiedOnly(pendingVerifiedOnly)
     setCurrentPage(1)
     setShowFilterPanel(false)
   }
@@ -64,6 +91,7 @@ export default function LectureListPage() {
   // 필터 초기화 핸들러
   const resetFilters = () => {
     setPendingCategory('전체')
+    setPendingVerifiedOnly(false)
   }
 
   return (
@@ -106,13 +134,18 @@ export default function LectureListPage() {
                   >
                     전체
                   </button>
+                  <button
+                    className={`ll-chip ll-chip--verified ${pendingVerifiedOnly ? 'active' : ''}`}
+                    onClick={() => setPendingVerifiedOnly(value => !value)}
+                  >
+                    검증 완료
+                  </button>
                 </div>
 
                 <div className="ll-chip-divider" />
 
-                {/* 서브그룹: Engineering */}
                 <div className="ll-filter-subgroup">
-                  <h5 className="ll-filter-sublabel">Engineering</h5>
+                  <h5 className="ll-filter-sublabel">도메인</h5>
                   <div className="ll-filter-chips">
                     {CATEGORIES.filter(cat => cat !== '전체').map(cat => (
                       <button
@@ -120,7 +153,7 @@ export default function LectureListPage() {
                         className={`ll-chip ${pendingCategory === cat ? 'active' : ''}`}
                         onClick={() => setPendingCategory(cat)}
                       >
-                        {cat}
+                        {CATEGORY_LABELS[cat] ?? cat}
                       </button>
                     ))}
                   </div>
@@ -138,10 +171,23 @@ export default function LectureListPage() {
               {activeCategory !== '전체' && (
                 <div className="ll-active-filters">
                   <span className="ll-active-chip">
-                    {activeCategory}
+                    {CATEGORY_LABELS[activeCategory] ?? activeCategory}
                     <button className="ll-active-remove" onClick={() => {
                       setActiveCategory('전체')
                       setPendingCategory('전체')
+                      setCurrentPage(1)
+                    }}>✕</button>
+                  </span>
+                </div>
+              )}
+              {activeVerifiedOnly && (
+                <div className="ll-active-filters">
+                  <span className="ll-active-chip ll-active-chip--verified">
+                    검증 완료
+                    <button className="ll-active-remove" onClick={() => {
+                      setActiveVerifiedOnly(false)
+                      setPendingVerifiedOnly(false)
+                      setCurrentPage(1)
                     }}>✕</button>
                   </span>
                 </div>

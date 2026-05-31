@@ -10,6 +10,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import Callable
 
 from . import claim_common as cv
 from .claim_pipeline import prepare_verification
@@ -1130,6 +1131,7 @@ def run_classified_issue_pipeline(
     verifier_batch_size: int = CLASSIFIED_ISSUE_VERIFIER_BATCH_SIZE,
     max_workers: int = 1,
     max_tokens: int = 8192,
+    stage_notify: Callable[[str, str], None] | None = None,
 ) -> dict:
     """Run the user's classified issue flow end-to-end.
 
@@ -1145,24 +1147,42 @@ def run_classified_issue_pipeline(
     out_dir = Path(output_dir).resolve() if output_dir else merged_file.parent
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    claims_result = _extract_or_reuse_claims_for_classified_pipeline(
-        merged_file,
-        out_dir,
-        claims_jsonl=claims_jsonl,
-        reuse_claims=reuse_claims,
-        current_date=current_date,
-        claim_batch_size=claim_batch_size,
-    )
-    issue_judge_result = run_issue_judge_only(
-        str(merged_file),
-        output_dir=str(out_dir),
-        claims_jsonl=claims_result["claims_jsonl"],
-        issue_judge_models=issue_judge_models,
-        current_date=current_date,
-        issue_judge_min_confidence=issue_judge_min_confidence,
-        issue_judge_batch_size=issue_judge_batch_size,
-        issue_judge_max_workers=max_workers,
-    )
+    def notify(stage: str, status: str) -> None:
+        if not stage_notify:
+            return
+        stage_notify(stage, status)
+
+    notify("verifier_claim_extraction", "run")
+    try:
+        claims_result = _extract_or_reuse_claims_for_classified_pipeline(
+            merged_file,
+            out_dir,
+            claims_jsonl=claims_jsonl,
+            reuse_claims=reuse_claims,
+            current_date=current_date,
+            claim_batch_size=claim_batch_size,
+        )
+    except Exception:
+        notify("verifier_claim_extraction", "error")
+        raise
+    notify("verifier_claim_extraction", "done")
+
+    notify("verifier_issue_judge", "run")
+    try:
+        issue_judge_result = run_issue_judge_only(
+            str(merged_file),
+            output_dir=str(out_dir),
+            claims_jsonl=claims_result["claims_jsonl"],
+            issue_judge_models=issue_judge_models,
+            current_date=current_date,
+            issue_judge_min_confidence=issue_judge_min_confidence,
+            issue_judge_batch_size=issue_judge_batch_size,
+            issue_judge_max_workers=max_workers,
+        )
+    except Exception:
+        notify("verifier_issue_judge", "error")
+        raise
+    notify("verifier_issue_judge", "done")
 
     from .issue_type_classifier import (
         build_next_stage_input,
@@ -1186,55 +1206,67 @@ def run_classified_issue_pipeline(
     issue_judge_payload = json.loads(issue_judge_merged_path.read_text(encoding="utf-8"))
     issue_type_output_path = _issue_type_default_output_path(issue_judge_merged_path)
     classified_input_path = _issue_type_default_next_input_path(issue_type_output_path)
-    if _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path):
-        print(f"  ⏭  issue type classifier — 출력 파일 존재, 스킵")
-        print(f"     {issue_type_output_path}")
-        issue_type_result = _load_json_file(issue_type_output_path)
-        classified_input = _load_json_file(classified_input_path)
-    else:
-        issue_type_models = issue_type_models or _issue_type_default_models()
-        print(f"  issue type classifier 모델: {', '.join(issue_type_models)}")
-        issue_type_result = classify_issues(
-            issue_judge_payload,
-            input_path=issue_judge_merged_path,
-            merged_clean_path=merged_file,
-            models=issue_type_models,
-            list_keys=["issues"],
-            batch_size=max(1, issue_type_batch_size),
-            current_date=current_date or datetime.now().date().isoformat(),
-            max_tokens=max(256, max_tokens),
-            max_workers=max(1, max_workers),
-            model_weights_spec=issue_type_model_weights,
-        )
-        issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
-        classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
-        classified_input_path.write_text(json.dumps(classified_input, ensure_ascii=False, indent=2), encoding="utf-8")
+    notify("verifier_issue_classification", "run")
+    try:
+        if _json_file_exists(issue_type_output_path) and _json_file_exists(classified_input_path):
+            print(f"  ⏭  issue type classifier — 출력 파일 존재, 스킵")
+            print(f"     {issue_type_output_path}")
+            issue_type_result = _load_json_file(issue_type_output_path)
+            classified_input = _load_json_file(classified_input_path)
+        else:
+            issue_type_models = issue_type_models or _issue_type_default_models()
+            print(f"  issue type classifier 모델: {', '.join(issue_type_models)}")
+            issue_type_result = classify_issues(
+                issue_judge_payload,
+                input_path=issue_judge_merged_path,
+                merged_clean_path=merged_file,
+                models=issue_type_models,
+                list_keys=["issues"],
+                batch_size=max(1, issue_type_batch_size),
+                current_date=current_date or datetime.now().date().isoformat(),
+                max_tokens=max(256, max_tokens),
+                max_workers=max(1, max_workers),
+                model_weights_spec=issue_type_model_weights,
+            )
+            issue_type_output_path.write_text(json.dumps(issue_type_result, ensure_ascii=False, indent=2), encoding="utf-8")
+            classified_input = build_next_stage_input(issue_type_result, classification_path=issue_type_output_path)
+            classified_input_path.write_text(json.dumps(classified_input, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        notify("verifier_issue_classification", "error")
+        raise
+    notify("verifier_issue_classification", "done")
 
     verifier_output_path = _verifier_default_output_path(classified_input_path)
-    if _json_file_exists(verifier_output_path):
-        print(f"  ⏭  classified issue verifier — 출력 파일 존재, 스킵")
-        print(f"     {verifier_output_path}")
-        verifier_result = _load_json_file(verifier_output_path)
-        verifier_result["output_path"] = str(verifier_output_path)
-    else:
-        verifier_models = verifier_models or _verifier_default_models()
-        print(f"  classified issue verifier 모델: {', '.join(verifier_models)}")
-        verifier_result = judge_classified_issues(
-            classified_input,
-            input_path=classified_input_path,
-            merged_clean_path=merged_file,
-            slide_textualized_path=_related_pipeline_path(merged_file, "_slide_textualized.json"),
-            slide_classified_path=_related_pipeline_path(merged_file, "_slide_classified.json"),
-            models=verifier_models,
-            batch_size=max(1, verifier_batch_size),
-            current_date=current_date or datetime.now().date().isoformat(),
-            max_tokens=max(256, max_tokens),
-            max_workers=max(1, max_workers),
-            context_window=5,
-            model_weights_spec=verifier_model_weights,
-        )
-        verifier_result["output_path"] = str(verifier_output_path)
-        verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    notify("verifier_final_verification", "run")
+    try:
+        if _json_file_exists(verifier_output_path):
+            print(f"  ⏭  classified issue verifier — 출력 파일 존재, 스킵")
+            print(f"     {verifier_output_path}")
+            verifier_result = _load_json_file(verifier_output_path)
+            verifier_result["output_path"] = str(verifier_output_path)
+        else:
+            verifier_models = verifier_models or _verifier_default_models()
+            print(f"  classified issue verifier 모델: {', '.join(verifier_models)}")
+            verifier_result = judge_classified_issues(
+                classified_input,
+                input_path=classified_input_path,
+                merged_clean_path=merged_file,
+                slide_textualized_path=_related_pipeline_path(merged_file, "_slide_textualized.json"),
+                slide_classified_path=_related_pipeline_path(merged_file, "_slide_classified.json"),
+                models=verifier_models,
+                batch_size=max(1, verifier_batch_size),
+                current_date=current_date or datetime.now().date().isoformat(),
+                max_tokens=max(256, max_tokens),
+                max_workers=max(1, max_workers),
+                context_window=5,
+                model_weights_spec=verifier_model_weights,
+            )
+            verifier_result["output_path"] = str(verifier_output_path)
+            verifier_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        notify("verifier_final_verification", "error")
+        raise
+    notify("verifier_final_verification", "done")
 
     grounding_enabled = os.getenv("CLASSIFIED_ISSUE_GROUNDING_ENABLED", "1").strip().lower() not in {
         "0",
@@ -1244,20 +1276,26 @@ def run_classified_issue_pipeline(
     }
     grounding_output_path = out_dir / f"{base_stem}_classified_issue_grounding.json"
     if grounding_enabled:
-        if _json_file_exists(grounding_output_path):
-            print(f"  ⏭  classified issue grounding — 출력 파일 존재, 스킵")
-            print(f"     {grounding_output_path}")
-            verifier_result = _load_json_file(grounding_output_path)
-            verifier_result["output_path"] = str(verifier_output_path)
-        else:
-            verifier_result = ground_classified_issues(
-                verifier_result,
-                current_date=current_date or datetime.now().date().isoformat(),
-                max_workers=max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", str(max_workers)))),
-                max_tokens=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")),
-            )
-            verifier_result["output_path"] = str(verifier_output_path)
-            grounding_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        notify("verifier_web_grounding", "run")
+        try:
+            if _json_file_exists(grounding_output_path):
+                print(f"  ⏭  classified issue grounding — 출력 파일 존재, 스킵")
+                print(f"     {grounding_output_path}")
+                verifier_result = _load_json_file(grounding_output_path)
+                verifier_result["output_path"] = str(verifier_output_path)
+            else:
+                verifier_result = ground_classified_issues(
+                    verifier_result,
+                    current_date=current_date or datetime.now().date().isoformat(),
+                    max_workers=max(1, int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_WORKERS", str(max_workers)))),
+                    max_tokens=int(os.getenv("CLASSIFIED_ISSUE_GROUNDING_MAX_TOKENS", "2048")),
+                )
+                verifier_result["output_path"] = str(verifier_output_path)
+                grounding_output_path.write_text(json.dumps(verifier_result, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            notify("verifier_web_grounding", "error")
+            raise
+        notify("verifier_web_grounding", "done")
     else:
         verifier_result["grounding"] = {"enabled": False, "grounded_issue_count": 0, "status_counts": {}}
 
@@ -1265,23 +1303,29 @@ def run_classified_issue_pipeline(
     slide_textualized_path = _related_pipeline_path(merged_file, "_slide_textualized.json")
     slide_classified_path = _related_pipeline_path(merged_file, "_slide_classified.json")
     slide_error_output_path = out_dir / f"{base_stem}_slide_errors.json"
-    if _json_file_exists(slide_error_output_path):
-        print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
-        print(f"     {slide_error_output_path}")
-        slide_error_result = _load_json_file(slide_error_output_path)
-        slide_error_result["output_path"] = str(slide_error_output_path)
-    else:
-        slide_error_result = detect_classified_slide_errors(
-            merged_clean_path=merged_file,
-            slide_textualized_path=slide_textualized_path,
-            slide_classified_path=slide_classified_path,
-            batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
-            max_workers=max(1, int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", str(max_workers)))),
-            max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
-            current_date=current_date or datetime.now().date().isoformat(),
-        )
-        slide_error_result["output_path"] = str(slide_error_output_path)
-        slide_error_output_path.write_text(json.dumps(slide_error_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    notify("verify_slide_errors", "run")
+    try:
+        if _json_file_exists(slide_error_output_path):
+            print(f"  ⏭  classified slide error checker — 출력 파일 존재, 스킵")
+            print(f"     {slide_error_output_path}")
+            slide_error_result = _load_json_file(slide_error_output_path)
+            slide_error_result["output_path"] = str(slide_error_output_path)
+        else:
+            slide_error_result = detect_classified_slide_errors(
+                merged_clean_path=merged_file,
+                slide_textualized_path=slide_textualized_path,
+                slide_classified_path=slide_classified_path,
+                batch_size=int(os.getenv("CLASSIFIED_SLIDE_ERROR_BATCH_SIZE", "5")),
+                max_workers=max(1, int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_WORKERS", str(max_workers)))),
+                max_tokens=int(os.getenv("CLASSIFIED_SLIDE_ERROR_MAX_TOKENS", "4096")),
+                current_date=current_date or datetime.now().date().isoformat(),
+            )
+            slide_error_result["output_path"] = str(slide_error_output_path)
+            slide_error_output_path.write_text(json.dumps(slide_error_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        notify("verify_slide_errors", "error")
+        raise
+    notify("verify_slide_errors", "done")
 
     slide_errors = slide_error_result.get("slide_errors", []) or []
     content_view["slide_errors"] = slide_errors

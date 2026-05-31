@@ -120,6 +120,9 @@ function VerifierReviewHeader({
   reviewCount,
   typoCount,
   onSelectTab,
+  onOpenDetail,
+  onCancelUpload,
+  isCancelling,
   onComplete,
 }) {
   return (
@@ -130,6 +133,11 @@ function VerifierReviewHeader({
           <span>검토 결과</span>
         </div>
         <div className="vf-review-header-actions">
+          {onOpenDetail && (
+            <button className="vf-review-detail-btn" onClick={onOpenDetail}>
+              상세보기
+            </button>
+          )}
           <nav className="vf-review-tabs" aria-label="검토 항목">
             <button className={reviewTabClassName('review', activeTab)} onClick={() => onSelectTab('review')}>
               <span>검토 필요</span>
@@ -140,6 +148,11 @@ function VerifierReviewHeader({
               <strong>{typoCount}</strong>
             </button>
           </nav>
+          {onCancelUpload && (
+            <button className="vf-cancel-btn vf-review-cancel-btn" onClick={onCancelUpload} disabled={isCancelling}>
+              업로드 취소
+            </button>
+          )}
           <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
             검토 완료
           </button>
@@ -199,7 +212,7 @@ function ReviewConfirmModal({ onCancel, onConfirm }) {
   )
 }
 
-export default function VerifierReviewPanel({ flow }) {
+export default function VerifierReviewPanel({ flow, onOpenDetail }) {
   const { actions } = flow
   const verifier = flow.verifier
   const lecture = flow.lecture
@@ -478,6 +491,9 @@ export default function VerifierReviewPanel({ flow }) {
             reviewCount={reviewCount}
             typoCount={typoCount}
             onSelectTab={selectTab}
+            onOpenDetail={onOpenDetail}
+            onCancelUpload={actions.cancelUpload}
+            isCancelling={flow.isBusy}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">

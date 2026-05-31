@@ -1,12 +1,30 @@
 import uuid
-from sqlalchemy import Column, String, Text, DateTime, ForeignKey, UniqueConstraint, Integer
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import Boolean, Column, String, Text, DateTime, ForeignKey, UniqueConstraint, Integer, Float, Index
+from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import DeclarativeBase, relationship
 from sqlalchemy.sql import func
 
 
 class Base(DeclarativeBase):
     pass
+
+
+JOB_TYPE_LEGACY_FULL = "legacy_full"
+JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
+JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
+JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
+
+JOB_STATUS_PENDING = "pending"
+JOB_STATUS_RUNNING = "running"
+JOB_STATUS_DONE = "done"
+JOB_STATUS_ERROR = "error"
+JOB_STATUS_WAITING_APPROVAL = "waiting_approval"
+JOB_STATUS_REJECTED = "rejected"
+
+WORKER_RUNNABLE_STATUSES = {JOB_STATUS_PENDING}
+RUNNING_STATUSES = {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}
+ACTION_REQUIRED_STATUSES = {JOB_STATUS_WAITING_APPROVAL}
+ACTIVE_STATUSES = RUNNING_STATUSES | ACTION_REQUIRED_STATUSES
 
 
 class ProcessingJob(Base):
@@ -20,7 +38,8 @@ class ProcessingJob(Base):
         nullable=False,
         index=True,
     )
-    status = Column(String, nullable=False, default="pending")  # pending, running, done, error
+    job_type = Column(String, nullable=False, default=JOB_TYPE_LEGACY_FULL, server_default=JOB_TYPE_LEGACY_FULL)
+    status = Column(String, nullable=False, default=JOB_STATUS_PENDING)
     current_stage = Column(Text, nullable=True)
     error_message = Column(Text, nullable=True)
     pipeline_stages = Column(JSONB, nullable=True)
@@ -37,6 +56,7 @@ class Lecture(Base):
     title = Column(String, nullable=True)
     category = Column(String, nullable=True)
     description = Column(Text, nullable=True)
+    is_verified = Column(Boolean, nullable=False, default=False, server_default="false")
     video_path = Column(Text, nullable=False)   # inputs/{lecture_id}/{filename}
     output_dir = Column(Text, nullable=False)   # results/{lecture_id}/
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -52,13 +72,54 @@ class Lecture(Base):
     def active_job(self):
         """현재 실행 중인 job — 최대 1개"""
         return next(
-            (j for j in self.processing_jobs if j.status in ("pending", "running")),
+            (j for j in self.processing_jobs if j.status in ACTIVE_STATUSES),
             None,
         )
 
     @property
     def last_job(self):
         return self.processing_jobs[-1] if self.processing_jobs else None
+
+
+class LectureMetadata(Base):
+    """추천/필터용 강의 메타데이터 요약본.
+
+    전체 원본 metadata JSON은 파일로 유지하고, DB에는 추천 런타임에서 자주 쓰는
+    구조화 필드만 저장한다.
+    """
+    __tablename__ = "lecture_metadata"
+    __table_args__ = (
+        Index("idx_lm_domain", "domain"),
+        Index("idx_lm_difficulty", "difficulty"),
+        Index("idx_lm_keywords_gin", "keywords", postgresql_using="gin"),
+    )
+
+    lecture_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("lectures.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    title = Column(Text, nullable=False)
+    instructor_id = Column(Text, nullable=True)
+    domain = Column(Text, nullable=True)
+    graph_domain = Column(Text, nullable=True)
+    graph_subdomain = Column(Text, nullable=True)
+    difficulty = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    learning_objectives = Column(ARRAY(Text), nullable=True)
+    keywords = Column(JSONB, nullable=True)
+    concept_roles = Column(JSONB, nullable=True)
+    concept_relations = Column(JSONB, nullable=True)
+    communities = Column(JSONB, nullable=True)
+    visual_concept_terms = Column(ARRAY(Text), nullable=True)
+    pedagogy = Column(JSONB, nullable=True)
+    diagnostics = Column(JSONB, nullable=True)
+    duration_sec = Column(Float, nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), nullable=True)
+    metadata_version = Column(Integer, nullable=False, default=1)
+    metadata_uri = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class GraphSession(Base):

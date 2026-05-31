@@ -56,23 +56,19 @@ def _sample_uniform(texts: list[str], n: int) -> list[str]:
     step = len(texts) / n
     return [texts[int(i * step)] for i in range(n)]
 
-DOMAIN_LIST = """
-ENG: eng/cs, eng/electrical, eng/mechanical, eng/civil, eng/chemical,
-     eng/industrial, eng/biomedical, eng/aerospace, eng/materials, eng/environmental
-SCI: sci/physics, sci/chemistry, sci/biology, sci/earth_science, sci/astronomy, sci/ecology
-MATH: math/calculus, math/linear_algebra, math/discrete, math/probability,
-      math/statistics, math/numerical, math/optimization
-HUM: hum/philosophy, hum/history, hum/linguistics, hum/literature,
-     hum/art_history, hum/religion
-SOC: soc/economics, soc/business, soc/law, soc/political_science,
-     soc/sociology, soc/psychology, soc/education
-MED: med/anatomy, med/physiology, med/pharmacology, med/clinical,
-     med/public_health, med/nursing
-ART: art/fine_arts, art/music, art/design, art/film, art/theater,
-     art/physical_education, art/sports_science
-GEN: gen/writing, gen/critical_thinking, gen/career, gen/ethics,
-     gen/language, gen/interdisciplinary, gen/other
-"""
+DOMAIN_TYPES = {
+    "engineering",
+    "natural_science",
+    "humanities",
+    "social_science",
+    "arts",
+    "health_sciences",
+    "sports",
+    "education",
+    "etc",
+}
+
+DOMAIN_LIST = "engineering, natural_science, humanities, social_science, arts, health_sciences, sports, education, etc"
 
 GRAPH_DOMAIN_TO_METADATA_DOMAIN = {
     ("engineering", "computer_science"): "eng/cs",
@@ -145,6 +141,16 @@ MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY
 MAX_VISUAL_CONCEPT_TERMS = int(os.getenv("GRAPHLEC_METADATA_MAX_VISUAL_TERMS", "80"))
 _VISUAL_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 _KOREAN_SYLLABLE_RE = re.compile(r"[가-힣]")
+METADATA_DOMAIN_ALIASES = {
+    "eng": "engineering",
+    "sci": "natural_science",
+    "hum": "humanities",
+    "soc": "social_science",
+    "med": "health_sciences",
+    "art": "arts",
+    "gen": "etc",
+    "math": "natural_science",
+}
 
 APPLICATION_KEYWORDS = (
     "예를 들어",
@@ -188,33 +194,36 @@ def _normalize_graph_domain_token(value: str) -> str:
 def _metadata_domain_from_graph_domain(domain: str, subdomain: str) -> str:
     domain = _normalize_graph_domain_token(domain)
     subdomain = _normalize_graph_domain_token(subdomain)
+    if domain in DOMAIN_TYPES:
+        return domain
     if not domain:
-        return ""
+        return "etc"
     mapped = GRAPH_DOMAIN_TO_METADATA_DOMAIN.get((domain, subdomain))
     if mapped:
-        return mapped
+        mapped_top = _normalize_graph_domain_token(mapped.split("/", 1)[0])
+        return METADATA_DOMAIN_ALIASES.get(mapped_top, "etc")
     if domain == "engineering" and subdomain:
         if "computer" in subdomain or subdomain in {"cs", "software", "operating_systems"}:
-            return "eng/cs"
+            return "engineering"
         if "electrical" in subdomain:
-            return "eng/electrical"
+            return "engineering"
         if "mechanical" in subdomain:
-            return "eng/mechanical"
+            return "engineering"
         if "civil" in subdomain:
-            return "eng/civil"
+            return "engineering"
         if "chemical" in subdomain:
-            return "eng/chemical"
+            return "engineering"
         if "biomedical" in subdomain:
-            return "eng/biomedical"
+            return "engineering"
         if "aerospace" in subdomain:
-            return "eng/aerospace"
+            return "engineering"
         if "material" in subdomain:
-            return "eng/materials"
+            return "engineering"
         if "environment" in subdomain:
-            return "eng/environmental"
+            return "engineering"
         if "industrial" in subdomain:
-            return "eng/industrial"
-    return GRAPH_DOMAIN_DEFAULTS.get(domain, "")
+            return "engineering"
+    return domain if domain in DOMAIN_TYPES else "etc"
 
 
 def load_graph_domain(stem: str, output_dir: Path) -> tuple[str, str, str]:
@@ -1265,14 +1274,15 @@ def classify_domain(slide_texts: list[str], transcript_texts: list[str]) -> str:
 전사: {sample_trans}
 
 다음 도메인 목록 중 가장 적합한 것 하나만 출력하라. 설명 없이 도메인 코드만 출력.
-예시 출력: eng/cs
+판단이 애매하면 etc를 출력하라.
+예시 출력: engineering
 
 도메인 목록:
 {DOMAIN_LIST}
 """
     result = _gemini(prompt).strip().lower()
-    valid = re.findall(r"[a-z]+/[a-z_]+", result)
-    return valid[0] if valid else "gen/other"
+    token = result.strip().split()[0].strip("`\"'.,:{}[]()").replace("-", "_")
+    return token if token in DOMAIN_TYPES else "etc"
 
 
 def generate_summary(
