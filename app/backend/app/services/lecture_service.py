@@ -97,6 +97,45 @@ def make_file_url(abs_path: Optional[str]) -> Optional[str]:
     return None
 
 
+def _first_existing_file(paths: list[Path]) -> Optional[Path]:
+    for path in paths:
+        if path.is_file():
+            return path
+    return None
+
+
+def _lecture_thumbnail_url(output_dir_value: Optional[str]) -> Optional[str]:
+    if not output_dir_value:
+        return None
+
+    output_dir = Path(output_dir_value)
+    candidates: list[Path] = []
+    for ext in ("jpg", "jpeg", "png", "webp"):
+        candidates.extend([
+            output_dir / "slides" / f"scene_001_base.{ext}",
+            output_dir / "slides_staged" / "scenes" / f"scene_001_base.{ext}",
+            output_dir / "slides_staged" / "review_slides" / f"scene_001_base.{ext}",
+            output_dir / f"scene_001_base.{ext}",
+        ])
+
+    first_scene = _first_existing_file(candidates)
+    if first_scene:
+        return make_file_url(str(first_scene))
+
+    base_images: list[Path] = []
+    for base_dir in (
+        output_dir / "slides",
+        output_dir / "slides_staged" / "scenes",
+        output_dir / "slides_staged" / "review_slides",
+        output_dir,
+    ):
+        if base_dir.is_dir():
+            base_images.extend(sorted(base_dir.glob("scene_*_base.*")))
+
+    first_base = _first_existing_file(base_images)
+    return make_file_url(str(first_base)) if first_base else None
+
+
 # ── 그래프 유틸 ──────────────────────────────────────────────────────────────
 def _hex_color(key: str) -> str:
     h = hashlib.md5(key.encode("utf-8")).hexdigest()
@@ -421,6 +460,7 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
             "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         })
     return out
 
@@ -611,6 +651,7 @@ async def list_all_results(
             "title": lecture.title or str(lecture.id),
             "category": lecture.category or "기타",
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
+            "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
             "error_message": job.error_message if job else None,
             "pipeline_stages": job.pipeline_stages or [] if job else [],
         })
@@ -659,6 +700,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         "info": info,
         "stem": stem,
         "video_url": make_file_url(lecture.video_path),
+        "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         "output_dir": lecture.output_dir,
         "graphrag_workspace": str(Path(lecture.output_dir) / "graphrag") if lecture.output_dir else None,
         "created_at": lecture.created_at.isoformat() if lecture.created_at else None,

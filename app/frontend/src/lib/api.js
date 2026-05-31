@@ -76,6 +76,7 @@ async function _fetchResults(params) {
         category: lec.category || '기타',
         status: lec.status,
         created_at: lec.created_at,
+        thumbnail_url: lec.thumbnail_url,
         error_message: lec.error_message,
         pipeline_stages: lec.pipeline_stages || [],
         tags: lec.tags || [],

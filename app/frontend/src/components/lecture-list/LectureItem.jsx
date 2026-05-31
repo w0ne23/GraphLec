@@ -19,7 +19,19 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
       style={{ cursor: isPlayable ? 'pointer' : 'default' }}
     >
       <div className="lecture-card-thumb" style={{ background: 'var(--card)' }}>
-        <span className="lecture-card-thumb-icon">
+        {lecture.thumbnail_url ? (
+          <img
+            className="lecture-card-thumb-image"
+            src={lecture.thumbnail_url}
+            alt=""
+            loading="lazy"
+            onError={(event) => {
+              event.currentTarget.hidden = true
+              event.currentTarget.nextElementSibling?.removeAttribute('hidden')
+            }}
+          />
+        ) : null}
+        <span className="lecture-card-thumb-icon" hidden={Boolean(lecture.thumbnail_url)}>
           {lecture.category === '수학' ? '📐' : '🎬'}
         </span>
         {!isDummy && !isDone && (
