@@ -28,7 +28,19 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
         {/* 썸네일 */}
         <div className="rec-col">
           <div className="rec-thumb">
-            <span className="rec-thumb-icon">🎬</span>
+            {lecture.thumbnail_url ? (
+              <img
+                className="rec-thumb-image"
+                src={lecture.thumbnail_url}
+                alt=""
+                loading="lazy"
+                onError={(event) => {
+                  event.currentTarget.hidden = true
+                  event.currentTarget.nextElementSibling?.removeAttribute('hidden')
+                }}
+              />
+            ) : null}
+            <span className="rec-thumb-icon" hidden={Boolean(lecture.thumbnail_url)}>🎬</span>
             {durationLabel && <span className="rec-duration">{durationLabel}</span>}
           </div>
         </div>
@@ -46,7 +58,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             <span className="rec-title">{lecture.title}</span>
             {durationLabel && <span className="rec-duration-inline">· {durationLabel}</span>}
           </div>
-          {lecture.video_id && <div className="rec-sub">{lecture.video_id}</div>}
           {durationMismatch && durationMin && (
             <span className="rec-condition-warning rec-condition-warning--inline">
               {durationMin}분 · 시간 범위 초과

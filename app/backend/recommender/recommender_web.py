@@ -12,6 +12,7 @@ FastAPI 기반 강의 추천 웹 서버
 """
 
 import os
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -42,6 +43,25 @@ _REPO_ROOT = _resolve_repo_root()
 METADATA_DIR = os.getenv("METADATA_DIR", str(_BACKEND_ROOT / "metadata"))
 RECOMMENDER_DB_DIR = os.getenv("RECOMMENDER_DB_DIR", str(_REPO_ROOT / "data" / "lancedb"))
 _recommender: Optional[Recommender] = None
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _thumbnail_url(video_id: str) -> Optional[str]:
+    if not _UUID_RE.match(str(video_id)):
+        return None
+    result_dir = Path("/pipeline/local_storage/results") / str(video_id)
+    if not result_dir.exists():
+        return f"/api/files/results/{video_id}/slides/scene_001_base.jpg"
+    candidates = (
+        sorted(result_dir.glob("slides/scene_001_base.*"))
+        or sorted(result_dir.glob("slides/scene_*_base.*"))
+    )
+    if not candidates:
+        return None
+    return f"/api/files/results/{video_id}/slides/{candidates[0].name}"
 
 
 @asynccontextmanager
@@ -123,6 +143,7 @@ class LectureResult(BaseModel):
     reason:            str
     summary:           str
     tier:              str
+    thumbnail_url:     Optional[str] = None
     score_detail:      Optional[ScoreDetail] = None
 
 
@@ -175,6 +196,7 @@ def recommend(req: RecommendRequest):
                 reason       = r.reason,
                 summary      = r.summary,
                 tier         = r.tier,
+                thumbnail_url= _thumbnail_url(r.video_id),
                 score_detail = None if not r.score_detail else ScoreDetail(
                     content_pct       = r.score_detail.get("content_pct",       0.0),
                     vec_score         = r.score_detail.get("vec_score",          0.0),
