@@ -144,6 +144,7 @@ class LectureResult(BaseModel):
     summary:           str
     tier:              str
     thumbnail_url:     Optional[str] = None
+    keywords:          list[dict] = []
     score_detail:      Optional[ScoreDetail] = None
 
 
@@ -197,6 +198,7 @@ def recommend(req: RecommendRequest):
                 summary      = r.summary,
                 tier         = r.tier,
                 thumbnail_url= _thumbnail_url(r.video_id),
+                keywords     = r.keywords or [],
                 score_detail = None if not r.score_detail else ScoreDetail(
                     content_pct       = r.score_detail.get("content_pct",       0.0),
                     vec_score         = r.score_detail.get("vec_score",          0.0),

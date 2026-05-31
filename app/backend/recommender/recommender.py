@@ -1685,6 +1685,7 @@ class RecommendResult:
     reason:       str
     summary:      str
     tier:         str   # "direct" | "related"
+    keywords:     list[dict]
 
 
 @dataclass
@@ -1918,6 +1919,7 @@ class Recommender:
                 reason        = reason,
                 summary       = lec.summary,
                 tier          = "list",
+                keywords      = lec.keywords or [],
             ))
         return results
 
@@ -2635,6 +2637,7 @@ class Recommender:
                 reason       = _build_reason(detail, tier),
                 summary      = lec.summary,
                 tier         = tier,
+                keywords     = lec.keywords or [],
             ))
             if len(results) >= top_k:
                 break

@@ -177,13 +177,15 @@ function deriveRelatedTags(lecture, queryText, topN = 4) {
     return lecture.tags.slice(0, topN)
   }
 
-  // keywords 배열 우선 — reason/notice 텍스트 오염 방지
   if (Array.isArray(lecture.keywords) && lecture.keywords.length > 0) {
-    return lecture.keywords.slice(0, topN).map(k => k.keyword ?? k)
+    return lecture.keywords
+      .map(k => k.keyword ?? k)
+      .filter(Boolean)
+      .slice(0, topN)
   }
 
-  // fallback: reason 제외하고 title + summary + query만 사용
-  const source = [queryText, lecture.title, lecture.summary].filter(Boolean).join(' ')
+  // fallback: 추천 질의 문구가 태그로 섞이지 않도록 강의 자체 텍스트만 사용
+  const source = [lecture.title, lecture.summary].filter(Boolean).join(' ')
   const tokens = tokenize(source).filter(t => t.length >= 2)
   const counts = new Map()
   for (const t of tokens) counts.set(t, (counts.get(t) || 0) + 1)
@@ -191,6 +193,7 @@ function deriveRelatedTags(lecture, queryText, topN = 4) {
   const stop = new Set([
     '강의', '관련', '추천', '내용', '직접', '매칭', '유사도', '설명', '요약', '기초', '심화',
     '포함', '일치', '개념', '주제', '분석', '지표', '학습', '이해', '방식', '방법',
+    '추천해줘', '추천해', '해줘', '알려줘', '보여줘',
     'the', 'and', 'for', 'with', 'that', 'this',
   ])
 
