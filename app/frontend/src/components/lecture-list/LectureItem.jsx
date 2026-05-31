@@ -6,11 +6,24 @@
  * @param {string}   viewMode   - 'grid' | 'list' (기본값 'grid')
  * @param {function} onClick    - 카드 클릭 시 호출되는 핸들러
  */
+const CATEGORY_LABELS = {
+  engineering: '공학',
+  natural_science: '자연과학',
+  humanities: '인문학',
+  social_science: '사회과학',
+  arts: '예술',
+  health_sciences: '보건의료',
+  sports: '스포츠',
+  education: '교육',
+  etc: '기타',
+}
+
 export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
   const isDone = lecture.status === 'done';
   const isDummy = lecture.is_dummy || lecture.source === 'metadata';
   const isPlayable = isDone && !isDummy;
   const metaLabel = lecture.created_at ? new Date(lecture.created_at).toLocaleDateString() : '';
+  const categoryLabel = CATEGORY_LABELS[lecture.category] ?? lecture.category;
   
   return (
     <article 
@@ -42,7 +55,7 @@ export default function LectureItem({ lecture, viewMode = 'grid', onClick }) {
       </div>
       
       <div className="lecture-card-info">
-        <div className="lecture-card-category">{lecture.category}</div>
+        <div className="lecture-card-category">{categoryLabel}</div>
         <h3 className="lecture-card-title">{lecture.title}</h3>
         <div className="lecture-card-meta">
           {metaLabel}
