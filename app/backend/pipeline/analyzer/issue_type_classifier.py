@@ -42,7 +42,7 @@ DEFAULT_MODEL_WEIGHTS = {
 ISSUE_TYPE_LABELS = {
     "temporal_error": "시대적 오류",
     "scope_overclaim": "범위 과잉 단정",
-    "factual_error": "발언 자체 오류",
+    "factual_error": "사실 오류",
     "confusing_explanation": "혼동 가능 설명",
 }
 TOKEN_USAGE_FIELDS = (
