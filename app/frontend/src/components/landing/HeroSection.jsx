@@ -99,7 +99,7 @@ export default function HeroSection({ current, onNext }) {
     <>
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
-        <div className="hero-card-stage hero-card-stage-paused">
+        <div className="hero-card-stage hero-card-stage-paused hero-card-stage-show-2">
           <div className="hero-orbit-card hero-orbit-card-1">
             <div className="hero-card-title-row">
               <span className="hero-card-num">1</span>
@@ -150,7 +150,81 @@ export default function HeroSection({ current, onNext }) {
               </div>
             </div>
           </div>
-          <div className="hero-orbit-card hero-orbit-card-2" />
+          <div className="hero-orbit-card hero-orbit-card-2">
+            <div className="hero-card-title-row">
+              <span className="hero-card-num">2</span>
+              <div className="hero-card-title">Recommendation</div>
+            </div>
+            <div className="hero-card-sub">
+              학습자가 원하는 강의를 검색하면, 분석된 강의 메타데이터와 일치도를 계산해 강의를 추천합니다.
+            </div>
+
+            <div className="hero-recommend-diagram">
+              <div className="hero-match-strip">
+                <span>영상 분석 그래프</span>
+                <i><b>추출</b></i>
+                <span>메타데이터</span>
+                <i className="hero-match-both"><em aria-hidden="true" /><b>매칭</b></i>
+                <span>질의 분석</span>
+              </div>
+
+              <div className="hero-recommend-panel">
+                <div className="hero-learner-row">
+                  <div className="hero-learner-profile">
+                    <div className="hero-learner-icon">
+                      <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="12" cy="8" r="4" />
+                        <path d="M4.5 20c1.4-4.1 4-6 7.5-6s6.1 1.9 7.5 6" />
+                      </svg>
+                    </div>
+                    <strong>학습자</strong>
+                  </div>
+                  <div className="hero-learner-query">
+                    <span>프로세스와 CPU 관계를 설명하는 강의 추천해줘.</span>
+                  </div>
+                </div>
+
+                <div className="hero-score-list">
+                  <div className="hero-score-item hero-score-item-top">
+                    <div className="hero-score-copy">
+                      <strong>프로세스 관리와 상태 전이</strong>
+                      <span className="hero-score-tags">#프로세스 #CPU</span>
+                    </div>
+                    <div className="hero-score-points">
+                      <span className="hero-score-pill hero-score-pill-content">내용 32</span>
+                      <span className="hero-score-pill hero-score-pill-meaning">의미 28</span>
+                      <span className="hero-score-pill hero-score-pill-condition">조건 15</span>
+                      <em>75점</em>
+                    </div>
+                  </div>
+                  <div className="hero-score-item">
+                    <div className="hero-score-copy">
+                      <strong>운영체제 개론</strong>
+                      <span className="hero-score-tags">#운영체제 #자원관리</span>
+                    </div>
+                    <div className="hero-score-points">
+                      <span className="hero-score-pill hero-score-pill-content">내용 27</span>
+                      <span className="hero-score-pill hero-score-pill-meaning">의미 24</span>
+                      <span className="hero-score-pill hero-score-pill-condition">조건 13</span>
+                      <em>64점</em>
+                    </div>
+                  </div>
+                  <div className="hero-score-item">
+                    <div className="hero-score-copy">
+                      <strong>CPU 스케줄링 기초</strong>
+                      <span className="hero-score-tags">#스케줄링 #성능</span>
+                    </div>
+                    <div className="hero-score-points">
+                      <span className="hero-score-pill hero-score-pill-content">내용 23</span>
+                      <span className="hero-score-pill hero-score-pill-meaning">의미 25</span>
+                      <span className="hero-score-pill hero-score-pill-condition">조건 10</span>
+                      <em>58점</em>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
           <div className="hero-orbit-card hero-orbit-card-3" />
         </div>
         <div className="hero-copy">
