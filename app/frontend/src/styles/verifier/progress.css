@@ -115,8 +115,7 @@
   transform: translateY(-50%);
   z-index: 0;
 }
-.vf-flow-item--done::after,
-.vf-flow-item--prior::after {
+.vf-flow-item--connector-complete::after {
   background: var(--vf-flow-complete);
 }
 .vf-flow-item:last-child::after {
