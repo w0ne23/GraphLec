@@ -1,63 +1,134 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-// useRef는 스크롤 기능 제거로 더 이상 필요하지 않습니다.
-
+import HeroSection from '../components/landing/HeroSection'
+import VerifySection from '../components/landing/VerifySection'
+import LearnerSection from '../components/landing/LearnerSection'
+import WorkflowSection from '../components/landing/WorkflowSection'
+import EntrySection from '../components/landing/EntrySection'
 import '../styles/landing.css'
+
+const TOTAL = 5
+const DOT_THEMES = ['on-dark', 'on-light', 'on-light', 'on-light', 'on-light']
 
 export default function LandingPage() {
   const navigate = useNavigate()
+  const [current, setCurrent] = useState(0)
+  const animating = useRef(false)
+
+  const goTo = useCallback((idx) => {
+    if (animating.current || idx === current || idx < 0 || idx >= TOTAL) return
+    animating.current = true
+    setCurrent(idx)
+    setTimeout(() => { animating.current = false }, 850)
+  }, [current])
+
+  const goNext = useCallback(() => goTo(current + 1), [current, goTo])
+  const goPrev = useCallback(() => goTo(current - 1), [current, goTo])
+
+  // Wheel
+  useEffect(() => {
+    let accum = 0
+    let timer = null
+    const onWheel = (e) => {
+      e.preventDefault()
+      accum += e.deltaY
+      clearTimeout(timer)
+      timer = setTimeout(() => {
+        if (accum > 60)       goNext()
+        else if (accum < -60) goPrev()
+        accum = 0
+      }, 80)
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    return () => window.removeEventListener('wheel', onWheel)
+  }, [goNext, goPrev])
+
+  // Keyboard
+  useEffect(() => {
+    const onKey = (e) => {
+      if (['ArrowDown', 'ArrowRight', 'PageDown'].includes(e.key)) goNext()
+      if (['ArrowUp',   'ArrowLeft',  'PageUp'  ].includes(e.key)) goPrev()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [goNext, goPrev])
+
+  // Touch
+  useEffect(() => {
+    let y0 = 0
+    const onStart = (e) => { y0 = e.touches[0].clientY }
+    const onEnd   = (e) => {
+      const dy = y0 - e.changedTouches[0].clientY
+      if (dy >  50) goNext()
+      if (dy < -50) goPrev()
+    }
+    window.addEventListener('touchstart', onStart, { passive: true })
+    window.addEventListener('touchend',   onEnd,   { passive: true })
+    return () => {
+      window.removeEventListener('touchstart', onStart)
+      window.removeEventListener('touchend',   onEnd)
+    }
+  }, [goNext, goPrev])
+
+  const slideClass = (i) => {
+    if (i < current)  return 'slide gone'
+    if (i === current) return 'slide active'
+    return 'slide'
+  }
+
+  const dotClass = (i) => {
+    const base = `pdot ${DOT_THEMES[i]}`
+    return i === current ? `${base} active` : base
+  }
 
   return (
-    // 전체 페이지를 중앙 정렬하는 컨테이너
-    <div className="ld-page">
-      
-      {/* global.css의 content-max 유틸리티 활용 */}
-      <div className="ld-content content-max">
-        
-        {/* ── 헤더 영역: 로고 및 설명 ── */}
-        <header className="ld-header">
-          <div className="ld-logo">
-            Graph<span>Lec</span>
-          </div>
-          <p className="ld-subtitle">영상 강의 토탈 솔루션</p>
-        </header>
-
-        {/* ── 메인 영역: 3개 선택지 카드 ── */}
-        <div className="ld-cards">
-          
-          <button 
-            className="ld-card"
-            onClick={() => navigate('/verify')}
-          >
-            <div className="ld-card-icon">✅</div>
-            <h3 className="ld-card-title">Verify</h3>
-            <p className="ld-card-desc">
-              강의를 업로드하여 강의 내용을 검토해 보세요
-            </p>
-          </button>
-
-          <button 
-            className="ld-card"
-            onClick={() => navigate('/recommend')}
-          >
-            <div className="ld-card-icon">💡</div>
-            <h3 className="ld-card-title">Recommend</h3>
-            <p className="ld-card-desc">
-              지금 내가 원하는 강의를 추천받으세요
-            </p>
-          </button>
-
-          <button 
-            className="ld-card"
-            onClick={() => navigate('/lectures')}
-          >
-            <div className="ld-card-icon">💬</div>
-            <h3 className="ld-card-title">QnA</h3>
-            <p className="ld-card-desc">
-              영상 강의를 보며 궁금한 점을 AI에게 바로 질문해 보세요
-            </p>
-          </button>
-
+    <div className="ld-landing">
+      {/* NAV */}
+      <nav className="ld-nav">
+        <div className="nav-logo">
+          <div className="nav-logo-mark">GL</div>
+          <div className="nav-brand">Graph<span>Lec</span></div>
         </div>
+        <ul className="nav-links">
+          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(1) }}>강의자 기능</a></li>
+          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(2) }}>학습자 기능</a></li>
+          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(3) }}>작동 방식</a></li>
+          <li><a href="#" className="nav-cta" onClick={(e) => { e.preventDefault(); goTo(4) }}>시작하기</a></li>
+        </ul>
+      </nav>
+
+      {/* SLIDE STACK */}
+      <div id="stack">
+        <div className={slideClass(0)} id="s1">
+          <HeroSection current={current} onNext={goNext} />
+        </div>
+        <div className={slideClass(1)} id="s2">
+          <VerifySection />
+        </div>
+        <div className={slideClass(2)} id="s3">
+          <LearnerSection />
+        </div>
+        <div className={slideClass(3)} id="s4">
+          <WorkflowSection active={current === 3} />
+        </div>
+        <div className={slideClass(4)} id="s5">
+          <EntrySection onNavigate={navigate} />
+        </div>
+      </div>
+
+      {/* FOOTER */}
+      <footer className="slide-footer">
+        <div>GraphLEC · ©2025 캡스톤 프로젝트</div>
+        <div className="slide-footer-team">
+          황베리 — 정다원, 김지민, 정규민, 김동석, 신지현
+        </div>
+      </footer>
+
+      {/* PROGRESS DOTS */}
+      <div className="progress-dots">
+        {DOT_THEMES.map((_, i) => (
+          <div key={i} className={dotClass(i)} onClick={() => goTo(i)} />
+        ))}
       </div>
     </div>
   )
