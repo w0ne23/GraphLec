@@ -86,25 +86,42 @@
    AppTabBar — 전역 하단 탭바 (모바일)
    ============================================================ */
 .app-header {
-  height: 52px; flex-shrink: 0;
+  height: 64px; flex-shrink: 0;
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0 24px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--b1);
+  padding: 0 3rem;
+  background: rgba(13,13,26,0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(102,103,171,0.2);
 }
-.app-header-logo { font-size: 17px; font-weight: 700; color: var(--t1); text-decoration: none; }
-.app-header-logo span { color: var(--blue); }
+.app-header-logo {
+  display: flex; align-items: center; gap: 10px;
+  color: #fff; text-decoration: none;
+}
+.app-header-logo-mark {
+  width: 32px; height: 32px;
+  background: var(--peri); border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-family: 'Bebas Neue', sans-serif;
+  font-size: 18px; letter-spacing: 1px;
+}
+.app-header-brand {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: #fff;
+}
+.app-header-brand span { color: var(--peri-light); }
 
 .app-header-nav { display: flex; align-items: center; }
 .app-header-tab {
-  font-size: 13px; font-weight: 500; color: var(--t2);
+  font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.45);
   padding: 0 14px; text-decoration: none;
   border-bottom: 2px solid transparent;
   transition: color .15s, border-color .15s;
-  height: 52px; display: flex; align-items: center;
+  height: 64px; display: flex; align-items: center;
 }
-.app-header-tab:hover { color: var(--t1); }
-.app-header-tab--active { color: var(--blue); border-bottom-color: var(--blue); }
+.app-header-tab:hover { color: var(--peri-light); }
+.app-header-tab--active { color: #fff; border-bottom-color: var(--peri-light); }
 
 .app-tabbar { display: none; }
 
