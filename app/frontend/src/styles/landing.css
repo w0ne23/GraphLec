@@ -43,7 +43,13 @@
   backdrop-filter: blur(12px);
   border-bottom: 1px solid rgba(102,103,171,0.2);
 }
-.ld-landing .nav-logo     { display: flex; align-items: center; gap: 10px; }
+.ld-landing .nav-logo {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
 .ld-landing .nav-logo-mark {
   width: 32px; height: 32px;
   background: var(--peri); border-radius: 8px;
@@ -51,7 +57,7 @@
   color: white; font-family: 'Bebas Neue', sans-serif;
   font-size: 18px; letter-spacing: 1px;
 }
-.ld-landing .nav-brand { font-family: 'Bebas Neue', sans-serif; font-size: 22px; letter-spacing: 2px; color: #fff; }
+.ld-landing .nav-brand { font-family: 'Noto Sans KR', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 0; color: #fff; }
 .ld-landing .nav-brand span { color: var(--peri-light); }
 .ld-landing .nav-links { display: flex; gap: 2rem; list-style: none; align-items: center; margin: 0; padding: 0; }
 .ld-landing .nav-links a { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.45); text-decoration: none; transition: color 0.2s; }
@@ -322,16 +328,16 @@
 .ld-landing #s5 {
   background: var(--surface);
   display: flex; align-items: center; justify-content: center;
-  padding: 64px 3rem 52px;
+  padding: 64px clamp(16px, 2vw, 32px) 52px;
 }
 .ld-landing .ld-page {
-  display: flex; align-items: center; justify-content: center;
+  display: flex; align-items: flex-start; justify-content: center;
   width: 100%; height: 100%;
-  padding: 24px;
+  padding: clamp(72px, 10vh, 104px) 0 24px;
 }
 .ld-landing .ld-content {
   display: flex; flex-direction: column; align-items: center;
-  gap: 72px;
+  gap: clamp(48px, 7vh, 76px);
   width: 100%;
 }
 .ld-landing .ld-header {
@@ -339,13 +345,13 @@
   display: flex; flex-direction: column; align-items: center;
 }
 .ld-landing .ld-logo {
-  font-size: 48px; font-weight: 800; color: var(--ink);
+  font-size: 52px; font-weight: 800; color: var(--ink);
   letter-spacing: -1px;
 }
 .ld-landing .ld-logo span { color: var(--peri); }
 .ld-landing .ld-subtitle {
-  margin-top: 1rem;
-  font-size: 16px;
+  margin-top: 0.85rem;
+  font-size: 17px;
   font-weight: 400;
   color: var(--muted);
   letter-spacing: 0.2px;
@@ -353,16 +359,17 @@
 .ld-landing .ld-cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  width: 100%;
-  max-width: 1000px;
+  gap: 34px;
+  width: min(1140px, 78vw);
+  max-width: 960px;
 }
 .ld-landing .ld-card {
-  height: clamp(240px, 30vh, 340px);
+  width: 100%;
+  height: clamp(300px, 36vh, 390px);
   background: var(--white);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 32px 20px;
+  padding: 44px 32px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -377,27 +384,20 @@
   transform: translateY(-3px);
   box-shadow: 0 4px 20px rgba(102,103,171,0.14);
 }
-.ld-landing .ld-card-icon {
-  width: 44px; height: 44px;
-  border-radius: 12px;
-  background: var(--peri-pale);
-  color: var(--peri);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 24px;
-  font-weight: 700;
-  margin-bottom: 16px;
-}
+.ld-landing .ld-entry-icon { width: 60px; height: 60px; margin-bottom: 24px; }
+.ld-landing .ld-entry-icon .feature-icon { width: 30px; height: 30px; }
 .ld-landing .ld-card-title {
-  font-size: 15px;
+  font-size: 18px;
   font-weight: 700;
   color: var(--ink);
-  margin-bottom: 10px;
+  margin-bottom: 14px;
 }
 .ld-landing .ld-card-desc {
-  font-size: 13px;
+  font-size: 14.5px;
   color: var(--muted);
-  line-height: 1.5;
+  line-height: 1.6;
   word-break: keep-all;
+  max-width: 240px;
 }
 
 /* ======================================================

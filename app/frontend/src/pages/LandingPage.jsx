@@ -85,10 +85,10 @@ export default function LandingPage() {
     <div className="ld-landing">
       {/* NAV */}
       <nav className="ld-nav">
-        <div className="nav-logo">
+        <button type="button" className="nav-logo" onClick={() => goTo(0)} aria-label="첫 번째 랜딩 페이지로 이동">
           <div className="nav-logo-mark">GL</div>
           <div className="nav-brand">Graph<span>Lec</span></div>
-        </div>
+        </button>
         <ul className="nav-links">
           <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(1) }}>강의자 기능</a></li>
           <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(2) }}>학습자 기능</a></li>
