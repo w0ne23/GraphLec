@@ -7,7 +7,7 @@
   flex: 1;
   background: var(--bg);
   overflow-y: auto;
-  padding: 40px 24px;
+  padding: 48px 32px;
 }
 
 .ll-content {
@@ -16,14 +16,14 @@
 }
 
 .ll-header {
-  margin-bottom: 32px;
+  margin-bottom: 36px;
 }
 
 .ll-title {
-  font-size: 22px;
+  font-size: 28px;
   font-weight: 700;
   color: var(--t1);
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 /* ── 검색바 스타일 ── */
@@ -31,8 +31,8 @@
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: 14px;
+  margin-bottom: 28px;
 }
 
 .ll-search-main {
@@ -43,13 +43,13 @@
 
 .ll-search-input {
   flex: 1;
-  height: 40px;
-  padding: 0 16px;
+  height: 48px;
+  padding: 0 18px;
   border: 1.5px solid var(--b1);
   border-right: none;
   border-radius: var(--rl) 0 0 var(--rl);
   background: var(--panel);
-  font-size: 14px;
+  font-size: 15px;
   color: var(--t1);
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -62,12 +62,12 @@
 }
 
 .ll-search-btn {
-  padding: 0 20px;
-  height: 40px;
+  padding: 0 26px;
+  height: 48px;
   background: var(--blue);
   border: 1.5px solid var(--blue);
   border-radius: 0 var(--rl) var(--rl) 0;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: #fff;
   cursor: pointer;
@@ -86,9 +86,9 @@
   background: var(--panel);
   border: 1.5px solid var(--b1);
   border-radius: var(--rl);
-  padding: 0 16px;
-  height: 40px;
-  font-size: 13px;
+  padding: 0 20px;
+  height: 48px;
+  font-size: 14px;
   font-weight: 600;
   color: var(--t2);
   cursor: pointer;
@@ -113,7 +113,7 @@
 .ll-filter-panel {
   margin-top: -12px;
   margin-bottom: 24px;
-  padding: 20px;
+  padding: 24px;
   background: var(--panel);
   border: 1.5px solid var(--b1);
   border-radius: var(--rl);
@@ -125,7 +125,7 @@
 }
 
 .ll-filter-label {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--t1);
   margin-bottom: 16px;
@@ -159,11 +159,11 @@
 }
 
 .ll-chip {
-  padding: 6px 14px;
+  padding: 8px 16px;
   background: var(--bg);
   border: 1px solid var(--b1);
   border-radius: 20px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--t2);
   cursor: pointer;
   transition: all 0.15s;
@@ -343,7 +343,7 @@
 .ll-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 20px;
+  gap: 24px;
 }
 
 /* 리스트 뷰: 세로 스택 */
@@ -358,11 +358,11 @@
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  min-height: 112px;
+  min-height: 136px;
 }
 
 .lecture-card--list .lecture-card-thumb {
-  width: 200px;
+  width: 240px;
   aspect-ratio: auto;
   flex-shrink: 0;
   border-radius: var(--rl) 0 0 var(--rl);
@@ -373,12 +373,12 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 12px 20px;
+  padding: 18px 24px;
 }
 
 .lecture-card--list .lecture-card-title {
-  font-size: 14px;
-  margin-bottom: 6px;
+  font-size: 16px;
+  margin-bottom: 8px;
   -webkit-line-clamp: 1;
 }
 

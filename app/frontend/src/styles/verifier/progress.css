@@ -1,16 +1,16 @@
 /* ── 상태 텍스트 ── */
 .vf-status-label {
-  font-size: 12px; font-weight: bold; color: var(--t3);
+  font-size: 14px; font-weight: bold; color: var(--t3);
   text-transform: uppercase; letter-spacing: .5px;
 }
 .vf-status-label--err { color: var(--red); }
-.vf-status-title  { font-size: 16px; font-weight: bold; color: var(--t1); text-align: center; }
-.vf-done-icon     { font-size: 36px; }
+.vf-status-title  { font-size: 22px; font-weight: bold; color: var(--t1); text-align: center; }
+.vf-done-icon     { font-size: 44px; }
 
 .vf-pipe {
-  width: min(100%, 680px);
+  width: min(100%, 960px);
   height: auto;
-  padding: 18px 18px 16px;
+  padding: 28px 30px 26px;
   background: var(--panel); border: 1px solid var(--b1);
   border-radius: var(--rl);
   overflow: hidden;
@@ -19,20 +19,20 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 .vf-progress-message {
   min-width: 0;
   color: var(--t1);
-  font-size: 15px;
+  font-size: 20px;
   font-weight: 800;
   line-height: 1.35;
 }
 .vf-work-log {
-  height: 112px;
+  height: 152px;
   overflow-y: auto;
-  margin-bottom: 18px;
-  padding: 10px 12px;
+  margin-bottom: 26px;
+  padding: 14px 16px;
   background: var(--card);
   border: 1px solid var(--b1);
   border-radius: var(--r);
@@ -40,14 +40,14 @@
 .vf-work-log-lines {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 7px;
 }
 .vf-work-log-line {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: baseline;
   min-width: 0;
-  font-size: 11px;
+  font-size: 13px;
   color: #6b7280;
 }
 .vf-work-log-line span {
@@ -74,10 +74,10 @@
   align-items: flex-start;
   justify-content: flex-start;
   color: var(--t2);
-  font-size: 12px;
+  font-size: 14px;
 }
 .vf-flow {
-  --flow-gap: clamp(4px, calc(4vw / var(--flow-count)), 14px);
+  --flow-gap: clamp(8px, calc(7vw / var(--flow-count)), 22px);
   --vf-flow-track: var(--light-gray);
   --vf-flow-complete: var(--black);
   --vf-flow-done: var(--green-fill);
@@ -89,7 +89,7 @@
   height: auto;
   gap: var(--flow-gap);
   margin: 0;
-  padding: 8px 4px 4px;
+  padding: 10px 4px 4px;
   list-style: none;
 }
 .vf-flow-item {
@@ -100,16 +100,16 @@
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
 }
 .vf-flow-item::after {
   content: '';
   position: absolute;
-  top: 26px;
-  left: calc(50% + 9px);
-  width: calc(100% + var(--flow-gap) - 18px);
+  top: 32px;
+  left: calc(50% + 13px);
+  width: calc(100% + var(--flow-gap) - 26px);
   height: 2px;
   background: var(--vf-flow-track);
   transform: translateY(-50%);
@@ -125,15 +125,15 @@
 .vf-flow-node-slot {
   position: relative;
   z-index: 1;
-  height: 52px;
+  height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 .vf-flow-node {
   position: relative;
-  width: var(--flow-node-size, 18px);
-  height: var(--flow-node-size, 18px);
+  width: var(--flow-node-size, 24px);
+  height: var(--flow-node-size, 24px);
   border-radius: 50%;
   border: 0;
   background: var(--vf-flow-track);
@@ -143,10 +143,10 @@
   transition: border-color .18s, background .18s, box-shadow .18s, outline-color .18s, transform .18s;
 }
 .vf-flow-item--major .vf-flow-node {
-  --flow-node-size: 18px;
-  border: 2px solid var(--vf-flow-track);
+  --flow-node-size: 24px;
+  border: 3px solid var(--vf-flow-track);
   background: var(--panel);
-  outline: 3px solid var(--vf-flow-track);
+  outline: 4px solid var(--vf-flow-track);
 }
 .vf-flow-item--run .vf-flow-node {
   border: 0;
@@ -155,10 +155,10 @@
   animation: vf-node-edge-pulse 1.4s ease-in-out infinite;
 }
 .vf-flow-item--major.vf-flow-item--run .vf-flow-node {
-  border: 2px solid var(--blue);
+  border: 3px solid var(--blue);
   border-color: var(--blue);
   background: transparent;
-  outline: 3px solid var(--blue);
+  outline: 4px solid var(--blue);
 }
 .vf-flow-item--done .vf-flow-node {
   border: 0;
@@ -166,9 +166,9 @@
   box-shadow: none;
 }
 .vf-flow-item--major.vf-flow-item--done .vf-flow-node {
-  border: 2px solid var(--vf-flow-done);
+  border: 3px solid var(--vf-flow-done);
   background: var(--panel);
-  outline: 3px solid var(--vf-flow-done);
+  outline: 4px solid var(--vf-flow-done);
 }
 .vf-flow-item--done .vf-flow-node::after,
 .vf-flow-item--prior .vf-flow-node::after {
@@ -176,8 +176,8 @@
   position: absolute;
   left: 50%;
   top: 45%;
-  width: 10px;
-  height: 6px;
+  width: 12px;
+  height: 7px;
   border-left: 2px solid currentColor;
   border-bottom: 2px solid currentColor;
   transform: translate(-50%, -50%) rotate(-45deg);
@@ -195,9 +195,9 @@
   box-shadow: none;
 }
 .vf-flow-item--major.vf-flow-item--prior .vf-flow-node {
-  border: 2px solid var(--vf-flow-complete);
+  border: 3px solid var(--vf-flow-complete);
   background: var(--vf-flow-complete);
-  outline: 3px solid var(--vf-flow-complete);
+  outline: 4px solid var(--vf-flow-complete);
 }
 .vf-flow-item--prior .vf-flow-node::after {
   color: var(--panel);
@@ -211,10 +211,10 @@
   }
 }
 .vf-flow-label {
-  max-width: 76px;
-  min-height: 24px;
-  font-size: 9px;
-  line-height: 1.2;
+  max-width: 104px;
+  min-height: 34px;
+  font-size: 11px;
+  line-height: 1.28;
   color: var(--t3);
   text-align: center;
   white-space: normal;
@@ -229,4 +229,4 @@
 .vf-flow-item--prior .vf-flow-label {
   color: var(--t2);
 }
-.vf-pipe-error  { margin-top: 6px; font-size: 11px; color: var(--red); }
+.vf-pipe-error  { margin-top: 8px; font-size: 13px; color: var(--red); }
