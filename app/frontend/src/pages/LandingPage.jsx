@@ -105,10 +105,6 @@ export default function LandingPage() {
         </div>
       </footer>
 
-      {/* PROGRESS DOTS */}
-      <div className="progress-dots">
-        <div className="pdot on-dark active" onClick={goMain} />
-      </div>
       </div>
     </div>
   )

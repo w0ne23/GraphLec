@@ -144,8 +144,73 @@
 
 .ld-landing .hero-content {
   position: relative; z-index: 2;
-  display: flex; flex-direction: column;
-  align-items: center; text-align: center; padding: 2rem;
+  display: grid;
+  grid-template-columns: minmax(0, 1.18fr) minmax(0, 0.82fr);
+  align-items: center;
+  width: 100%;
+  height: 100%;
+  padding: 64px clamp(32px, 7vw, 120px) 52px;
+  transform: translateY(clamp(18px, 4vh, 46px));
+}
+.ld-landing .hero-card-stage {
+  position: relative;
+  grid-column: 1;
+  justify-self: center;
+  width: clamp(480px, 44vw, 740px);
+  aspect-ratio: 1.08;
+  pointer-events: none;
+  transform: translateY(clamp(-58px, -5vh, -28px));
+}
+.ld-landing .hero-orbit-card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: clamp(360px, 33vw, 560px);
+  aspect-ratio: 1.22;
+  border-radius: 18px;
+  background: rgba(102,103,171,0.16);
+  border: 1px solid rgba(197,198,232,0.38);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.06),
+    0 22px 60px rgba(0,0,0,0.22);
+  backdrop-filter: blur(14px);
+  transform-origin: center;
+  animation: ld-card-cycle 15s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+}
+.ld-landing .hero-orbit-card-1 { animation-delay: 0s; }
+.ld-landing .hero-orbit-card-2 { animation-delay: -5s; }
+.ld-landing .hero-orbit-card-3 { animation-delay: -10s; }
+@keyframes ld-card-cycle {
+  0%, 26% {
+    opacity: 1;
+    z-index: 3;
+    transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
+  }
+  33.333%, 59% {
+    opacity: 0.72;
+    z-index: 2;
+    transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
+  }
+  66.666%, 92% {
+    opacity: 0.58;
+    z-index: 1;
+    transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
+  }
+  100% {
+    opacity: 1;
+    z-index: 3;
+    transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
+  }
+}
+.ld-landing .hero-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  max-width: 500px;
+  grid-column: 2;
+  justify-self: start;
+  transform: translateX(clamp(8px, 2vw, 40px));
 }
 .ld-landing .hero-badge {
   display: inline-flex; align-items: center; gap: 8px;
@@ -163,14 +228,17 @@
 
 .ld-landing .hero-title {
   font-family: 'Bebas Neue', sans-serif;
-  font-size: clamp(64px, 10vw, 110px); line-height: 0.9; letter-spacing: 5px;
-  color: #fff; margin-bottom: 1.5rem; animation: ld-fadeUp 0.8s 0.15s ease both;
+  font-size: clamp(56px, 7.8vw, 92px); line-height: 0.92; letter-spacing: 4px;
+  color: #fff; margin-bottom: 1.3rem; animation: ld-fadeUp 0.8s 0.15s ease both;
+  translate: 0 -12px;
 }
 .ld-landing .hero-title .peri { color: var(--peri-light); }
 .ld-landing .hero-title .dim  { color: rgba(255,255,255,0.3); }
 .ld-landing .hero-desc {
-  font-size: 16px; font-weight: 300; color: rgba(255,255,255,0.45);
+  font-size: 15px; font-weight: 300; color: rgba(255,255,255,0.45);
   max-width: 480px; line-height: 1.8; margin-bottom: 1.75rem; animation: ld-fadeUp 0.8s 0.3s ease both;
+  margin-left: 10px;
+  translate: 0 -22px;
 }
 .ld-landing .hero-desc strong { color: rgba(255,255,255,0.85); font-weight: 500; }
 
@@ -185,7 +253,10 @@
   font-family: 'Noto Sans KR', sans-serif;
   box-shadow: 0 12px 32px rgba(102,103,171,0.24);
   transition: background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  margin-top: 2px;
   margin-bottom: 2.25rem;
+  margin-left: 10px;
+  translate: 0 -12px;
   animation: ld-fadeUp 0.8s 0.42s ease both;
 }
 .ld-landing .hero-cta:hover {
@@ -193,18 +264,6 @@
   transform: translateY(-2px);
   box-shadow: 0 16px 38px rgba(102,103,171,0.3);
 }
-
-.ld-landing .scroll-hint {
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  color: rgba(255,255,255,0.2); font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
-  animation: ld-fadeUp 0.8s 0.5s ease both; cursor: pointer; transition: color 0.2s; user-select: none;
-}
-.ld-landing .scroll-hint:hover { color: var(--peri-light); }
-.ld-landing .scroll-arrow {
-  width: 28px; height: 28px; border: 1px solid rgba(255,255,255,0.15); border-radius: 50%;
-  display: flex; align-items: center; justify-content: center; animation: ld-bounce 2s infinite;
-}
-@keyframes ld-bounce { 0%,100%{transform:translateY(0)} 50%{transform:translateY(5px)} }
 
 /* ======================================================
    SHARED: section header, feature card, tag

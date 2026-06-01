@@ -99,25 +99,24 @@ export default function HeroSection({ current, onNext }) {
     <>
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
-        <h1 className="hero-title">
-          강의 영상을<br />
-          <span className="peri">지식으로</span><br />
-          <span className="dim">연결하다</span>
-        </h1>
-        <p className="hero-desc">
-          <strong>GraphLEC</strong>은 슬라이드, 음성, 필기를 동시에 분석해<br />
-          강의 콘텐츠를 구조화하고 학습을 연결합니다.
-        </p>
-        <button type="button" className="hero-cta" onClick={onNext}>
-          시작하기
-        </button>
-        <div className="scroll-hint" onClick={onNext}>
-          <div className="scroll-arrow">
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5">
-              <path d="M2 4l4 4 4-4" />
-            </svg>
-          </div>
-          SCROLL
+        <div className="hero-card-stage" aria-hidden="true">
+          <div className="hero-orbit-card hero-orbit-card-1" />
+          <div className="hero-orbit-card hero-orbit-card-2" />
+          <div className="hero-orbit-card hero-orbit-card-3" />
+        </div>
+        <div className="hero-copy">
+          <h1 className="hero-title">
+            강의 영상을<br />
+            <span className="peri">지식으로</span><br />
+            <span className="dim">연결하다</span>
+          </h1>
+          <p className="hero-desc">
+            <strong>GraphLEC</strong>은 슬라이드, 음성, 필기를 동시에 분석해<br />
+            강의 콘텐츠를 구조화하고 학습을 연결합니다.
+          </p>
+          <button type="button" className="hero-cta" onClick={onNext}>
+            시작하기
+          </button>
         </div>
       </div>
     </>
