@@ -1401,7 +1401,7 @@
 .ld-landing .feature-card:hover { border-color: var(--peri-lighter); transform: translateY(-6px); box-shadow: 0 24px 48px rgba(102,103,171,0.14); background: var(--peri-pale); }
 .ld-landing .feature-card:hover::before { transform: scaleX(1); }
 .ld-landing .feature-icon-wrap {
-  width: 52px; height: 52px; background: var(--peri-pale); border-radius: 12px;
+  width: 52px; height: 52px; background: var(--peri-pale); border: 1px solid transparent; border-radius: 12px;
   display: flex; align-items: center; justify-content: center; margin-bottom: 1.5rem; transition: background 0.3s;
 }
 .ld-landing .feature-icon-wrap-inline { margin-bottom: 0; flex-shrink: 0; }
@@ -1617,11 +1617,11 @@
 .ld-landing .ld-page {
   display: flex; align-items: flex-start; justify-content: center;
   width: 100%; height: 100%;
-  padding: clamp(72px, 10vh, 104px) 0 24px;
+  padding: clamp(64px, 9vh, 96px) 0 24px;
 }
 .ld-landing .ld-content {
   display: flex; flex-direction: column; align-items: center;
-  gap: clamp(48px, 7vh, 76px);
+  gap: clamp(58px, 7.5vh, 88px);
   width: 100%;
 }
 .ld-landing .ld-header {
@@ -1643,17 +1643,17 @@
 .ld-landing .ld-cards {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 34px;
-  width: min(1140px, 78vw);
-  max-width: 960px;
+  gap: clamp(38px, 4vw, 58px);
+  width: min(1260px, 84vw);
+  max-width: 1080px;
 }
 .ld-landing .ld-card {
   width: 100%;
-  height: clamp(300px, 36vh, 390px);
+  height: clamp(350px, 41vh, 450px);
   background: var(--white);
   border: 1px solid var(--border);
   border-radius: 10px;
-  padding: 44px 32px;
+  padding: 54px 40px 50px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -1668,20 +1668,27 @@
   transform: translateY(-3px);
   box-shadow: 0 4px 20px rgba(102,103,171,0.14);
 }
-.ld-landing .ld-entry-icon { width: 60px; height: 60px; margin-bottom: 24px; }
-.ld-landing .ld-entry-icon .feature-icon { width: 30px; height: 30px; }
+.ld-landing .ld-entry-icon {
+  width: 72px;
+  height: 72px;
+  margin-bottom: 28px;
+  transform: translateY(-18px);
+}
+.ld-landing .ld-entry-icon .feature-icon { width: 36px; height: 36px; }
 .ld-landing .ld-card-title {
-  font-size: 18px;
+  font-size: 27px;
   font-weight: 700;
   color: var(--ink);
-  margin-bottom: 14px;
+  margin-bottom: 30px;
+  transform: translateY(-12px);
 }
 .ld-landing .ld-card-desc {
-  font-size: 14.5px;
+  font-size: 16px;
   color: var(--muted);
-  line-height: 1.6;
+  line-height: 1.68;
   word-break: keep-all;
-  max-width: 240px;
+  max-width: 270px;
+  transform: translateY(10px);
 }
 
 /* ======================================================
