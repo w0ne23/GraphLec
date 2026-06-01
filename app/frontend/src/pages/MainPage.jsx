@@ -17,7 +17,7 @@ export default function MainPage() {
       </div>
 
       <footer className="slide-footer">
-        <div>GraphLEC · ©2025 캡스톤 프로젝트</div>
+        <div>GraphLEC · ©2026 캡스톤 프로젝트</div>
         <div className="slide-footer-team">
           황베리 — 정다원, 김지민, 정규민, 김동석, 신지현
         </div>

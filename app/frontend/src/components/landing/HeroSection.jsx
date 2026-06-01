@@ -99,7 +99,7 @@ export default function HeroSection({ current, onNext }) {
     <>
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
-        <div className="hero-card-stage hero-card-stage-paused hero-card-stage-show-2">
+        <div className="hero-card-stage">
           <div className="hero-orbit-card hero-orbit-card-1">
             <div className="hero-card-title-row">
               <span className="hero-card-num">1</span>
@@ -225,7 +225,64 @@ export default function HeroSection({ current, onNext }) {
               </div>
             </div>
           </div>
-          <div className="hero-orbit-card hero-orbit-card-3" />
+          <div className="hero-orbit-card hero-orbit-card-3">
+            <div className="hero-card-title-row">
+              <span className="hero-card-num">3</span>
+              <div className="hero-card-title">QnA</div>
+            </div>
+            <div className="hero-card-sub">
+              학습자가 강의 시청 중 궁금한 점을 질문하면, 답변과 함께 출처 구간과 근거 그래프를 제공합니다.
+            </div>
+
+            <div className="hero-qna-panel">
+              <div className="hero-learner-row hero-qna-question-row">
+                <div className="hero-learner-profile">
+                  <div className="hero-learner-icon">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="12" cy="8" r="4" />
+                      <path d="M4.5 20c1.4-4.1 4-6 7.5-6s6.1 1.9 7.5 6" />
+                    </svg>
+                  </div>
+                  <strong>학습자</strong>
+                </div>
+                <div className="hero-learner-query">
+                  <span>문맥 전환은 왜 필요한가요?</span>
+                </div>
+              </div>
+
+              <div className="hero-answer-bubble">
+                <div className="hero-qna-answer-grid">
+                  <div className="hero-answer-copy">
+                    <p>
+                      문맥 전환은 CPU가 실행 중인 프로세스의 상태를 저장하고,
+                      다음 프로세스의 상태를 복원해 여러 작업을 번갈아 실행하기 위해 필요합니다.
+                    </p>
+
+                    <div className="hero-answer-divider" />
+
+                    <div className="hero-source-row">
+                      <span>강의 출처</span>
+                      <strong>Slide 12 · 14:20</strong>
+                    </div>
+                  </div>
+
+                  <div className="hero-mini-graph">
+                    <svg className="hero-graph-edges" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                      <line x1="50" y1="50" x2="22" y2="24" />
+                      <line x1="50" y1="50" x2="78" y2="24" />
+                      <line x1="50" y1="50" x2="62" y2="78" />
+                      <line x1="50" y1="50" x2="22" y2="76" />
+                    </svg>
+                    <span className="hero-graph-node hero-graph-node-main">문맥 전환</span>
+                    <span className="hero-graph-node hero-graph-node-a">CPU 상태</span>
+                    <span className="hero-graph-node hero-graph-node-b">Slide 12</span>
+                    <span className="hero-graph-node hero-graph-node-c">스케줄링</span>
+                    <span className="hero-graph-node hero-graph-node-d">프로세스</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
         <div className="hero-copy">
           <h1 className="hero-title">
