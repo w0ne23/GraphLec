@@ -147,9 +147,9 @@
 /* ======================================================
    SHARED: section header, feature card, tag
 ====================================================== */
-.ld-landing .feat-header { text-align: center; padding: 2rem 3rem 1.25rem; background: var(--white); }
+.ld-landing .feat-header { text-align: center; padding: 3rem 3rem 1rem; background: var(--white); }
 .ld-landing .section-label { font-size: 11px; font-weight: 500; color: var(--peri); letter-spacing: 2px; text-transform: uppercase; margin-bottom: 0.75rem; }
-.ld-landing .section-title { font-family: 'Bebas Neue', sans-serif; font-size: 48px; letter-spacing: 3px; color: var(--ink); margin-bottom: 0.5rem; }
+.ld-landing .section-title { font-family: 'Bebas Neue', sans-serif; font-size: 44px; letter-spacing: 3px; color: var(--ink); margin-bottom: 0.5rem; }
 .ld-landing .section-sub { font-size: 14px; color: var(--muted); font-weight: 300; line-height: 1.6; }
 
 .ld-landing .feature-card {
@@ -182,18 +182,28 @@
 /* ======================================================
    SLIDE 2: VERIFY
 ====================================================== */
-.ld-landing #s2 { background: var(--white); position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; padding: 64px 0 52px; }
+.ld-landing #s2 { background: var(--white); position: absolute; inset: 0; display: flex; flex-direction: column; overflow: hidden; padding: 64px 0 60px; }
 
-.ld-landing .verify-body { display: flex; flex: 1; margin: 0 2.5rem; gap: 2rem; min-height: 0; overflow: hidden; padding-bottom: 2rem; }
-.ld-landing .verify-left { width: 24%; display: flex; flex-direction: column; justify-content: flex-start; padding: 0 2rem 0 0; flex-shrink: 0; }
+.ld-landing .verify-body {
+  display: flex;
+  flex: 0 1 auto;
+  width: min(1320px, calc(100% - 5rem));
+  height: clamp(500px, 58vh, 650px);
+  margin: clamp(1.75rem, 4vh, 3rem) auto 0;
+  gap: clamp(1.5rem, 2.5vw, 3rem);
+  min-height: 0;
+  overflow: hidden;
+  padding: 0 0 1.25rem;
+}
+.ld-landing .verify-left { width: 25%; display: flex; flex-direction: column; justify-content: flex-start; padding: 0 1.25rem 0 0; flex-shrink: 0; }
 .ld-landing .verify-eyebrow { display: flex; align-items: center; gap: 10px; margin-bottom: 0.75rem; }
-.ld-landing .verify-big-title { font-family: 'Bebas Neue', sans-serif; font-size: 40px; letter-spacing: 3px; line-height: 1.05; color: var(--ink); margin-bottom: 0.5rem; }
+.ld-landing .verify-big-title { font-family: 'Bebas Neue', sans-serif; font-size: 36px; letter-spacing: 3px; line-height: 1.05; color: var(--ink); margin-bottom: 0.5rem; }
 .ld-landing .verify-big-title span { color: var(--peri); }
 .ld-landing .verify-label { font-family: 'Bebas Neue', sans-serif; font-size: 24px; letter-spacing: 2px; color: var(--ink); }
 .ld-landing .verify-desc { font-size: 12px; color: var(--muted); font-weight: 300; line-height: 1.7; margin-bottom: 0.75rem; }
 .ld-landing .verify-left .feature-tags { margin-top: 0.75rem; }
 
-.ld-landing .verify-right { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 0.9rem 1.1rem; display: flex; flex-direction: column; gap: 7px; overflow: hidden; min-height: 0; }
+.ld-landing .verify-right { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 0.8rem 1rem; display: flex; flex-direction: column; gap: 7px; overflow: hidden; min-height: 0; }
 
 .ld-landing .vf-top-bar { display: flex; align-items: center; justify-content: space-between; }
 .ld-landing .vf-top-label { font-size: 11px; font-weight: 700; color: var(--muted); letter-spacing: 1.5px; text-transform: uppercase; }
@@ -201,15 +211,15 @@
 .ld-landing .vf-status-dot { width: 6px; height: 6px; border-radius: 50%; background: #4CAF82; }
 
 .ld-landing .vf-summary { display: flex; gap: 8px; }
-.ld-landing .vf-summary-item { flex: 1; background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; display: flex; align-items: center; gap: 10px; }
-.ld-landing .vf-summary-num { font-family: 'Bebas Neue', sans-serif; font-size: 34px; letter-spacing: 1px; line-height: 1; flex-shrink: 0; }
+.ld-landing .vf-summary-item { flex: 1; background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 7px 11px; display: flex; align-items: center; gap: 10px; }
+.ld-landing .vf-summary-num { font-family: 'Bebas Neue', sans-serif; font-size: 31px; letter-spacing: 1px; line-height: 1; flex-shrink: 0; }
 .ld-landing .vf-summary-num.warn { color: #7A8FC7; }
 .ld-landing .vf-summary-num.info { color: #646597; }
 .ld-landing .vf-summary-text { font-size: 13px; color: var(--ink); font-weight: 600; line-height: 1.4; }
 .ld-landing .vf-summary-sub  { font-size: 11px; color: var(--muted); font-weight: 300; }
 
 .ld-landing .vf-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; flex: 1; min-height: 0; }
-.ld-landing .vf-card { background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
+.ld-landing .vf-card { background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; overflow: hidden; }
 
 .ld-landing .vf-type-badge { font-size: 11px; font-weight: 500; border-radius: 4px; padding: 3px 9px; border: 1px solid; }
 .ld-landing .vf-type-badge.fact    { background:#F5F5F7; color:#3D3D5C; border-color:#D8D8E8; }
@@ -248,9 +258,21 @@
    SLIDE 3: LEARNER
 ====================================================== */
 .ld-landing #s3 { background: var(--white); display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; padding-top: 64px; }
-.ld-landing .features-grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0; flex: 1; margin: 0 5rem; padding-bottom: 5rem; min-height: 0; }
+.ld-landing .features-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(2.5rem, 4vw, 4rem);
+  flex: 0 1 auto;
+  width: min(1280px, calc(100% - 5rem));
+  height: clamp(500px, 58vh, 640px);
+  margin: clamp(3rem, 4vh, 3rem) auto 0;
+  padding-bottom: 1.25rem;
+  min-height: 0;
+}
+.ld-landing .features-grid-2 .learner-card:first-child { order: 2; }
+.ld-landing .features-grid-2 .learner-card:nth-child(2) { order: 1; }
 
-.ld-landing .learner-card { margin: 0 0.75rem; padding: 1.5rem 1.75rem; }
+.ld-landing .learner-card { margin: 0; padding: 1.35rem 1.5rem; }
 .ld-landing .feature-card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 0.75rem; }
 .ld-landing .qna-demo { display: flex; flex-direction: column; gap: 7px; margin-top: 0.5rem; flex: 1; overflow: hidden; }
 .ld-landing .qna-demo-compact { margin-top: 0.5rem; gap: 8px; }
@@ -312,6 +334,23 @@
 .ld-landing .rec-more-dots { font-size: 11px; color: var(--muted); writing-mode: vertical-rl; letter-spacing: 2px; }
 .ld-landing .feature-tags-qna { margin-top: 0.25rem; }
 .ld-landing .feature-tags-recommend { margin-top: 0.5rem; }
+
+@media (max-height: 840px) {
+  .ld-landing .feat-header { padding-top: 1.25rem; padding-bottom: 0.75rem; }
+  .ld-landing .section-title { font-size: 38px; margin-bottom: 0.35rem; }
+  .ld-landing .section-sub { font-size: 13px; }
+  .ld-landing .verify-body {
+    height: clamp(440px, 56vh, 540px);
+    margin-top: clamp(1rem, 2.5vh, 1.75rem);
+  }
+  .ld-landing .verify-big-title { font-size: 32px; }
+  .ld-landing .features-grid-2 {
+    height: clamp(440px, 56vh, 540px);
+    margin-top: clamp(1rem, 2.5vh, 1.75rem);
+  }
+  .ld-landing .learner-card { padding: 1.15rem 1.3rem; }
+  .ld-landing .feature-card-head { margin-bottom: 0.55rem; }
+}
 
 /* ======================================================
    SLIDE 4: HOW IT WORKS
