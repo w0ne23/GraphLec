@@ -99,8 +99,57 @@ export default function HeroSection({ current, onNext }) {
     <>
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
-        <div className="hero-card-stage" aria-hidden="true">
-          <div className="hero-orbit-card hero-orbit-card-1" />
+        <div className="hero-card-stage hero-card-stage-paused">
+          <div className="hero-orbit-card hero-orbit-card-1">
+            <div className="hero-card-title-row">
+              <span className="hero-card-num">1</span>
+              <div className="hero-card-title">Verification</div>
+            </div>
+            <div className="hero-card-sub">
+              강의자가 영상을 전달하면 Verifier가 Multi-LLM으로 판단하고 피드백을 돌려줍니다.
+            </div>
+
+            <div className="hero-verifier-diagram">
+              <div className="hero-flow-node hero-flow-node-lecturer">
+                <div className="hero-flow-person">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="12" cy="8" r="4" />
+                    <path d="M4.5 20c1.4-4.1 4-6 7.5-6s6.1 1.9 7.5 6" />
+                  </svg>
+                  <strong>강의자</strong>
+                </div>
+                <em>강의 영상 업로드</em>
+              </div>
+
+              <div className="hero-flow-connector">
+                <div className="hero-flow-arrow hero-flow-arrow-upload">
+                  <span>강의 영상</span>
+                </div>
+                <div className="hero-flow-arrow hero-flow-arrow-feedback">
+                  <span>피드백</span>
+                </div>
+              </div>
+
+              <div className="hero-flow-node hero-flow-node-verifier">
+                <strong>Verifier</strong>
+                <em>Multi-LLM 판단 후 피드백 제공</em>
+              </div>
+
+              <div className="hero-feedback-panel">
+                <div className="hero-feedback-head">
+                  <span className="hero-feedback-dot" />
+                  피드백 리포트
+                </div>
+                <div className="hero-feedback-tags">
+                  <span>사실 오류</span>
+                  <span>시대적 오류</span>
+                  <span>혼동 오류</span>
+                  <span>범위 오류</span>
+                  <span>슬라이드 오류</span>
+                </div>
+              </div>
+            </div>
+          </div>
           <div className="hero-orbit-card hero-orbit-card-2" />
           <div className="hero-orbit-card hero-orbit-card-3" />
         </div>
