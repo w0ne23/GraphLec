@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import EntrySection from '../components/landing/EntrySection'
-import RaspberryIcon from '../components/common/RaspberryIcon'
+import LandingHeader from '../components/landing/LandingHeader'
 import '../styles/landing.css'
 
 export default function MainPage() {
@@ -8,19 +8,7 @@ export default function MainPage() {
 
   return (
     <div className="ld-landing">
-      <nav className="ld-nav ld-nav-entry">
-        <button type="button" className="nav-logo" onClick={() => navigate('/')} aria-label="메인 페이지로 이동">
-          <div className="nav-logo-mark">
-            <RaspberryIcon className="raspberry-icon" />
-          </div>
-          <div className="nav-brand">Graph<span>Lec</span></div>
-        </button>
-        <ul className="nav-links">
-          <li><a href="/verify" onClick={(e) => { e.preventDefault(); navigate('/verify') }}>Verify</a></li>
-          <li><a href="/recommend" onClick={(e) => { e.preventDefault(); navigate('/recommend') }}>Recommend</a></li>
-          <li><a href="/lectures" onClick={(e) => { e.preventDefault(); navigate('/lectures') }}>QnA</a></li>
-        </ul>
-      </nav>
+      <LandingHeader logoTo="/" />
 
       <div id="stack">
         <div className="slide active" id="s5">

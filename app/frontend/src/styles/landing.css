@@ -73,7 +73,8 @@
   height: 64px;
   background: rgba(13,13,26,0.85);
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(102,103,171,0.2);
+  border-bottom: 1px solid rgba(248,248,252,0.42);
+  box-shadow: none;
 }
 .ld-landing .nav-logo {
   display: flex; align-items: center; gap: 10px;
@@ -91,6 +92,15 @@
 }
 .ld-landing .nav-brand { font-family: 'Noto Sans KR', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 0; color: #fff; }
 .ld-landing .nav-brand span { color: var(--peri-light); }
+.ld-landing .nav-hero-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-left: 18px;
+  background: rgba(102,103,171,0.22); color: var(--peri-lighter);
+  border: 1px solid rgba(197,198,232,0.58); border-radius: 20px; padding: 6px 14px;
+  font-size: 11px; font-weight: 400; letter-spacing: 1.2px; text-transform: uppercase;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+  white-space: nowrap;
+}
 .ld-landing .nav-links { display: flex; gap: 2rem; list-style: none; align-items: center; margin: 0; padding: 0; }
 .ld-landing .nav-links a { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.45); text-decoration: none; transition: color 0.2s; }
 .ld-landing .nav-links a:hover { color: var(--peri-light); }
@@ -160,9 +170,29 @@
 .ld-landing .hero-title .dim  { color: rgba(255,255,255,0.3); }
 .ld-landing .hero-desc {
   font-size: 16px; font-weight: 300; color: rgba(255,255,255,0.45);
-  max-width: 480px; line-height: 1.8; margin-bottom: 3rem; animation: ld-fadeUp 0.8s 0.3s ease both;
+  max-width: 480px; line-height: 1.8; margin-bottom: 1.75rem; animation: ld-fadeUp 0.8s 0.3s ease both;
 }
 .ld-landing .hero-desc strong { color: rgba(255,255,255,0.85); font-weight: 500; }
+
+.ld-landing .hero-cta {
+  background: var(--peri);
+  color: #fff;
+  border: 1px solid rgba(197,198,232,0.25);
+  border-radius: 8px;
+  padding: 12px 28px;
+  font-size: 14px;
+  font-weight: 700;
+  font-family: 'Noto Sans KR', sans-serif;
+  box-shadow: 0 12px 32px rgba(102,103,171,0.24);
+  transition: background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  margin-bottom: 2.25rem;
+  animation: ld-fadeUp 0.8s 0.42s ease both;
+}
+.ld-landing .hero-cta:hover {
+  background: var(--peri-dark);
+  transform: translateY(-2px);
+  box-shadow: 0 16px 38px rgba(102,103,171,0.3);
+}
 
 .ld-landing .scroll-hint {
   display: flex; flex-direction: column; align-items: center; gap: 8px;

@@ -5,7 +5,7 @@ import VerifySection from '../components/landing/VerifySection'
 import LearnerSection from '../components/landing/LearnerSection'
 import WorkflowSection from '../components/landing/WorkflowSection'
 import EntrySection from '../components/landing/EntrySection'
-import RaspberryIcon from '../components/common/RaspberryIcon'
+import LandingHeader from '../components/landing/LandingHeader'
 import '../styles/landing.css'
 
 export default function LandingPage() {
@@ -72,19 +72,7 @@ export default function LandingPage() {
   return (
     <div className={`ld-landing${exiting ? ' ld-landing-exit' : ''}`}>
       <div className="ld-main-underlay" aria-hidden="true">
-        <nav className="ld-nav ld-nav-entry ld-underlay-nav">
-          <button type="button" className="nav-logo" tabIndex={-1}>
-            <div className="nav-logo-mark">
-              <RaspberryIcon className="raspberry-icon" />
-            </div>
-            <div className="nav-brand">Graph<span>Lec</span></div>
-          </button>
-          <ul className="nav-links">
-            <li><a href="/verify" tabIndex={-1}>Verify</a></li>
-            <li><a href="/recommend" tabIndex={-1}>Recommend</a></li>
-            <li><a href="/lectures" tabIndex={-1}>QnA</a></li>
-          </ul>
-        </nav>
+        <LandingHeader logoTo="/" inert />
         <div id="stack">
           <div className="slide active" id="s5">
             <EntrySection onNavigate={() => {}} />
@@ -100,17 +88,7 @@ export default function LandingPage() {
 
       <div className="ld-hero-overlay">
       {/* NAV */}
-      <nav className="ld-nav">
-        <button type="button" className="nav-logo" onClick={() => navigate('/landing')} aria-label="랜딩 페이지로 이동">
-          <div className="nav-logo-mark">
-            <RaspberryIcon className="raspberry-icon" />
-          </div>
-          <div className="nav-brand">Graph<span>Lec</span></div>
-        </button>
-        <ul className="nav-links">
-          <li><a href="/" className="nav-cta" onClick={(e) => { e.preventDefault(); goMain() }}>시작하기</a></li>
-        </ul>
-      </nav>
+      <LandingHeader logoTo="/landing" />
 
       {/* SLIDE STACK */}
       <div id="stack">
