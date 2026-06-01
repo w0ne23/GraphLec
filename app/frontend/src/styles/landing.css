@@ -27,6 +27,38 @@
   color: var(--ink);
 }
 
+.ld-landing .ld-main-underlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--surface);
+  pointer-events: none;
+}
+
+.ld-landing .ld-hero-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  background: #0D0D1A;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.ld-landing.ld-landing-exit .ld-hero-overlay {
+  transform: translateY(-100vh);
+  transition:
+    transform 0.86s cubic-bezier(0.77, 0, 0.175, 1);
+}
+
+.ld-landing .ld-main-underlay .ld-nav {
+  z-index: 30;
+}
+
+.ld-landing .ld-main-underlay #stack,
+.ld-landing .ld-main-underlay .slide-footer {
+  z-index: 1;
+}
+
 /* ======================================================
    NAV
 ====================================================== */

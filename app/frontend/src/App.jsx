@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import LandingPage   from './pages/LandingPage'
+import MainPage      from './pages/MainPage'
 import DevUploadPage from './pages/dev/DevUploadPage'
 import RecommendPage from './pages/RecommendPage'
 import LectureListPage from './pages/LectureListPage'
@@ -20,7 +21,8 @@ export default function App() {
         <div className="app-main">
           <Routes>
             {/* 헤더/탭바 X */}
-            <Route path="/"                      element={<LandingPage />} />
+            <Route path="/"                      element={<MainPage />} />
+            <Route path="/landing"               element={<LandingPage />} />
             <Route path="/lectures/:id"          element={<LecturePage />} />
             <Route path="/dev/lectures/:id/verifier" element={<DevVerifierPage />} />
 
@@ -38,7 +40,7 @@ export default function App() {
             </Route>
 
             {/* Fallback */}
-            <Route path="*" element={<LandingPage />} />
+            <Route path="*" element={<MainPage />} />
           </Routes>
         </div>
       </div>
