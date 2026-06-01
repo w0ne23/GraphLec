@@ -5,6 +5,7 @@ import VerifySection from '../components/landing/VerifySection'
 import LearnerSection from '../components/landing/LearnerSection'
 import WorkflowSection from '../components/landing/WorkflowSection'
 import EntrySection from '../components/landing/EntrySection'
+import RaspberryIcon from '../components/common/RaspberryIcon'
 import '../styles/landing.css'
 
 const TOTAL = 5
@@ -81,19 +82,33 @@ export default function LandingPage() {
     return i === current ? `${base} active` : base
   }
 
+  const isEntrySlide = current === 4
+
   return (
     <div className="ld-landing">
       {/* NAV */}
-      <nav className="ld-nav">
+      <nav className={`ld-nav${isEntrySlide ? ' ld-nav-entry' : ''}`}>
         <button type="button" className="nav-logo" onClick={() => goTo(0)} aria-label="첫 번째 랜딩 페이지로 이동">
-          <div className="nav-logo-mark">GL</div>
+          <div className="nav-logo-mark">
+            <RaspberryIcon className="raspberry-icon" />
+          </div>
           <div className="nav-brand">Graph<span>Lec</span></div>
         </button>
         <ul className="nav-links">
-          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(1) }}>강의자 기능</a></li>
-          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(2) }}>학습자 기능</a></li>
-          <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(3) }}>작동 방식</a></li>
-          <li><a href="#" className="nav-cta" onClick={(e) => { e.preventDefault(); goTo(4) }}>시작하기</a></li>
+          {isEntrySlide ? (
+            <>
+              <li><a href="/verify" onClick={(e) => { e.preventDefault(); navigate('/verify') }}>Verify</a></li>
+              <li><a href="/recommend" onClick={(e) => { e.preventDefault(); navigate('/recommend') }}>Recommend</a></li>
+              <li><a href="/lectures" onClick={(e) => { e.preventDefault(); navigate('/lectures') }}>QnA</a></li>
+            </>
+          ) : (
+            <>
+              <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(1) }}>강의자 기능</a></li>
+              <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(2) }}>학습자 기능</a></li>
+              <li><a href="#" onClick={(e) => { e.preventDefault(); goTo(3) }}>작동 방식</a></li>
+              <li><a href="#" className="nav-cta" onClick={(e) => { e.preventDefault(); goTo(4) }}>시작하기</a></li>
+            </>
+          )}
         </ul>
       </nav>
 

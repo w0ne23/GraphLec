@@ -64,6 +64,15 @@
 .ld-landing .nav-links a:hover { color: var(--peri-light); }
 .ld-landing .nav-cta { background: var(--peri) !important; color: white !important; padding: 8px 18px; border-radius: 6px; font-size: 13px !important; font-weight: 500 !important; transition: background 0.2s !important; }
 .ld-landing .nav-cta:hover { background: var(--peri-dark) !important; color: white !important; }
+.ld-landing .ld-nav-entry .nav-links { gap: 0; }
+.ld-landing .ld-nav-entry .nav-links a {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 2px solid transparent;
+  font-weight: 500;
+}
 
 /* ======================================================
    SLIDE STACK
