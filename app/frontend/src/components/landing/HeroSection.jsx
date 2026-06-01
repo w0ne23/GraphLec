@@ -1,40 +1,80 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 export default function HeroSection({ current, onNext }) {
   const canvasRef = useRef(null)
   const currentRef = useRef(current)
+  const [activeCard, setActiveCard] = useState(1)
+  const [cardPaused, setCardPaused] = useState(false)
 
   useEffect(() => {
     currentRef.current = current
   }, [current])
 
   useEffect(() => {
+    if (current !== 0 || cardPaused) return undefined
+
+    const timerId = window.setInterval(() => {
+      setActiveCard(card => (card === 3 ? 1 : card + 1))
+    }, 3000)
+
+    return () => window.clearInterval(timerId)
+  }, [cardPaused, current])
+
+  useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
 
+    const P = { r: 102, g: 103, b: 171 }
+    const N = 66
+    const getBounds = () => ({
+      top: 64,
+      bottom: Math.max(120, window.innerHeight - 58),
+      width: window.innerWidth,
+      height: Math.max(120, window.innerHeight - 122),
+    })
+    const createNodes = () => {
+      const bounds = getBounds()
+      const cols = Math.ceil(Math.sqrt(N * (bounds.width / bounds.height)))
+      const rows = Math.ceil(N / cols)
+
+      return Array.from({ length: N }, (_, i) => {
+        const isHub = i < 10
+        const col = i % cols
+        const row = Math.floor(i / cols)
+        return {
+          x: ((col + Math.random() * 0.8 + 0.1) / cols) * bounds.width,
+          y: bounds.top + ((row + Math.random() * 0.8 + 0.1) / rows) * bounds.height,
+          vx: (Math.random() - 0.5) * (isHub ? 0.25 : 0.4),
+          vy: (Math.random() - 0.5) * (isHub ? 0.25 : 0.4),
+          r: isHub ? Math.random() * 2.4 + 5.2 : Math.random() * 1.8 + 2,
+          op: isHub ? 0.72 : Math.random() * 0.32 + 0.24,
+          ph: Math.random() * Math.PI * 2,
+          isHub,
+        }
+      })
+    }
+
+    let bounds = getBounds()
+    let nodes = createNodes()
+
     const resize = () => {
+      const prev = bounds
       canvas.width = window.innerWidth
       canvas.height = window.innerHeight
+      bounds = getBounds()
+
+      nodes = nodes.map(node => ({
+        ...node,
+        x: Math.min(bounds.width, Math.max(0, node.x * (bounds.width / prev.width))),
+        y: Math.min(
+          bounds.bottom,
+          Math.max(bounds.top, bounds.top + ((node.y - prev.top) / prev.height) * bounds.height)
+        ),
+      }))
     }
     resize()
     window.addEventListener('resize', resize)
-
-    const P = { r: 102, g: 103, b: 171 }
-    const N = 50
-    const nodes = Array.from({ length: N }, (_, i) => {
-      const isHub = i < 8
-      return {
-        x: Math.random() * window.innerWidth,
-        y: Math.random() * window.innerHeight,
-        vx: (Math.random() - 0.5) * (isHub ? 0.25 : 0.4),
-        vy: (Math.random() - 0.5) * (isHub ? 0.25 : 0.4),
-        r: isHub ? Math.random() * 2 + 4 : Math.random() * 1.5 + 1.5,
-        op: isHub ? 0.75 : Math.random() * 0.35 + 0.25,
-        ph: Math.random() * Math.PI * 2,
-        isHub,
-      }
-    })
 
     let rafId
 
@@ -47,22 +87,22 @@ export default function HeroSection({ current, onNext }) {
         n.ph += 0.012
         n.x += n.vx
         n.y += n.vy
-        if (n.x < 0 || n.x > canvas.width)  n.vx *= -1
-        if (n.y < 0 || n.y > canvas.height)  n.vy *= -1
+        if (n.x < 0 || n.x > bounds.width) n.vx *= -1
+        if (n.y < bounds.top || n.y > bounds.bottom) n.vy *= -1
       })
 
-      const MAX_DIST = 180
+      const MAX_DIST = 200
       for (let i = 0; i < N; i++) {
         for (let j = i + 1; j < N; j++) {
           const a = nodes[i], b = nodes[j]
           const d = Math.hypot(a.x - b.x, a.y - b.y)
           if (d > MAX_DIST) continue
-          const alpha = (1 - d / MAX_DIST) * 0.28
+          const alpha = (1 - d / MAX_DIST) * 0.24
           ctx.beginPath()
           ctx.moveTo(a.x, a.y)
           ctx.lineTo(b.x, b.y)
           ctx.strokeStyle = `rgba(${P.r},${P.g},${P.b},${alpha})`
-          ctx.lineWidth = a.isHub || b.isHub ? 0.8 : 0.5
+          ctx.lineWidth = a.isHub || b.isHub ? 1 : 0.58
           ctx.stroke()
         }
       }
@@ -71,19 +111,25 @@ export default function HeroSection({ current, onNext }) {
         const pr = n.r * (1 + 0.2 * Math.sin(n.ph))
         const al = n.op * (0.8 + 0.2 * Math.sin(n.ph))
         if (n.isHub) {
+          ctx.shadowColor = `rgba(${P.r},${P.g},${P.b},${al * 0.32})`
+          ctx.shadowBlur = pr * 3.2
           ctx.beginPath()
-          ctx.arc(n.x, n.y, pr * 4, 0, Math.PI * 2)
-          ctx.fillStyle = `rgba(${P.r},${P.g},${P.b},${al * 0.06})`
+          ctx.arc(n.x, n.y, pr * 4.8, 0, Math.PI * 2)
+          ctx.fillStyle = `rgba(${P.r},${P.g},${P.b},${al * 0.055})`
           ctx.fill()
+          ctx.shadowBlur = pr * 1.8
           ctx.beginPath()
-          ctx.arc(n.x, n.y, pr * 2, 0, Math.PI * 2)
-          ctx.fillStyle = `rgba(${P.r},${P.g},${P.b},${al * 0.12})`
+          ctx.arc(n.x, n.y, pr * 2.4, 0, Math.PI * 2)
+          ctx.fillStyle = `rgba(${P.r},${P.g},${P.b},${al * 0.11})`
           ctx.fill()
         }
+        ctx.shadowColor = `rgba(${P.r},${P.g},${P.b},${al * 0.28})`
+        ctx.shadowBlur = n.isHub ? pr * 1.2 : pr * 0.7
         ctx.beginPath()
         ctx.arc(n.x, n.y, pr, 0, Math.PI * 2)
         ctx.fillStyle = `rgba(${P.r},${P.g},${P.b},${al})`
         ctx.fill()
+        ctx.shadowBlur = 0
       })
     }
 
@@ -99,7 +145,11 @@ export default function HeroSection({ current, onNext }) {
     <>
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
-        <div className="hero-card-stage">
+        <div
+          className={`hero-card-stage hero-card-stage-paused hero-card-stage-show-${activeCard}`}
+          onMouseEnter={() => setCardPaused(true)}
+          onMouseLeave={() => setCardPaused(false)}
+        >
           <div className="hero-orbit-card hero-orbit-card-1">
             <div className="hero-card-title-row">
               <span className="hero-card-num">1</span>
@@ -141,12 +191,28 @@ export default function HeroSection({ current, onNext }) {
                   피드백 리포트
                 </div>
                 <div className="hero-feedback-tags">
-                  <span>사실 오류</span>
-                  <span>시대적 오류</span>
-                  <span>혼동 오류</span>
-                  <span>범위 오류</span>
-                  <span>슬라이드 오류</span>
+                  <span className="hero-feedback-tag-fact">사실 오류</span>
+                  <span className="hero-feedback-tag-era">오래된 내용</span>
+                  <span className="hero-feedback-tag-confusion">혼동 가능 설명</span>
+                  <span className="hero-feedback-tag-scope">과도한 일반화</span>
+                  <span className="hero-feedback-tag-slide">슬라이드 오타</span>
                 </div>
+                <ul className="hero-feedback-issues">
+                  <li>
+                    <span className="hero-issue-pill hero-issue-fact">사실 오류</span>
+                    <strong>
+                      페이지 테이블은 <del>CPU</del> 안에 저장됩니다.
+                    </strong>
+                    <em>→ 메인 메모리</em>
+                  </li>
+                  <li>
+                    <span className="hero-issue-pill hero-issue-era">오래된 내용</span>
+                    <strong>
+                      현대 OS는 <del>세그멘테이션만</del> 사용합니다.
+                    </strong>
+                    <em>→ 페이징 기반 가상 메모리</em>
+                  </li>
+                </ul>
               </div>
             </div>
           </div>
@@ -165,7 +231,7 @@ export default function HeroSection({ current, onNext }) {
                 <i><b>추출</b></i>
                 <span>메타데이터</span>
                 <i className="hero-match-both"><em aria-hidden="true" /><b>매칭</b></i>
-                <span>질의 분석</span>
+                <span className="hero-query-node">질의 분석</span>
               </div>
 
               <div className="hero-recommend-panel">
@@ -283,15 +349,45 @@ export default function HeroSection({ current, onNext }) {
               </div>
             </div>
           </div>
+          <button
+            type="button"
+            className="hero-card-nav hero-card-nav-prev"
+            aria-label="이전 카드"
+            onClick={() => setActiveCard(card => (card === 1 ? 3 : card - 1))}
+          >
+            ‹
+          </button>
+          <button
+            type="button"
+            className="hero-card-nav hero-card-nav-next"
+            aria-label="다음 카드"
+            onClick={() => setActiveCard(card => (card === 3 ? 1 : card + 1))}
+          >
+            ›
+          </button>
+          <div className="hero-card-dots" aria-label="카드 순서">
+            {[1, 2, 3].map(card => (
+              <button
+                key={card}
+                type="button"
+                className={card === activeCard ? 'active' : ''}
+                aria-label={`${card}번 카드 보기`}
+                aria-current={card === activeCard ? 'true' : undefined}
+                onClick={() => setActiveCard(card)}
+              />
+            ))}
+          </div>
         </div>
         <div className="hero-copy">
           <h1 className="hero-title">
-            강의 영상을<br />
-            <span className="peri">지식으로</span><br />
-            <span className="dim">연결하다</span>
+            <span className="hero-title-top">강의 영상을</span>
+            <span className="hero-title-linked">
+              <span className="peri">지식으로</span>
+              <span className="dim">연결하다</span>
+            </span>
           </h1>
           <p className="hero-desc">
-            <strong>GraphLEC</strong>은 슬라이드, 음성, 필기를 동시에 분석해<br />
+            <strong>GraphLec</strong>은 슬라이드, 음성, 필기를 동시에 분석해<br />
             강의 콘텐츠를 구조화하고 학습을 연결합니다.
           </p>
           <button type="button" className="hero-cta" onClick={onNext}>
