@@ -6,30 +6,41 @@
 
 /* ── CSS 변수 (라이트 테마) ─────────────────────────────────── */
 :root {
+  /* 랜딩 팔레트 */
+  --peri: #6667AB;
+  --peri-light: #8E8FC7;
+  --peri-lighter: #C5C6E8;
+  --peri-pale: #EEEEF8;
+  --peri-dark: #45468A;
+  --ink: #1A1A2E;
+  --muted: #6B6B8A;
+  --surface: #F8F8FC;
+  --peri-border: rgba(102, 103, 171, 0.15);
+
   /* 기본 색상 */
   --white: #ffffff;
-  --black: #111827;
+  --black: var(--ink);
 
   /* 그레이 */
   --gray-50: #f5f6fa;
   --gray-100: #f0f2f7;
-  --gray-200: #e4e6ef;
-  --gray-300: #c8cde0;
-  --gray-400: #9ca3af;
-  --gray-600: #4b5563;
+  --gray-200: #E1E2F0;
+  --gray-300: #C5C6E8;
+  --gray-400: #8B8CAA;
+  --gray-600: var(--muted);
   --light-gray: var(--gray-300);
   --gray: var(--gray-400);
   --dark-gray: var(--gray-600);
 
   /* 배경 */
-  --bg: var(--gray-100);
+  --bg: var(--surface);
   --panel: var(--white);
   --card: var(--gray-50);
   --hover: var(--gray-100);
 
   /* 보더 */
-  --b1: var(--gray-200);
-  --b2: var(--gray-300);
+  --b1: var(--peri-border);
+  --b2: rgba(102, 103, 171, 0.28);
 
   /* 텍스트 */
   --t1: var(--black);
@@ -37,35 +48,35 @@
   --t3: var(--gray);
 
   /* 블루 (primary) */
-  --blue: #3b82f6;
-  --blue-fill: #2563eb;
-  --blue-text: #1d4ed8;
-  --blue-bg: #eff6ff;
-  --blue-br: #bfdbfe;
+  --blue: var(--peri);
+  --blue-fill: var(--peri-dark);
+  --blue-text: var(--peri-dark);
+  --blue-bg: var(--peri-pale);
+  --blue-br: var(--peri-lighter);
 
   /* 앰버 (강조) */
-  --amber: #f59e0b;
-  --amber-fill: #d97706;
-  --amber-text: #b45309;
-  --amber-bg: #fffbeb;
+  --amber: #D8A83E;
+  --amber-fill: #B98118;
+  --amber-text: #7A5A12;
+  --amber-bg: #FBF6E8;
 
   /* 그린 (positive) */
-  --green: #22c55e;
-  --green-text: #15803d;
-  --green-fill: #16a34a;
-  --green-bg:   #f0fdf4;
+  --green: #4CAF82;
+  --green-text: #2F6F58;
+  --green-fill: #3C8D68;
+  --green-bg:   #EDF8F5;
 
   /* 레드 (negative) */
-  --red: #ef4444;
-  --red-fill: #dc2626;
-  --red-text: #b91c1c;
-  --red-bg: #fef2f2;
+  --red: #E8647A;
+  --red-fill: #C94A60;
+  --red-text: #9D3447;
+  --red-bg: #FDF0F3;
 
   /* 퍼플 (관리자) */
-  --purple: #8b5cf6;
-  --purple-fill: #7c3aed;
-  --purple-text: #6d28d9;
-  --purp-bg: #f5f3ff;
+  --purple: var(--peri-light);
+  --purple-fill: var(--peri);
+  --purple-text: var(--peri-dark);
+  --purp-bg: var(--peri-pale);
 
   /* 차트 */
   --chart-blue: var(--blue);
@@ -83,7 +94,7 @@
   background: var(--bg);
 
   /* 레이아웃 표준 너비 */
-  --content-max-width: 720px;
+  --content-max-width: 1040px;
 }
 
 /* ── 리셋 ────────────────────────────────────────────────────── */
