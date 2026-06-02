@@ -31,20 +31,35 @@ function verifierArtifactsFromResult(verifier) {
   }
 }
 
-function getKnownStageKeys(phase, routeKind = '') {
+function normalizeMode(mode, jobType = '') {
+  const token = String(mode || '').trim().toLowerCase().replaceAll('-', '_')
+  if (['publish', 'publication', 'upload', 'direct', 'direct_upload', 'graph', 'graph_upload'].includes(token)) {
+    return 'publish'
+  }
+  if (['verify', 'verification', 'verified', 'verified_upload'].includes(token)) {
+    return 'verify'
+  }
+  if (!jobType) return 'verify'
+
+  const normalizedJobType = normalizeJobType(jobType)
+  if (normalizedJobType === 'publish' || normalizedJobType === 'legacy_full') return 'publish'
+  return 'verify'
+}
+
+function getKnownStageKeys(phase, mode = '') {
+  const normalizedMode = normalizeMode(mode)
   if (
     phase === PHASES.PIPELINE2 ||
     phase === PHASES.DONE ||
-    routeKind === 'finalize' ||
-    routeKind === 'direct'
+    normalizedMode === 'publish'
   ) {
     return UPLOAD_STAGE_KEYS
   }
   return [...VERIFY_STAGE_KEYS, ...VERIFY_PROGRESS_STAGE_KEYS]
 }
 
-function mergeStageStatus(current, incoming, phase, routeKind = '') {
-  const known = new Set(getKnownStageKeys(phase, routeKind))
+function mergeStageStatus(current, incoming, phase, mode = '') {
+  const known = new Set(getKnownStageKeys(phase, mode))
   const byStage = new Map(current.map(item => [item.stage, item.status]))
 
   incoming.forEach(item => {
@@ -55,8 +70,8 @@ function mergeStageStatus(current, incoming, phase, routeKind = '') {
   return normalizePipelineStages(Array.from(byStage, ([stage, status]) => ({ stage, status })))
 }
 
-function markKnownStages(phase, status, routeKind = '') {
-  return normalizePipelineStages(getKnownStageKeys(phase, routeKind).map(stage => ({ stage, status })))
+function markKnownStages(phase, status, mode = '') {
+  return normalizePipelineStages(getKnownStageKeys(phase, mode).map(stage => ({ stage, status })))
 }
 
 function createUploadRetryStages() {
@@ -73,15 +88,19 @@ function normalizeJobType(jobType) {
   return token || 'legacy_full'
 }
 
-function phaseFromStatus(status, jobType, routeKind) {
+function phaseFromStatus(status, jobType, mode) {
   const normalizedJobType = normalizeJobType(jobType)
+  const normalizedMode = normalizeMode(mode, jobType)
   if (status === 'error') return PHASES.ERROR
-  if (routeKind === 'result') return PHASES.REVIEWED
+  if (normalizedMode === 'publish') {
+    if (status === 'done') return PHASES.DONE
+    return PHASES.PIPELINE2
+  }
   if (normalizedJobType === 'verify' && (status === 'done' || status === 'waiting_approval')) {
     return PHASES.VERIFY_READY
   }
   if (status === 'done') return PHASES.DONE
-  if (routeKind === 'finalize' || routeKind === 'direct' || normalizedJobType === 'publish') {
+  if (normalizedJobType === 'publish') {
     return PHASES.PIPELINE2
   }
   if (status === 'waiting_approval') return PHASES.VERIFY_READY
@@ -92,7 +111,7 @@ function stageStatus(stages, key) {
   return stages.find(stage => stage.stage === key)?.status ?? 'wait'
 }
 
-export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
+export function useVerifierRouteFlow(lectureId, mode = 'verify') {
   const navigate = useNavigate()
   const eventSourceRef = useRef(null)
 
@@ -121,7 +140,10 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     if (!lectureId) return
 
     closeEventSource()
-    const query = jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''
+    const params = new URLSearchParams()
+    if (jobId) params.set('job_id', jobId)
+    params.set('mode', normalizeMode(mode))
+    const query = `?${params.toString()}`
     const eventSource = new EventSource(`/api/jobs/${lectureId}/stream${query}`)
     eventSourceRef.current = eventSource
 
@@ -130,7 +152,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
         const payload = JSON.parse(event.data)
         if (payload.error) throw new Error(payload.error)
 
-        const nextPhase = phaseFromStatus(payload.lecture_status, payload.job_type, routeKind)
+        const nextPhase = phaseFromStatus(payload.lecture_status, payload.job_type, mode)
         setPhase(nextPhase)
         setCurrentStage(payload.current_stage || '')
         setErrorMessage(payload.error_message || '')
@@ -141,7 +163,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
           job_type: payload.job_type || prev.job_type,
           status: payload.lecture_status || prev.status,
         }))
-        setPipelineStages(prev => mergeStageStatus(prev, payload.pipeline_stages || [], nextPhase, routeKind))
+        setPipelineStages(prev => mergeStageStatus(prev, payload.pipeline_stages || [], nextPhase, mode))
 
         if (
           payload.lecture_status === 'waiting_approval' ||
@@ -191,13 +213,13 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
 
         const detail = detailResult.value || EMPTY_LECTURE
         const verifierData = verifierResult.status === 'fulfilled' ? verifierResult.value : null
-        const nextPhase = phaseFromStatus(detail.status, detail.job_type, routeKind)
+        const nextPhase = phaseFromStatus(detail.status, detail.job_type, mode)
 
         setLecture({ ...EMPTY_LECTURE, ...detail })
         setVerifier(verifierData)
         setPhase(nextPhase)
         setCurrentStage(detail.current_stage || '')
-        setPipelineStages(markKnownStages(nextPhase, detail.status === 'done' ? 'done' : 'wait', routeKind))
+        setPipelineStages(markKnownStages(nextPhase, detail.status === 'done' ? 'done' : 'wait', mode))
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(String(error?.message || error))
@@ -212,14 +234,14 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     return () => {
       cancelled = true
     }
-  }, [lectureId, routeKind])
+  }, [lectureId, mode])
 
   useEffect(() => {
     if (!lectureId) return undefined
 
     connectJob()
     return closeEventSource
-  }, [lectureId, routeKind])
+  }, [lectureId, mode])
 
   async function retryUploadPublish() {
     if (!lectureId || isBusy) return
@@ -295,7 +317,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
       confirmReview,
       retryUploadPublish,
       cancelUpload,
-      backToVerifyReady: () => navigate(`/upload/${lectureId}/progress`),
+      backToVerifyReady: () => navigate(`/verify/${lectureId}`),
       reset: () => navigate('/upload'),
       toggleClaim: key => setExpandedClaimKey(prev => prev === key ? '' : key),
       watchClaim: startTime => {

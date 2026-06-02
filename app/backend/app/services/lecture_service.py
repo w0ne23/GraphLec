@@ -129,6 +129,10 @@ PUBLICATION_DB_JOB_TYPES = [
     JOB_TYPE_GRAPH_UPLOAD,
     JOB_TYPE_UPLOAD,
 ]
+VERIFICATION_DB_JOB_TYPES = [
+    JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFIED_UPLOAD,
+]
 
 
 def _is_publication_job_type(job_type: Optional[str]) -> bool:
@@ -535,6 +539,33 @@ async def get_latest_job(db: AsyncSession, lecture_id: str) -> Optional[Processi
     result = await db.execute(
         select(ProcessingJob)
         .where(ProcessingJob.lecture_id == ident_uuid)
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_latest_job_by_mode(db: AsyncSession, lecture_id: str, mode: str) -> Optional[ProcessingJob]:
+    """lecture_id와 route mode에 맞는 가장 최근 job을 반환."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    canonical_mode = normalize_job_type(mode)
+    if canonical_mode == JOB_TYPE_VERIFY:
+        job_types = VERIFICATION_DB_JOB_TYPES
+    elif canonical_mode in PUBLICATION_JOB_TYPES:
+        job_types = PUBLICATION_DB_JOB_TYPES
+    else:
+        return None
+
+    result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type.in_(job_types),
+        )
         .order_by(ProcessingJob.created_at.desc())
         .limit(1)
     )

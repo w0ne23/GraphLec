@@ -261,9 +261,9 @@ export function useVerifierUploadFlow() {
         file,
       }))
       if (workflowMode === 'verify') {
-        navigate(`/upload/${created.id}/progress`)
+        navigate(`/verify/${created.id}`)
       } else {
-        navigate(`/upload/${created.id}/direct`)
+        navigate(`/publish/${created.id}`)
       }
     } catch (error) {
       setIsBusy(false)

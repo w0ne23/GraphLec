@@ -62,10 +62,12 @@ async def stream_job_status(
     lecture_id: str,
     request: Request,
     job_id: Optional[str] = Query(None),
+    mode: Optional[str] = Query(None),
 ):
     """
     job_id 쿼리파라미터가 있으면 해당 job을 고정 추적.
-    없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
+    mode 쿼리파라미터가 있으면 lecture_id 기준 해당 mode의 최신 job을 추적.
+    둘 다 없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
     retry 후 새 job_id로 재연결하면 정확한 시도별 추적이 가능.
     """
     async def event_generator():
@@ -76,6 +78,8 @@ async def stream_job_status(
                 async with AsyncSessionLocal() as db:
                     if job_id:
                         job = await lecture_service.get_job(db, job_id)
+                    elif mode:
+                        job = await lecture_service.get_latest_job_by_mode(db, lecture_id, mode)
                     else:
                         job = await lecture_service.get_latest_job(db, lecture_id)
                 if not job:
