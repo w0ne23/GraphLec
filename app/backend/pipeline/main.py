@@ -483,6 +483,7 @@ def process_audio(
             "scenes_structure": slides_structure,
             "slide_ranges": slide_ranges,
             "duration": duration,
+            "elapsed": 0.0,
         }
     elif not args.force and segments_path.exists():
         log.warning(
@@ -501,6 +502,7 @@ def process_audio(
     video_path = args.input
 
     _banner("P3B process_audio — 오디오 파이프라인")
+    stage_started_at = time.time()
 
     # 슬라이드 텍스트화 데이터 로드
     textualized_data: dict = {"scenes": []}
@@ -657,7 +659,8 @@ def process_audio(
     finally:
         Path(audio_path_temp).unlink(missing_ok=True)
 
-    _done("오디오 파이프라인", 0.0)
+    elapsed = time.time() - stage_started_at
+    _done("오디오 파이프라인", elapsed)
     return {
         "segments_path": str(segments_path),
         "silences_path": str(silences_path),
@@ -667,6 +670,7 @@ def process_audio(
         "scenes_structure": scenes_structure,
         "slide_ranges": slide_ranges,
         "duration": duration,
+        "elapsed": elapsed,
     }
 
 
