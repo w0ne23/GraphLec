@@ -25,12 +25,25 @@ async def init_db():
             "ADD COLUMN IF NOT EXISTS is_verified BOOLEAN NOT NULL DEFAULT FALSE"
         ))
         await conn.execute(text(
+            "ALTER TABLE lectures "
+            "ADD COLUMN IF NOT EXISTS is_published BOOLEAN NOT NULL DEFAULT FALSE"
+        ))
+        await conn.execute(text(
             "UPDATE lectures "
             "SET is_verified = TRUE "
             "WHERE id IN ("
             "  SELECT lecture_id FROM processing_jobs "
             "  WHERE job_type = 'verified_upload' "
             "  AND status IN ('done', 'waiting_approval')"
+            ")"
+        ))
+        await conn.execute(text(
+            "UPDATE lectures "
+            "SET is_published = TRUE "
+            "WHERE id IN ("
+            "  SELECT lecture_id FROM processing_jobs "
+            "  WHERE job_type IN ('legacy_full', 'direct_upload', 'graph_upload', 'upload', 'publish') "
+            "  AND status = 'done'"
             ")"
         ))
     logger.info("--- [DB] Database initialized via SQLAlchemy models. ---")

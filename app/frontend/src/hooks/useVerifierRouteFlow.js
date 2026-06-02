@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  approveLectureUpload,
+  confirmLectureVerification,
   deleteLecture,
   getLectureDetail,
   getLectureVerifier,
-  retryGraphUpload,
+  retryUploadPublish as retryUploadPublishRequest,
 } from '../lib/api'
 import {
   PHASES,
@@ -59,18 +59,29 @@ function markKnownStages(phase, status, routeKind = '') {
   return normalizePipelineStages(getKnownStageKeys(phase, routeKind).map(stage => ({ stage, status })))
 }
 
-function createGraphRetryStages() {
+function createUploadRetryStages() {
   return normalizePipelineStages(UPLOAD_STAGE_KEYS.map(stage => ({
     stage,
     status: stage.startsWith('preprocess_') ? 'done' : 'wait',
   })))
 }
 
+function normalizeJobType(jobType) {
+  const token = String(jobType || '').trim().toLowerCase().replaceAll('-', '_')
+  if (['verify', 'verified', 'verified_upload'].includes(token)) return 'verify'
+  if (['publish', 'publication', 'upload', 'direct', 'direct_upload', 'graph', 'graph_upload'].includes(token)) return 'publish'
+  return token || 'legacy_full'
+}
+
 function phaseFromStatus(status, jobType, routeKind) {
+  const normalizedJobType = normalizeJobType(jobType)
   if (status === 'error') return PHASES.ERROR
-  if (status === 'done') return PHASES.DONE
   if (routeKind === 'result') return PHASES.REVIEWED
-  if (routeKind === 'finalize' || routeKind === 'direct' || jobType === 'direct_upload' || jobType === 'graph_upload') {
+  if (normalizedJobType === 'verify' && (status === 'done' || status === 'waiting_approval')) {
+    return PHASES.VERIFY_READY
+  }
+  if (status === 'done') return PHASES.DONE
+  if (routeKind === 'finalize' || routeKind === 'direct' || normalizedJobType === 'publish') {
     return PHASES.PIPELINE2
   }
   if (status === 'waiting_approval') return PHASES.VERIFY_READY
@@ -132,7 +143,10 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
         }))
         setPipelineStages(prev => mergeStageStatus(prev, payload.pipeline_stages || [], nextPhase, routeKind))
 
-        if (payload.lecture_status === 'waiting_approval') {
+        if (
+          payload.lecture_status === 'waiting_approval' ||
+          (payload.lecture_status === 'done' && normalizeJobType(payload.job_type) === 'verify')
+        ) {
           getLectureVerifier(lectureId).then(setVerifier).catch(() => {})
         }
         if (['done', 'error', 'waiting_approval', 'rejected'].includes(payload.lecture_status)) {
@@ -207,36 +221,21 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     return closeEventSource
   }, [lectureId, routeKind])
 
-  async function continueUpload() {
-    if (!lectureId || isBusy) return
-    setIsBusy(true)
-    setErrorMessage('')
-    try {
-      await approveLectureUpload(lectureId)
-      navigate(`/upload/${lectureId}/finalize`)
-    } catch (error) {
-      setErrorMessage(String(error?.message || error))
-      setPhase(PHASES.ERROR)
-    } finally {
-      setIsBusy(false)
-    }
-  }
-
-  async function retryGraphGeneration() {
+  async function retryUploadPublish() {
     if (!lectureId || isBusy) return
     setIsBusy(true)
     setErrorMessage('')
     setPhase(PHASES.PIPELINE2)
-    setCurrentStage('그래프 생성을 다시 시작합니다.')
-    setPipelineStages(createGraphRetryStages())
+    setCurrentStage('업로드 파이프라인을 다시 시작합니다.')
+    setPipelineStages(createUploadRetryStages())
 
     try {
-      const result = await retryGraphUpload(lectureId)
+      const result = await retryUploadPublishRequest(lectureId)
       setLecture(prev => ({
         ...prev,
         id: prev.id || lectureId,
         job_id: result.job_id || prev.job_id,
-        job_type: result.job_type || 'graph_upload',
+        job_type: result.job_type || 'publish',
         status: 'pending',
       }))
       connectJob(result.job_id)
@@ -249,7 +248,7 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
 
   async function cancelUpload() {
     if (!lectureId || isBusy) return
-    if (!window.confirm('업로드를 취소하고 생성된 파일을 삭제할까요?')) return
+    if (!window.confirm('이 작업과 생성된 파일을 삭제할까요?')) return
 
     closeEventSource()
     setIsBusy(true)
@@ -257,6 +256,20 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
 
     try {
       await deleteLecture(lectureId)
+      navigate('/upload')
+    } catch (error) {
+      setIsBusy(false)
+      setErrorMessage(String(error?.message || error))
+      setPhase(PHASES.ERROR)
+    }
+  }
+
+  async function confirmReview() {
+    if (!lectureId || isBusy) return
+    setIsBusy(true)
+    setErrorMessage('')
+    try {
+      await confirmLectureVerification(lectureId)
       navigate('/upload')
     } catch (error) {
       setIsBusy(false)
@@ -279,9 +292,8 @@ export function useVerifierRouteFlow(lectureId, routeKind = 'progress') {
     isBusy,
     isLoading,
     actions: {
-      continueUpload,
-      confirmReview: continueUpload,
-      retryGraphGeneration,
+      confirmReview,
+      retryUploadPublish,
       cancelUpload,
       backToVerifyReady: () => navigate(`/upload/${lectureId}/progress`),
       reset: () => navigate('/upload'),

@@ -29,6 +29,7 @@ export async function uploadLecture({ file, title, category, description, workfl
     description: data.description || description,
     status: data.status || 'pending',
     is_verified: Boolean(data.is_verified),
+    is_published: Boolean(data.is_published),
     created_at: data.created_at,
   };
 }
@@ -79,6 +80,7 @@ async function _fetchResults(params) {
         domain: lec.domain || lec.category || 'etc',
         status: lec.status,
         is_verified: Boolean(lec.is_verified),
+        is_published: Boolean(lec.is_published),
         created_at: lec.created_at,
         thumbnail_url: lec.thumbnail_url,
         error_message: lec.error_message,
@@ -135,24 +137,24 @@ export async function retryLecture(lectureId) {
   return { job_id: data.job_id };
 }
 
-export async function approveLectureUpload(lectureId) {
-  const res = await fetch(`${API_BASE}/jobs/${lectureId}/approve`, {
+export async function confirmLectureVerification(lectureId) {
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/verify/confirm`, {
     method: 'POST',
   });
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Approve failed');
+    throw new Error(errorData.detail || 'Verification confirm failed');
   }
   return res.json();
 }
 
-export async function retryGraphUpload(lectureId) {
+export async function retryUploadPublish(lectureId) {
   const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry_graph`, {
     method: 'POST',
   });
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
-    throw new Error(errorData.detail || 'Graph retry failed');
+    throw new Error(errorData.detail || 'Upload retry failed');
   }
   return res.json();
 }

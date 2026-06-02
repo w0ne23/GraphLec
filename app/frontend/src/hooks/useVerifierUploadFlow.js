@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  approveLectureUpload,
+  confirmLectureVerification,
   getLectureDetail,
   getLectureVerifier,
   uploadLecture,
@@ -82,7 +82,8 @@ export function useVerifierUploadFlow() {
   const [title, setTitle] = useState('')
   const [file, setFile] = useState(null)
 
-  const [phase, setPhase] = useState(PHASES.UPLOAD)
+  const [phase, setPhase] = useState(PHASES.VERIFY_CHOICE)
+  const [selectedWorkflowMode, setSelectedWorkflowMode] = useState('')
   const [pipelineStages, setPipelineStages] = useState(() => normalizePipelineStages())
   const [currentStage, setCurrentStage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
@@ -124,14 +125,6 @@ export function useVerifierUploadFlow() {
       },
       file: nextFile,
     }))
-  }
-
-  function setRunningState(nextPhase, message) {
-    setPhase(nextPhase)
-    setCurrentStage(message)
-    setErrorMessage('')
-    setIsBusy(true)
-    setPipelineStages(normalizePipelineStages())
   }
 
   function setSubmittingState(message) {
@@ -185,6 +178,14 @@ export function useVerifierUploadFlow() {
     if (status === 'done') {
       closeEventSource()
       setIsBusy(false)
+      if (runningPhase === PHASES.PIPELINE1) {
+        setCurrentStage('검증 결과가 준비되었습니다.')
+        setPipelineStages(markStages(VERIFY_STAGE_KEYS, 'done'))
+        loadVerifierResult(fallbackLecture.id, fallbackLecture).finally(() => {
+          setPhase(PHASES.VERIFY_READY)
+        })
+        return true
+      }
       setCurrentStage('분석이 완료되었습니다.')
       setPipelineStages(markStages(UPLOAD_STAGE_KEYS, 'done'))
       setPhase(PHASES.DONE)
@@ -242,7 +243,7 @@ export function useVerifierUploadFlow() {
     if (!file || isBusy) return
     const uploadTitle = title.trim() || fileTitle(file)
     setSubmittingState(
-      workflowMode === 'verified_upload' ? '검증 파이프라인을 시작합니다.' : '업로드 파이프라인을 시작합니다.'
+      workflowMode === 'verify' ? '검증 파이프라인을 시작합니다.' : '업로드 파이프라인을 시작합니다.'
     )
 
     try {
@@ -259,7 +260,7 @@ export function useVerifierUploadFlow() {
         lecture: createdLecture,
         file,
       }))
-      if (workflowMode === 'verified_upload') {
+      if (workflowMode === 'verify') {
         navigate(`/upload/${created.id}/progress`)
       } else {
         navigate(`/upload/${created.id}/direct`)
@@ -267,48 +268,39 @@ export function useVerifierUploadFlow() {
     } catch (error) {
       setIsBusy(false)
       setErrorMessage(String(error.message || error))
-      setPhase(PHASES.VERIFY_CHOICE)
+      setPhase(PHASES.UPLOAD)
     }
   }
 
   function upload() {
-    if (!file) return
-    setErrorMessage('')
-    setPhase(PHASES.VERIFY_CHOICE)
+    if (!file || !selectedWorkflowMode) return
+    const runningPhase = selectedWorkflowMode === 'verify' ? PHASES.PIPELINE1 : PHASES.PIPELINE2
+    startUpload(selectedWorkflowMode, runningPhase)
   }
 
   function startVerify() {
-    startUpload('verified_upload', PHASES.PIPELINE1)
+    setSelectedWorkflowMode('verify')
+    setErrorMessage('')
+    setPhase(PHASES.UPLOAD)
   }
 
-  function skipVerify() {
-    startUpload('direct_upload', PHASES.PIPELINE2)
+  function startDirectUpload() {
+    setSelectedWorkflowMode('publish')
+    setErrorMessage('')
+    setPhase(PHASES.UPLOAD)
   }
 
-  async function continueUpload() {
-    if (!lecture.id || isBusy) return
-    setRunningState(PHASES.PIPELINE2, '업로드 파이프라인을 이어서 시작합니다.')
-
-    try {
-      const approved = await approveLectureUpload(lecture.id)
-      const nextLecture = {
-        ...lecture,
-        job_id: approved.job_id,
-        job_type: approved.job_type,
-      }
-      setPreview(prev => ({ ...prev, lecture: nextLecture }))
-      connectJob(lecture.id, approved.job_id, PHASES.PIPELINE2, nextLecture)
-    } catch (error) {
-      setIsBusy(false)
-      setErrorMessage(String(error.message || error))
-      setPhase(PHASES.ERROR)
-    }
+  function backToChoice() {
+    setSelectedWorkflowMode('')
+    setErrorMessage('')
+    setPhase(PHASES.VERIFY_CHOICE)
   }
 
   function reset() {
     closeEventSource()
     setPreview(EMPTY_FLOW)
-    setPhase(PHASES.UPLOAD)
+    setPhase(PHASES.VERIFY_CHOICE)
+    setSelectedWorkflowMode('')
     setErrorMessage('')
     setPipelineStages(normalizePipelineStages())
     setCurrentStage('')
@@ -326,7 +318,7 @@ export function useVerifierUploadFlow() {
       return
     }
     setErrorMessage('')
-    setPhase(PHASES.VERIFY_CHOICE)
+    setPhase(selectedWorkflowMode ? PHASES.UPLOAD : PHASES.VERIFY_CHOICE)
   }
 
   function backToVerifyReady() {
@@ -336,6 +328,20 @@ export function useVerifierUploadFlow() {
     setPhase(PHASES.VERIFY_READY)
   }
 
+  async function confirmReview() {
+    if (!lecture.id || isBusy) return
+    setIsBusy(true)
+    setErrorMessage('')
+    try {
+      await confirmLectureVerification(lecture.id)
+      reset()
+    } catch (error) {
+      setIsBusy(false)
+      setErrorMessage(String(error?.message || error))
+      setPhase(PHASES.ERROR)
+    }
+  }
+
   return {
     phase,
     lecture,
@@ -343,6 +349,7 @@ export function useVerifierUploadFlow() {
     verifierArtifacts: preview.verifierArtifacts,
     title,
     file,
+    selectedWorkflowMode,
     pipelineStages: visibleStages,
     currentStage,
     errorMessage,
@@ -355,11 +362,11 @@ export function useVerifierUploadFlow() {
       selectFile,
       upload,
       startVerify,
-      skipVerify,
-      continueUpload,
+      startDirectUpload,
+      backToChoice,
       openReview: () => setPhase(PHASES.REVIEWED),
       backToVerifyReady,
-      confirmReview: () => setPhase(PHASES.UPLOAD_RESUME),
+      confirmReview,
       retry,
       reset,
       toggleClaim: key => setExpandedClaimKey(prev => prev === key ? '' : key),

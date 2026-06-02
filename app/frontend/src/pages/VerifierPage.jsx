@@ -11,11 +11,14 @@ function VerifierUploadStep({ flow }) {
   const fileRef = useRef()
   const [dragOver, setDragOver] = useState(false)
   const { actions } = flow
+  const isVerify = flow.selectedWorkflowMode === 'verify'
 
   return (
     <div className="vf-upload-wrap">
       <div className="vf-upload-inner">
-        <p className="vf-upload-sub">강의 영상을 검증 파이프라인에 올립니다.</p>
+        <p className="vf-upload-sub">
+          {isVerify ? '검증할 강의 영상' : '공개 업로드할 강의 영상'}
+        </p>
         {flow.errorMessage && <p className="vf-upload-error">{flow.errorMessage}</p>}
 
         <div
@@ -65,8 +68,9 @@ function VerifierUploadStep({ flow }) {
         </div>
 
         <button className="vf-submit-btn" onClick={actions.upload} disabled={!flow.file}>
-          다음
+          {isVerify ? '검증 시작' : '업로드 시작'}
         </button>
+        <button className="vf-cancel-btn" onClick={actions.backToChoice}>이전</button>
       </div>
     </div>
   )
@@ -79,22 +83,19 @@ function VerifyChoiceStep({ flow }) {
     <div className="vf-choice-wrap">
       <div className="vf-choice-inner">
         <div className="vf-choice-head">
-          <span>검증 파이프라인</span>
-          <h1>{flow.title || flow.lecture.title}</h1>
+          <h1>무엇을 할까요?</h1>
+          <span>원하시는 작업을 선택해 주세요.</span>
         </div>
         <div className="vf-choice-grid">
           <button className="vf-choice-card vf-choice-card--primary" onClick={actions.startVerify}>
-            <span>권장</span>
+            <span>Verify</span>
             <strong>검증하기</strong>
-            <em>검증 보고서를 생성한 뒤 결과 확인</em>
           </button>
-          <button className="vf-choice-card" onClick={actions.skipVerify}>
-            <span>선택</span>
-            <strong>검증 건너뛰기</strong>
-            <em>검증 없이 다음 단계로 진행</em>
+          <button className="vf-choice-card" onClick={actions.startDirectUpload}>
+            <span>Publish</span>
+            <strong>업로드하기</strong>
           </button>
         </div>
-        <button className="vf-cancel-btn" onClick={actions.reset}>이전</button>
       </div>
     </div>
   )
@@ -126,7 +127,7 @@ function VerifyPipelineStep({ flow }) {
           검증 진행 중
         </button>
       )}
-          <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
+          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
     </div>
       </div>
     </div>
@@ -150,7 +151,7 @@ function PipelineRunStep({ flow }) {
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
         <div className="vf-status-actions">
-          <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
+          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
         </div>
       </div>
     </div>
@@ -195,7 +196,7 @@ function VerifierErrorStep({ flow }) {
         />
         <div className="vf-error-actions">
           <button className="vf-retry-btn" onClick={actions.retry}>재시도</button>
-          <button className="vf-cancel-btn" onClick={actions.reset}>업로드 취소</button>
+          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
         </div>
       </div>
     </div>

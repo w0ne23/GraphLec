@@ -38,7 +38,7 @@ export default function VerifierProgressPage() {
           />
           <div className="vf-status-actions vf-status-actions--inline">
             <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={flow.isBusy}>
-              업로드 취소
+              작업 삭제
             </button>
             <button
               className="vf-confirm-btn"

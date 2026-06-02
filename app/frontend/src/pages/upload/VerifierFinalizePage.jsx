@@ -20,12 +20,12 @@ export default function VerifierFinalizePage() {
       <div className="vf-status-wrap">
         <div className="vf-status-inner">
           <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
-          <div className="vf-status-label">검증 이후 업로드 파이프라인</div>
+          <div className="vf-status-label">업로드 파이프라인</div>
           <PipelineProgress
             stages={flow.pipelineStages}
             phase={progressPhase}
             errorMessage={flow.errorMessage}
-            statusMessage={flow.currentStage || '나머지 파이프라인을 진행 중입니다.'}
+            statusMessage={flow.currentStage || '업로드 파이프라인을 진행 중입니다.'}
             flowNodes={FINALIZE_PIPELINE_FLOW_NODES}
           />
           <div className="vf-status-actions vf-status-actions--inline">
@@ -33,9 +33,9 @@ export default function VerifierFinalizePage() {
               <button
                 className="vf-confirm-btn"
                 disabled={flow.isBusy}
-                onClick={flow.actions.retryGraphGeneration}
+                onClick={flow.actions.retryUploadPublish}
               >
-                {flow.isBusy ? '재시도 중' : '그래프 생성 재시도'}
+                {flow.isBusy ? '재시도 중' : '업로드 재시도'}
               </button>
             )}
             <button
