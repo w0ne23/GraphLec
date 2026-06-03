@@ -89,13 +89,18 @@ export function useJobStream(lectureId, mode = 'verify') {
     if (jobId) params.set('job_id', jobId)
     params.set('mode', normalizedMode)
 
-    const eventSource = new EventSource(`/api/jobs/${lectureId}/stream?${params.toString()}`)
+    const url = `/api/jobs/${lectureId}/stream?${params.toString()}`
+    console.log(`--- [SSE] Connecting to stream for lecture ${lectureId} (job ${jobId || 'latest'}, mode ${normalizedMode}) ---`)
+    const eventSource = new EventSource(url)
     eventSourceRef.current = eventSource
 
     eventSource.onmessage = event => {
       try {
         const payload = JSON.parse(event.data)
-        if (payload.error) throw new Error(payload.error)
+        if (payload.error) {
+          console.error('SSE Error:', payload.error)
+          throw new Error(payload.error)
+        }
         if (activeJobIdRef.current && payload.job_id && payload.job_id !== activeJobIdRef.current) return
 
         const nextPhase = phaseFromStatus(payload.lecture_status, payload.job_type, normalizedMode)
@@ -126,6 +131,7 @@ export function useJobStream(lectureId, mode = 'verify') {
           closeEventSource()
         }
       } catch (error) {
+        console.error('SSE Parse error:', error)
         closeEventSource()
         setErrorMessage(String(error?.message || error))
         setPhase(PHASES.ERROR)
@@ -133,6 +139,7 @@ export function useJobStream(lectureId, mode = 'verify') {
     }
 
     eventSource.onerror = () => {
+      console.error('SSE connection error')
       closeEventSource()
       setErrorMessage('서버와의 연결이 끊어졌습니다.')
       setPhase(PHASES.ERROR)
