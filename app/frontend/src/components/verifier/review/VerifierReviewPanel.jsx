@@ -150,7 +150,7 @@ function VerifierReviewHeader({
           </nav>
           {onCancelUpload && (
             <button className="vf-cancel-btn vf-review-cancel-btn" onClick={onCancelUpload} disabled={isCancelling}>
-              업로드 취소
+              작업 삭제
             </button>
           )}
           <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
@@ -197,14 +197,14 @@ function ReviewConfirmModal({ onCancel, onConfirm }) {
         aria-labelledby="vf-next-confirm-title"
         onClick={e => e.stopPropagation()}
       >
-        <h2 id="vf-next-confirm-title">검토 결과를 확정할까요?</h2>
-        <p>확정한 결과를 기준으로 업로드 파이프라인을 계속 진행합니다.</p>
+        <h2 id="vf-next-confirm-title">검토를 완료할까요?</h2>
+        <p>검토 결과를 확정하고 현재 작업을 마칩니다.</p>
         <div className="vf-confirm-modal-actions">
           <button className="vf-modal-secondary-btn" onClick={onCancel}>
             계속 검토
           </button>
           <button className="vf-modal-primary-btn" onClick={onConfirm}>
-            확정
+            완료
           </button>
         </div>
       </div>
@@ -493,7 +493,7 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             onSelectTab={selectTab}
             onOpenDetail={onOpenDetail}
             onCancelUpload={actions.cancelUpload}
-            isCancelling={flow.isBusy}
+            isCancelling={Boolean(flow.isMutating || flow.isRestarting || flow.isBusy)}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">

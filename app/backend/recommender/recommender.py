@@ -457,6 +457,7 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
             l.created_at AS lecture_created_at
         FROM lecture_metadata lm
         JOIN lectures l ON l.id = lm.lecture_id
+        WHERE l.is_published IS TRUE
         ORDER BY lm.updated_at DESC NULLS LAST, lm.created_at DESC NULLS LAST
     """
 
@@ -496,6 +497,8 @@ class MetadataCollection:
                 raw = json.load(f)
             items = raw if isinstance(raw, list) else [raw]
             for item in items:
+                if not self._metadata_item_is_published(item):
+                    continue
                 lec = self._from_metadata_item(item)
                 self.lectures[lec.video_id] = lec
         print(f"[파일 로드] {len(self.lectures)}개 강의 메타데이터 로드 완료")
@@ -527,6 +530,20 @@ class MetadataCollection:
             f"[DB 로드] lecture_metadata {len(rows)}개 로드 "
             f"(추가 {added}, 병합 {merged}) — 총 {len(self.lectures)}개\n"
         )
+
+    @staticmethod
+    def _metadata_item_is_published(item: dict) -> bool:
+        if "is_published" in item:
+            value = item.get("is_published")
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+        publication_status = item.get("publication_status")
+        if publication_status is not None:
+            return str(publication_status).strip().lower() == "published"
+
+        return True
 
     @staticmethod
     def _from_metadata_item(item: dict) -> LectureMetadata:
@@ -1772,7 +1789,11 @@ class Recommender:
         # 테이블이 아직 생성되지 않은 초기 상태에서는 벡터 검색만 비활성화하고,
         # metadata 기반 BM25/직접매칭/그래프 점수로 추천을 계속 제공한다.
         print("[LanceDB 레코드 로드 중...]")
-        self._index_rows = self._load_lancedb_rows()
+        self._index_rows = [
+            row
+            for row in self._load_lancedb_rows()
+            if self.collection.get(str(row.get("video_id") or "")) is not None
+        ]
         self._row_by_video_id = {
             row["video_id"]: row
             for row in self._index_rows

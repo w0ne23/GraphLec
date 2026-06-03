@@ -14,10 +14,14 @@ from sqlalchemy import text
 from app.db import AsyncSessionLocal
 from app.models import (
     JOB_STATUS_DONE,
-    JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_DIRECT_UPLOAD,
     JOB_TYPE_LEGACY_FULL,
     JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_PUBLISH,
+    JOB_TYPE_UPLOAD,
+    JOB_TYPE_VERIFY,
     JOB_TYPE_VERIFIED_UPLOAD,
+    normalize_job_type,
 )
 from app.services.job_service import update_job_stage_sync
 
@@ -64,6 +68,26 @@ GRAPH_UPLOAD_PRECOMPLETED_STAGE_KEYS = {
     "preprocess_textualize_transcribe",
     "preprocess_enrich_audio_annotation",
 }
+
+PIPELINE_JOB_TYPE_ALIASES = {
+    "legacy": JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_LEGACY_FULL: JOB_TYPE_LEGACY_FULL,
+    "direct": JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_DIRECT_UPLOAD: JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_PUBLISH: JOB_TYPE_PUBLISH,
+    "publication": JOB_TYPE_PUBLISH,
+    JOB_TYPE_UPLOAD: JOB_TYPE_PUBLISH,
+    "verified": JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFIED_UPLOAD: JOB_TYPE_VERIFIED_UPLOAD,
+    JOB_TYPE_VERIFY: JOB_TYPE_VERIFY,
+    "graph": JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_GRAPH_UPLOAD: JOB_TYPE_GRAPH_UPLOAD,
+}
+
+
+def _pipeline_job_type(job_type: str | None) -> str:
+    token = (job_type or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
+    return PIPELINE_JOB_TYPE_ALIASES.get(token, JOB_TYPE_LEGACY_FULL)
 
 PIPELINE_STAGE_LABELS = {
     "preprocess_extract_media": "슬라이드 추출 및 오디오 품질 분석",
@@ -127,7 +151,7 @@ def pipeline_process(
         if not video_path.is_absolute():
             video_path = Path(pipeline_path) / input_path
 
-        job_type = (job_type or JOB_TYPE_LEGACY_FULL).strip() or JOB_TYPE_LEGACY_FULL
+        job_type = _pipeline_job_type(job_type)
         logger.info(f"--- [Child Process {job_id}] Target video: {video_path} ({job_type}) ---")
 
         output_dir    = Path(LOCAL_STORAGE_DIR) / "results" / lecture_id
@@ -254,7 +278,14 @@ async def worker_loop():
                 job_id_str     = str(job_id_val)
                 job_lecture_str = str(job_lecture_id)
                 job_type_str = str(job_type_val or JOB_TYPE_LEGACY_FULL)
-                logger.info(f"--- [Worker] Starting pipeline: {job_id_str} (lecture: {job_lecture_str}, type: {job_type_str}) ---")
+                pipeline_job_type = _pipeline_job_type(job_type_str)
+                logger.info(
+                    "--- [Worker] Starting pipeline: %s (lecture: %s, type: %s, pipeline_type: %s) ---",
+                    job_id_str,
+                    job_lecture_str,
+                    job_type_str,
+                    pipeline_job_type,
+                )
 
                 try:
                     loop = asyncio.get_running_loop()
@@ -264,7 +295,7 @@ async def worker_loop():
                         job_id_str,
                         job_lecture_str,
                         job_input_path,
-                        job_type_str,
+                        pipeline_job_type,
                         job_uploaded_at,
                         job_title,
                     )
@@ -287,14 +318,11 @@ async def worker_loop():
 
                 async with AsyncSessionLocal() as db:
                     if success:
-                        final_status = (
-                            JOB_STATUS_WAITING_APPROVAL
-                            if job_type_str == JOB_TYPE_VERIFIED_UPLOAD
-                            else JOB_STATUS_DONE
-                        )
+                        canonical_job_type = normalize_job_type(job_type_str)
+                        final_status = JOB_STATUS_DONE
                         final_stage = (
-                            "검증 결과 확인 대기 중"
-                            if final_status == JOB_STATUS_WAITING_APPROVAL
+                            "검증 결과가 준비되었습니다."
+                            if canonical_job_type == JOB_TYPE_VERIFY
                             else "분석이 완료되었습니다."
                         )
                         await db.execute(text("""
@@ -302,10 +330,10 @@ async def worker_loop():
                             SET status = :status, current_stage = :stage
                             WHERE id = :id
                         """), {"id": job_id_val, "status": final_status, "stage": final_stage})
-                        if final_status == JOB_STATUS_WAITING_APPROVAL:
+                        if canonical_job_type in {JOB_TYPE_PUBLISH, JOB_TYPE_LEGACY_FULL}:
                             await db.execute(text("""
                                 UPDATE lectures
-                                SET is_verified = TRUE
+                                SET is_published = TRUE
                                 WHERE id = :lecture_id
                             """), {"lecture_id": job_lecture_id})
                     else:

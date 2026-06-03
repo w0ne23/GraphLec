@@ -503,7 +503,7 @@ export function useVerifierPreviewFlow() {
   const [title, setTitle] = useState(EMPTY_VERIFIER_PREVIEW.lecture.title)
   const [file, setFile] = useState(EMPTY_VERIFIER_PREVIEW.file)
 
-  const [phase, setPhase] = useState(PHASES.UPLOAD)
+  const [phase, setPhase] = useState(PHASES.VERIFY_CHOICE)
   const [stageGroupIndex, setStageGroupIndex] = useState(-1)
   const [verifyEnabled, setVerifyEnabled] = useState(true)
   const [errorMessage, setErrorMessage] = useState('')
@@ -597,25 +597,31 @@ export function useVerifierPreviewFlow() {
     if (!file) return
     setErrorMessage('')
     setStageGroupIndex(-1)
-    setPhase(PHASES.VERIFY_CHOICE)
+    setPhase(verifyEnabled ? PHASES.PIPELINE1 : PHASES.PIPELINE2)
   }
 
   function startVerify() {
     setErrorMessage('')
     setVerifyEnabled(true)
     setStageGroupIndex(-1)
-    setPhase(PHASES.PIPELINE1)
+    setPhase(PHASES.UPLOAD)
   }
 
-  function skipVerify() {
+  function startDirectUpload() {
     setErrorMessage('')
     setVerifyEnabled(false)
     setStageGroupIndex(-1)
-    setPhase(PHASES.PIPELINE2)
+    setPhase(PHASES.UPLOAD)
+  }
+
+  function backToChoice() {
+    setErrorMessage('')
+    setStageGroupIndex(-1)
+    setPhase(PHASES.VERIFY_CHOICE)
   }
 
   function reset() {
-    setPhase(PHASES.UPLOAD)
+    setPhase(PHASES.VERIFY_CHOICE)
     setErrorMessage('')
     setVerifyEnabled(true)
     setStageGroupIndex(-1)
@@ -646,6 +652,7 @@ export function useVerifierPreviewFlow() {
     verifierArtifacts: preview.verifierArtifacts,
     title,
     file,
+    selectedWorkflowMode: verifyEnabled ? 'verify' : 'publish',
     pipelineStages,
     pipelineFlowNodes: pipelineView.flowNodes,
     pipelinePriorNodeIds: pipelineView.priorNodeIds,
@@ -660,14 +667,11 @@ export function useVerifierPreviewFlow() {
       selectFile,
       upload,
       startVerify,
-      skipVerify,
+      startDirectUpload,
+      backToChoice,
       openReview: () => setPhase(PHASES.REVIEWED),
       backToVerifyReady,
-      confirmReview: () => {
-        setVerifyEnabled(true)
-        setStageGroupIndex(-1)
-        setPhase(PHASES.PIPELINE2)
-      },
+      confirmReview: reset,
       retry,
       reset,
       toggleClaim: key => setExpandedClaimKey(prev => prev === key ? '' : key),

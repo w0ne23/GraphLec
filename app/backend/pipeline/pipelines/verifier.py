@@ -17,6 +17,7 @@ def run_verifier_pipeline(
     duration = preprocess_result["duration"]
     textualized_path = preprocess_result["textualized_path"]
     audio_result = preprocess_result["audio_result"]
+    slides_structure = audio_result.get("scenes_structure") or audio_result.get("slides_structure")
 
     notify_stage("verifier_build_analyzer_input", "run")
     r9 = helpers.build_analyzer_input(
@@ -26,7 +27,7 @@ def run_verifier_pipeline(
         segments_path=audio_result.get("segments_path", str(paths["segments"])),
         output_dir=output_dir,
         duration=audio_result.get("duration", duration),
-        slides_structure=audio_result.get("slides_structure"),
+        slides_structure=slides_structure,
     )
     timings["V1 build_analyzer_input — verifier 입력 생성"] = r9["elapsed"]
     notify_stage("verifier_build_analyzer_input", "done")

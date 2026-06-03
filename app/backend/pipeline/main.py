@@ -65,14 +65,33 @@ DEFAULT_RECOMMENDER_DB_DIR = os.getenv(
     "/lance/lancedb" if Path("/lance").exists() else str(REPO_ROOT / "data" / "lancedb"),
 )
 JOB_TYPE_LEGACY_FULL = "legacy_full"
+JOB_TYPE_VERIFY = "verify"
+JOB_TYPE_UPLOAD = "upload"
+JOB_TYPE_PUBLISH = "publish"
 JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
 JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
 JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
 PIPELINE_JOB_TYPES = {
     JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFY,
+    JOB_TYPE_PUBLISH,
     JOB_TYPE_DIRECT_UPLOAD,
     JOB_TYPE_VERIFIED_UPLOAD,
     JOB_TYPE_GRAPH_UPLOAD,
+}
+PIPELINE_JOB_TYPE_ALIASES = {
+    "legacy": JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_LEGACY_FULL: JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_VERIFY: JOB_TYPE_VERIFY,
+    "verified": JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFIED_UPLOAD: JOB_TYPE_VERIFIED_UPLOAD,
+    JOB_TYPE_PUBLISH: JOB_TYPE_PUBLISH,
+    "publication": JOB_TYPE_PUBLISH,
+    JOB_TYPE_UPLOAD: JOB_TYPE_PUBLISH,
+    "direct": JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_DIRECT_UPLOAD: JOB_TYPE_DIRECT_UPLOAD,
+    "graph": JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_GRAPH_UPLOAD: JOB_TYPE_GRAPH_UPLOAD,
 }
 VERIFIER_DETAIL_STAGE_KEYS = [
     "verifier_claim_extraction",
@@ -113,7 +132,7 @@ def _banner(title: str):
 
 def _normalize_pipeline_job_type(value: str | None) -> str:
     job_type = (value or JOB_TYPE_LEGACY_FULL).strip().lower().replace("-", "_")
-    return job_type if job_type in PIPELINE_JOB_TYPES else JOB_TYPE_LEGACY_FULL
+    return PIPELINE_JOB_TYPE_ALIASES.get(job_type, JOB_TYPE_LEGACY_FULL)
 
 
 def _done(label: str, elapsed: float):
@@ -483,6 +502,7 @@ def process_audio(
             "scenes_structure": slides_structure,
             "slide_ranges": slide_ranges,
             "duration": duration,
+            "elapsed": 0.0,
         }
     elif not args.force and segments_path.exists():
         log.warning(
@@ -501,6 +521,7 @@ def process_audio(
     video_path = args.input
 
     _banner("P3B process_audio — 오디오 파이프라인")
+    stage_started_at = time.time()
 
     # 슬라이드 텍스트화 데이터 로드
     textualized_data: dict = {"scenes": []}
@@ -657,7 +678,8 @@ def process_audio(
     finally:
         Path(audio_path_temp).unlink(missing_ok=True)
 
-    _done("오디오 파이프라인", 0.0)
+    elapsed = time.time() - stage_started_at
+    _done("오디오 파이프라인", elapsed)
     return {
         "segments_path": str(segments_path),
         "silences_path": str(silences_path),
@@ -667,6 +689,7 @@ def process_audio(
         "scenes_structure": scenes_structure,
         "slide_ranges": slide_ranges,
         "duration": duration,
+        "elapsed": elapsed,
     }
 
 

@@ -10,9 +10,31 @@ class Base(DeclarativeBase):
 
 
 JOB_TYPE_LEGACY_FULL = "legacy_full"
+JOB_TYPE_VERIFY = "verify"
+JOB_TYPE_UPLOAD = "upload"
+JOB_TYPE_PUBLISH = "publish"
 JOB_TYPE_DIRECT_UPLOAD = "direct_upload"
 JOB_TYPE_VERIFIED_UPLOAD = "verified_upload"
 JOB_TYPE_GRAPH_UPLOAD = "graph_upload"
+JOB_TYPE_ALIASES = {
+    "legacy": JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_LEGACY_FULL: JOB_TYPE_LEGACY_FULL,
+    "verified": JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFIED_UPLOAD: JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFY: JOB_TYPE_VERIFY,
+    "publication": JOB_TYPE_PUBLISH,
+    JOB_TYPE_PUBLISH: JOB_TYPE_PUBLISH,
+    "direct": JOB_TYPE_PUBLISH,
+    JOB_TYPE_DIRECT_UPLOAD: JOB_TYPE_PUBLISH,
+    "graph": JOB_TYPE_PUBLISH,
+    JOB_TYPE_GRAPH_UPLOAD: JOB_TYPE_PUBLISH,
+    JOB_TYPE_UPLOAD: JOB_TYPE_PUBLISH,
+}
+
+
+def normalize_job_type(value: str | None, default: str = JOB_TYPE_LEGACY_FULL) -> str:
+    token = (value or default).strip().lower().replace("-", "_")
+    return JOB_TYPE_ALIASES.get(token, default)
 
 JOB_STATUS_PENDING = "pending"
 JOB_STATUS_RUNNING = "running"
@@ -57,6 +79,7 @@ class Lecture(Base):
     category = Column(String, nullable=True)
     description = Column(Text, nullable=True)
     is_verified = Column(Boolean, nullable=False, default=False, server_default="false")
+    is_published = Column(Boolean, nullable=False, default=False, server_default="false")
     video_path = Column(Text, nullable=False)   # inputs/{lecture_id}/{filename}
     output_dir = Column(Text, nullable=False)   # results/{lecture_id}/
     created_at = Column(DateTime(timezone=True), server_default=func.now())

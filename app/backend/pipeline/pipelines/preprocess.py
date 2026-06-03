@@ -100,6 +100,7 @@ def run_preprocess_pipeline(
                 timings["P3A analyze_annotation — 필기 강조 분석"] = annotation_result["elapsed"]
             else:
                 audio_result = future.result()
+                timings["P3B process_audio — 오디오 후처리"] = audio_result.get("elapsed", 0.0)
 
     timings["P3 enrich_audio_annotation total — 보강 분석 총합"] = time.time() - t_parallel
     notify_stage("preprocess_enrich_audio_annotation", "done")

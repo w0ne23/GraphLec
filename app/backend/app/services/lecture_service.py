@@ -24,8 +24,12 @@ from app.models import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JOB_STATUS_WAITING_APPROVAL,
+    JOB_TYPE_DIRECT_UPLOAD,
     JOB_TYPE_GRAPH_UPLOAD,
     JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_PUBLISH,
+    JOB_TYPE_UPLOAD,
+    JOB_TYPE_VERIFY,
     JOB_TYPE_VERIFIED_UPLOAD,
     Lecture,
     LectureMetadata,
@@ -33,6 +37,7 @@ from app.models import (
     GraphSession,
     ChatSession,
     ChatMessage,
+    normalize_job_type,
 )
 from app.services.neo4j_service import (
     neo4j_session,
@@ -116,6 +121,24 @@ DOMAIN_ALIASES = {
 
 
 # ── 직렬화 헬퍼 ──────────────────────────────────────────────────────────────
+PUBLICATION_JOB_TYPES = {JOB_TYPE_LEGACY_FULL, JOB_TYPE_PUBLISH}
+PUBLICATION_DB_JOB_TYPES = [
+    JOB_TYPE_LEGACY_FULL,
+    JOB_TYPE_PUBLISH,
+    JOB_TYPE_DIRECT_UPLOAD,
+    JOB_TYPE_GRAPH_UPLOAD,
+    JOB_TYPE_UPLOAD,
+]
+VERIFICATION_DB_JOB_TYPES = [
+    JOB_TYPE_VERIFY,
+    JOB_TYPE_VERIFIED_UPLOAD,
+]
+
+
+def _is_publication_job_type(job_type: Optional[str]) -> bool:
+    return normalize_job_type(job_type) in PUBLICATION_JOB_TYPES
+
+
 def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str, Any]:
     """ProcessingJob과 Lecture를 하나의 딕셔너리로 직렬화"""
     stages = job.pipeline_stages
@@ -135,6 +158,8 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
         "error_message": job.error_message,
         "pipeline_stages": stages,
         "created_at": job.created_at.isoformat() if job.created_at else None,
+        "is_verified": bool(getattr(lecture, "is_verified", False)) if lecture else False,
+        "is_published": bool(getattr(lecture, "is_published", False)) if lecture else False,
         "content": [],
     }
     if lecture:
@@ -144,6 +169,8 @@ def format_job_dict(job: ProcessingJob, lecture: Optional[Lecture]) -> Dict[str,
             "title": lecture.title,
             "category": lecture.category,
             "description": lecture.description,
+            "is_verified": bool(getattr(lecture, "is_verified", False)),
+            "is_published": bool(getattr(lecture, "is_published", False)),
             "stem": str(lecture.id),
             "output_dir": lecture.output_dir,
         })
@@ -518,6 +545,33 @@ async def get_latest_job(db: AsyncSession, lecture_id: str) -> Optional[Processi
     return result.scalar_one_or_none()
 
 
+async def get_latest_job_by_mode(db: AsyncSession, lecture_id: str, mode: str) -> Optional[ProcessingJob]:
+    """lecture_id와 route mode에 맞는 가장 최근 job을 반환."""
+    try:
+        ident_uuid = uuid.UUID(str(lecture_id))
+    except (ValueError, TypeError):
+        return None
+
+    canonical_mode = normalize_job_type(mode)
+    if canonical_mode == JOB_TYPE_VERIFY:
+        job_types = VERIFICATION_DB_JOB_TYPES
+    elif canonical_mode in PUBLICATION_JOB_TYPES:
+        job_types = PUBLICATION_DB_JOB_TYPES
+    else:
+        return None
+
+    result = await db.execute(
+        select(ProcessingJob)
+        .where(
+            ProcessingJob.lecture_id == ident_uuid,
+            ProcessingJob.job_type.in_(job_types),
+        )
+        .order_by(ProcessingJob.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_job_detail(db: AsyncSession, job_id: str) -> Optional[Dict[str, Any]]:
     query = (
         select(ProcessingJob, Lecture)
@@ -565,13 +619,14 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
             "category": domain,
             "domain": domain,
             "is_verified": bool(getattr(lecture, "is_verified", False)),
+            "is_published": bool(getattr(lecture, "is_published", False)),
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
         })
     return out
 
 
-async def retry_lecture(db: AsyncSession, lecture_id: str):
+async def retry_lecture(db: AsyncSession, lecture_id: str, mode: Optional[str] = None):
     """lecture_id로 새 ProcessingJob을 INSERT하여 재시도 이력을 누적.
     성공 시 { status, job_id } dict 반환, 실패 시 None.
     """
@@ -584,15 +639,25 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     if not lecture:
         return None
 
-    latest_job = await get_latest_job(db, str(ident_uuid))
-    job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+    if mode:
+        job_type = normalize_job_type(mode)
+    else:
+        latest_job = await get_latest_job(db, str(ident_uuid))
+        job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+
+    if job_type == JOB_TYPE_VERIFY:
+        current_stage = "검증 파이프라인을 다시 시작합니다."
+    elif _is_publication_job_type(job_type):
+        current_stage = "업로드 파이프라인을 다시 시작합니다."
+    else:
+        current_stage = "파이프라인을 다시 시작합니다."
 
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
         job_type=job_type,
         status="pending",
-        current_stage="Resuming pipeline...",
+        current_stage=current_stage,
         error_message=None,
         pipeline_stages=[],
     )
@@ -602,8 +667,8 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     return {"status": "success", "job_id": str(new_job.id), "job_type": new_job.job_type}
 
 
-async def approve_verified_upload(db: AsyncSession, lecture_id: str):
-    """Approve a verified upload and enqueue graph generation as a new job."""
+async def confirm_verified_lecture(db: AsyncSession, lecture_id: str):
+    """Mark a completed verification as reviewed without starting upload."""
     try:
         ident_uuid = uuid.UUID(str(lecture_id))
     except (ValueError, TypeError):
@@ -613,24 +678,12 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
     if not lecture:
         return None
 
-    existing_graph_result = await db.execute(
-        select(ProcessingJob)
-        .where(
-            ProcessingJob.lecture_id == ident_uuid,
-            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
-            ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
-        )
-        .order_by(ProcessingJob.created_at.desc())
-        .limit(1)
-    )
-    existing_graph_job = existing_graph_result.scalar_one_or_none()
-
     approval_result = await db.execute(
         select(ProcessingJob)
         .where(
             ProcessingJob.lecture_id == ident_uuid,
-            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
-            ProcessingJob.status == JOB_STATUS_WAITING_APPROVAL,
+            ProcessingJob.job_type.in_([JOB_TYPE_VERIFY, JOB_TYPE_VERIFIED_UPLOAD]),
+            ProcessingJob.status.in_([JOB_STATUS_DONE, JOB_STATUS_WAITING_APPROVAL]),
         )
         .order_by(ProcessingJob.created_at.desc())
         .limit(1)
@@ -639,46 +692,23 @@ async def approve_verified_upload(db: AsyncSession, lecture_id: str):
     approval_job = approval_result.scalar_one_or_none()
 
     if not approval_job:
-        if existing_graph_job:
-            lecture.is_verified = True
-            await db.commit()
-            return {
-                "status": "success",
-                "approved_job_id": None,
-                "job_id": str(existing_graph_job.id),
-                "job_type": existing_graph_job.job_type,
-                "already_queued": True,
-            }
-        raise HTTPException(status_code=409, detail="No verified upload is waiting for approval")
+        raise HTTPException(status_code=409, detail="No completed verification is ready for review")
 
     approval_job.status = JOB_STATUS_DONE
-    approval_job.current_stage = "승인 완료"
+    approval_job.current_stage = "검토 완료"
     approval_job.error_message = None
     lecture.is_verified = True
 
-    graph_job = existing_graph_job
-    already_queued = graph_job is not None
-    if graph_job is None:
-        graph_job = ProcessingJob(
-            id=uuid.uuid4(),
-            lecture_id=ident_uuid,
-            job_type=JOB_TYPE_GRAPH_UPLOAD,
-            status=JOB_STATUS_PENDING,
-            current_stage="그래프 생성을 대기 중입니다.",
-            error_message=None,
-            pipeline_stages=[],
-        )
-        db.add(graph_job)
-
     await db.commit()
     await db.refresh(approval_job)
-    await db.refresh(graph_job)
+    await db.refresh(lecture)
     return {
         "status": "success",
-        "approved_job_id": str(approval_job.id),
-        "job_id": str(graph_job.id),
-        "job_type": graph_job.job_type,
-        "already_queued": already_queued,
+        "lecture_id": str(lecture.id),
+        "job_id": str(approval_job.id),
+        "job_type": approval_job.job_type,
+        "is_verified": bool(lecture.is_verified),
+        "is_published": bool(getattr(lecture, "is_published", False)),
     }
 
 
@@ -745,8 +775,15 @@ async def list_all_results(
         metadata = _lecture_metadata_dict(lecture_metadata) or _lecture_file_metadata(lecture)
         domain = _lecture_domain_value(lecture, metadata)
         job_status = job.status if job else 'unknown'
+        job_type = (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None
+        is_published = bool(getattr(lecture, "is_published", False))
+        is_publication_job = _is_publication_job_type(job_type)
 
-        if scope == 'browse' and job_status != 'done':
+        if scope == 'browse' and not is_published:
+            continue
+        if scope == 'upload' and not is_published and not (
+            is_publication_job and job_status == JOB_STATUS_ERROR
+        ):
             continue
         if scope == 'upload' and job_status in ACTIVE_STATUSES:
             continue
@@ -761,12 +798,13 @@ async def list_all_results(
         out.append({
             "id": str(lecture.id),
             "job_id": str(job.id) if job else None,
-            "job_type": (getattr(job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if job else None,
+            "job_type": job_type,
             "status": job_status,
             "title": lecture.title or str(lecture.id),
             "category": domain,
             "domain": domain,
             "is_verified": bool(getattr(lecture, "is_verified", False)),
+            "is_published": is_published,
             "created_at": lecture.created_at.isoformat() if lecture.created_at else None,
             "thumbnail_url": _lecture_thumbnail_url(lecture.output_dir),
             "error_message": job.error_message if job else None,
@@ -813,6 +851,7 @@ async def get_lecture_detail(db: AsyncSession, lecture_id: str) -> Optional[Dict
         "title": lecture.title or stem,
         "category": info.get("domain") or normalize_domain_value(lecture.category),
         "is_verified": bool(getattr(lecture, "is_verified", False)),
+        "is_published": bool(getattr(lecture, "is_published", False)),
         "description": lecture.description,
         "summary": info.get("summary") or "",
         "keywords": info.get("keywords") or [],
@@ -1884,7 +1923,7 @@ async def get_graph_info(db: AsyncSession, lecture_id: str) -> Dict[str, Any]:
 
 
 async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] | None:
-    """Retry only the graph_upload portion for a verified upload."""
+    """Retry the publish/upload portion. The route name remains for compatibility."""
     try:
         ident_uuid = uuid.UUID(str(lecture_id))
     except (ValueError, TypeError):
@@ -1898,7 +1937,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
         select(ProcessingJob)
         .where(
             ProcessingJob.lecture_id == ident_uuid,
-            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.job_type.in_(PUBLICATION_DB_JOB_TYPES),
             ProcessingJob.status.in_([JOB_STATUS_PENDING, JOB_STATUS_RUNNING]),
         )
         .order_by(ProcessingJob.created_at.desc())
@@ -1918,7 +1957,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
         select(ProcessingJob)
         .where(
             ProcessingJob.lecture_id == ident_uuid,
-            ProcessingJob.job_type == JOB_TYPE_GRAPH_UPLOAD,
+            ProcessingJob.job_type.in_(PUBLICATION_DB_JOB_TYPES),
             ProcessingJob.status == JOB_STATUS_ERROR,
         )
         .order_by(ProcessingJob.created_at.desc())
@@ -1928,7 +1967,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
     failed_graph_job = failed_graph_result.scalar_one_or_none()
     if failed_graph_job:
         failed_graph_job.status = JOB_STATUS_PENDING
-        failed_graph_job.current_stage = "그래프 생성을 다시 시작합니다."
+        failed_graph_job.current_stage = "업로드 파이프라인을 다시 시작합니다."
         failed_graph_job.error_message = None
         failed_graph_job.pipeline_stages = []
         await db.commit()
@@ -1945,7 +1984,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
         select(ProcessingJob)
         .where(
             ProcessingJob.lecture_id == ident_uuid,
-            ProcessingJob.job_type == JOB_TYPE_VERIFIED_UPLOAD,
+            ProcessingJob.job_type.in_([JOB_TYPE_VERIFY, JOB_TYPE_VERIFIED_UPLOAD]),
             ProcessingJob.status == JOB_STATUS_DONE,
         )
         .order_by(ProcessingJob.created_at.desc())
@@ -1953,7 +1992,7 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
     )
     approved_job = approved_result.scalar_one_or_none()
     if not approved_job:
-        raise HTTPException(status_code=409, detail="No approved verified upload is ready for graph retry")
+        raise HTTPException(status_code=409, detail="No verified lecture is ready for upload retry")
 
     manifest_path = Path(lecture.output_dir) / f"{ident_uuid}_preprocess_result.json"
     if not manifest_path.exists() or manifest_path.stat().st_size <= 0:
@@ -1962,9 +2001,9 @@ async def retry_graph_only(db: AsyncSession, lecture_id: str) -> dict[str, Any] 
     graph_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
-        job_type=JOB_TYPE_GRAPH_UPLOAD,
+        job_type=JOB_TYPE_PUBLISH,
         status=JOB_STATUS_PENDING,
-        current_stage="그래프 재시도를 대기 중입니다.",
+        current_stage="업로드 파이프라인 재시도를 대기 중입니다.",
         error_message=None,
         pipeline_stages=[],
     )

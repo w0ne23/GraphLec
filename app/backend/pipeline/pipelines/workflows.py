@@ -86,15 +86,19 @@ def run_pipeline(args, progress_callback=None, *, helpers):
         r10b: dict = {}
         should_run_verifier = job_type in {
             helpers.JOB_TYPE_LEGACY_FULL,
+            helpers.JOB_TYPE_VERIFY,
             helpers.JOB_TYPE_VERIFIED_UPLOAD,
         }
         should_run_preprocess = job_type in {
             helpers.JOB_TYPE_LEGACY_FULL,
+            helpers.JOB_TYPE_VERIFY,
+            helpers.JOB_TYPE_PUBLISH,
             helpers.JOB_TYPE_DIRECT_UPLOAD,
             helpers.JOB_TYPE_VERIFIED_UPLOAD,
         }
         should_run_graph = job_type in {
             helpers.JOB_TYPE_LEGACY_FULL,
+            helpers.JOB_TYPE_PUBLISH,
             helpers.JOB_TYPE_DIRECT_UPLOAD,
             helpers.JOB_TYPE_GRAPH_UPLOAD,
         }
@@ -135,7 +139,10 @@ def run_pipeline(args, progress_callback=None, *, helpers):
                 output_dir=output_dir,
                 paths=paths,
                 timings=timings,
-                background=job_type != helpers.JOB_TYPE_VERIFIED_UPLOAD,
+                background=job_type not in {
+                    helpers.JOB_TYPE_VERIFY,
+                    helpers.JOB_TYPE_VERIFIED_UPLOAD,
+                },
                 notify_stage=notify_stage,
                 helpers=helpers,
             )
@@ -179,8 +186,8 @@ def run_pipeline(args, progress_callback=None, *, helpers):
                 print(f"\n  verifier는 백그라운드에서 계속 실행 중입니다. (PID {r10.get('pid')})")
             return
 
-        if job_type == helpers.JOB_TYPE_VERIFIED_UPLOAD:
-            print("\n  ⏹  verified_upload: graph 단계는 승인 이후 graph_upload에서 실행합니다.")
+        if job_type in {helpers.JOB_TYPE_VERIFY, helpers.JOB_TYPE_VERIFIED_UPLOAD}:
+            print(f"\n  ⏹  {job_type}: graph 단계는 승인 이후 publish에서 실행합니다.")
             output_files = [
                 audio_result.get("segments_path", ""),
                 audio_result.get("silences_path", ""),

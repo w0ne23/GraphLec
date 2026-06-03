@@ -16,9 +16,9 @@ from app.models import (
     JOB_STATUS_ERROR,
     JOB_STATUS_REJECTED,
     JOB_STATUS_WAITING_APPROVAL,
-    JOB_TYPE_DIRECT_UPLOAD,
     JOB_TYPE_LEGACY_FULL,
-    JOB_TYPE_VERIFIED_UPLOAD,
+    JOB_TYPE_PUBLISH,
+    JOB_TYPE_VERIFY,
     Lecture,
     ProcessingJob,
 )
@@ -33,11 +33,16 @@ def _normalize_upload_job_type(value: str) -> str:
     aliases = {
         "legacy": JOB_TYPE_LEGACY_FULL,
         "legacy_full": JOB_TYPE_LEGACY_FULL,
-        "direct": JOB_TYPE_DIRECT_UPLOAD,
-        "direct_upload": JOB_TYPE_DIRECT_UPLOAD,
-        "verified": JOB_TYPE_VERIFIED_UPLOAD,
-        "verify": JOB_TYPE_VERIFIED_UPLOAD,
-        "verified_upload": JOB_TYPE_VERIFIED_UPLOAD,
+        "publish": JOB_TYPE_PUBLISH,
+        "publication": JOB_TYPE_PUBLISH,
+        "direct": JOB_TYPE_PUBLISH,
+        "upload": JOB_TYPE_PUBLISH,
+        "direct_upload": JOB_TYPE_PUBLISH,
+        "graph": JOB_TYPE_PUBLISH,
+        "graph_upload": JOB_TYPE_PUBLISH,
+        "verified": JOB_TYPE_VERIFY,
+        "verify": JOB_TYPE_VERIFY,
+        "verified_upload": JOB_TYPE_VERIFY,
     }
     if token not in aliases:
         raise HTTPException(status_code=400, detail="Invalid workflow_mode")
@@ -57,10 +62,12 @@ async def stream_job_status(
     lecture_id: str,
     request: Request,
     job_id: Optional[str] = Query(None),
+    mode: Optional[str] = Query(None),
 ):
     """
     job_id 쿼리파라미터가 있으면 해당 job을 고정 추적.
-    없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
+    mode 쿼리파라미터가 있으면 lecture_id 기준 해당 mode의 최신 job을 추적.
+    둘 다 없으면 lecture_id 기준 최신 job을 추적 (기존 동작).
     retry 후 새 job_id로 재연결하면 정확한 시도별 추적이 가능.
     """
     async def event_generator():
@@ -71,6 +78,8 @@ async def stream_job_status(
                 async with AsyncSessionLocal() as db:
                     if job_id:
                         job = await lecture_service.get_job(db, job_id)
+                    elif mode:
+                        job = await lecture_service.get_latest_job_by_mode(db, lecture_id, mode)
                     else:
                         job = await lecture_service.get_latest_job(db, lecture_id)
                 if not job:
@@ -180,6 +189,7 @@ async def create_job(
         "job_type": new_job.job_type,
         "status": "pending",
         "is_verified": False,
+        "is_published": False,
         "created_at": new_lecture.created_at.isoformat() if new_lecture.created_at else None,
     }
 
@@ -193,16 +203,28 @@ async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{lecture_id}/retry")
-async def retry_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    result = await lecture_service.retry_lecture(db, lecture_id)
+async def retry_lecture(
+    lecture_id: str,
+    mode: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await lecture_service.retry_lecture(db, lecture_id, mode=mode)
     if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
     return result
 
 
 @router.post("/{lecture_id}/approve")
-async def approve_verified_upload(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    result = await lecture_service.approve_verified_upload(db, lecture_id)
+async def confirm_verified_lecture_compat(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    result = await lecture_service.confirm_verified_lecture(db, lecture_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Lecture not found")
+    return result
+
+
+@router.post("/{lecture_id}/verify/confirm")
+async def confirm_verified_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
+    result = await lecture_service.confirm_verified_lecture(db, lecture_id)
     if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
     return result
