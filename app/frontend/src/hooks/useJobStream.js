@@ -45,6 +45,9 @@ export function useJobStream(lectureId, mode = 'verify') {
   const eventSourceRef = useRef(null)
   const activeJobIdRef = useRef(null)
   const isVerifiedRef = useRef(false)
+  const verifierLoadedRef = useRef(false)
+  const ignoreNextStreamErrorRef = useRef(false)
+  const healthTimerRef = useRef(null)
 
   const [lecture, setLecture] = useState(EMPTY_LECTURE)
   const [verifier, setVerifier] = useState(null)
@@ -72,11 +75,76 @@ export function useJobStream(lectureId, mode = 'verify') {
   )
   const pipelineLabel = getPipelineLabel(normalizedMode)
 
-  function closeEventSource() {
+  function stopHealthCheck() {
+    if (!healthTimerRef.current) return
+    clearInterval(healthTimerRef.current)
+    healthTimerRef.current = null
+  }
+
+  function closeEventSource({ ignoreStreamError = false } = {}) {
     if (eventSourceRef.current) {
+      if (ignoreStreamError) ignoreNextStreamErrorRef.current = true
       eventSourceRef.current.close()
       eventSourceRef.current = null
     }
+    stopHealthCheck()
+  }
+
+  function handleServerDown() {
+    console.error('--- [Health] Server down detected ---')
+    closeEventSource({ ignoreStreamError: true })
+    setCurrentStage('서버와의 연결이 끊어졌습니다.')
+    setErrorMessage('서버와의 연결이 끊어졌습니다.')
+    setLecture(prev => ({ ...prev, status: 'error' }))
+    setPhase(PHASES.ERROR)
+  }
+
+  function startHealthCheck() {
+    if (healthTimerRef.current) return
+
+    console.log('--- [Health] Starting health check polling ---')
+    healthTimerRef.current = setInterval(async () => {
+      if (!eventSourceRef.current) {
+        stopHealthCheck()
+        return
+      }
+
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 2500)
+
+      try {
+        const res = await fetch('/api/health', {
+          cache: 'no-store',
+          signal: controller.signal,
+        })
+        if (!res.ok) throw new Error(`status ${res.status}`)
+      } catch {
+        handleServerDown()
+      } finally {
+        window.clearTimeout(timeoutId)
+      }
+    }, 3000)
+  }
+
+  function isVerifierReady(payload) {
+    return (
+      payload.lecture_status === 'waiting_approval' ||
+      (payload.lecture_status === 'done' && normalizeJobType(payload.job_type) === 'verify')
+    )
+  }
+
+  function loadVerifierIfReady(payload) {
+    if (!isVerifierReady(payload) || verifierLoadedRef.current) return
+
+    verifierLoadedRef.current = true
+    getLectureVerifier(lectureId)
+      .then(result => {
+        if (result) setVerifier(result)
+        else verifierLoadedRef.current = false
+      })
+      .catch(() => {
+        verifierLoadedRef.current = false
+      })
   }
 
   function connectJob(jobId = '') {
@@ -84,6 +152,7 @@ export function useJobStream(lectureId, mode = 'verify') {
 
     closeEventSource()
     activeJobIdRef.current = jobId || null
+    ignoreNextStreamErrorRef.current = false
 
     const params = new URLSearchParams()
     if (jobId) params.set('job_id', jobId)
@@ -93,6 +162,7 @@ export function useJobStream(lectureId, mode = 'verify') {
     console.log(`--- [SSE] Connecting to stream for lecture ${lectureId} (job ${jobId || 'latest'}, mode ${normalizedMode}) ---`)
     const eventSource = new EventSource(url)
     eventSourceRef.current = eventSource
+    startHealthCheck()
 
     eventSource.onmessage = event => {
       try {
@@ -105,10 +175,13 @@ export function useJobStream(lectureId, mode = 'verify') {
 
         const nextPhase = phaseFromStatus(payload.lecture_status, payload.job_type, normalizedMode)
         const currentIsVerified = isVerifiedRef.current
+        const nextErrorMessage =
+          payload.error_message ||
+          (nextPhase === PHASES.ERROR ? payload.current_stage || '' : '')
 
         setPhase(nextPhase)
         setCurrentStage(payload.current_stage || '')
-        setErrorMessage(payload.error_message || '')
+        setErrorMessage(prev => nextErrorMessage || (nextPhase === PHASES.ERROR ? prev : ''))
         setLecture(prev => ({
           ...prev,
           id: prev.id || lectureId,
@@ -120,15 +193,10 @@ export function useJobStream(lectureId, mode = 'verify') {
           mergeStageStatus(prev, payload.pipeline_stages || [], nextPhase, normalizedMode, currentIsVerified)
         )
 
-        if (
-          payload.lecture_status === 'waiting_approval' ||
-          (payload.lecture_status === 'done' && normalizeJobType(payload.job_type) === 'verify')
-        ) {
-          getLectureVerifier(lectureId).then(setVerifier).catch(() => {})
-        }
+        loadVerifierIfReady(payload)
 
         if (['done', 'error', 'waiting_approval', 'rejected'].includes(payload.lecture_status)) {
-          closeEventSource()
+          closeEventSource({ ignoreStreamError: true })
         }
       } catch (error) {
         console.error('SSE Parse error:', error)
@@ -139,6 +207,10 @@ export function useJobStream(lectureId, mode = 'verify') {
     }
 
     eventSource.onerror = () => {
+      if (ignoreNextStreamErrorRef.current) {
+        ignoreNextStreamErrorRef.current = false
+        return
+      }
       console.error('SSE connection error')
       closeEventSource()
       setErrorMessage('서버와의 연결이 끊어졌습니다.')
@@ -155,24 +227,23 @@ export function useJobStream(lectureId, mode = 'verify') {
 
     async function loadInitialState() {
       try {
-        const [detailResult, verifierResult] = await Promise.allSettled([
-          getLectureDetail(lectureId),
-          getLectureVerifier(lectureId),
-        ])
+        const detail = await getLectureDetail(lectureId)
 
         if (cancelled) return
-        if (detailResult.status === 'rejected') throw detailResult.reason
 
-        const detail = detailResult.value || EMPTY_LECTURE
-        const verifierData = verifierResult.status === 'fulfilled' ? verifierResult.value : null
         const detailIsVerified = Boolean(detail.is_verified)
         const nextPhase = phaseFromStatus(detail.status, detail.job_type, normalizedMode)
+        const detailErrorMessage =
+          detail.error_message ||
+          (nextPhase === PHASES.ERROR ? detail.current_stage || '' : '')
 
         isVerifiedRef.current = detailIsVerified
+        verifierLoadedRef.current = false
         setLecture({ ...EMPTY_LECTURE, ...detail })
-        setVerifier(verifierData)
+        setVerifier(null)
         setPhase(nextPhase)
         setCurrentStage(detail.current_stage || '')
+        setErrorMessage(detailErrorMessage)
 
         if (Array.isArray(detail.pipeline_stages) && detail.pipeline_stages.length > 0) {
           setPipelineStages(
@@ -215,7 +286,10 @@ export function useJobStream(lectureId, mode = 'verify') {
 
     setIsRestarting(true)
     setErrorMessage('')
-    if (resolvedMode !== 'publish') setVerifier(null)
+    if (resolvedMode !== 'publish') {
+      verifierLoadedRef.current = false
+      setVerifier(null)
+    }
     setPhase(resolvedMode === 'publish' ? PHASES.PIPELINE2 : PHASES.PIPELINE1)
     setCurrentStage(resolvedMode === 'publish' ? '업로드 파이프라인을 다시 시작합니다.' : '검증 파이프라인을 다시 시작합니다.')
     setPipelineStages(createInitialStages(resolvedMode, currentIsVerified))

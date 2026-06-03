@@ -25,6 +25,7 @@ function LoadingState({ mode }) {
 function VerifyModePage({ flow }) {
   const [isReviewOpen, setIsReviewOpen] = useState(false)
   const canOpenResult = flow.phase === PHASES.VERIFY_READY && flow.verifier
+  const isError = flow.phase === PHASES.ERROR
   const actionDisabled = flow.isRestarting || flow.isMutating
 
   if (isReviewOpen) {
@@ -61,13 +62,15 @@ function VerifyModePage({ flow }) {
             <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={actionDisabled}>
               작업 삭제
             </button>
-            <button
-              className="vf-confirm-btn"
-              disabled={actionDisabled || (canOpenResult && !flow.verifier)}
-              onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
-            >
-              {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
-            </button>
+            {(canOpenResult || isError) && (
+              <button
+                className="vf-confirm-btn"
+                disabled={actionDisabled || (canOpenResult && !flow.verifier)}
+                onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
+              >
+                {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -77,6 +80,7 @@ function VerifyModePage({ flow }) {
 
 function PublishModePage({ flow }) {
   const isDone = flow.phase === PHASES.DONE
+  const isError = flow.phase === PHASES.ERROR
   const actionDisabled = flow.isRestarting || flow.isMutating
   const progressPhase = flow.phase === PHASES.DONE
     ? PHASES.DONE
@@ -99,7 +103,7 @@ function PublishModePage({ flow }) {
             priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            {!isDone && (
+            {isError && (
               <button
                 className="vf-confirm-btn"
                 disabled={actionDisabled}
