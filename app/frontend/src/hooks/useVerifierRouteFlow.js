@@ -5,7 +5,7 @@ import {
   deleteLecture,
   getLectureDetail,
   getLectureVerifier,
-  retryUploadPublish as retryUploadPublishRequest,
+  retryLecture as retryJobRequest,
 } from '../lib/api'
 import {
   PHASES,
@@ -243,21 +243,29 @@ export function useVerifierRouteFlow(lectureId, mode = 'verify') {
     return closeEventSource
   }, [lectureId, mode])
 
-  async function retryUploadPublish() {
+  async function restartJob(targetMode) {
     if (!lectureId || isBusy) return
+    const normalizedTargetMode = normalizeMode(targetMode)
+    const isPublish = normalizedTargetMode === 'publish'
+
     setIsBusy(true)
     setErrorMessage('')
-    setPhase(PHASES.PIPELINE2)
-    setCurrentStage('업로드 파이프라인을 다시 시작합니다.')
-    setPipelineStages(createUploadRetryStages())
+    if (!isPublish) setVerifier(null)
+    setPhase(isPublish ? PHASES.PIPELINE2 : PHASES.PIPELINE1)
+    setCurrentStage(isPublish ? '업로드 파이프라인을 다시 시작합니다.' : '검증 파이프라인을 다시 시작합니다.')
+    setPipelineStages(
+      isPublish
+        ? createUploadRetryStages()
+        : markKnownStages(PHASES.PIPELINE1, 'wait', 'verify')
+    )
 
     try {
-      const result = await retryUploadPublishRequest(lectureId)
+      const result = await retryJobRequest(lectureId, { mode: normalizedTargetMode })
       setLecture(prev => ({
         ...prev,
         id: prev.id || lectureId,
         job_id: result.job_id || prev.job_id,
-        job_type: result.job_type || 'publish',
+        job_type: result.job_type || normalizedTargetMode,
         status: 'pending',
       }))
       connectJob(result.job_id)
@@ -315,7 +323,8 @@ export function useVerifierRouteFlow(lectureId, mode = 'verify') {
     isLoading,
     actions: {
       confirmReview,
-      retryUploadPublish,
+      restartVerify: () => restartJob('verify'),
+      restartPublish: () => restartJob('publish'),
       cancelUpload,
       backToVerifyReady: () => navigate(`/verify/${lectureId}`),
       reset: () => navigate('/upload'),

@@ -124,8 +124,11 @@ export async function deleteLecture(lectureId) {
   return res.json();
 }
 
-export async function retryLecture(lectureId) {
-  const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry`, {
+export async function retryLecture(lectureId, options = {}) {
+  const query = new URLSearchParams()
+  if (options.mode) query.set('mode', options.mode)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const res = await fetch(`${API_BASE}/jobs/${lectureId}/retry${suffix}`, {
     method: 'POST',
   });
   if (!res.ok) {
@@ -134,7 +137,7 @@ export async function retryLecture(lectureId) {
   }
   const data = await res.json();
   // 새로 생성된 job_id를 반환 — 프론트에서 SSE 재연결에 사용
-  return { job_id: data.job_id };
+  return { job_id: data.job_id, job_type: data.job_type, status: data.status };
 }
 
 export async function confirmLectureVerification(lectureId) {

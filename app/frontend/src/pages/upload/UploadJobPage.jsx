@@ -73,10 +73,10 @@ function VerifyModePage({ flow }) {
             </button>
             <button
               className="vf-confirm-btn"
-              disabled={!canOpenResult}
-              onClick={() => setIsReviewOpen(true)}
+              disabled={flow.isBusy}
+              onClick={canOpenResult ? () => setIsReviewOpen(true) : flow.actions.restartVerify}
             >
-              {canOpenResult ? '결과 보기' : '검증 진행 중'}
+              {canOpenResult ? '결과 보기' : flow.isBusy ? '재시작 중' : '재시작'}
             </button>
           </div>
         </div>
@@ -110,13 +110,13 @@ function PublishModePage({ flow }) {
             flowNodes={flowNodes}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            {flow.phase === PHASES.ERROR && (
+            {!isDone && (
               <button
                 className="vf-confirm-btn"
                 disabled={flow.isBusy}
-                onClick={flow.actions.retryUploadPublish}
+                onClick={flow.actions.restartPublish}
               >
-                {flow.isBusy ? '재시도 중' : '업로드 재시도'}
+                {flow.isBusy ? '재시작 중' : '재시작'}
               </button>
             )}
             <button

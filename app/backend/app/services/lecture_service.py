@@ -626,7 +626,7 @@ async def list_jobs(db: AsyncSession, status_filter: Optional[str] = None):
     return out
 
 
-async def retry_lecture(db: AsyncSession, lecture_id: str):
+async def retry_lecture(db: AsyncSession, lecture_id: str, mode: Optional[str] = None):
     """lecture_id로 새 ProcessingJob을 INSERT하여 재시도 이력을 누적.
     성공 시 { status, job_id } dict 반환, 실패 시 None.
     """
@@ -639,15 +639,25 @@ async def retry_lecture(db: AsyncSession, lecture_id: str):
     if not lecture:
         return None
 
-    latest_job = await get_latest_job(db, str(ident_uuid))
-    job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+    if mode:
+        job_type = normalize_job_type(mode)
+    else:
+        latest_job = await get_latest_job(db, str(ident_uuid))
+        job_type = (getattr(latest_job, "job_type", None) or JOB_TYPE_LEGACY_FULL) if latest_job else JOB_TYPE_LEGACY_FULL
+
+    if job_type == JOB_TYPE_VERIFY:
+        current_stage = "검증 파이프라인을 다시 시작합니다."
+    elif _is_publication_job_type(job_type):
+        current_stage = "업로드 파이프라인을 다시 시작합니다."
+    else:
+        current_stage = "파이프라인을 다시 시작합니다."
 
     new_job = ProcessingJob(
         id=uuid.uuid4(),
         lecture_id=ident_uuid,
         job_type=job_type,
         status="pending",
-        current_stage="Resuming pipeline...",
+        current_stage=current_stage,
         error_message=None,
         pipeline_stages=[],
     )

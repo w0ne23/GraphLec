@@ -203,8 +203,12 @@ async def delete_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{lecture_id}/retry")
-async def retry_lecture(lecture_id: str, db: AsyncSession = Depends(get_db)):
-    result = await lecture_service.retry_lecture(db, lecture_id)
+async def retry_lecture(
+    lecture_id: str,
+    mode: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await lecture_service.retry_lecture(db, lecture_id, mode=mode)
     if not result:
         raise HTTPException(status_code=404, detail="Lecture not found")
     return result
