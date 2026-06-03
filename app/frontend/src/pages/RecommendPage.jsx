@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { recommendLectures } from '../lib/api'
 
@@ -13,6 +13,9 @@ const SUGGESTIONS = [
   '딥러닝 CNN 실습 위주 강의 보여줘',
 ]
 
+const RECOMMEND_CACHE_KEY = 'graphlec:recommend:last'
+const RECOMMEND_CACHE_TTL_MS = 60 * 60 * 1000
+
 export default function RecommendPage() {
   const navigate = useNavigate()
   const [query,       setQuery]       = useState('')
@@ -22,6 +25,24 @@ export default function RecommendPage() {
   const [searchLabel, setSearchLabel] = useState('')
   const [error,       setError]       = useState('')
   const inputRef = useRef(null)
+  const leavingForLecture = useRef(false)
+
+  useEffect(() => {
+    const cached = readRecommendCache()
+    if (!cached) return
+
+    setQuery(cached.query)
+    setSearchLabel(cached.searchLabel || cached.query)
+    setResults(cached.results)
+    setSubmitted(true)
+  }, [])
+
+  // 강의 페이지로 이동하는 경우가 아니면 unmount 시 캐시 삭제
+  useEffect(() => {
+    return () => {
+      if (!leavingForLecture.current) clearRecommendCache()
+    }
+  }, [])
 
   async function handleSearch(overrideQuery) {
     const text = (overrideQuery ?? query).trim()
@@ -33,10 +54,17 @@ export default function RecommendPage() {
     setLoading(true)
     setError('')
     setResults(null)
+    clearRecommendCache()
 
     try {
       const res = await recommendLectures(text, 5)
-      setResults(res?.results ?? [])
+      const nextResults = res?.results ?? []
+      setResults(nextResults)
+      writeRecommendCache({
+        query: text,
+        searchLabel: text,
+        results: nextResults,
+      })
     } catch (e) {
       console.error('Recommend search failed:', e)
       setError('추천 서버가 잠시 불안정합니다. 잠시 후 다시 검색해 주세요.')
@@ -53,10 +81,12 @@ export default function RecommendPage() {
     setResults(null)
     setError('')
     setSearchLabel('')
+    clearRecommendCache()
     setTimeout(() => inputRef.current?.focus(), 350) // transition 끝난 뒤 포커스
   }
 
   function handlePlay(lectureId) {
+    leavingForLecture.current = true
     navigate(`/lectures/${lectureId}`)
   }
 
@@ -85,7 +115,7 @@ export default function RecommendPage() {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSearch() }
             }}
             disabled={loading}
-            autoFocus
+            autoFocus={!submitted}
           />
           {query && (
             <button className="rec-searchbar-clear" onClick={() => setQuery('')} tabIndex={-1}>
@@ -163,4 +193,44 @@ export default function RecommendPage() {
 
     </div>
   )
+}
+
+function readRecommendCache() {
+  try {
+    const raw = sessionStorage.getItem(RECOMMEND_CACHE_KEY)
+    if (!raw) return null
+
+    const cached = JSON.parse(raw)
+    if (!cached || Date.now() - Number(cached.createdAt || 0) > RECOMMEND_CACHE_TTL_MS) {
+      clearRecommendCache()
+      return null
+    }
+
+    if (!cached.query || !Array.isArray(cached.results)) return null
+    return cached
+  } catch {
+    clearRecommendCache()
+    return null
+  }
+}
+
+function writeRecommendCache({ query, searchLabel, results }) {
+  try {
+    sessionStorage.setItem(RECOMMEND_CACHE_KEY, JSON.stringify({
+      query,
+      searchLabel,
+      results,
+      createdAt: Date.now(),
+    }))
+  } catch {
+    // 캐시 실패는 추천 기능 자체를 막지 않는다.
+  }
+}
+
+function clearRecommendCache() {
+  try {
+    sessionStorage.removeItem(RECOMMEND_CACHE_KEY)
+  } catch {
+    // noop
+  }
 }
