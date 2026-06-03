@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import EntrySection from '../components/landing/EntrySection'
-import LandingHeader from '../components/landing/LandingHeader'
+import AppHeader from '../components/layout/AppHeader'
 import '../styles/landing.css'
 
 export default function MainPage() {
@@ -8,7 +8,7 @@ export default function MainPage() {
 
   return (
     <div className="ld-landing">
-      <LandingHeader logoTo="/" />
+      <AppHeader logoTo="/" />
 
       <div id="stack">
         <div className="slide active" id="s5">

@@ -5,7 +5,7 @@ import VerifySection from '../components/landing/VerifySection'
 import LearnerSection from '../components/landing/LearnerSection'
 import WorkflowSection from '../components/landing/WorkflowSection'
 import EntrySection from '../components/landing/EntrySection'
-import LandingHeader from '../components/landing/LandingHeader'
+import AppHeader from '../components/layout/AppHeader'
 import '../styles/landing.css'
 
 export default function LandingPage() {
@@ -72,7 +72,7 @@ export default function LandingPage() {
   return (
     <div className={`ld-landing${exiting ? ' ld-landing-exit' : ''}`}>
       <div className="ld-main-underlay" aria-hidden="true">
-        <LandingHeader logoTo="/" inert />
+        <AppHeader logoTo="/" inert />
         <div id="stack">
           <div className="slide active" id="s5">
             <EntrySection onNavigate={() => {}} />
@@ -88,7 +88,7 @@ export default function LandingPage() {
 
       <div className="ld-hero-overlay">
       {/* NAV */}
-      <LandingHeader logoTo="/landing" />
+      <AppHeader logoTo="/landing" />
 
       {/* SLIDE STACK */}
       <div id="stack">

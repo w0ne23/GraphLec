@@ -9,6 +9,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const detail        = lecture.score_detail || {}
   const overallScore  = lecture.display_score ?? null
   const durationLabel = formatDuration(lecture.duration_sec)
+  const scoreParts    = getScoreParts(detail, overallScore)
 
   const isRelated = lecture.tier === 'related'
   const showScore = overallScore != null
@@ -47,13 +48,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
 
         {/* 메타 */}
         <div className="rec-col rec-col-meta">
-          {relatedTags.length > 0 && (
-            <div className="rec-col-tags">
-              {relatedTags.map((tag, i) => (
-                <span key={i} className="rec-tag">#{tag}</span>
-              ))}
-            </div>
-          )}
           <div className="rec-title-row">
             <span className="rec-title">{lecture.title}</span>
             {durationLabel && <span className="rec-duration-inline">· {durationLabel}</span>}
@@ -67,6 +61,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
 
         {/* 점수 + 티어 배지 + 토글 */}
         <div className="rec-col rec-col-score">
+          {showScore && (
+            <ScorePills parts={scoreParts} />
+          )}
           {showScore && (
             <div className={`rec-overall-score${isRelated ? ' rec-overall-score--related' : ''}`}>
               {overallScore}점
@@ -87,53 +84,40 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
       {isExpanded && (
         <div className="rec-item-details">
           <div className="rec-details-content">
-            {isRelated && (
-              <p className="rec-related-notice">
-                이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.
-              </p>
-            )}
-            {lecture.reason && (
-              <p className="rec-sub" style={{ marginBottom: 8 }}>{lecture.reason}</p>
-            )}
-            {lecture.summary && (
-              <p className="rec-sub" style={{ marginBottom: 10 }}>{lecture.summary}</p>
-            )}
-            {lecture.score_detail && (
-              <>
-                <h4 className="rec-details-title">AI 세부 분석 지표</h4>
-                <div className="rec-scores-grid">
-                  <div className="rec-score-group">
-                    <DetailScoreBar label="내용 점수" score={detail.content_pct ?? 0} color="#3b82f6" variant="primary" />
-                    <div className="rec-score-subrows">
-                      <DetailScoreBar label="의미 유사도" score={pct(detail.vec_score)} color="#8b5cf6" variant="sub" />
-                      <DetailScoreBar label="직접 매칭" score={pct(detail.dm_keyword ?? detail.dm_score)} color="#f59e0b" variant="sub" />
-                    </div>
+            <div className="rec-details-grid">
+              <div className="rec-details-copy">
+                {isRelated && (
+                  <p className="rec-related-notice">
+                    이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.
+                  </p>
+                )}
+
+                <section className="rec-detail-section">
+                  <h4 className="rec-details-title">핵심 키워드</h4>
+                  <div className="rec-detail-tags">
+                    {(relatedTags.length > 0 ? relatedTags : ['추천 강의']).map((tag, i) => (
+                      <span key={i} className="rec-tag">#{tag}</span>
+                    ))}
                   </div>
-                  <DetailScoreBar label="개념 그래프" score={pct(detail.graph_score)} color="#10b981" />
-                  <DetailScoreBar label="커뮤니티 점수" score={pct(detail.community_score)} color="#14b8a6" />
-                  {detail.visual_preference && (
-                    <DetailScoreBar label="시각 자료" score={pct(detail.visual_score)} color="#ec4899" />
-                  )}
-                  {detail.application_preference && (
-                    <DetailScoreBar label="예제/시연" score={pct(detail.application_score)} color="#f97316" />
-                  )}
-                  {detail.listenability_preference && (
-                    <DetailScoreBar label="청취 품질" score={pct(detail.listenability_score)} color="#06b6d4" />
-                  )}
-                  {detail.slow_speech_preference && (
-                    <DetailScoreBar label="발화 속도" score={pct(detail.speech_rate_score)} color="#84cc16" />
-                  )}
-                  <DetailScoreBar label="조건 부스트" score={pct(detail.combined_boost)} color="#64748b" />
-                </div>
-              </>
-            )}
-            <div className="rec-details-action">
-              <button
-                className="rec-play-btn"
-                onClick={e => { e.stopPropagation(); onPlay?.(lecture.video_id) }}
-              >
-                ▶ 이 강의 시청하기
-              </button>
+                </section>
+
+                <section className="rec-detail-section rec-detail-section--summary">
+                  <h4 className="rec-details-title">요약 설명</h4>
+                  <p className="rec-detail-summary">
+                    {lecture.summary || lecture.reason || '이 강의는 검색한 질의와 관련된 핵심 개념을 포함하고 있어 학습 흐름에 맞춰 참고하기 좋습니다.'}
+                  </p>
+                  <button
+                    className="rec-play-btn rec-play-btn--summary"
+                    onClick={e => { e.stopPropagation(); onPlay?.(lecture.video_id) }}
+                  >
+                    ▶ 이 강의 시청하기
+                  </button>
+                </section>
+              </div>
+
+              <div className="rec-details-chart">
+                <RadialScoreChart parts={scoreParts} />
+              </div>
             </div>
           </div>
         </div>
@@ -142,21 +126,131 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   )
 }
 
-function DetailScoreBar({ label, score, color, variant = '' }) {
-  const safeScore = clampScore(score)
+function ScorePills({ parts }) {
   return (
-    <div className={`rec-score-row${variant ? ` rec-score-row--${variant}` : ''}`}>
-      <span className="rec-score-label">{label}</span>
-      <div className="rec-score-track">
-        <div className="rec-score-fill" style={{ width: `${safeScore}%`, backgroundColor: color }} />
-      </div>
-      <span className="rec-score-num">{safeScore}</span>
+    <div className="rec-score-pills" aria-label="세부 추천 점수">
+      {parts.map(part => (
+        <span key={part.key} className={`rec-score-pill rec-score-pill--${part.key}`}>
+          {part.label} {part.value}
+        </span>
+      ))}
     </div>
   )
 }
 
-function pct(value) {
-  return Math.round((value || 0) * 100)
+function RadialScoreChart({ parts }) {
+  const total = parts.reduce((sum, part) => sum + part.value, 0)
+  const maxPartValue = Math.max(...parts.map(part => part.value), 1)
+  let cursor = -90
+  const sectors = parts.map(part => {
+    const angle = total > 0 ? (part.value / total) * 360 : 360 / parts.length
+    const sector = {
+      ...part,
+      startAngle: cursor,
+      endAngle: cursor + angle,
+      radius: 56 * Math.max(0.18, Math.min(1, part.value / maxPartValue)),
+    }
+    cursor += angle
+    return sector
+  })
+
+  return (
+      <div className="rec-radial-card">
+        <div className="rec-radial-head">
+          <span>점수 구성</span>
+        </div>
+      <div className="rec-radial-chart" aria-label="내용, 의미, 조건 점수 원형 차트">
+        <svg viewBox="0 0 132 132" role="img">
+          <circle className="rec-radial-boundary" cx="66" cy="66" r="56" />
+          {sectors.map(sector => (
+            <path
+              key={sector.key}
+              className={`rec-radial-sector rec-radial-sector--${sector.key}`}
+              d={describeSector(66, 66, sector.radius, sector.startAngle, sector.endAngle)}
+            />
+          ))}
+        </svg>
+      </div>
+      <div className="rec-radial-legend">
+        {parts.map(part => (
+          <div key={part.key} className={`rec-radial-legend-item rec-radial-legend-item--${part.key}`}>
+            <span>{part.shortLabel}</span>
+            <div className="rec-radial-meter" aria-label={`${part.label} ${part.value} / 100`}>
+              <i style={{ width: `${part.value}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function describeSector(cx, cy, radius, startAngle, endAngle) {
+  if (radius <= 0) return ''
+  const start = polarToCartesian(cx, cy, radius, endAngle)
+  const end = polarToCartesian(cx, cy, radius, startAngle)
+  const largeArcFlag = endAngle - startAngle <= 180 ? '0' : '1'
+
+  return [
+    `M ${cx} ${cy}`,
+    `L ${start.x} ${start.y}`,
+    `A ${radius} ${radius} 0 ${largeArcFlag} 0 ${end.x} ${end.y}`,
+    'Z',
+  ].join(' ')
+}
+
+function polarToCartesian(cx, cy, radius, angleInDegrees) {
+  const angleInRadians = (angleInDegrees * Math.PI) / 180
+  return {
+    x: cx + radius * Math.cos(angleInRadians),
+    y: cy + radius * Math.sin(angleInRadians),
+  }
+}
+
+function getScoreParts(detail, overallScore) {
+  const total = clampScore(overallScore ?? detail.score * 100 ?? 0)
+  const rawParts = [
+    {
+      key: 'content',
+      label: '내용 일치',
+      shortLabel: '내용',
+      raw: toRatio(detail.content_score ?? ((detail.content_pct ?? 0) / 100)),
+    },
+    {
+      key: 'meaning',
+      label: '의미 유사',
+      shortLabel: '의미',
+      raw: toRatio(detail.vec_score ?? detail.graph_score ?? 0),
+    },
+    {
+      key: 'condition',
+      label: '조건 적합',
+      shortLabel: '조건',
+      raw: toRatio(detail.combined_boost ?? detail.duration_score ?? detail.dm_keyword ?? 0),
+    },
+  ]
+
+  const rawTotal = rawParts.reduce((sum, part) => sum + part.raw, 0)
+  if (!total || rawTotal <= 0) {
+    return rawParts.map(part => ({ ...part, value: 0 }))
+  }
+
+  const values = rawParts.map(part => Math.max(0, Math.round((part.raw / rawTotal) * total)))
+  const diff = total - values.reduce((sum, value) => sum + value, 0)
+  if (values.length > 0) values[0] += diff
+
+  return rawParts.map((part, index) => ({
+    key: part.key,
+    label: part.label,
+    shortLabel: part.shortLabel,
+    value: clampScore(values[index]),
+    score10: Math.max(0, Math.min(10, Number((part.raw * 10).toFixed(1)))),
+  }))
+}
+
+function toRatio(value) {
+  const numeric = Number(value) || 0
+  return numeric > 1 ? numeric / 100 : numeric
 }
 
 function clampScore(value) {

@@ -50,7 +50,7 @@
     transform 0.86s cubic-bezier(0.77, 0, 0.175, 1);
 }
 
-.ld-landing .ld-main-underlay .ld-nav {
+.ld-landing .ld-main-underlay .app-header {
   z-index: 30;
 }
 
@@ -62,7 +62,7 @@
 /* ======================================================
    NAV
 ====================================================== */
-.ld-landing .ld-nav {
+.ld-landing .app-header {
   position: fixed;
   top: 0; left: 0; right: 0;
   z-index: 200;
@@ -76,23 +76,23 @@
   border-bottom: 1px solid rgba(248,248,252,0.42);
   box-shadow: none;
 }
-.ld-landing .nav-logo {
+.ld-landing .app-header-logo {
   display: flex; align-items: center; gap: 10px;
   padding: 0;
   background: transparent;
   border: 0;
   cursor: pointer;
 }
-.ld-landing .nav-logo-mark {
+.ld-landing .app-header-logo-mark {
   width: 32px; height: 32px;
   background: var(--peri); border-radius: 8px;
   display: flex; align-items: center; justify-content: center;
   color: white; font-family: 'Bebas Neue', sans-serif;
   font-size: 18px; letter-spacing: 1px;
 }
-.ld-landing .nav-brand { font-family: 'Noto Sans KR', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 0; color: #fff; }
-.ld-landing .nav-brand span { color: var(--peri-light); }
-.ld-landing .nav-hero-badge {
+.ld-landing .app-header-brand { font-family: 'Noto Sans KR', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: 0; color: #fff; }
+.ld-landing .app-header-brand span { color: var(--peri-light); }
+.ld-landing .app-header-badge {
   display: inline-flex; align-items: center; gap: 8px;
   margin-left: 18px;
   background: rgba(102,103,171,0.22); color: var(--peri-lighter);
@@ -101,13 +101,11 @@
   box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
   white-space: nowrap;
 }
-.ld-landing .nav-links { display: flex; gap: 2rem; list-style: none; align-items: center; margin: 0; padding: 0; }
-.ld-landing .nav-links a { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.45); text-decoration: none; transition: color 0.2s; }
-.ld-landing .nav-links a:hover { color: var(--peri-light); }
-.ld-landing .nav-cta { background: var(--peri) !important; color: white !important; padding: 8px 18px; border-radius: 6px; font-size: 13px !important; font-weight: 500 !important; transition: background 0.2s !important; }
-.ld-landing .nav-cta:hover { background: var(--peri-dark) !important; color: white !important; }
-.ld-landing .ld-nav-entry .nav-links { gap: 0; }
-.ld-landing .ld-nav-entry .nav-links a {
+.ld-landing .app-header-links { display: flex; gap: 2rem; list-style: none; align-items: center; margin: 0; padding: 0; }
+.ld-landing .app-header-links a { font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.45); text-decoration: none; transition: color 0.2s; }
+.ld-landing .app-header-links a:hover { color: var(--peri-light); }
+.ld-landing .app-header-entry .app-header-links { gap: 0; }
+.ld-landing .app-header-entry .app-header-links a {
   height: 64px;
   display: flex;
   align-items: center;
