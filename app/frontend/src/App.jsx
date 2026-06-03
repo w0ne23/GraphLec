@@ -20,12 +20,12 @@ export default function App() {
             {/* 헤더/탭바 X */}
             <Route path="/"                      element={<MainPage />} />
             <Route path="/landing"               element={<LandingPage />} />
-            <Route path="/lectures/:id"          element={<LecturePage />} />
             <Route path="/dev/lectures/:id/verifier" element={<DevVerifierPage />} />
 
             {/* 헤더/탭바 O */}
             <Route element={<MainLayout />}>
               <Route path="/lectures"   element={<LectureListPage />} />
+              <Route path="/lectures/:id" element={<LecturePage />} />
               <Route path="/verify" element={<VerifierPage />} />
               <Route path="/upload" element={<UploadPage />} />
               <Route path="/verify/:lectureId" element={<UploadJobPage mode="verify" />} />

@@ -1,20 +1,46 @@
-import { NavLink } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import RaspberryIcon from '../common/RaspberryIcon'
 
-export default function AppHeader() {
+export default function AppHeader({ logoTo = '/', inert = false, className = '' }) {
+  const navigate = useNavigate()
+
+  const go = (path) => {
+    if (inert) return
+    navigate(path)
+  }
+
+  const linkProps = (path) => ({
+    href: path,
+    tabIndex: inert ? -1 : undefined,
+    onClick: (event) => {
+      event.preventDefault()
+      go(path)
+    },
+  })
+
   return (
-    <header className="app-header">
-      <NavLink to="/" className="app-header-logo">
-        <span className="app-header-logo-mark">
+    <nav className={`app-header app-header-entry${className ? ` ${className}` : ''}`}>
+      <button
+        type="button"
+        className="app-header-logo"
+        onClick={() => go(logoTo)}
+        aria-label="GraphLec 페이지로 이동"
+        tabIndex={inert ? -1 : undefined}
+      >
+        <div className="app-header-logo-mark">
           <RaspberryIcon className="raspberry-icon" />
-        </span>
-        <span className="app-header-brand">Graph<span>Lec</span></span>
-      </NavLink>
-      <nav className="app-header-nav">
-        <NavLink to="/verify" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Verify</NavLink>
-        <NavLink to="/recommend" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>Recommend</NavLink>
-        <NavLink to="/lectures" className={({ isActive }) => 'app-header-tab' + (isActive ? ' app-header-tab--active' : '')}>QnA</NavLink>
-      </nav>
-    </header>
+        </div>
+        <div className="app-header-brand">Graph<span>Lec</span></div>
+        <div className="app-header-badge">
+          <span className="app-header-badge-dot" />
+          멀티모달 강의 분석 솔루션
+        </div>
+      </button>
+      <ul className="app-header-links">
+        <li><a {...linkProps('/verify')}>Verify</a></li>
+        <li><a {...linkProps('/recommend')}>Recommend</a></li>
+        <li><a {...linkProps('/lectures')}>QnA</a></li>
+      </ul>
+    </nav>
   )
 }

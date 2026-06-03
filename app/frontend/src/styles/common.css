@@ -86,23 +86,49 @@
    AppTabBar — 전역 하단 탭바 (모바일)
    ============================================================ */
 .app-header {
-  height: 64px; flex-shrink: 0;
-  display: flex; align-items: center; justify-content: space-between;
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   padding: 0 3rem;
+  height: 64px;
   background: rgba(13,13,26,0.85);
   backdrop-filter: blur(12px);
-  border-bottom: 1px solid rgba(102,103,171,0.2);
+  border-bottom: 1px solid rgba(248,248,252,0.42);
+  box-shadow: none;
+}
+.app-site-header {
+  position: relative;
+  top: auto;
+  left: auto;
+  right: auto;
+  flex-shrink: 0;
 }
 .app-header-logo {
-  display: flex; align-items: center; gap: 10px;
-  color: #fff; text-decoration: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
 }
 .app-header-logo-mark {
-  width: 32px; height: 32px;
-  background: var(--peri); border-radius: 8px;
-  display: flex; align-items: center; justify-content: center;
-  color: #fff; font-family: 'Bebas Neue', sans-serif;
-  font-size: 18px; letter-spacing: 1px;
+  width: 32px;
+  height: 32px;
+  background: var(--peri);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 18px;
+  letter-spacing: 1px;
 }
 .raspberry-icon {
   width: 20px;
@@ -110,29 +136,65 @@
   display: block;
 }
 .app-header-brand {
+  font-family: 'Noto Sans KR', sans-serif;
   font-size: 20px;
   font-weight: 700;
   letter-spacing: 0;
   color: #fff;
 }
 .app-header-brand span { color: var(--peri-light); }
-
-.app-header-nav { display: flex; align-items: center; }
-.app-header-tab {
-  font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.45);
-  padding: 0 14px; text-decoration: none;
-  border-bottom: 2px solid transparent;
-  transition: color .15s, border-color .15s;
-  height: 64px; display: flex; align-items: center;
+.app-header-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  margin-left: 18px;
+  background: rgba(102,103,171,0.22); color: var(--peri-lighter);
+  border: 1px solid rgba(197,198,232,0.58); border-radius: 20px; padding: 6px 14px;
+  font-size: 11px; font-weight: 400; letter-spacing: 1.2px; text-transform: uppercase;
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+  white-space: nowrap;
 }
-.app-header-tab:hover { color: var(--peri-light); }
-.app-header-tab--active { color: #fff; border-bottom-color: var(--peri-light); }
+.app-header-badge-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--peri-light);
+}
+.app-header-links {
+  display: flex; gap: 2rem; list-style: none; align-items: center; margin: 0; padding: 0;
+}
+.app-header-links a {
+  font-size: 13px; font-weight: 400; color: rgba(255,255,255,0.45); text-decoration: none; transition: color 0.2s;
+}
+.app-header-links a:hover { color: var(--peri-light); }
+.app-header-entry .app-header-links { gap: 0; }
+.app-header-entry .app-header-links a {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 2px solid transparent;
+  font-weight: 500;
+}
 
 .app-tabbar { display: none; }
 
+.app-footer {
+  flex-shrink: 0;
+  padding: 10px 2rem;
+  border-top: 1px solid rgba(102,103,171,0.16);
+  background: rgba(13,13,26,0.96);
+  color: rgba(255,255,255,0.42);
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.app-footer-team {
+  margin-top: 3px;
+  color: rgba(255,255,255,0.26);
+}
+
 @media (max-width: 768px) {
-  .app-header { justify-content: center; }
-  .app-header-nav { display: none; }
+  .app-header { justify-content: center; padding: 0 1rem; }
+  .app-header-links { display: none; }
+  .app-header-badge { display: none; }
 
   .app-tabbar {
     display: flex; flex-shrink: 0;
@@ -148,6 +210,11 @@
   }
   .app-tabbar-tab span { font-size: 12px; font-weight: 600; }
   .app-tabbar-tab--active { color: var(--blue); }
+
+  .app-footer {
+    padding: 8px 1rem;
+    font-size: 11px;
+  }
 }
 
 
