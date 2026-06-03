@@ -15,9 +15,9 @@ const DEV_FILE_BASE = typeof window !== 'undefined' && window.location?.hostname
   ? `http://${window.location.hostname}:8000`
   : ''
 const FILE_BASE = (import.meta.env.VITE_API_BASE_URL || DEV_FILE_BASE || '').replace(/\/$/, '')
-const DEFAULT_PREVIEW_ID = 'd5e73475-c1be-42ba-a526-4fd6eb420aac'
+const DEFAULT_PREVIEW_ID = 'preview'
 const DEFAULT_PREVIEW_VIDEO_TITLE = '운영체제 강의 영상'
-const DEFAULT_PREVIEW_ANALYZER_DIR = `${DEFAULT_PREVIEW_ID}_analyzer`
+const DEFAULT_PREVIEW_ANALYZER_DIR = 'preview_analyzer'
 
 function fileUrl(path) {
   return `${FILE_BASE}${path}`
@@ -43,6 +43,7 @@ const DEFAULT_PREVIEW_ARTIFACT_URLS = {
   classifiedIssues: analyzerFileUrl('_classified_issues.json'),
   classifiedIssueVerifier: analyzerFileUrl('_classified_issue_verifier.json'),
   slideErrors: DEFAULT_PREVIEW_SLIDE_ERROR_URL,
+  slideClassified: DEFAULT_PREVIEW_SLIDE_DATA_URL,
   verification: DEFAULT_PREVIEW_RESULT_URL,
 }
 
@@ -426,6 +427,7 @@ async function loadPreviewArtifacts() {
     classifiedIssues,
     classifiedIssueVerifier,
     slideErrors,
+    slideClassified,
   ] = await Promise.all([
     loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.mergedClean),
     loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.claims),
@@ -437,6 +439,7 @@ async function loadPreviewArtifacts() {
     loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.classifiedIssues),
     loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.classifiedIssueVerifier),
     loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.slideErrors),
+    loadJsonArtifact(DEFAULT_PREVIEW_ARTIFACT_URLS.slideClassified),
   ])
 
   return {
@@ -451,6 +454,7 @@ async function loadPreviewArtifacts() {
     classifiedIssues,
     classifiedIssueVerifier,
     slideErrors,
+    slideClassified,
   }
 }
 

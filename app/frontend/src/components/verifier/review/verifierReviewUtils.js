@@ -370,6 +370,24 @@ function extractUtteranceIds(text) {
   return uniqueStrings(String(text).match(/\bU\d{4,}\b/g) || [])
 }
 
+function transcriptContextsFromText(text, targetContextIds = []) {
+  const targetSet = new Set(uniqueStrings(targetContextIds))
+  return String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map((line, index) => {
+      const match = line.match(/^([^:：]+)[:：]\s*(.*)$/)
+      const contextId = match ? match[1].trim() : ''
+      return {
+        context_id: contextId || `transcript-${index + 1}`,
+        text: match ? match[2].trim() : line,
+        is_target: contextId ? targetSet.has(contextId) : false,
+      }
+    })
+    .filter(context => context.text)
+}
+
 function getItemLocation(item, sourceClaim = {}) {
   return item.location || sourceClaim.location || {}
 }
@@ -425,21 +443,37 @@ function getFeedbackUtteranceIds(item, sourceClaim = {}) {
   ])
 }
 
-function getFeedbackTranscriptContexts(item) {
+function claimTextCandidates(item, sourceClaim = {}) {
+  return uniqueStrings([
+    item.claim_text,
+    item.resolved_claim,
+    sourceClaim.claim_text,
+    sourceClaim.resolved_claim,
+    item.problem?.problematic_content,
+  ])
+}
+
+function getFeedbackTranscriptContexts(item, sourceClaim = {}) {
   const evidence = item.evidence || {}
   const contexts = []
 
   asArray(evidence.source_issues).forEach(issue => {
-    asArray(issue?.judge_context?.context_bundle?.target_contexts).forEach(context => {
+    const bundle = issue?.judge_context?.context_bundle || {}
+    asArray(bundle.target_contexts).forEach(context => {
       if (context?.text) contexts.push(context)
     })
+    asArray(bundle.window_contexts).forEach(context => {
+      if (context?.text) contexts.push(context)
+    })
+    contexts.push(...transcriptContextsFromText(bundle.current_slide_transcript, bundle.target_context_ids))
     if (issue?.context?.text) contexts.push(issue.context)
   })
 
   const seenTexts = new Set()
-  return contexts
+  const normalized = contexts
     .map(context => ({
       context_id: context.context_id,
+      is_target: Boolean(context.is_target),
       slide_number: context.slide_number,
       text: String(context.text || '').trim(),
     }))
@@ -448,6 +482,15 @@ function getFeedbackTranscriptContexts(item) {
       seenTexts.add(context.text)
       return true
     })
+
+  const targetContexts = normalized.filter(context => context.is_target)
+  if (targetContexts.length) return targetContexts
+
+  const candidates = claimTextCandidates(item, sourceClaim)
+  const matchingContexts = normalized.filter(context => (
+    candidates.some(candidate => context.text.includes(candidate) || candidate.includes(context.text))
+  ))
+  return matchingContexts.length ? matchingContexts : normalized
 }
 
 function getRejectionReason(item) {
@@ -553,7 +596,7 @@ export function feedbackItemToClaim(item, claimById) {
     secondary_issue_types: item.secondary_issue_types || crosscheck.scoring?.secondary_issue_types,
     issue_type_rationale: item.issue_type_rationale,
     issue_category_label: item.feedback_label || item.issue_category_label,
-    transcript_contexts: getFeedbackTranscriptContexts(item),
+    transcript_contexts: getFeedbackTranscriptContexts(item, sourceClaim),
     transcript_claim_text: item.claim_text || sourceClaim.claim_text,
     student_misunderstanding: feedback.student_misunderstanding,
     why_it_matters: feedback.why_it_matters,
