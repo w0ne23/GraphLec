@@ -39,12 +39,24 @@ from typing import Iterable, Optional
 import numpy as np
 import lancedb
 from google import genai
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 _client        = genai.Client(api_key=os.getenv("GOOGLE_API_KEY_2"))
 GEMINI_MODEL   = "gemini-2.5-flash"
 EMBED_MODEL    = "gemini-embedding-001"
+QUERY_LLM_PROVIDER = (
+    os.getenv("RECOMMENDER_LLM_PROVIDER")
+    or os.getenv("QUERY_SERVICE_LLM_PROVIDER")
+    or "openai"
+).strip().lower()
+QUERY_OPENAI_MODEL = (
+    os.getenv("RECOMMENDER_OPENAI_MODEL")
+    or os.getenv("QUERY_SERVICE_OPENAI_MODEL")
+    or "gpt-5.4"
+).strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
 
 def _resolve_repo_root() -> Path:
@@ -1537,8 +1549,38 @@ def _compute_fragmentation_penalty(concept_roles) -> float:
 
 
 # ============================================================================
-#  Gemini — 자연어 질의 분석
+#  OpenAI — 자연어 질의 분석
 # ============================================================================
+
+def _openai_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY 환경 변수가 없습니다.")
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
+def _call_query_analysis_llm(prompt: str) -> str:
+    if QUERY_LLM_PROVIDER == "openai":
+        response = _openai_client().chat.completions.create(
+            model=QUERY_OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "너는 강의 추천 질의를 분석해 JSON만 반환하는 분류기다.",
+                },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_completion_tokens=2048,
+            )
+        return (response.choices[0].message.content or "").strip()
+
+    response = _client.models.generate_content(
+        model    = GEMINI_MODEL,
+        contents = prompt,
+        config   = {"temperature": 0.0},
+    )
+    return response.text.strip()
+
 
 def analyze_query(
     query:              str,
@@ -1630,12 +1672,7 @@ def analyze_query(
 
 [키워드 목록]: {keyword_list}"""
 
-    response = _client.models.generate_content(
-        model    = GEMINI_MODEL,
-        contents = prompt,
-        config   = {"temperature": 0.0},
-    )
-    text   = response.text.strip().replace("```json", "").replace("```", "").strip()
+    text   = _call_query_analysis_llm(prompt).replace("```json", "").replace("```", "").strip()
     parsed = json.loads(text)
 
     intent            = parsed.get("intent") or "recommend"
