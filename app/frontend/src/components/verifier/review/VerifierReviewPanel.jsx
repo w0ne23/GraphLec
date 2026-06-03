@@ -493,7 +493,7 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             onSelectTab={selectTab}
             onOpenDetail={onOpenDetail}
             onCancelUpload={actions.cancelUpload}
-            isCancelling={flow.isBusy}
+            isCancelling={Boolean(flow.isMutating || flow.isRestarting || flow.isBusy)}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">

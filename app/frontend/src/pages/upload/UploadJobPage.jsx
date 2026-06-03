@@ -2,23 +2,11 @@ import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import PipelineProgress from '../../components/verifier/PipelineProgress'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
-import {
-  FINALIZE_PIPELINE_FLOW_NODES,
-  PHASES,
-  UPLOAD_PIPELINE_FLOW_NODES,
-  VERIFY_PROGRESS_PIPELINE_FLOW_NODES,
-} from '../../components/verifier/verifierConstants'
-import { useVerifierRouteFlow } from '../../hooks/useVerifierRouteFlow'
+import { PHASES } from '../../components/verifier/verifierConstants'
+import { useJobStream } from '../../hooks/useJobStream'
+import { normalizeMode } from '../../lib/jobStreamUtils'
 
 import '../../styles/verifier.css'
-
-function normalizeMode(value) {
-  const token = String(value || '').trim().toLowerCase().replaceAll('-', '_')
-  if (['publish', 'publication', 'upload', 'direct', 'direct_upload', 'graph', 'graph_upload'].includes(token)) {
-    return 'publish'
-  }
-  return 'verify'
-}
 
 function LoadingState({ mode }) {
   return (
@@ -37,6 +25,7 @@ function LoadingState({ mode }) {
 function VerifyModePage({ flow }) {
   const [isReviewOpen, setIsReviewOpen] = useState(false)
   const canOpenResult = flow.phase === PHASES.VERIFY_READY && flow.verifier
+  const actionDisabled = flow.isRestarting || flow.isMutating
 
   if (isReviewOpen) {
     return (
@@ -59,24 +48,25 @@ function VerifyModePage({ flow }) {
       <div className="vf-status-wrap">
         <div className="vf-status-inner vf-status-inner--wide">
           <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
-          <div className="vf-status-label">검증 파이프라인</div>
+          <div className="vf-status-label">{flow.pipelineLabel}</div>
           <PipelineProgress
             stages={flow.pipelineStages}
             phase={canOpenResult ? PHASES.VERIFY_READY : flow.phase === PHASES.ERROR ? PHASES.ERROR : PHASES.PIPELINE1}
             errorMessage={flow.errorMessage}
             statusMessage={flow.currentStage || '검증 파이프라인을 진행 중입니다.'}
-            flowNodes={VERIFY_PROGRESS_PIPELINE_FLOW_NODES}
+            flowNodes={flow.pipelineFlowNodes}
+            priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={flow.isBusy}>
+            <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={actionDisabled}>
               작업 삭제
             </button>
             <button
               className="vf-confirm-btn"
-              disabled={flow.isBusy}
-              onClick={canOpenResult ? () => setIsReviewOpen(true) : flow.actions.restartVerify}
+              disabled={actionDisabled || (canOpenResult && !flow.verifier)}
+              onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
             >
-              {canOpenResult ? '결과 보기' : flow.isBusy ? '재시작 중' : '재시작'}
+              {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
             </button>
           </div>
         </div>
@@ -87,42 +77,41 @@ function VerifyModePage({ flow }) {
 
 function PublishModePage({ flow }) {
   const isDone = flow.phase === PHASES.DONE
+  const actionDisabled = flow.isRestarting || flow.isMutating
   const progressPhase = flow.phase === PHASES.DONE
     ? PHASES.DONE
     : flow.phase === PHASES.ERROR
       ? PHASES.ERROR
       : PHASES.PIPELINE2
-  const flowNodes = flow.lecture.is_verified
-    ? FINALIZE_PIPELINE_FLOW_NODES
-    : UPLOAD_PIPELINE_FLOW_NODES
 
   return (
     <div className="vf-page">
       <div className="vf-status-wrap">
         <div className="vf-status-inner">
           <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
-          <div className="vf-status-label">업로드 파이프라인</div>
+          <div className="vf-status-label">{flow.pipelineLabel}</div>
           <PipelineProgress
             stages={flow.pipelineStages}
             phase={progressPhase}
             errorMessage={flow.errorMessage}
             statusMessage={flow.currentStage || '업로드 파이프라인을 진행 중입니다.'}
-            flowNodes={flowNodes}
+            flowNodes={flow.pipelineFlowNodes}
+            priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
             {!isDone && (
               <button
                 className="vf-confirm-btn"
-                disabled={flow.isBusy}
-                onClick={flow.actions.restartPublish}
+                disabled={actionDisabled}
+                onClick={() => flow.actions.restart('publish')}
               >
-                {flow.isBusy ? '재시작 중' : '재시작'}
+                {flow.isRestarting ? '재시작 중' : '재시작'}
               </button>
             )}
             <button
               className={isDone ? 'vf-reset-btn' : 'vf-cancel-btn'}
               onClick={isDone ? flow.actions.reset : flow.actions.cancelUpload}
-              disabled={flow.isBusy}
+              disabled={actionDisabled}
             >
               {isDone ? '새 강의 업로드' : '업로드 취소'}
             </button>
@@ -136,7 +125,7 @@ function PublishModePage({ flow }) {
 export default function UploadJobPage({ mode: routeMode = 'verify' }) {
   const { lectureId } = useParams()
   const mode = normalizeMode(routeMode)
-  const flow = useVerifierRouteFlow(lectureId, mode)
+  const flow = useJobStream(lectureId, mode)
 
   if (flow.isLoading) return <LoadingState mode={mode} />
   if (mode === 'publish') return <PublishModePage flow={flow} />
