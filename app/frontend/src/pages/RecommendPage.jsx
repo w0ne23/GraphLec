@@ -7,10 +7,10 @@ import RecommendListItem from '../components/recommend/RecommendListItem'
 import '../styles/recommend.css'
 
 const SUGGESTIONS = [
-  '선형대수 행렬 강의',
-  '30분 내외의 그림 위주 파이썬',
-  '음질 좋은 DNA 복제 단계 설명해주는 강의',
-  '딥러닝 CNN 실습 위주 강의',
+  '선형대수 행렬 강의 뭐 있어?',
+  '그림 위주로 설명는 30분 내외 파이썬 강의 알려줘',
+  'DNA 복제 단계 설명해주는 음질 좋은 강의 추천해줘',
+  '딥러닝 CNN 실습 위주 강의 보여줘',
 ]
 
 export default function RecommendPage() {
