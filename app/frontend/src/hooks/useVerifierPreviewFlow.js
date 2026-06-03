@@ -180,10 +180,6 @@ const EMPTY_VERIFIER_PREVIEW = {
     title: DEFAULT_PREVIEW_VIDEO_TITLE,
     video_url: DEFAULT_PREVIEW_VIDEO_URL,
   },
-  file: {
-    name: DEFAULT_PREVIEW_VIDEO_TITLE,
-    size: null,
-  },
   verifier: FALLBACK_VERIFIER_RESULT,
   verifierArtifacts: {},
 }
@@ -500,8 +496,8 @@ async function loadPreviewScenes() {
 
 export function useVerifierPreviewFlow() {
   const [preview, setPreview] = useState(EMPTY_VERIFIER_PREVIEW)
-  const [title, setTitle] = useState(EMPTY_VERIFIER_PREVIEW.lecture.title)
-  const [file, setFile] = useState(EMPTY_VERIFIER_PREVIEW.file)
+  const [title, setTitle] = useState('')
+  const [file, setFile] = useState(null)
 
   const [phase, setPhase] = useState(PHASES.VERIFY_CHOICE)
   const [stageGroupIndex, setStageGroupIndex] = useState(-1)
@@ -535,8 +531,6 @@ export function useVerifierPreviewFlow() {
 
         const nextPreview = createPreviewResult(verifierResult, [], artifacts)
         setPreview(nextPreview)
-        setFile(nextPreview.file)
-        setTitle(nextPreview.lecture.title)
 
         const scenes = await loadPreviewScenes()
         if (!active || scenes.length === 0) return
@@ -553,8 +547,6 @@ export function useVerifierPreviewFlow() {
         const fallbackResult = mergeSlideErrorArtifact(FALLBACK_VERIFIER_RESULT, slideErrorResult)
         const nextPreview = createPreviewResult(fallbackResult)
         setPreview(nextPreview)
-        setFile(nextPreview.file)
-        setTitle(nextPreview.lecture.title)
       }
     }
 
@@ -628,8 +620,8 @@ export function useVerifierPreviewFlow() {
     setExpandedClaimKey('')
     setIsVideoMode(false)
     setSeekToSeconds(null)
-    setFile(preview.file)
-    setTitle(preview.lecture.title)
+    setFile(null)
+    setTitle('')
   }
 
   function retry() {
