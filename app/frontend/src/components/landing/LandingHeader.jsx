@@ -37,7 +37,7 @@ export default function LandingHeader({ logoTo = '/', inert = false }) {
         </div>
       </button>
       <ul className="nav-links">
-        <li><a {...linkProps('/upload')}>Verify</a></li>
+        <li><a {...linkProps('/verify')}>Verify</a></li>
         <li><a {...linkProps('/recommend')}>Recommend</a></li>
         <li><a {...linkProps('/lectures')}>QnA</a></li>
       </ul>

@@ -26,8 +26,8 @@ export default function App() {
             {/* 헤더/탭바 O */}
             <Route element={<MainLayout />}>
               <Route path="/lectures"   element={<LectureListPage />} />
+              <Route path="/verify" element={<VerifierPage />} />
               <Route path="/upload" element={<UploadPage />} />
-              <Route path="/upload/preview" element={<VerifierPage />} />
               <Route path="/verify/:lectureId" element={<UploadJobPage mode="verify" />} />
               <Route path="/publish/:lectureId" element={<UploadJobPage mode="publish" />} />
               <Route path="/dev/upload" element={<DevUploadPage />} />

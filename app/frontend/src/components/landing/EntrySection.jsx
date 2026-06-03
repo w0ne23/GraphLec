@@ -12,7 +12,7 @@ export default function EntrySection({ onNavigate }) {
         <div className="ld-cards">
           <button
             className="ld-card"
-            onClick={() => onNavigate('/upload')}
+            onClick={() => onNavigate('/verify')}
           >
             <div className="feature-icon-wrap ld-entry-icon">
               <svg className="feature-icon" viewBox="0 0 24 24">
