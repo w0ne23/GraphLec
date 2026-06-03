@@ -110,6 +110,66 @@ PIPELINE_STAGE_LABELS = {
 }
 
 
+def _parse_cpu_group(group: str) -> list[int]:
+    cpus: set[int] = set()
+    for part in group.split(","):
+        token = part.strip()
+        if not token:
+            continue
+        if "-" in token:
+            start_text, end_text = token.split("-", 1)
+            start = int(start_text.strip())
+            end = int(end_text.strip())
+            if end < start:
+                start, end = end, start
+            cpus.update(range(start, end + 1))
+        else:
+            cpus.add(int(token))
+    return sorted(cpus)
+
+
+def _available_cpus() -> list[int]:
+    try:
+        return sorted(os.sched_getaffinity(0))
+    except AttributeError:
+        return list(range(os.cpu_count() or 1))
+
+
+def _cpu_set_for_worker(worker_index: int, worker_count: int) -> list[int]:
+    explicit = os.getenv("GRAPHLEC_WORKER_CPU_SETS", "").strip()
+    if explicit:
+        groups = [group.strip() for group in explicit.split(";") if group.strip()]
+        if groups:
+            return _parse_cpu_group(groups[worker_index % len(groups)])
+
+    cpus = _available_cpus()
+    worker_count = max(1, int(worker_count))
+    worker_index = max(0, int(worker_index)) % worker_count
+    chunk = max(1, (len(cpus) + worker_count - 1) // worker_count)
+    start = worker_index * chunk
+    assigned = cpus[start:start + chunk]
+    return assigned or cpus
+
+
+def _apply_pipeline_cpu_affinity(worker_index: int, worker_count: int, job_id: str) -> None:
+    if os.getenv("GRAPHLEC_WORKER_PIN_CPUS", "1").lower() in {"0", "false", "no"}:
+        return
+    cpus = _cpu_set_for_worker(worker_index, worker_count)
+    try:
+        os.sched_setaffinity(0, set(cpus))
+        logger.info(
+            "--- [Child Process %s] CPU affinity set: worker=%s/%s cpus=%s ---",
+            job_id,
+            worker_index + 1,
+            worker_count,
+            ",".join(map(str, cpus)),
+        )
+    except AttributeError:
+        logger.info("--- [Child Process %s] CPU affinity unsupported on this platform. ---", job_id)
+    except Exception as exc:
+        logger.warning("--- [Child Process %s] CPU affinity failed: %s ---", job_id, exc)
+
+
 def _initial_stage_state(job_type: str) -> dict[str, str]:
     stages = {key: "wait" for key in PIPELINE_STAGE_KEYS}
     if job_type == JOB_TYPE_GRAPH_UPLOAD:
@@ -136,8 +196,11 @@ def pipeline_process(
     job_type: str,
     uploaded_at: str | None = None,
     title: str = "",
+    worker_index: int = 0,
+    worker_count: int = 1,
 ):
     pipeline_path = os.getenv("PIPELINE_ROOT", str(Path(__file__).resolve().parent.parent.parent.parent))
+    _apply_pipeline_cpu_affinity(worker_index, worker_count, job_id)
 
     # spawn된 자식 프로세스는 부모의 sys.path를 상속받지 않으므로 pipeline 패키지를 import하기 위해 명시적으로 경로를 추가한다.
     # os.chdir은 pipeline 내부의 상대 경로 참조를 위해 필요하다.
@@ -216,7 +279,7 @@ def pipeline_process(
         return False, None, str(e)
 
 
-async def worker_loop():
+async def worker_loop(worker_index: int = 0, worker_count: int = 1):
     try:
         mp_context = multiprocessing.get_context("spawn")
         executor   = ProcessPoolExecutor(max_workers=1, mp_context=mp_context)
@@ -231,7 +294,13 @@ async def worker_loop():
                 logger.info(f"--- [Worker Recovery] Marked {count} orphaned jobs as error. ---")
             await db.commit()
 
-        logger.info(f"--- [Worker] Started. Storage: {LOCAL_STORAGE_DIR} ---")
+        logger.info(
+            "--- [Worker %s/%s] Started. Storage: %s CPU set: %s ---",
+            worker_index + 1,
+            worker_count,
+            LOCAL_STORAGE_DIR,
+            ",".join(map(str, _cpu_set_for_worker(worker_index, worker_count))),
+        )
 
         while True:
             try:
@@ -298,6 +367,8 @@ async def worker_loop():
                         pipeline_job_type,
                         job_uploaded_at,
                         job_title,
+                        worker_index,
+                        worker_count,
                     )
                 except concurrent.futures.process.BrokenProcessPool as bp_err:
                     logger.error(f"--- [Worker EXECUTOR BROKEN] {job_id_str}: {bp_err} ---")

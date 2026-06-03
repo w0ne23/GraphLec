@@ -3,6 +3,7 @@
 """
 
 import subprocess
+import os
 
 import librosa
 import numpy as np
@@ -102,12 +103,24 @@ def analyze_audio_features(audio_path: str) -> dict:
     }
 
     # 7. 템포 (말하기 속도)
-    print("    - 템포 추정...")
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    features['tempo'] = {
-        'bpm': float(tempo.item()) if hasattr(tempo, 'item') else float(tempo),
-        'description': '말하기 속도 지표 (BPM)'
-    }
+    # librosa.beat.beat_track can crash the native process on some long lecture
+    # inputs. It is non-critical for the pipeline, so keep it opt-in.
+    tempo_flag = os.getenv("GRAPHLEC_AUDIO_TEMPO_ENABLED", "0").strip().lower()
+    tempo_enabled = bool(tempo_flag) and tempo_flag not in {"0", "false", "no"}
+    if tempo_enabled:
+        print("    - 템포 추정...")
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        features['tempo'] = {
+            'bpm': float(tempo.item()) if hasattr(tempo, 'item') else float(tempo),
+            'description': '말하기 속도 지표 (BPM)'
+        }
+    else:
+        print("    - 템포 추정 건너뜀...")
+        features['tempo'] = {
+            'bpm': None,
+            'skipped': True,
+            'description': '말하기 속도 지표 (비활성화됨)'
+        }
 
     # 8. 침묵 구간 감지
     print("    - 침묵 구간 분석...")
@@ -171,15 +184,6 @@ def evaluate_audio_quality(features: dict) -> dict:
             'unit': 'Hz',
             'description': '고품질 녹음 환경'
         },
-        'tempo': {
-            'name': '말하기 속도',
-            'value': features['tempo']['bpm'],
-            'min': 80,
-            'max': 150,
-            'optimal': (100, 130),
-            'unit': 'BPM',
-            'description': '이해하기 적절한 속도'
-        },
         'silence_ratio': {
             'name': '침묵 비율',
             'value': features['silence_detection']['silence_ratio'] * 100,
@@ -199,6 +203,17 @@ def evaluate_audio_quality(features: dict) -> dict:
             'description': '깨끗하고 안정적인 녹음'
         }
     }
+    tempo_value = features.get('tempo', {}).get('bpm')
+    if isinstance(tempo_value, (int, float)) and np.isfinite(tempo_value):
+        criteria['tempo'] = {
+            'name': '말하기 속도',
+            'value': tempo_value,
+            'min': 80,
+            'max': 150,
+            'optimal': (100, 130),
+            'unit': 'BPM',
+            'description': '이해하기 적절한 속도'
+        }
 
     # 각 항목 평가
     for key, criterion in criteria.items():

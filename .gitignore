@@ -6,6 +6,9 @@
 # ── 파이프라인 출력물 ─────────────────────────────────────────
 output/
 slides/
+backup.sql
+core.*
+**/core.*
 *.json
 *.jpg
 *.html
@@ -79,6 +82,7 @@ TODOs.md
 
 # ── Local Storage ─────────────────────────────────────────────
 local_storage/
+local_storage*/
 
 # ── OS ────────────────────────────────────────────────────────
 .DS_Store

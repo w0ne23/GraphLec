@@ -9,6 +9,7 @@ import json
 import os
 import re
 import time
+import base64
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,8 @@ from .config import GEMINI_GENERATIVE_MODEL, gemini_client_2
 load_dotenv()
 
 GEMINI_MODEL = GEMINI_GENERATIVE_MODEL
+IMAGE_PROVIDER = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_PROVIDER", "gemini").strip().lower()
+IMAGE_MODEL = os.getenv("GRAPHLEC_TEXT_PROCESSOR_IMAGE_MODEL", "gpt-4.1-mini").strip()
 
 BATCH_SIZE = int(os.getenv("MERGE_CORRECTION_BATCH_SIZE", "50"))
 TRANSITION_LEAD_SEC = float(os.getenv("MERGE_TRANSITION_LEAD_SEC", "1.0"))
@@ -79,19 +82,75 @@ def _add_usage(response, stage: str = "stage3b_text_processor") -> None:
         pass
 
 
-def api_call_with_retry(func, max_retries: int = 5, initial_wait: int = 10):
-    for attempt in range(max_retries):
+def _call_openai_image_correction(prompt: str, image_bytes: bytes):
+    from .config import get_openai_client
+    from .utils import api_call_with_retry
+
+    client = get_openai_client()
+    if client is None:
+        raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    content = [
+        {
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{b64}",
+                "detail": "high",
+            },
+        },
+        {"type": "text", "text": prompt},
+    ]
+
+    def call():
+        return client.chat.completions.create(
+            model=IMAGE_MODEL,
+            messages=[{"role": "user", "content": content}],
+            response_format={"type": "json_object"},
+            max_completion_tokens=8192,
+            temperature=0,
+        )
+
+    response = api_call_with_retry(call)
+    try:
+        from .cost_report import record_model_call
+
+        record_model_call(
+            stage="stage3b_text_processor_pass2",
+            provider="openai",
+            model=IMAGE_MODEL,
+            response=response,
+            image_count=1,
+            prompt_chars=len(prompt),
+        )
+    except Exception:
+        pass
+    return response.choices[0].message.content or ""
+
+
+def api_call_with_retry(func, max_retries: int | None = None, initial_wait: int | None = None):
+    if max_retries is None:
+        max_retries = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_MAX_RETRIES", "0"))
+    if initial_wait is None:
+        initial_wait = int(os.getenv("GRAPHLEC_TEXT_PROCESSOR_API_INITIAL_WAIT", "10"))
+    max_wait = float(os.getenv("GRAPHLEC_API_RETRY_MAX_WAIT_SEC", "60"))
+    infinite = max_retries <= 0
+    attempt = 0
+    while infinite or attempt < max_retries:
         try:
             return func()
         except Exception as exc:
+            attempt += 1
             err = str(exc)
             retryable = ["429", "503", "500", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "overloaded"]
-            if any(code in err for code in retryable) and attempt < max_retries - 1:
-                wait = initial_wait * (attempt + 1)
-                print(f"  재시도 ({attempt + 1}): {err[:60]}, {wait}초 대기")
+            if any(code in err for code in retryable) and (infinite or attempt < max_retries):
+                wait = min(initial_wait * attempt, max_wait)
+                total = "∞" if infinite else str(max_retries - 1)
+                print(f"  재시도 ({attempt}/{total}): {err[:60]}, {wait:g}초 대기")
                 time.sleep(wait)
                 continue
             raise
+    raise Exception("API 호출 실패")
 
 
 def _normalize_text(text: str) -> str:
@@ -498,6 +557,7 @@ def _correct_batch_pass2(
 - 강의자의 발화 구조를 절대적으로 따라가라
 - 내용 오류, 개념 오류, 슬라이드와 발화의 불일치는 verifier가 확인할 문제이므로 전사 보정에서 제거하지 말 것"""
 
+    img_bytes = None
     contents = []
     if has_image:
         with open(slide_image_path, "rb") as f:
@@ -517,9 +577,13 @@ def _correct_batch_pass2(
         )
 
     try:
-        response = api_call_with_retry(call)
-        _add_usage(response, stage="stage3b_text_processor_pass2")
-        local_corrections = parse_batch_response(response.text or "")
+        if has_image and IMAGE_PROVIDER == "openai":
+            response_text = _call_openai_image_correction(prompt, img_bytes or b"")
+        else:
+            response = api_call_with_retry(call)
+            _add_usage(response, stage="stage3b_text_processor_pass2")
+            response_text = response.text or ""
+        local_corrections = parse_batch_response(response_text)
     except Exception as exc:
         print(f"  [Pass2 오류 무시] {exc}")
         return {}

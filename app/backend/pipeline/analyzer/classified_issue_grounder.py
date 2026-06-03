@@ -1,7 +1,7 @@
 """Web grounding for classified issue verifier results.
 
 This stage runs after ``classified_issue_verifier`` and checks externally
-verifiable factual_error issues with Gemini Search.
+verifiable factual_error and temporal_error issues with Gemini Search.
 It only grounds surfaced verifier candidates and can lower refuted candidates
 below the rejected threshold.
 """
@@ -29,7 +29,7 @@ from config import get_gemini_client_sequence
 from utils import api_call_with_retry, is_retryable_api_error
 
 
-GROUNDABLE_CATEGORIES = {"factual_error"}
+GROUNDABLE_CATEGORIES = {"factual_error", "temporal_error"}
 GROUNDING_STATUSES = {
     "supports_issue",
     "refutes_issue",
@@ -273,12 +273,21 @@ def _parse_response(text: str) -> dict[str, Any]:
     sources = payload.get("evidence_sources", [])
     if not isinstance(sources, list):
         sources = []
+    sources = [
+        str(source).strip()
+        for source in sources
+        if re.match(r"^https?://", str(source).strip(), flags=re.IGNORECASE)
+    ]
+    if status in {"supports_issue", "refutes_issue"} and not sources:
+        status = "insufficient_evidence"
+        claim_verdict = "uncertain"
+        issue_supported = None
     return {
         "status": status,
         "claim_verdict": claim_verdict or "uncertain",
         "issue_supported": issue_supported if isinstance(issue_supported, bool) else None,
         "reason": reason,
-        "evidence_sources": [str(source).strip() for source in sources if str(source).strip()],
+        "evidence_sources": sources,
         "evidence_summary": evidence_summary,
     }
 
@@ -311,7 +320,11 @@ def _parse_line_response(text: str) -> dict[str, Any]:
             if lowered in {"", "none", "n/a", "없음"}:
                 fields[key] = []
             else:
-                fields[key] = [part.strip() for part in re.split(r"[,\\n]+", value) if part.strip()]
+                fields[key] = [
+                    re.sub(r"\s+", "", part)
+                    for part in value.split(",")
+                    if re.sub(r"\s+", "", part)
+                ]
         else:
             fields[key] = value
     return fields

@@ -29,8 +29,10 @@ Output:
 import os
 import re
 import json
+import base64
 import logging
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -73,6 +75,11 @@ class Config:
     slides_dir: Path = Path("output_slides")     # slide_extractor.py 출력 디렉토리
     output_dir: Path = Path("output")
     output_filename: str = "slide_textualized.json"  # 저장 파일명 ({stem}_slide_textualized.json)
+    provider: str = os.getenv("GRAPHLEC_SLIDE_TEXTUALIZER_PROVIDER", "gemini")
+    model: str = os.getenv(
+        "GRAPHLEC_SLIDE_TEXTUALIZER_MODEL",
+        os.getenv("GRAPHLEC_OPENAI_TEXTUALIZER_MODEL", "gpt-4.1-mini"),
+    )
     gemini_model: str = GEMINI_GENERATIVE_MODEL
     max_retries: int = 3
     retry_delay: float = 5.0
@@ -588,9 +595,75 @@ class T1Extractor:
 
     def __init__(self, config: Config):
         self.config = config
-        from .config import gemini_client
-        self.client = gemini_client
-        logger.info("✓ Gemini initialized for t1 extraction")
+        self.provider = str(config.provider or "gemini").strip().lower()
+        if self.provider == "openai":
+            from .config import get_openai_client
+            self.client = get_openai_client()
+            if self.client is None:
+                raise RuntimeError("OPENAI_API_KEY가 설정되지 않았습니다.")
+            logger.info(f"✓ OpenAI initialized for t1 extraction: {self.config.model}")
+        else:
+            from .config import gemini_client
+            self.client = gemini_client
+            logger.info(f"✓ Gemini initialized for t1 extraction: {self.config.gemini_model}")
+
+    @staticmethod
+    def _image_to_data_url(image: Image.Image) -> str:
+        buf = BytesIO()
+        image.save(buf, format="JPEG", quality=90)
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        return f"data:image/jpeg;base64,{b64}"
+
+    def _call_openai(self, image: Image.Image, base_image: Image.Image = None) -> str:
+        if base_image is not None:
+            prompt = T1_EXTRACTION_PROMPT_WITH_ANNOT
+            content = [
+                {"type": "text", "text": "Image 1 (BASE):"},
+                {"type": "image_url", "image_url": {"url": self._image_to_data_url(base_image), "detail": "high"}},
+                {"type": "text", "text": "Image 2 (LAST_ANNOT):"},
+                {"type": "image_url", "image_url": {"url": self._image_to_data_url(image), "detail": "high"}},
+                {"type": "text", "text": prompt},
+            ]
+        else:
+            prompt = T1_EXTRACTION_PROMPT
+            content = [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": self._image_to_data_url(image), "detail": "high"}},
+            ]
+
+        last_exc = None
+        for attempt in range(self.config.max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.config.model,
+                    messages=[{"role": "user", "content": content}],
+                    response_format={"type": "json_object"},
+                    max_completion_tokens=4096,
+                    temperature=0,
+                )
+                try:
+                    from .cost_report import record_model_call
+
+                    record_model_call(
+                        stage="stage2a_slide_textualizer",
+                        provider="openai",
+                        model=self.config.model,
+                        response=response,
+                        image_count=2 if base_image is not None else 1,
+                        prompt_chars=len(prompt),
+                    )
+                except Exception:
+                    pass
+                return (response.choices[0].message.content or "").strip()
+            except Exception as e:
+                last_exc = e
+                logger.warning(
+                    f"  ⚠ OpenAI call failed "
+                    f"(attempt {attempt+1}/{self.config.max_retries}): {e}"
+                )
+                if attempt < self.config.max_retries - 1:
+                    time.sleep(self.config.retry_delay * (attempt + 1))
+        raise last_exc
 
     @staticmethod
     def _filter_emphasis(emphasis_list: List[Dict]) -> List[Dict]:
@@ -821,6 +894,9 @@ class T1Extractor:
           Image 2 (LAST_ANNOT)→ t1 텍스트 추출
         base_image가 없으면 단일 이미지 프롬프트 사용.
         """
+        if self.provider == "openai":
+            return self._call_openai(image, base_image=base_image)
+
         if base_image is not None:
             contents = [
                 "Image 1 (BASE):", base_image,

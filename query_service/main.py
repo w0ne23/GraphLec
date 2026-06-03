@@ -27,6 +27,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from neo4j import GraphDatabase
 from neo4j.exceptions import Neo4jError, ServiceUnavailable
+from openai import OpenAI
 from pydantic import BaseModel, Field
 
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
@@ -50,6 +51,9 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY_2") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 GEMINI_ANSWER_MODEL = os.getenv("GEMINI_ANSWER_MODEL", "gemini-2.5-flash")
+QUERY_LLM_PROVIDER = os.getenv("QUERY_SERVICE_LLM_PROVIDER", "openai").strip().lower()
+QUERY_OPENAI_MODEL = os.getenv("QUERY_SERVICE_OPENAI_MODEL", "gpt-5.4").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 TOP_K = int(os.getenv("GRAPHLEC_TOP_K", "8"))
 GRAPH_TOP_K = int(os.getenv("GRAPHLEC_GRAPH_TOP_K", "12"))
 RETRY_DELAYS = [0, 5, 15, 30]
@@ -362,26 +366,55 @@ def _gemini_client() -> genai.Client:
     return genai.Client(api_key=GEMINI_API_KEY)
 
 
-def _call_gemini_raw(contents: str, system_instruction: str) -> str:
-    client = _gemini_client()
+def _openai_client() -> OpenAI:
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY 환경 변수가 없습니다.")
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+
+def _is_retryable_llm_error(error: Exception) -> bool:
+    err_s = str(error)
+    return any(k in err_s for k in ("429", "500", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "high demand", "overloaded"))
+
+
+def _call_llm_raw(contents: str, system_instruction: str, *, temperature: float = 0.0, max_tokens: int = 2048) -> str:
     last_err: Optional[Exception] = None
     for delay in RETRY_DELAYS:
         if delay:
             time.sleep(delay)
         try:
+            if QUERY_LLM_PROVIDER == "openai":
+                r = _openai_client().chat.completions.create(
+                    model=QUERY_OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": contents},
+                    ],
+                    temperature=temperature,
+                    max_completion_tokens=max_tokens,
+                )
+                return (r.choices[0].message.content or "").strip()
+            client = _gemini_client()
             r = client.models.generate_content(
                 model=GEMINI_ANSWER_MODEL,
                 contents=contents,
-                config={"system_instruction": system_instruction},
+                config={
+                    "system_instruction": system_instruction,
+                    "temperature": temperature,
+                    "max_output_tokens": max_tokens,
+                },
             )
             return (r.text or "").strip()
         except Exception as e:
             last_err = e
-            err_s = str(e)
-            if not any(k in err_s for k in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "high demand")):
+            if not _is_retryable_llm_error(e):
                 raise
     assert last_err is not None
     raise last_err
+
+
+def _call_gemini_raw(contents: str, system_instruction: str) -> str:
+    return _call_llm_raw(contents, system_instruction, temperature=0.0, max_tokens=2048)
 
 
 def _format_conversation_history(history: list[dict[str, str]], max_chars: int = 1600) -> str:
@@ -462,35 +495,13 @@ def _call_gemini_answer(
     conversation_history: Optional[list[dict[str, str]]] = None,
     resolved_question: Optional[str] = None,
 ) -> str:
-    client = _gemini_client()
     history = _format_conversation_history(conversation_history or [])
     history_block = f"이전 대화:\n{history}\n\n" if history else ""
     resolved_block = ""
     if resolved_question and resolved_question.strip() and resolved_question.strip() != question.strip():
         resolved_block = f"이전 대화를 반영한 검색 질문: {resolved_question.strip()}\n\n"
     contents = f"{history_block}현재 질문: {question}\n\n{resolved_block}근거:\n{context}"
-    last_err: Optional[Exception] = None
-    for delay in RETRY_DELAYS:
-        if delay:
-            time.sleep(delay)
-        try:
-            r = client.models.generate_content(
-                model=GEMINI_ANSWER_MODEL,
-                contents=contents,
-                config={
-                    "system_instruction": ANSWER_SYSTEM_PROMPT,
-                    "temperature": 0.2,
-                    "max_output_tokens": 2048,
-                },
-            )
-            return (r.text or "").strip()
-        except Exception as e:
-            last_err = e
-            err_s = str(e)
-            if not any(k in err_s for k in ("429", "503", "RESOURCE_EXHAUSTED", "UNAVAILABLE", "high demand")):
-                raise
-    assert last_err is not None
-    raise last_err
+    return _call_llm_raw(contents, ANSWER_SYSTEM_PROMPT, temperature=0.2, max_tokens=2048)
 
 
 def _dedupe_preserve_order(items: list[str]) -> list[str]:
@@ -2872,7 +2883,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         try:
             answer = _call_gemini_answer(context, raw_question, req.conversation_history, resolved_question=question)
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Gemini 답변 생성 실패: {e}") from e
+            raise HTTPException(status_code=502, detail=f"LLM 답변 생성 실패: {e}") from e
         answer = _compact_answer(answer, question, retrieved_chunks, source_mode=source_mode)
     if _is_refusal_answer(answer):
         retrieved_chunks = []

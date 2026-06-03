@@ -932,7 +932,15 @@ def build_analyzer_input(
         try:
             with open(merged_clean_path, "r", encoding="utf-8") as f:
                 existing = json.load(f)
-            if any(slide.get("contexts") for slide in existing.get("slides", [])):
+            has_existing_contexts = any(slide.get("contexts") for slide in existing.get("slides", []))
+            has_structured_contexts = any(scene.get("contexts") for scene in slides_structure or [])
+            existing_context_ids = [
+                str(ctx.get("context_id", "") or "")
+                for slide in existing.get("slides", []) or []
+                for ctx in slide.get("contexts", []) or []
+            ]
+            fallback_only = bool(existing_context_ids) and all("-V01-" in cid for cid in existing_context_ids)
+            if has_existing_contexts and not (has_structured_contexts and fallback_only):
                 print(f"\n  ⏭  V1 build_analyzer_input — verifier 입력 context 파일 존재, 스킵")
                 print(f"     {merged_clean_path}")
                 print("─" * 70)
