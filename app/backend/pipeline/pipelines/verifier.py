@@ -83,4 +83,3 @@ def run_verifier_pipeline(
         "claims_result": r10a,
         "issue_judge_result": r10b,
     }
-

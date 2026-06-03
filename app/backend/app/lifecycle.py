@@ -19,6 +19,12 @@ LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_sto
 # Global worker task registry for monitoring
 worker_tasks = []
 
+def _worker_count() -> int:
+    try:
+        return max(1, int(os.getenv("GRAPHLEC_BACKEND_WORKERS", "3")))
+    except ValueError:
+        return 3
+
 async def monitor_workers():
     """Periodically logs the number of active workers."""
     while True:
@@ -63,7 +69,8 @@ async def lifespan(app):
         )
     
     logger.info("--- [FastAPI] Starting worker loops... ---")
-    worker_tasks = [asyncio.create_task(worker_loop()) for _ in range(3)]
+    count = _worker_count()
+    worker_tasks = [asyncio.create_task(worker_loop(i, count)) for i in range(count)]
     monitor_task = asyncio.create_task(monitor_workers())
     logger.info(f"--- [FastAPI] {len(worker_tasks)} worker tasks and monitor created. ---")
     

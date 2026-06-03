@@ -1032,6 +1032,13 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
             for row in model_judgments
             if str(row.get("reason", "")).strip()
         )
+        web_grounding = issue.get("web_grounding") if isinstance(issue.get("web_grounding"), dict) else {}
+        grounding_reason = str(web_grounding.get("reason") or "").strip()
+        grounding_sources = web_grounding.get("evidence_sources") if isinstance(web_grounding.get("evidence_sources"), list) else []
+        if web_grounding.get("status") == "refutes_issue" and grounding_reason:
+            reason = f"웹 근거로 기각: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
+        elif web_grounding.get("status") == "supports_issue" and grounding_reason:
+            reason = f"웹 근거로 확인: {grounding_reason}" + (f" / 기존 모델 판단: {reason}" if reason else "")
         minimal_fix = next(
             (
                 row.get("minimal_fix", "")
@@ -1085,6 +1092,8 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                 "evidence": {
                     "slide_number": location.get("slide_number"),
                     "evidence_in_context": reason,
+                    "web_grounding": web_grounding,
+                    "web_sources": grounding_sources,
                     "source_issues": [issue],
                 },
                 "checks": {
@@ -1103,6 +1112,7 @@ def build_content_verification_view(result: dict[str, Any]) -> dict[str, Any]:
                     "average_context_resolution": issue.get("average_context_resolution", 0.0),
                     "model_disagreement": issue.get("model_disagreement", 0.0),
                     "needs_manual_review": bool(issue.get("needs_manual_review")),
+                    "web_grounding": web_grounding,
                 },
             }
         )
