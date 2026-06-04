@@ -20,6 +20,7 @@ const DEFAULT_PREVIEW_VIDEO_TITLE = '운영체제 강의 영상'
 const DEFAULT_PREVIEW_ANALYZER_DIR = 'preview_analyzer'
 
 function fileUrl(path) {
+  if (path.startsWith('/files/')) return path
   return `${FILE_BASE}${path}`
 }
 
