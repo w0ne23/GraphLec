@@ -30,6 +30,7 @@ import os
 import argparse
 import math
 import re
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
@@ -955,7 +956,7 @@ class CommunityIndex:
         return round(min(best, 1.0), 4)
 
 
-def _fast_list_by_domain_analysis(
+def _fast_list_query_analysis(
     query: str,
     available_domains: list[str],
     available_subdomains: list[str],
@@ -977,12 +978,13 @@ def _fast_list_by_domain_analysis(
     if not has_list_signal:
         return None
 
+    query_terms = [query]
     if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "list_by_domain", query, [], [], None, None, None, {}
+        return "list_by_topic", query, query_terms, [], None, None, None, {}
 
     domain, subdomain = _infer_domain_filters(query, available_domains, available_subdomains)
     if domain:
-        return "list_by_domain", query, [], [], domain, None, None, {"subdomain": subdomain}
+        return "list_by_topic", query, query_terms, [], domain, None, None, {"subdomain": subdomain}
 
     return None
 
@@ -1616,7 +1618,7 @@ def analyze_query(
     질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec 추출.
 
     반환:
-      intent             : "recommend" | "list_by_domain" | "list_by_topic"
+      intent             : "recommend" | "list_by_topic"
       search_text        : 벡터 임베딩용 전체 텍스트 (query + inferred 합산)
       query_keywords     : 원본 질의에서 직접 추출한 핵심 용어 (dm 100% 반영)
       inferred_keywords  : Gemini가 의미 확장한 연관 용어 (dm 50% 반영)
@@ -1641,7 +1643,7 @@ def analyze_query(
 {{
   "query_keywords": ["원본 질의 핵심 용어1", ...],
   "inferred_keywords": ["확장 연관 용어1", ...],
-  "intent": "recommend 또는 list_by_domain 또는 list_by_topic",
+  "intent": "recommend 또는 list_by_topic",
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
@@ -1658,10 +1660,8 @@ def analyze_query(
 [intent]: 질의 목적 분류
   - "recommend": 특정 강의를 추천받고 싶은 일반 질의
     예) "가상 메모리 자세히 설명하는 강의 추천해줘"
-  - "list_by_domain": 분야/도메인 강의 목록을 묻는 질의
-    예) "컴퓨터공학 강의 뭐 있어?", "경제학 강의 목록 보여줘", "전체 강의 뭐 있어?"
   - "list_by_topic": 특정 주제와 관련된 강의를 넓게/모두 보고 싶은 질의
-    예) "딥러닝 관련 강의 모두 알려줘", "운영체제 관련 강의 다 보여줘"
+    예) "딥러닝 관련 강의 모두 알려줘", "운영체제 관련 강의 다 보여줘", "컴퓨터공학 강의 뭐 있어?"
 
 [query_keywords]: 원본 질의에서 직접 등장하는 핵심 학술·기술 용어
 - "찾아줘", "알려줘", "강의", "어떻게" 같은 메타·구어체 표현 제외
@@ -1737,7 +1737,7 @@ def analyze_query(
             duration_max_sec = int(duration_max_sec)
         except (ValueError, TypeError):
             duration_max_sec = None
-    if intent not in ("recommend", "list_by_domain", "list_by_topic"):
+    if intent not in ("recommend", "list_by_topic"):
         intent = "recommend"
 
     result = (
@@ -1920,6 +1920,7 @@ class Recommender:
     def __init__(self, metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
         self.collection          = MetadataCollection(metadata_dir)
         self.cfg                 = config or RecommenderConfig()
+        self._recommend_lock     = threading.RLock()
         self._available_domains  = self.collection.available_domains()
         self._available_subdomains = self.collection.available_subdomains()
         self._available_keywords = self.collection.available_keywords()
@@ -1979,7 +1980,7 @@ class Recommender:
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
-        fast_analysis = _fast_list_by_domain_analysis(query, self._available_domains, self._available_subdomains)
+        fast_analysis = _fast_list_query_analysis(query, self._available_domains, self._available_subdomains)
         if fast_analysis:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = fast_analysis
         else:
@@ -2049,39 +2050,6 @@ class Recommender:
 
     def _all_candidate_ids(self) -> list[str]:
         return [lec.video_id for lec in self.collection.all()]
-
-    def _list_by_domain_results(self, ctx: QueryContext, top_k: int) -> list[RecommendResult]:
-        lectures = []
-        for lec in self.collection.all():
-            if ctx.domain and lec.domain != ctx.domain:
-                continue
-            if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
-                continue
-            lectures.append(lec)
-
-        lectures.sort(key=lambda lec: lec.title or lec.video_id)
-
-        scope = _DOMAIN_LABELS.get(ctx.domain, ctx.domain) if ctx.domain else "전체"
-        if ctx.subdomain:
-            scope = f"{scope} / {ctx.subdomain}"
-        reason = "전체 강의 목록입니다." if not ctx.domain else f"{scope} 분야 강의 목록입니다."
-        results = []
-        for lec in lectures[:top_k]:
-            results.append(RecommendResult(
-                video_id      = lec.video_id,
-                title         = lec.title,
-                domain        = lec.domain,
-                instructor    = lec.instructor_id,
-                score         = 0.0,
-                display_score = None,
-                duration_sec  = lec.duration_sec,
-                score_detail  = {},
-                reason        = reason,
-                summary       = lec.summary,
-                tier          = "list",
-                keywords      = lec.keywords or [],
-            ))
-        return results
 
     def _rrf_fuse(
         self,
@@ -2822,11 +2790,12 @@ class Recommender:
         """
         ctx = self._prepare_query_context(query)
 
-        if ctx.intent == "list_by_domain":
-            return self._list_by_domain_results(ctx, max(top_k, self.cfg.LIST_QUERY_TOP_K))
-
         restored_cfg = None
+        config_locked = False
         effective_top_k = top_k
+        if ctx.intent == "list_by_topic" or min_score is not None:
+            self._recommend_lock.acquire()
+            config_locked = True
         if ctx.intent == "list_by_topic":
             effective_top_k = max(top_k, self.cfg.LIST_QUERY_TOP_K)
             restored_cfg = {
@@ -2848,11 +2817,12 @@ class Recommender:
 
         try:
             # ── 질의 벡터화 ───────────────────────────────────────────────
-            query_vec = (
-                _embed(ctx.search_text)
-                if self._vector_search_index.video_ids
-                else []
-            )
+            query_vec = []
+            if self._vector_search_index.video_ids:
+                try:
+                    query_vec = _embed(ctx.search_text)
+                except Exception as exc:
+                    print(f"  ⚠ 질의 임베딩 실패 — BM25/metadata 기반으로 계속 진행: {exc}")
             candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
             candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
 
@@ -2863,6 +2833,8 @@ class Recommender:
             if restored_cfg:
                 for key, value in restored_cfg.items():
                     setattr(self.cfg, key, value)
+            if config_locked:
+                self._recommend_lock.release()
 
     def print_results(self, results: list[RecommendResult], title: str = "추천 결과", top_k: int = 3):
         top = results[:top_k]
