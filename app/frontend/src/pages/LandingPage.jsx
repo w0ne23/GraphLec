@@ -29,46 +29,13 @@ export default function LandingPage() {
     return () => clearTimeout(exitTimer.current)
   }, [])
 
-  // Wheel
-  useEffect(() => {
-    let accum = 0
-    let timer = null
-    const onWheel = (e) => {
-      e.preventDefault()
-      accum += e.deltaY
-      clearTimeout(timer)
-      timer = setTimeout(() => {
-        if (accum > 60) goMain()
-        accum = 0
-      }, 80)
-    }
-    window.addEventListener('wheel', onWheel, { passive: false })
-    return () => window.removeEventListener('wheel', onWheel)
-  }, [goMain])
-
   // Keyboard
   useEffect(() => {
     const onKey = (e) => {
-      if (['ArrowDown', 'ArrowRight', 'PageDown', 'Enter', ' '].includes(e.key)) goMain()
+      if (['Enter', ' '].includes(e.key)) goMain()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [goMain])
-
-  // Touch
-  useEffect(() => {
-    let y0 = 0
-    const onStart = (e) => { y0 = e.touches[0].clientY }
-    const onEnd   = (e) => {
-      const dy = y0 - e.changedTouches[0].clientY
-      if (dy > 50) goMain()
-    }
-    window.addEventListener('touchstart', onStart, { passive: true })
-    window.addEventListener('touchend',   onEnd,   { passive: true })
-    return () => {
-      window.removeEventListener('touchstart', onStart)
-      window.removeEventListener('touchend',   onEnd)
-    }
   }, [goMain])
 
   return (
