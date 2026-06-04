@@ -33,11 +33,11 @@ export const PIPELINE_STAGES = {
   },
   verifier_final_verification: {
     key: 'verifier_final_verification',
-    label: '최종 평가',
+    label: '멀티 LLM 검증',
   },
   verify_slide_errors: {
     key: 'verify_slide_errors',
-    label: '슬라이드 오타 검사',
+    label: '최종 검증',
   },
   graph_classify_scene: {
     key: 'graph_classify_scene',
@@ -122,12 +122,12 @@ export const PIPELINE_NODES = {
   }),
   final_verification: createNode({
     id: 'final_verification',
-    label: '최종 평가',
+    label: '멀티 LLM 검증',
     stageKeys: ['verifier_final_verification'],
   }),
   slide_review: createNode({
     id: 'slide_review',
-    label: '슬라이드 오타',
+    label: '최종 검증',
     stageKeys: ['verify_slide_errors'],
   }),
   verified: createNode({ id: 'verified', label: '검증 결과 확인', type: 'major' }),

@@ -210,6 +210,7 @@
   }
 }
 .vf-flow-label {
+  width: max-content;
   max-width: 104px;
   min-height: 34px;
   font-size: 11px;
@@ -217,6 +218,8 @@
   color: var(--t3);
   text-align: center;
   white-space: normal;
+  word-break: keep-all;
+  overflow-wrap: normal;
 }
 .vf-flow-item--run .vf-flow-label {
   color: var(--blue);
