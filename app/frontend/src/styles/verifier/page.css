@@ -17,7 +17,7 @@
 .vf-upload-inner,
 .vf-status-inner {
   display: flex; flex-direction: column; align-items: center;
-  width: 100%; max-width: 960px; gap: 14px;
+  width: 100%; max-width: 960px; gap: 1.5rem;
 }
 .vf-upload-inner {
   max-width: 580px;
@@ -216,13 +216,16 @@
 
 /* ── 버튼 ── */
 .vf-reset-btn {
-  padding: 10px 24px;
-  background: var(--blue); color: #fff;
-  border: none; border-radius: var(--r);
-  font-size: 13px; font-weight: bold;
+  padding: 14px 24px;
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  border-radius: var(--r);
+  font-size: 14px;
+  font-weight: bold;
   transition: opacity .15s;
 }
-.vf-reset-btn:hover { opacity: .85; }
+.vf-reset-btn:hover { opacity: .87; }
 .vf-retry-btn {
   padding: 10px 24px;
   background: var(--blue);

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import PipelineProgress from '../components/verifier/PipelineProgress'
+import PipelineStatusHeader from '../components/verifier/PipelineStatusHeader'
 import VerifyReportPanels from '../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../components/verifier/verifierConstants'
@@ -108,8 +109,7 @@ function VerifyPipelineStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">{flow.pipelineLabel}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
@@ -119,17 +119,13 @@ function VerifyPipelineStep({ flow }) {
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
         <div className="vf-status-actions">
-      {flow.phase === PHASES.VERIFY_READY ? (
-        <button className="vf-confirm-btn" onClick={actions.openReview}>
-          결과 보기
-        </button>
-      ) : (
-        <button className="vf-confirm-btn" disabled>
-          검증 진행 중
-        </button>
-      )}
-          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
-    </div>
+          {flow.phase === PHASES.VERIFY_READY && (
+            <button className="vf-confirm-btn" onClick={actions.openReview}>
+              결과 보기
+            </button>
+          )}
+          <button className="vf-cancel-btn" onClick={actions.reset}>검증 중단</button>
+        </div>
       </div>
     </div>
   )
@@ -141,8 +137,7 @@ function PipelineRunStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">{flow.pipelineLabel}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
@@ -163,13 +158,12 @@ function VerifierDoneStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-done-icon">✅</div>
-        <div className="vf-status-title">{flow.lecture.title}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={PHASES.DONE}
           errorMessage={flow.errorMessage}
-          statusMessage="분석이 완료되었습니다."
+          statusMessage="업로드가 완료되었습니다."
           flowNodes={flow.pipelineFlowNodes}
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
@@ -185,8 +179,7 @@ function VerifierErrorStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-label vf-status-label--err">오류 발생</div>
-        <div className="vf-status-title">{flow.lecture.title}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={PHASES.ERROR}

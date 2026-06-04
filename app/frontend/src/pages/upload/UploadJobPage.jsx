@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import PipelineProgress from '../../components/verifier/PipelineProgress'
+import PipelineStatusHeader from '../../components/verifier/PipelineStatusHeader'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../../components/verifier/verifierConstants'
 import { useJobStream } from '../../hooks/useJobStream'
@@ -49,8 +50,7 @@ function VerifyModePage({ flow }) {
     <div className="vf-page">
       <div className="vf-status-wrap">
         <div className="vf-status-inner vf-status-inner--wide">
-          <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
-          <div className="vf-status-label">{flow.pipelineLabel}</div>
+          <PipelineStatusHeader title={flow.lecture.title || '강의 영상'} pipelineLabel={flow.pipelineLabel} />
           <PipelineProgress
             stages={flow.pipelineStages}
             phase={canOpenResult ? PHASES.VERIFY_READY : flow.phase === PHASES.ERROR ? PHASES.ERROR : PHASES.PIPELINE1}
@@ -93,8 +93,7 @@ function PublishModePage({ flow }) {
     <div className="vf-page">
       <div className="vf-status-wrap">
         <div className="vf-status-inner">
-          <div className="vf-status-title">{flow.lecture.title || '강의 영상'}</div>
-          <div className="vf-status-label">{flow.pipelineLabel}</div>
+          <PipelineStatusHeader title={flow.lecture.title || '강의 영상'} pipelineLabel={flow.pipelineLabel} />
           <PipelineProgress
             stages={flow.pipelineStages}
             phase={progressPhase}
