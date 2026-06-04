@@ -31,11 +31,13 @@ function cx(...classNames) {
 function ReviewSection({ title, count, tone = '', empty, children }) {
   return (
     <section className={cx('vf-section', SECTION_TONE_CLASS[tone])}>
-      <div className="vf-section-head">
-        <h2>{title}</h2>
-        <span>{count}</span>
+      <div className="vf-section-inner">
+        <div className="vf-section-head">
+          <h2>{title}</h2>
+          <span>{count}</span>
+        </div>
+        {count > 0 ? children : <div className="vf-empty">{empty}</div>}
       </div>
-      {count > 0 ? children : <div className="vf-empty">{empty}</div>}
     </section>
   )
 }
