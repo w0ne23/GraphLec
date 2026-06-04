@@ -33,8 +33,11 @@ async def init_db():
             "SET is_verified = TRUE "
             "WHERE id IN ("
             "  SELECT lecture_id FROM processing_jobs "
-            "  WHERE job_type = 'verified_upload' "
-            "  AND status IN ('done', 'waiting_approval')"
+            "  WHERE ("
+            "    job_type = 'legacy_full' AND status = 'done'"
+            "  ) OR ("
+            "    job_type = 'verified_upload' AND status IN ('done', 'waiting_approval')"
+            "  )"
             ")"
         ))
         await conn.execute(text(
