@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { PHASES } from '../components/verifier/verifierConstants'
 import { useUploadForm } from '../hooks/useUploadForm'
+import { usePageTitle } from '../hooks/usePageTitle'
 
 import '../styles/verifier.css'
 
@@ -125,6 +126,7 @@ function VerifierErrorStep({ flow }) {
 
 export default function UploadPage() {
   const flow = useUploadForm()
+  usePageTitle(flow.phase === PHASES.VERIFY_CHOICE ? 'Upload' : flow.mode === 'verify' ? 'Verify' : 'Publish')
 
   return (
     <div className="vf-page">

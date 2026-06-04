@@ -1,10 +1,12 @@
 import { useNavigate } from 'react-router-dom'
 import EntrySection from '../components/landing/EntrySection'
 import AppHeader from '../components/layout/AppHeader'
+import { usePageTitle } from '../hooks/usePageTitle'
 import '../styles/landing.css'
 
 export default function MainPage() {
   const navigate = useNavigate()
+  usePageTitle()
 
   return (
     <div className="ld-landing">

@@ -4,6 +4,7 @@ import PipelineProgress from '../../components/verifier/PipelineProgress'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../../components/verifier/verifierConstants'
 import { useJobStream } from '../../hooks/useJobStream'
+import { usePageTitle } from '../../hooks/usePageTitle'
 import { normalizeMode } from '../../lib/jobStreamUtils'
 
 import '../../styles/verifier.css'
@@ -25,6 +26,7 @@ function LoadingState({ mode }) {
 function VerifyModePage({ flow }) {
   const [isReviewOpen, setIsReviewOpen] = useState(false)
   const canOpenResult = flow.phase === PHASES.VERIFY_READY && flow.verifier
+  const isError = flow.phase === PHASES.ERROR
   const actionDisabled = flow.isRestarting || flow.isMutating
 
   if (isReviewOpen) {
@@ -61,13 +63,15 @@ function VerifyModePage({ flow }) {
             <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={actionDisabled}>
               작업 삭제
             </button>
-            <button
-              className="vf-confirm-btn"
-              disabled={actionDisabled || (canOpenResult && !flow.verifier)}
-              onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
-            >
-              {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
-            </button>
+            {(canOpenResult || isError) && (
+              <button
+                className="vf-confirm-btn"
+                disabled={actionDisabled || (canOpenResult && !flow.verifier)}
+                onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
+              >
+                {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -77,6 +81,7 @@ function VerifyModePage({ flow }) {
 
 function PublishModePage({ flow }) {
   const isDone = flow.phase === PHASES.DONE
+  const isError = flow.phase === PHASES.ERROR
   const actionDisabled = flow.isRestarting || flow.isMutating
   const progressPhase = flow.phase === PHASES.DONE
     ? PHASES.DONE
@@ -99,7 +104,7 @@ function PublishModePage({ flow }) {
             priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            {!isDone && (
+            {isError && (
               <button
                 className="vf-confirm-btn"
                 disabled={actionDisabled}
@@ -126,6 +131,8 @@ export default function UploadJobPage({ mode: routeMode = 'verify' }) {
   const { lectureId } = useParams()
   const mode = normalizeMode(routeMode)
   const flow = useJobStream(lectureId, mode)
+  const pageLabel = (mode === 'publish') ? 'Publish' : 'Verify'
+  usePageTitle(flow.lecture.title ? `${flow.lecture.title} - ${pageLabel}` : pageLabel)
 
   if (flow.isLoading) return <LoadingState mode={mode} />
   if (mode === 'publish') return <PublishModePage flow={flow} />

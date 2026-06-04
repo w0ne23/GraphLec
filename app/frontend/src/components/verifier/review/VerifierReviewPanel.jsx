@@ -97,24 +97,12 @@ function SortControls({ value, onChange }) {
   )
 }
 
-function VerifierReviewTopbar({ onBack }) {
-  return (
-    <div className="vf-topbar">
-      <div className="vf-topbar-main">
-        {onBack && <button className="vf-topbar-back" onClick={onBack}>← 이전으로</button>}
-        <div className="vf-topbar-title">
-          <strong>Verifier</strong>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function reviewTabClassName(tab, activeTab) {
   return cx('vf-review-tab', REVIEW_TAB_CLASS[tab], activeTab === tab && 'vf-review-tab--active')
 }
 
 function VerifierReviewHeader({
+  onBack,
   activeTab,
   lectureTitle,
   reviewCount,
@@ -129,6 +117,7 @@ function VerifierReviewHeader({
     <div className="vf-review-header">
       <div className="vf-review-header-main">
         <div className="vf-review-heading">
+          {onBack && <button className="vf-topbar-back" onClick={onBack}>◀</button>}
           <strong>{lectureTitle}</strong>
           <span>검토 결과</span>
         </div>
@@ -292,7 +281,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
   const counts = verifier?.counts || {}
   const reviewCount = sections.needsReview.length
   const typoCount = counts.slide_errors ?? sections.slideTypos.length
-  const filteredCount = sections.filtered.length + sections.firstStageRejected.length
 
   function selectTab(tab) {
     setActiveTab(tab)
@@ -356,78 +344,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
     )
   }
 
-  function renderFilteredSection({ title, items, section, empty, tone = '' }) {
-    if (!items.length) return null
-    const sortedItems = sortClaims(items)
-    return (
-      <ReviewSection key={section} title={title} count={items.length} tone={tone} empty={empty}>
-        <SortControls value={sortMode} onChange={setSortMode} />
-        {renderClaimList(sortedItems, section)}
-      </ReviewSection>
-    )
-  }
-
-  function renderRejectedSubmenu() {
-    if (filteredCount <= 0) return null
-
-    if (sections.usesFeedbackItems) {
-      const sortedRejected = sortClaims(sections.filtered)
-      return (
-        <details className="vf-rejected-submenu">
-          <summary>
-            <span>검토 대상에서 제외된 후보</span>
-            <strong>{filteredCount}</strong>
-          </summary>
-          <p>자동 검증에서 검토 대상으로 올리기 어렵다고 판단한 참고 항목입니다.</p>
-          <SortControls value={sortMode} onChange={setSortMode} />
-          {renderClaimList(sortedRejected, 'rejected')}
-        </details>
-      )
-    }
-
-    const filteredGroups = [
-      {
-        title: '최종 평가 기각',
-        items: sections.crossRejected,
-        section: 'verifier_rejected',
-        empty: '최종 평가에서 기각된 후보가 없습니다.',
-      },
-      {
-        title: '교차검증 불확실',
-        items: sections.inconclusive,
-        section: 'crosscheck_inconclusive',
-        empty: '교차검증에서 불확실로 남은 후보가 없습니다.',
-        tone: 'review',
-      },
-      {
-        title: '근거 기각',
-        items: sections.groundingRejected,
-        section: 'grounding_rejected',
-        empty: '외부 근거로 기각된 후보가 없습니다.',
-      },
-    ]
-
-    return (
-      <details className="vf-rejected-submenu">
-        <summary>
-          <span>검토 대상에서 제외된 후보</span>
-          <strong>{filteredCount}</strong>
-        </summary>
-        <p>자동 검증에서 검토 대상으로 올리기 어렵다고 판단한 참고 항목입니다.</p>
-        {filteredGroups
-          .filter(group => group.items.length > 0)
-          .map(group => renderFilteredSection(group))}
-        <ReviewSection
-          title="1차 판정에서 제외된 claim"
-          count={sections.firstStageRejected.length}
-          empty="1차 판정에서 제외된 claim이 없습니다."
-        >
-          {renderClaimList(sections.firstStageRejected, 'first_stage_rejected')}
-        </ReviewSection>
-      </details>
-    )
-  }
-
   function renderActivePanel() {
     if (activeTab === 'review') {
       const filteredReview = sortClaims(filterIssueClaims(sections.needsReview))
@@ -473,7 +389,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
   if (!verifier) {
     return (
       <div className="vf-shell">
-        <VerifierReviewTopbar />
         <div className="vf-error">Verifier 결과를 불러오는 중입니다.</div>
       </div>
     )
@@ -481,11 +396,9 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
 
   return (
     <div className="vf-shell">
-      <VerifierReviewTopbar onBack={actions.backToVerifyReady} />
-
-      <div className="vf-body">
         <section className="vf-review-panel">
           <VerifierReviewHeader
+            onBack={actions.backToVerifyReady}
             activeTab={activeTab}
             lectureTitle={lecture.title}
             reviewCount={reviewCount}
@@ -509,11 +422,9 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             )}
             <div className="vf-review-scroll">
               {renderActivePanel()}
-              {activeTab === 'review' && renderRejectedSubmenu()}
             </div>
           </div>
         </section>
-      </div>
 
       {showNextConfirm && (
         <ReviewConfirmModal

@@ -15,6 +15,8 @@ const NODE_STATUS_CLASS = {
   wait: '',
 }
 
+const CONNECTOR_COMPLETE_STATUSES = new Set(['done', 'prior', 'run'])
+
 const WORK_LOG_STATUS_CLASS = {
   done: '',
   prior: '',
@@ -63,6 +65,12 @@ function getNodeStatus(node, stages, phase, priorNodeIds = new Set()) {
 
 function getActiveNode(flowNodes, stages, phase, priorNodeIds) {
   return flowNodes.find(node => getNodeStatus(node, stages, phase, priorNodeIds) === 'run')
+}
+
+function getRenderedNodeStatus(node, nodeIndex, activeNodeIndex, stages, phase, priorNodeIds) {
+  const rawNodeStatus = getNodeStatus(node, stages, phase, priorNodeIds)
+  if (activeNodeIndex >= 0 && nodeIndex > activeNodeIndex) return 'wait'
+  return rawNodeStatus
 }
 
 function getLogNode(activeNode, flowNodes) {
@@ -144,12 +152,19 @@ export default function PipelineProgress({
   const displayStatusMessage = getStatusMessageText(statusMessage, flowNodes)
 
   function renderNode(node, nodeIndex) {
-    const rawNodeStatus = getNodeStatus(node, stages, phase, priorNodeIdSet)
-    const nodeStatus = activeNodeIndex >= 0 && nodeIndex > activeNodeIndex ? 'wait' : rawNodeStatus
+    const nodeStatus = getRenderedNodeStatus(node, nodeIndex, activeNodeIndex, stages, phase, priorNodeIdSet)
+    const nextNode = flowNodes[nodeIndex + 1]
+    const nextNodeStatus = nextNode
+      ? getRenderedNodeStatus(nextNode, nodeIndex + 1, activeNodeIndex, stages, phase, priorNodeIdSet)
+      : 'wait'
+    const connectorComplete =
+      CONNECTOR_COMPLETE_STATUSES.has(nodeStatus) &&
+      CONNECTOR_COMPLETE_STATUSES.has(nextNodeStatus)
     const classes = cx(
       'vf-flow-item',
       NODE_TYPE_CLASS[node.type],
       NODE_STATUS_CLASS[nodeStatus],
+      connectorComplete && 'vf-flow-item--connector-complete',
     )
 
     return (

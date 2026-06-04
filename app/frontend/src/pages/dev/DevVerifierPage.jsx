@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { getLectureDetail, getLectureVerifier } from '../../lib/api'
+import { usePageTitle } from '../../hooks/usePageTitle'
 
 import VideoPlayer from '../../components/watch/VideoPlayer'
 
@@ -574,6 +575,7 @@ export default function DevVerifierPage() {
   const [activeIssueFilter, setActiveIssueFilter] = useState('all')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
+  usePageTitle(lecture?.title ? `${lecture.title} - Verifier` : 'Verifier')
 
   useEffect(() => {
     if (!id) return

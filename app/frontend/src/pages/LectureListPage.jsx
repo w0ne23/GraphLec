@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { listLectures } from '../lib/api'
 import LectureItem from '../components/lecture-list/LectureItem'
+import { usePageTitle } from '../hooks/usePageTitle'
 
 import '../styles/lecture-list.css'
 
@@ -33,6 +34,7 @@ const ITEMS_PER_PAGE = 12
 
 export default function LectureListPage() {
   const navigate = useNavigate()
+  usePageTitle('Lectures')
   
   const [lectures, setLectures] = useState([])
   const [loading, setLoading] = useState(true)

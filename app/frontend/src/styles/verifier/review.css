@@ -266,6 +266,7 @@
   flex: 1;
   min-height: 0;
   display: flex;
+  flex-direction: row;
   overflow: hidden;
 }
 
@@ -275,7 +276,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 60px;
+  align-items: center;
   overflow-y: auto;
   padding-inline: 20px;
   padding-block: 0;
@@ -339,10 +340,15 @@
 }
 
 .vf-section {
-  margin-top: 0;
+  width: 1180px;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: strietch;
 }
 
 .vf-section-head {
+  flex: 1;
   min-height: 40px;
   display: flex;
   align-items: center;

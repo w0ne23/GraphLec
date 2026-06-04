@@ -6,10 +6,12 @@ import LearnerSection from '../components/landing/LearnerSection'
 import WorkflowSection from '../components/landing/WorkflowSection'
 import EntrySection from '../components/landing/EntrySection'
 import AppHeader from '../components/layout/AppHeader'
+import { usePageTitle } from '../hooks/usePageTitle'
 import '../styles/landing.css'
 
 export default function LandingPage() {
   const navigate = useNavigate()
+  usePageTitle()
   const [exiting, setExiting] = useState(false)
   const animating = useRef(false)
   const exitTimer = useRef(null)
