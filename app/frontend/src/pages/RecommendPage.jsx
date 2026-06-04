@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { recommendLectures } from '../lib/api'
+import { usePageTitle } from '../hooks/usePageTitle'
 
 import RecommendListItem from '../components/recommend/RecommendListItem'
 
@@ -18,6 +19,7 @@ const RECOMMEND_CACHE_TTL_MS = 60 * 60 * 1000
 
 export default function RecommendPage() {
   const navigate = useNavigate()
+  usePageTitle('Recommend')
   const [query,       setQuery]       = useState('')
   const [submitted,   setSubmitted]   = useState(false)
   const [loading,     setLoading]     = useState(false)

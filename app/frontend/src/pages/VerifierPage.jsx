@@ -4,6 +4,7 @@ import VerifyReportPanels from '../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../components/verifier/verifierConstants'
 import { useVerifierPreviewFlow } from '../hooks/useVerifierPreviewFlow'
+import { usePageTitle } from '../hooks/usePageTitle'
 
 import '../styles/verifier.css'
 
@@ -223,6 +224,7 @@ function VerifyDetailStep({ flow, onBackReview }) {
 
 export default function VerifierPage() {
   const flow = useVerifierPreviewFlow()
+  usePageTitle(flow.phase === PHASES.VERIFY_CHOICE ? 'Upload' : flow.selectedWorkflowMode === 'verify' ? 'Verify' : 'Publish')
   const [reviewView, setReviewView] = useState('review')
   const isVerifyPipelinePhase =
     flow.phase === PHASES.PIPELINE1 ||

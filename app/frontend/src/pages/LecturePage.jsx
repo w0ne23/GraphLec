@@ -7,6 +7,7 @@ import {
 
 import { useChatSession } from '../hooks/useChatSession'
 import { useGraphSession } from '../hooks/useGraphSession'
+import { usePageTitle } from '../hooks/usePageTitle'
 import { useResizer } from '../hooks/useResizer'
 
 import VideoPlayer from '../components/watch/VideoPlayer'
@@ -45,6 +46,7 @@ export default function LecturePage() {
   const [isInfoOpen, setIsInfoOpen] = useState(false)
 
   const leftRef = useRef(null)
+  usePageTitle(lecture?.title || 'Lecture Viewer')
 
   const toggleChat = () => setIsChatOpen(v => !v)
   const toggleGraphPanel = () => setIsGraphPanelOpen(v => !v)

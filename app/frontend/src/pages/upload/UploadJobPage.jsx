@@ -4,6 +4,7 @@ import PipelineProgress from '../../components/verifier/PipelineProgress'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../../components/verifier/verifierConstants'
 import { useJobStream } from '../../hooks/useJobStream'
+import { usePageTitle } from '../../hooks/usePageTitle'
 import { normalizeMode } from '../../lib/jobStreamUtils'
 
 import '../../styles/verifier.css'
@@ -130,6 +131,8 @@ export default function UploadJobPage({ mode: routeMode = 'verify' }) {
   const { lectureId } = useParams()
   const mode = normalizeMode(routeMode)
   const flow = useJobStream(lectureId, mode)
+  const pageLabel = (mode === 'publish') ? 'Publish' : 'Verify'
+  usePageTitle(flow.lecture.title ? `${flow.lecture.title} - ${pageLabel}` : pageLabel)
 
   if (flow.isLoading) return <LoadingState mode={mode} />
   if (mode === 'publish') return <PublishModePage flow={flow} />

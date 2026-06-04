@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { listActiveJobs, listUploadedLectures, uploadLecture, deleteLecture, retryLecture } from '../../lib/api'
+import { usePageTitle } from '../../hooks/usePageTitle'
 
 import '../../styles/dev-upload.css'
 
@@ -56,6 +57,7 @@ const THUMB_ICON = {
 
 export default function DevUploadPage() {
   const navigate = useNavigate()
+  usePageTitle('Upload')
 
   const [lectures,    setLectures]    = useState([])
   const [title,       setTitle]       = useState('')
