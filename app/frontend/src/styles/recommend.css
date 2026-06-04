@@ -158,18 +158,6 @@
   cursor: not-allowed;
 }
 
-/* 티어 배지 (간접 관련) */
-.rec-item--related    { opacity: .92; }
-.rec-overall-score--related    { color: var(--amber); }
-.rec-tier-badge {
-  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
-  background: var(--amber-bg); color: var(--amber);
-}
-.rec-related-notice {
-  font-size: 12px; color: var(--amber); margin-bottom: 8px;
-  padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r);
-}
-
 /* 모바일 */
 @media (max-width: 768px) {
   .rec-hero     { padding-top: 14vh; }
@@ -470,11 +458,6 @@
   padding-inline: 16px;
 }
 
-/* 티어 배지 */
-.rec-item--related { opacity: .92; }
-.rec-overall-score--related { color: var(--amber); }
-.rec-tier-badge { font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 3px; background: var(--amber-bg); color: var(--amber); }
-.rec-related-notice { font-size: 12px; color: var(--amber); margin-bottom: 8px; padding: 6px 10px; background: var(--amber-bg); border-radius: var(--r); }
 .rec-condition-warnings { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
 .rec-condition-warning {
   font-size: 11px;

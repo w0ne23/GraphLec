@@ -1582,6 +1582,31 @@ def _call_query_analysis_llm(prompt: str) -> str:
     return response.text.strip()
 
 
+_ANALYZE_QUERY_CACHE: dict[tuple[str, tuple[str, ...], int], tuple] = {}
+
+
+def _analysis_cache_key(query: str, available_domains: list[str], available_keywords: list[str]) -> tuple[str, tuple[str, ...], int]:
+    return (
+        re.sub(r"\s+", " ", str(query or "").strip()),
+        tuple(sorted(available_domains)),
+        len(available_keywords),
+    )
+
+
+def _copy_analysis_result(result: tuple) -> tuple:
+    intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = result
+    return (
+        intent,
+        search_text,
+        list(query_keywords),
+        list(inferred_keywords),
+        domain,
+        focus_concept,
+        duration_max_sec,
+        dict(conditions),
+    )
+
+
 def analyze_query(
     query:              str,
     available_domains:  list[str],
@@ -1600,6 +1625,11 @@ def analyze_query(
       duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
       conditions         : 조건 질의 플래그
     """
+    cache_key = _analysis_cache_key(query, available_domains, available_keywords)
+    cached = _ANALYZE_QUERY_CACHE.get(cache_key)
+    if cached:
+        return _copy_analysis_result(cached)
+
     domain_list  = ", ".join(available_domains)
     keyword_list = ", ".join(available_keywords)
 
@@ -1710,7 +1740,7 @@ def analyze_query(
     if intent not in ("recommend", "list_by_domain", "list_by_topic"):
         intent = "recommend"
 
-    return (
+    result = (
         intent,
         search_text,
         query_keywords,
@@ -1720,6 +1750,8 @@ def analyze_query(
         duration_max_sec,
         normalized_conditions,
     )
+    _ANALYZE_QUERY_CACHE[cache_key] = _copy_analysis_result(result)
+    return result
 
 
 # ============================================================================
@@ -1803,11 +1835,7 @@ def _display_score(internal_score: float, tier: str) -> int:
     내부 랭킹 점수를 사용자 표시용 추천 적합도로 변환한다.
     추천 순위와 tier 판단에는 영향을 주지 않는다.
     """
-    # 0.30~0.85 내부 점수를 55~95점대로 완만하게 매핑한다.
-    normalized = (internal_score - 0.30) / 0.55
-    score = 55 + max(0.0, min(normalized, 1.0)) * 40
-
-    return int(round(score))
+    return int(round(max(0.0, min(internal_score, 1.0)) * 100))
 
 
 # ============================================================================
