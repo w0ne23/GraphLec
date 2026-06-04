@@ -1830,12 +1830,20 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
     return " · ".join(parts) if parts else "관련 강의"
 
 
-def _display_score(internal_score: float, tier: str) -> int:
+def _display_score(internal_score: float, tier: str, detail: Optional[dict] = None) -> int:
     """
     내부 랭킹 점수를 사용자 표시용 추천 적합도로 변환한다.
     추천 순위와 tier 판단에는 영향을 주지 않는다.
     """
-    return int(round(max(0.0, min(internal_score, 1.0)) * 100))
+    detail = detail or {}
+    semantic_score = max(
+        internal_score,
+        float(detail.get("content_score", 0.0) or 0.0),
+        float(detail.get("vec_score", 0.0) or 0.0),
+        float(detail.get("sim_keyword", 0.0) or 0.0),
+    )
+    score = max(0.0, min(semantic_score / 0.8, 1.0)) * 100
+    return int(round(score))
 
 
 # ============================================================================
@@ -2514,14 +2522,6 @@ class Recommender:
         total = min(total + contrast_bonus, 1.0)
 
         # ── 패널티 체계 ───────────────────────────────────────
-        # dm_keyword == 0 패널티
-        if dm["keyword"] == 0:
-            total *= 0.6
-
-        # 원본 query_keyword 완전 미매칭 패널티
-        if ctx.query_keywords and not dm.get("q_kw_matched", True):
-            total *= self.cfg.Q_KW_MISMATCH_PENALTY
-
         # 도메인 상위 카테고리 불일치 패널티
         if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
             total *= self.cfg.DOMAIN_MISMATCH_PENALTY
@@ -2687,7 +2687,7 @@ class Recommender:
             related_community = community_sc >= self.cfg.RELATED_COMMUNITY_FLOOR
             direct_threshold_for_candidate = (
                 min(direct_threshold, self.cfg.CORE_MATCH_DIRECT_FLOOR)
-                if core_match and detail.get("q_kw_matched", True)
+                if core_match
                 else direct_threshold
             )
 
@@ -2717,7 +2717,7 @@ class Recommender:
                 domain       = lec.domain,
                 instructor   = lec.instructor_id,
                 score        = detail["score"],
-                display_score= _display_score(detail["score"], tier),
+                display_score= _display_score(detail["score"], tier, detail),
                 duration_sec = lec.duration_sec,
                 score_detail = detail,
                 reason       = _build_reason(detail, tier),

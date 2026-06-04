@@ -51,7 +51,7 @@ export default function ChatPanel({
   useEffect(() => {
     if (loading) {
       setSlowHint(false)
-      slowTimerRef.current = setTimeout(() => setSlowHint(true), 20000)
+      slowTimerRef.current = setTimeout(() => setSlowHint(true), 11000)
     } else {
       setSlowHint(false)
       clearTimeout(slowTimerRef.current)
