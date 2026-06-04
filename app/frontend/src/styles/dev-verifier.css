@@ -126,16 +126,27 @@
   margin-top: 14px;
 }
 
+.dev-vf-section-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  padding-bottom: 10px;
+  background: var(--bg);
+}
+
+.dev-vf-section-sticky--with-controls {
+  border-bottom: 1px solid var(--b1);
+}
+
 .dev-vf-section-head {
   height: 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  border-bottom: 1px solid var(--b1);
 }
 
 .dev-vf-section-head h2 {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 800;
   color: var(--t1);
 }
@@ -143,7 +154,7 @@
 .dev-vf-section-head span {
   min-width: 28px;
   text-align: right;
-  font-size: 12px;
+  font-size: 17px;
   font-weight: 700;
   color: var(--t3);
 }
@@ -250,7 +261,15 @@
   border: 1px solid var(--b1);
   border-radius: var(--r);
   overflow: hidden;
-  transition: border-color .14s, background .14s;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  transition: border-color .16s, background .16s, box-shadow .16s, transform .16s;
+}
+
+.dev-vf-claim-card:hover,
+.dev-vf-claim-card:has(.dev-vf-claim-main:focus-visible) {
+  border-color: rgba(37, 99, 235, .28);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .11);
+  transform: translateY(-2px);
 }
 
 .dev-vf-claim-card--expanded {
@@ -417,6 +436,32 @@
   color: var(--t2);
   line-height: 1.55;
   overflow-wrap: anywhere;
+}
+
+.dev-vf-model-problem-list {
+  display: grid;
+  gap: 6px;
+}
+
+.dev-vf-model-problem {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.dev-vf-model-problem strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--t1);
+  font-size: 12px;
+}
+
+.dev-vf-model-problem p {
+  margin: 0;
+  color: var(--t2);
+  line-height: 1.65;
 }
 
 .dev-vf-evidence-block {

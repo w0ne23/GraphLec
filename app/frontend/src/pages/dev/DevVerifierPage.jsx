@@ -10,9 +10,9 @@ import '../../styles/dev-verifier.css'
 const VERIFIER_POLL_MS = 5000
 const ISSUE_FILTERS = [
   { key: 'all', label: '전체' },
-  { key: 'factual_error', label: '발언 자체 오류' },
-  { key: 'temporal_error', label: '시대적 오류' },
-  { key: 'scope_overclaim', label: '범위 과잉 단정' },
+  { key: 'factual_error', label: '사실 오류' },
+  { key: 'temporal_error', label: '오래된 내용' },
+  { key: 'scope_overclaim', label: '과도한 일반화' },
   { key: 'confusing_explanation', label: '혼동 가능 설명' },
 ]
 const ISSUE_FILTER_DESCRIPTIONS = {
@@ -68,9 +68,9 @@ function labelForStage(stage) {
 
 function labelForIssueType(type) {
   const labels = {
-    factual_error: '발언 자체 오류',
-    temporal_error: '시대적 오류',
-    scope_overclaim: '범위 과잉 단정',
+    factual_error: '사실 오류',
+    temporal_error: '오래된 내용',
+    scope_overclaim: '과도한 일반화',
     confusing_explanation: '혼동 가능 설명',
   }
   return labels[type] || compactText(type)
@@ -78,9 +78,9 @@ function labelForIssueType(type) {
 
 function labelForIssueSubtype(type) {
   const labels = {
-    factual_error: '발언 자체 오류',
-    temporal_error: '시대적 오류',
-    scope_overclaim: '범위 과잉 단정',
+    factual_error: '사실 오류',
+    temporal_error: '오래된 내용',
+    scope_overclaim: '과도한 일반화',
     confusing_explanation: '혼동 가능 설명',
   }
   return labels[type] || compactText(type)
@@ -89,9 +89,12 @@ function labelForIssueSubtype(type) {
 function getIssueSubtype(item) {
   const direct = item.feedback_type || item.issue_type || item.type || item.issue_subtype
   if (direct === 'temporal_error') return 'temporal_error'
+  if (direct === 'outdated') return 'temporal_error'
   if (direct === 'scope_overclaim') return 'scope_overclaim'
+  if (direct === 'scope_error') return 'scope_overclaim'
   if (direct === 'confusing_explanation') return 'confusing_explanation'
   if (direct === 'factual_error') return 'factual_error'
+  if (direct === 'simple_factual_error') return 'factual_error'
   return ''
 }
 
@@ -312,12 +315,15 @@ function SummaryMetric({ label, value, tone = '', active = false, onClick }) {
   )
 }
 
-function Section({ title, count, tone = '', empty, children }) {
+function Section({ title, count, tone = '', empty, stickyContent = null, children }) {
   return (
     <section className={`dev-vf-section ${tone ? `dev-vf-section--${tone}` : ''}`}>
-      <div className="dev-vf-section-head">
-        <h2>{title}</h2>
-        <span>{count}</span>
+      <div className={`dev-vf-section-sticky ${stickyContent ? 'dev-vf-section-sticky--with-controls' : ''}`}>
+        <div className="dev-vf-section-head">
+          <h2>{title}</h2>
+          <span>{count}</span>
+        </div>
+        {stickyContent}
       </div>
       {count > 0 ? children : <div className="dev-vf-empty">{empty}</div>}
     </section>
@@ -367,25 +373,43 @@ function DetailRow({ label, value }) {
   )
 }
 
-function ModelVerdicts({ verdicts }) {
-  const entries = Object.entries(verdicts || {})
+function formatModelName(value) {
+  const text = compactText(value, '')
+  return text ? `${text.charAt(0).toUpperCase()}${text.slice(1)}` : ''
+}
+
+function textFromVerdict(verdict) {
+  return compactText(
+    verdict?.reason ||
+      verdict?.problem ||
+      verdict?.summary ||
+      verdict?.why_wrong ||
+      verdict?.rationale ||
+      verdict?.explanation,
+    ''
+  )
+}
+
+function modelProblemEntries(verdicts) {
+  return Object.entries(verdicts || {})
+    .map(([model, verdict]) => ({
+      model,
+      text: textFromVerdict(verdict),
+    }))
+    .filter(item => item.text)
+}
+
+function ModelProblemList({ entries }) {
   if (!entries.length) return null
+
   return (
-    <div className="dev-vf-evidence-block">
-      <div className="dev-vf-evidence-title">모델 판정</div>
-      <div className="dev-vf-verdict-grid">
-        {entries.map(([model, verdict]) => (
-          <div className="dev-vf-verdict" key={model}>
-            <span>{model}</span>
-            <strong>점수 {formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
-            {(verdict?.decision || verdict?.verdict || verdict?.status) && (
-              <em>{compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</em>
-            )}
-            {verdict?.model_weight !== undefined && <em>가중치 {Number(verdict.model_weight).toFixed(2)}</em>}
-            {verdict?.weighted_score !== undefined && <em>반영점수 {Number(verdict.weighted_score).toFixed(2)}</em>}
-          </div>
-        ))}
-      </div>
+    <div className="dev-vf-model-problem-list">
+      {entries.map(entry => (
+        <div className="dev-vf-model-problem" key={entry.model}>
+          <strong>{formatModelName(entry.model)}</strong>
+          <p>{entry.text}</p>
+        </div>
+      ))}
     </div>
   )
 }
@@ -424,6 +448,7 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
     : asArray(claim.evidence_sources)
   const hasSeverityScore = claim.severity_score !== undefined && claim.severity_score !== null
   const severityStatus = claim.severity_status || claim.severity_verdict
+  const problemsByModel = modelProblemEntries(claim.model_verdicts)
 
   return (
     <article className={`dev-vf-claim-card ${expanded ? 'dev-vf-claim-card--expanded' : ''}`}>
@@ -461,7 +486,7 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             />
             <DetailRow label="Claim" value={claim.resolved_claim || claim.claim_text} />
             <DetailRow label="문제 유형" value={displayIssueLabel} />
-            <DetailRow label="문제점" value={claim.issue} />
+            <DetailRow label="문제점" value={problemsByModel.length ? <ModelProblemList entries={problemsByModel} /> : claim.issue} />
             <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
             <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
             <DetailRow label="문맥 해소 여부" value={claim.context_resolution} />
@@ -474,7 +499,6 @@ function ClaimCard({ claim, section, expanded, onToggle, onWatch }) {
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
-          <ModelVerdicts verdicts={claim.model_verdicts} />
           <EvidenceSources sources={sources} />
         </div>
       )}
@@ -725,13 +749,15 @@ export default function DevVerifierPage() {
           count={sections.needsReview.length}
           tone="review"
           empty="강의자 확인이 필요한 내용 이슈가 없습니다."
+          stickyContent={(
+            <IssueTypeBreakdown
+              items={sections.needsReview}
+              section="needs_review"
+              activeFilter={activeIssueFilter}
+              onFilterChange={setActiveIssueFilter}
+            />
+          )}
         >
-          <IssueTypeBreakdown
-            items={sections.needsReview}
-            section="needs_review"
-            activeFilter={activeIssueFilter}
-            onFilterChange={setActiveIssueFilter}
-          />
           <IssueFilterDescription filter={activeIssueFilter} />
           {filteredReview.length > 0
             ? renderClaimList(filteredReview, 'needs_review')
@@ -743,10 +769,10 @@ export default function DevVerifierPage() {
     if (activeTab === 'slideErrors') {
       return (
         <Section
-          title="슬라이드 오류"
+          title="슬라이드 오타"
           count={sections.slideErrors.length}
           tone="error"
-          empty="확정된 슬라이드 오류가 없습니다."
+          empty="확정된 슬라이드 오타가 없습니다."
         >
           {renderSlideErrorGroups(sections.slideErrors)}
         </Section>
@@ -784,13 +810,15 @@ export default function DevVerifierPage() {
         count={sections.finalClaims.length}
         tone="danger"
         empty="확정된 내용 이슈가 없습니다."
+        stickyContent={(
+          <IssueTypeBreakdown
+            items={sections.finalClaims}
+            section="final_confirmed"
+            activeFilter={activeIssueFilter}
+            onFilterChange={setActiveIssueFilter}
+          />
+        )}
       >
-        <IssueTypeBreakdown
-          items={sections.finalClaims}
-          section="final_confirmed"
-          activeFilter={activeIssueFilter}
-          onFilterChange={setActiveIssueFilter}
-        />
         <IssueFilterDescription filter={activeIssueFilter} />
         {filteredFinal.length > 0
           ? renderClaimList(filteredFinal, 'final_confirmed')
@@ -866,7 +894,7 @@ export default function DevVerifierPage() {
               onClick={() => selectTab('review')}
             />
             <SummaryMetric
-              label="슬라이드 오류"
+              label="슬라이드 오타"
               value={slideErrorCount}
               tone="error"
               active={activeTab === 'slideErrors'}

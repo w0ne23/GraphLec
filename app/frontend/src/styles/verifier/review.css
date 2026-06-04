@@ -347,6 +347,20 @@
   align-items: strietch;
 }
 
+.vf-section-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  margin-inline: -1px;
+  padding-inline: 1px;
+  padding-bottom: 10px;
+  background: var(--bg);
+}
+
+.vf-section-sticky--with-controls {
+  border-bottom: 1px solid var(--b1);
+}
+
 .vf-section-head {
   flex: 1;
   min-height: 40px;
@@ -355,17 +369,16 @@
   justify-content: flex-start;
   gap: 8px;
   padding-top: 8px;
-  border-bottom: 1px solid var(--b1);
 }
 
 .vf-section-head h2 {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 800;
   color: var(--t1);
 }
 
 .vf-section-head span {
-  font-size: 13px;
+  font-size: 17px;
   font-weight: bold;
   color: var(--t3);
 }
@@ -455,7 +468,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
-  padding-top: 16px;
+  padding-top: 12px;
 }
 
 .vf-review-control-row .vf-type-breakdown {
@@ -515,7 +528,7 @@
 }
 
 .vf-filter-description {
-  margin-top: 12px;
+  margin-top: 2px;
   padding: 8px 10px;
   border: 1px solid var(--b1);
   border-radius: 4px;
@@ -583,7 +596,15 @@
   border: 1px solid var(--b1);
   border-radius: var(--r);
   overflow: hidden;
-  transition: border-color .14s, background .14s;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .04);
+  transition: border-color .16s, background .16s, box-shadow .16s, transform .16s;
+}
+
+.vf-claim-card:hover,
+.vf-claim-card:has(.vf-claim-main:focus-visible) {
+  border-color: rgba(37, 99, 235, .28);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .11);
+  transform: translateY(-2px);
 }
 
 .vf-claim-card--expanded {
@@ -724,6 +745,44 @@
   color: var(--t2);
   line-height: 1.75;
   overflow-wrap: anywhere;
+}
+
+.vf-detail-row--separated dt,
+.vf-detail-row--separated dd {
+  padding-top: 10px;
+  border-top: 1px solid var(--b1);
+}
+
+.vf-model-problem-list {
+  display: grid;
+  gap: 6px;
+}
+
+.vf-model-problem {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--b1);
+  border-radius: 4px;
+  background: var(--panel);
+}
+
+.vf-model-problem-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.vf-model-problem-head strong {
+  color: var(--t1);
+  font-size: 12px;
+}
+
+.vf-model-problem p {
+  margin: 0;
+  color: var(--t2);
+  line-height: 1.65;
 }
 
 .vf-transcript-row dt,

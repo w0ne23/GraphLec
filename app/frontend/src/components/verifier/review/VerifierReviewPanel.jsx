@@ -28,12 +28,15 @@ function cx(...classNames) {
   return classNames.filter(Boolean).join(' ')
 }
 
-function ReviewSection({ title, count, tone = '', empty, children }) {
+function ReviewSection({ title, count, tone = '', empty, stickyContent = null, children }) {
   return (
     <section className={cx('vf-section', SECTION_TONE_CLASS[tone])}>
-      <div className="vf-section-head">
-        <h2>{title}</h2>
-        <span>{count}</span>
+      <div className={cx('vf-section-sticky', stickyContent && 'vf-section-sticky--with-controls')}>
+        <div className="vf-section-head">
+          <h2>{title}</h2>
+          <span>{count}</span>
+        </div>
+        {stickyContent}
       </div>
       {count > 0 ? children : <div className="vf-empty">{empty}</div>}
     </section>
@@ -133,7 +136,7 @@ function VerifierReviewHeader({
               <strong>{reviewCount}</strong>
             </button>
             <button className={reviewTabClassName('typos', activeTab)} onClick={() => onSelectTab('typos')}>
-              <span>슬라이드 오류</span>
+              <span>슬라이드 오타</span>
               <strong>{typoCount}</strong>
             </button>
           </nav>
@@ -353,15 +356,17 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
           count={sections.needsReview.length}
           tone="review"
           empty="검토가 필요한 내용이 없습니다."
+          stickyContent={(
+            <div className="vf-review-control-row">
+              <IssueTypeBreakdown
+                items={sections.needsReview}
+                activeFilter={activeIssueFilter}
+                onFilterChange={setActiveIssueFilter}
+              />
+              <SortControls value={sortMode} onChange={setSortMode} />
+            </div>
+          )}
         >
-          <div className="vf-review-control-row">
-            <IssueTypeBreakdown
-              items={sections.needsReview}
-              activeFilter={activeIssueFilter}
-              onFilterChange={setActiveIssueFilter}
-            />
-            <SortControls value={sortMode} onChange={setSortMode} />
-          </div>
           <IssueFilterDescription filter={activeIssueFilter} />
           {filteredReview.length > 0
             ? renderClaimList(filteredReview, 'needs_review')
@@ -373,10 +378,10 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
     if (activeTab === 'typos') {
       return (
         <ReviewSection
-          title="슬라이드 오류"
+          title="슬라이드 오타"
           count={sections.slideTypos.length}
           tone="typo"
-          empty="슬라이드 오류가 없습니다."
+          empty="슬라이드 오타가 없습니다."
         >
           {renderTypoGroups(sections.slideTypos)}
         </ReviewSection>

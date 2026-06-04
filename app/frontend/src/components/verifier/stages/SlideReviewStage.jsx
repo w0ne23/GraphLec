@@ -12,7 +12,7 @@ import {
 } from '../VerifyReportParts'
 
 /**
- * SlideReviewStage: 슬라이드 오류 검토 단계 메인 컴포넌트
+ * SlideReviewStage: 슬라이드 오타 검토 단계 메인 컴포넌트
  * 메인 패널의 요약 로직에 의존하지 않고 자체적으로 칩과 리스트를 렌더링합니다.
  */
 export default function SlideReviewStage({ model, status, resultId }) {
@@ -23,14 +23,14 @@ export default function SlideReviewStage({ model, status, resultId }) {
       <section className={`vf-claim-flow vf-claim-flow--${status}`}>
         <div className="vf-claim-flow-head">
           <div>
-            <span>슬라이드 오류 목록</span>
+            <span>슬라이드 오타 목록</span>
             <div className="vf-claim-flow-title-row">
-              <h2>슬라이드 오류</h2>
+              <h2>슬라이드 오타</h2>
             </div>
           </div>
           <span className="vf-bold">{statusText(status)}</span>
         </div>
-        <div className="vf-stage-pending">{pendingText(status, '슬라이드 오류 결과가 생성되는 중입니다.', '슬라이드 오류 결과는 아직 없습니다.')}</div>
+        <div className="vf-stage-pending">{pendingText(status, '슬라이드 오타 결과가 생성되는 중입니다.', '슬라이드 오타 결과는 아직 없습니다.')}</div>
       </section>
     )
   }
@@ -39,9 +39,9 @@ export default function SlideReviewStage({ model, status, resultId }) {
     <section className={`vf-claim-flow vf-claim-flow--${status}`}>
       <div className="vf-claim-flow-head">
         <div className="vf-claim-flow-title">
-          <span>슬라이드 오류 목록</span>
+          <span>슬라이드 오타 목록</span>
           <div className="vf-claim-flow-title-row">
-            <h2>슬라이드 오류</h2>
+            <h2>슬라이드 오타</h2>
           </div>
         </div>
         <div className="vf-claim-flow-head-actions">

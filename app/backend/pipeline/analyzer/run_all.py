@@ -1035,16 +1035,16 @@ def _format_classified_issue_report(content_view: dict) -> str:
         f"\n검증일: {content_view.get('verification_date', '')}",
         f"전체 후보: {summary.get('total_feedback_count', len(feedback_items))}건",
         f"확정: {len(confirmed)}건 / 검토 필요: {len(needs_review)}건 / 기각: {len(rejected)}건",
-        f"슬라이드 오류: {len(slide_errors)}건",
+        f"슬라이드 오타: {len(slide_errors)}건",
     ]
 
     breakdown = summary.get("breakdown_by_type", {}) if isinstance(summary.get("breakdown_by_type"), dict) else {}
     if breakdown:
         labels = {
             "factual_error": "사실 오류",
-            "temporal_error": "시대적 오류",
-            "confusing_explanation": "혼동 오류",
-            "scope_overclaim": "범위 오류",
+            "temporal_error": "오래된 내용",
+            "confusing_explanation": "혼동 가능 설명",
+            "scope_overclaim": "과도한 일반화",
         }
         parts = [f"{labels.get(key, key)} {value}건" for key, value in breakdown.items()]
         lines.append(f"유형별: {', '.join(parts)}")
@@ -1083,7 +1083,7 @@ def _format_classified_issue_report(content_view: dict) -> str:
 
     if slide_errors:
         lines.append(f"\n{'-' * 40}")
-        lines.append(f"슬라이드 오류 ({len(slide_errors)}건)")
+        lines.append(f"슬라이드 오타 ({len(slide_errors)}건)")
         lines.append("-" * 40)
         for index, error in enumerate(slide_errors, 1):
             lines.append(f"\n  [{index}] 슬라이드 {error.get('slide_number', '?')} ({error.get('slide_title', '')})")
@@ -1095,7 +1095,7 @@ def _format_classified_issue_report(content_view: dict) -> str:
 
     slide_error_status = content_view.get("slide_error_status", "")
     if slide_error_status and slide_error_status != "ok":
-        lines.append(f"\n슬라이드 오류 검사 상태: {slide_error_status}")
+        lines.append(f"\n슬라이드 오타 검사 상태: {slide_error_status}")
 
     model_breakdown = (verifier_result.get("summary", {}) or {}).get("model_breakdown", {})
     if model_breakdown:
