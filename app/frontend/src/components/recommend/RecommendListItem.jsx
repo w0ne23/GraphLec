@@ -13,7 +13,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const detail        = lecture.score_detail || {}
   const overallScore  = lecture.display_score ?? null
   const durationLabel = formatDuration(lecture.duration_sec)
-  const scoreParts    = getScoreParts(detail, overallScore)
+  const scoreParts    = getScoreParts(detail)
 
   const showScore = overallScore != null
 
@@ -204,8 +204,7 @@ function polarToCartesian(cx, cy, radius, angleInDegrees) {
   }
 }
 
-function getScoreParts(detail, overallScore) {
-  const displayFloor = overallScore == null ? 0 : clampScore(overallScore)
+function getScoreParts(detail) {
   const contentRaw = toRatio(detail.content_score ?? ((detail.content_pct ?? 0) / 100))
   const meaningRaw = Math.max(
     toRatio(detail.vec_score ?? 0),
@@ -241,13 +240,13 @@ function getScoreParts(detail, overallScore) {
     key: part.key,
     label: part.label,
     shortLabel: part.shortLabel,
-    value: Math.max(displayRatioScore(part.raw), displayFloor),
+    value: displayRatioScore(part.raw),
     chartValue: part.key === 'condition'
       ? CONDITION_CHART_SHARE
       : part.key === 'content'
         ? contentChartValue
         : meaningChartValue,
-    score10: Math.max(0, Math.min(10, Number((Math.max(displayRatioScore(part.raw), displayFloor) / 10).toFixed(1)))),
+    score10: Math.max(0, Math.min(10, Number((displayRatioScore(part.raw) / 10).toFixed(1)))),
   }))
 }
 

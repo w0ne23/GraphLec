@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from dataclasses import dataclass
 from collections import Counter, defaultdict
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import numpy as np
 import lancedb
@@ -1830,19 +1830,85 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
     return " · ".join(parts) if parts else "관련 강의"
 
 
+DISPLAY_SCORE_FULL_RATIO = 0.8
+CONDITION_DISPLAY_SHARE = 20
+CONTENT_MEANING_DISPLAY_SHARE = 100 - CONDITION_DISPLAY_SHARE
+
+
+def _ratio(value: Any) -> float:
+    try:
+        numeric = float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return numeric / 100.0 if numeric > 1.0 else numeric
+
+
+def _display_component_score(value: Any) -> float:
+    return max(0.0, min(_ratio(value) / DISPLAY_SCORE_FULL_RATIO, 1.0)) * 100.0
+
+
+def _condition_score_ratio(detail: dict) -> float:
+    condition_scores: list[float] = []
+    warnings = detail.get("condition_warnings") if isinstance(detail.get("condition_warnings"), list) else []
+    has_duration_condition = bool(_ratio(detail.get("duration_score")) > 0.0 or detail.get("duration_mismatch") is True)
+
+    if has_duration_condition:
+        condition_scores.append(_ratio(detail.get("duration_score")))
+    if detail.get("visual_preference"):
+        condition_scores.append(max(
+            _ratio(detail.get("visual_score")),
+            _ratio(detail.get("visual_density_score")),
+            _ratio(detail.get("visual_concept_score")),
+        ))
+    if detail.get("application_preference"):
+        condition_scores.append(_ratio(detail.get("application_score")))
+    if detail.get("listenability_preference"):
+        condition_scores.append(_ratio(detail.get("listenability_score")))
+    if detail.get("slow_speech_preference"):
+        condition_scores.append(_ratio(detail.get("speech_rate_score")))
+    if detail.get("recency_preference"):
+        condition_scores.append(_ratio(detail.get("recency_score")))
+
+    if condition_scores:
+        combined = _ratio(detail.get("combined_boost"))
+        if combined > 0.0:
+            return combined
+        return sum(condition_scores) / len(condition_scores)
+
+    return _ratio(detail.get("combined_boost")) if warnings else 1.0
+
+
+def _content_display_share(content_ratio: float, meaning_ratio: float) -> int:
+    total = max(content_ratio, 0.0) + max(meaning_ratio, 0.0)
+    if total <= 0.0:
+        return CONTENT_MEANING_DISPLAY_SHARE // 2
+    return int(round((max(content_ratio, 0.0) / total) * CONTENT_MEANING_DISPLAY_SHARE))
+
+
 def _display_score(internal_score: float, tier: str, detail: Optional[dict] = None) -> int:
     """
     내부 랭킹 점수를 사용자 표시용 추천 적합도로 변환한다.
     추천 순위와 tier 판단에는 영향을 주지 않는다.
     """
-    detail = detail or {}
-    semantic_score = max(
-        internal_score,
-        float(detail.get("content_score", 0.0) or 0.0),
-        float(detail.get("vec_score", 0.0) or 0.0),
-        float(detail.get("sim_keyword", 0.0) or 0.0),
+    if not detail:
+        return int(round(max(0.0, min(internal_score, 1.0)) * 100))
+
+    content_ratio = _ratio(detail.get("content_score", _ratio(detail.get("content_pct"))))
+    meaning_ratio = max(
+        _ratio(detail.get("vec_score")),
+        _ratio(detail.get("graph_score")),
+        _ratio(detail.get("sim_keyword")),
     )
-    score = max(0.0, min(semantic_score / 0.8, 1.0)) * 100
+    condition_ratio = _condition_score_ratio(detail)
+
+    content_share = _content_display_share(content_ratio, meaning_ratio)
+    meaning_share = CONTENT_MEANING_DISPLAY_SHARE - content_share
+
+    score = (
+        _display_component_score(content_ratio) * (content_share / 100.0)
+        + _display_component_score(meaning_ratio) * (meaning_share / 100.0)
+        + _display_component_score(condition_ratio) * (CONDITION_DISPLAY_SHARE / 100.0)
+    )
     return int(round(score))
 
 
