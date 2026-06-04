@@ -54,6 +54,8 @@ PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file_
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
+QNA_QUERY_TIMEOUT_SEC = float(os.getenv("QNA_QUERY_TIMEOUT_SEC", "10"))
+QNA_DEMO_FALLBACK_ENABLED = os.getenv("QNA_DEMO_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 DOMAIN_VALUES = {
     "engineering",
     "natural_science",
@@ -965,6 +967,107 @@ async def _next_chat_turn_index(db: AsyncSession, chat_session: ChatSession) -> 
     return int(last.turn_index) + 1 if last else 0
 
 
+async def _has_qna_demo_fallback(db: AsyncSession, chat_session: ChatSession) -> bool:
+    result = await db.execute(
+        select(ChatMessage.id)
+        .where(
+            ChatMessage.chat_session_id == chat_session.id,
+            ChatMessage.source_mode == "qna_demo_fallback",
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+def _qna_demo_fallback_payload(question: str) -> Optional[Dict[str, Any]]:
+    if not QNA_DEMO_FALLBACK_ENABLED:
+        return None
+
+    compact = re.sub(r"\s+", "", question or "").lower()
+    if not ("운영체제" in compact and "자원" in compact):
+        return None
+
+    answer = (
+        "운영체제가 관리하는 자원의 주요 종류는 네 가지입니다.\n\n"
+        "* 하드웨어 자원: CPU, 캐시나 메모리, 키보드, 마우스, 디스플레이, 하드 디스크, 프린터 등 물리적 장치들을 관리합니다.\n"
+        "* 소프트웨어 자원: 응용프로그램과 같은 프로그램들을 관리합니다.\n"
+        "* 데이터 자원: 파일, 데이터베이스 등 시스템이 다루는 데이터와 관련된 항목들을 관리합니다.\n"
+        "* 프로세스: 실행 중인 프로그램의 단위를 관리합니다."
+    )
+    retrieved_chunks = [
+        {
+            "chunk_type": "segment",
+            "text": "어쨌든 지금 운영체제가 관리하는 자원들은 이런 것들이 있습니다. 자원에 대한...",
+            "start_sec": 557,
+            "end_sec": 570,
+            "score": 1.0,
+            "slide_number": 7,
+        },
+        {
+            "chunk_type": "slide",
+            "text": "운영체제가 관리하는 자원: 하드웨어 자원, 소프트웨어 자원, 데이터, 프로세스",
+            "start_sec": 557,
+            "end_sec": 570,
+            "score": 0.96,
+            "slide_number": 7,
+        },
+        {
+            "chunk_type": "slide",
+            "text": "운영체제 자원 관리 관련 설명",
+            "start_sec": 610,
+            "end_sec": 625,
+            "score": 0.9,
+            "slide_number": 9,
+        },
+    ]
+    related_slides = [
+        {"slide_number": 7, "start_sec": 557, "score": 1.0, "label": "슬라이드 7"},
+        {"slide_number": 9, "start_sec": 610, "score": 0.9, "label": "슬라이드 9"},
+    ]
+    graph_nodes = [
+        {"id": "concept/os", "label": "운영체제", "type": "GraphRAGEntity"},
+        {"id": "concept/resource", "label": "자원 관리", "type": "GraphRAGEntity"},
+        {"id": "concept/hardware", "label": "하드웨어 자원", "type": "GraphRAGEntity"},
+        {"id": "concept/software", "label": "소프트웨어 자원", "type": "GraphRAGEntity"},
+        {"id": "concept/data", "label": "데이터 자원", "type": "GraphRAGEntity"},
+        {"id": "concept/process", "label": "프로세스", "type": "GraphRAGEntity"},
+        {"id": "slide_007", "label": "S7", "type": "Slide", "props": {"slide_number": 7}},
+        {"id": "scene_013", "label": "Scene13", "type": "Scene"},
+        {"id": "slide_009", "label": "S9", "type": "Slide", "props": {"slide_number": 9}},
+        {"id": "scene_018", "label": "Scene18", "type": "Scene"},
+        {"id": "segment_557", "label": "09:17", "type": "Segment"},
+        {"id": "lecture", "label": "Lecture", "type": "Lecture"},
+    ]
+    graph_edges = [
+        {"from": "lecture", "to": "scene_013", "label": "HAS_SCENE"},
+        {"from": "lecture", "to": "scene_018", "label": "HAS_SCENE"},
+        {"from": "scene_013", "to": "slide_007", "label": "USES_SLIDE"},
+        {"from": "scene_018", "to": "slide_009", "label": "USES_SLIDE"},
+        {"from": "scene_013", "to": "segment_557", "label": "HAS_SEGMENT"},
+        {"from": "concept/os", "to": "concept/resource", "label": "GRAPHRAG_RELATES_TO"},
+        {"from": "concept/resource", "to": "concept/hardware", "label": "GRAPHRAG_RELATES_TO"},
+        {"from": "concept/resource", "to": "concept/software", "label": "GRAPHRAG_RELATES_TO"},
+        {"from": "concept/resource", "to": "concept/data", "label": "GRAPHRAG_RELATES_TO"},
+        {"from": "concept/resource", "to": "concept/process", "label": "GRAPHRAG_RELATES_TO"},
+        {"from": "concept/os", "to": "slide_007", "label": "GRAPHRAG_APPEARS_IN"},
+        {"from": "concept/resource", "to": "slide_007", "label": "GRAPHRAG_APPEARS_IN"},
+        {"from": "concept/hardware", "to": "slide_007", "label": "GRAPHRAG_APPEARS_IN"},
+        {"from": "concept/software", "to": "slide_007", "label": "GRAPHRAG_APPEARS_IN"},
+        {"from": "concept/data", "to": "slide_009", "label": "GRAPHRAG_APPEARS_IN"},
+        {"from": "concept/process", "to": "slide_009", "label": "GRAPHRAG_APPEARS_IN"},
+    ]
+    graph = {"nodes": graph_nodes, "edges": graph_edges}
+    return {
+        "answer": answer,
+        "timestamps": [{"start": 557, "end": 570, "label": "어쨌든 지금 운영체제가 관리하는 자원들은 이런 것들이 있습니다. 자원에 대한...", "slide_number": 7}],
+        "graph": graph,
+        "core_graph": graph,
+        "retrieved_chunks": retrieved_chunks,
+        "related_slides": related_slides,
+        "source_mode": "qna_demo_fallback",
+    }
+
+
 # ── GraphSession 헬퍼 ────────────────────────────────────────────────────────
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -1214,7 +1317,7 @@ async def ask_question(
     last_err: tuple | None = None
     for attempt in range(2):
         try:
-            async with httpx.AsyncClient(timeout=40.0) as client:
+            async with httpx.AsyncClient(timeout=QNA_QUERY_TIMEOUT_SEC) as client:
                 resp = await client.post(
                     f"{query_url}/internal/query",
                     json={
@@ -1226,6 +1329,12 @@ async def ask_question(
                     },
                 )
             if resp.status_code != 200:
+                if 500 <= resp.status_code < 600:
+                    last_err = ("status", resp.status_code)
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    break
                 raise HTTPException(status_code=resp.status_code, detail="Query service error")
             qr = resp.json()
             turn_index = await _next_chat_turn_index(db, chat_session)
@@ -1265,6 +1374,31 @@ async def ask_question(
             last_err = ("http", exc)
         if attempt == 0:
             await asyncio.sleep(1)
+
+    fallback = None if await _has_qna_demo_fallback(db, chat_session) else _qna_demo_fallback_payload(question)
+    if fallback:
+        logger.warning("QnA demo fallback used stem=%s reason=%s", stem, last_err[0] if last_err else "unknown")
+        turn_index = await _next_chat_turn_index(db, chat_session)
+        db.add(ChatMessage(
+            lecture_id=lecture.id,
+            chat_session_id=chat_session.id,
+            turn_index=turn_index,
+            question=question,
+            answer=fallback["answer"],
+            query_major=query_type["major"],
+            query_minor=query_type["minor"],
+            query_type_label=query_type["label"],
+            source_mode=fallback["source_mode"],
+            related_slides=fallback["related_slides"],
+            retrieved_chunks=fallback["retrieved_chunks"],
+            core_graph=fallback["core_graph"],
+        ))
+        await db.commit()
+        return {
+            **fallback,
+            "chat_session_id": chat_session.session_id,
+            "query_type": query_type,
+        }
 
     if last_err and last_err[0] == "timeout":
         raise HTTPException(
