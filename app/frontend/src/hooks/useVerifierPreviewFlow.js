@@ -202,6 +202,14 @@ const VERIFY_TO_UPLOAD_PRIOR_NODE_IDS = [
   'data_extract',
   'content_extract',
 ]
+const PREVIEW_DEFAULT_STAGE_DELAY_MS = 2000
+const VERIFY_PREPROCESS_STAGE_DELAY_MS = 3000
+const VERIFY_REVIEW_STAGE_DELAY_MS = 6000
+const VERIFY_PREPROCESS_STAGE_KEYS = new Set([
+  'preprocess_extract_media',
+  'preprocess_textualize_transcribe',
+  'preprocess_enrich_audio_annotation',
+])
 
 function getPreviewStageGroups(phase, verifyEnabled = true) {
   if (phase === PHASES.PIPELINE1) return VERIFY_PROGRESS_STAGE_GROUPS
@@ -225,6 +233,13 @@ function getPreviewInitialStageGroupIndex(phase, verifyEnabled) {
   }
 
   return 0
+}
+
+function getPreviewStageDelayMs(phase, stageGroup) {
+  if (phase !== PHASES.PIPELINE1) return PREVIEW_DEFAULT_STAGE_DELAY_MS
+
+  const isPreprocessStage = stageGroup.some(stage => VERIFY_PREPROCESS_STAGE_KEYS.has(stage))
+  return isPreprocessStage ? VERIFY_PREPROCESS_STAGE_DELAY_MS : VERIFY_REVIEW_STAGE_DELAY_MS
 }
 
 function getPipelinePriorNodeIds(phase, verifyEnabled) {
@@ -575,7 +590,7 @@ export function useVerifierPreviewFlow() {
       }
       setStageGroupIndex(-1)
       setPhase(phase === PHASES.PIPELINE1 ? PHASES.VERIFY_READY : PHASES.DONE)
-    }, 2000)
+    }, getPreviewStageDelayMs(phase, stageGroups[stageGroupIndex]))
 
     return () => clearTimeout(timer)
   }, [phase, stageGroupIndex, verifyEnabled])
