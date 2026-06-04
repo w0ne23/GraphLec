@@ -21,7 +21,7 @@ export const PIPELINE_NODES = {
   }),
   context_analysis: createNode({
     id: 'context_analysis',
-    label: '강의 보강 분석',
+    label: '맥락 신호 분석',
     stageKey: 'preprocess_enrich_audio_annotation',
     stageLabel: '필기 강조 및 오디오 후처리',
   }),
