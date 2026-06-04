@@ -146,7 +146,7 @@ export default function HeroSection({ current, onNext }) {
       <canvas ref={canvasRef} id="bg-canvas" />
       <div className="hero-content">
         <div
-          className={`hero-card-stage hero-card-stage-paused hero-card-stage-show-${activeCard}`}
+          className={`hero-card-stage hero-card-stage-show-${activeCard}`}
           onMouseEnter={() => setCardPaused(true)}
           onMouseLeave={() => setCardPaused(false)}
         >

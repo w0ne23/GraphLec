@@ -174,39 +174,36 @@
     0 22px 60px rgba(0,0,0,0.22);
   backdrop-filter: blur(14px);
   transform-origin: center;
-  animation: ld-card-cycle 9s cubic-bezier(0.45, 0, 0.2, 1) infinite;
   display: flex;
   flex-direction: column;
   color: rgba(255,255,255,0.86);
+  transition:
+    opacity 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.28s ease,
+    border-color 0.28s ease,
+    background 0.28s ease;
+  will-change: transform, opacity;
 }
-.ld-landing .hero-card-stage:hover .hero-orbit-card {
-  animation-play-state: paused;
-}
-.ld-landing .hero-orbit-card-1 { animation-delay: -6s; }
-.ld-landing .hero-orbit-card-2 { animation-delay: -3s; }
-.ld-landing .hero-orbit-card-3 { animation-delay: 0s; }
-.ld-landing .hero-card-stage-paused .hero-orbit-card {
-  animation: none;
-}
-.ld-landing .hero-card-stage-paused .hero-orbit-card-1 {
+.ld-landing .hero-card-stage-show-1 .hero-orbit-card-1 {
   z-index: 3;
   opacity: 1;
   transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
 }
-.ld-landing .hero-card-stage-paused .hero-orbit-card-2 {
+.ld-landing .hero-card-stage-show-1 .hero-orbit-card-2 {
   z-index: 2;
   opacity: 0.72;
   transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
 }
-.ld-landing .hero-card-stage-paused .hero-orbit-card-3 {
+.ld-landing .hero-card-stage-show-1 .hero-orbit-card-3 {
   z-index: 1;
   opacity: 0.58;
   transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
 }
 .ld-landing .hero-card-stage-show-2 .hero-orbit-card-1 {
-  z-index: 2;
-  opacity: 0.72;
-  transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
+  z-index: 1;
+  opacity: 0.58;
+  transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
 }
 .ld-landing .hero-card-stage-show-2 .hero-orbit-card-2 {
   z-index: 3;
@@ -214,24 +211,35 @@
   transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
 }
 .ld-landing .hero-card-stage-show-2 .hero-orbit-card-3 {
-  z-index: 1;
-  opacity: 0.58;
-  transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
-}
-.ld-landing .hero-card-stage-show-3 .hero-orbit-card-1 {
-  z-index: 1;
-  opacity: 0.58;
-  transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
-}
-.ld-landing .hero-card-stage-show-3 .hero-orbit-card-2 {
   z-index: 2;
   opacity: 0.72;
   transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
+}
+.ld-landing .hero-card-stage-show-3 .hero-orbit-card-1 {
+  z-index: 2;
+  opacity: 0.72;
+  transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
+}
+.ld-landing .hero-card-stage-show-3 .hero-orbit-card-2 {
+  z-index: 1;
+  opacity: 0.58;
+  transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
 }
 .ld-landing .hero-card-stage-show-3 .hero-orbit-card-3 {
   z-index: 3;
   opacity: 1;
   transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
+}
+.ld-landing .hero-card-stage-show-1:hover .hero-orbit-card-1,
+.ld-landing .hero-card-stage-show-2:hover .hero-orbit-card-2,
+.ld-landing .hero-card-stage-show-3:hover .hero-orbit-card-3 {
+  border-color: rgba(197,198,232,0.72);
+  background: rgba(102,103,171,0.22);
+  box-shadow:
+    inset 0 0 0 1px rgba(255,255,255,0.08),
+    0 34px 86px rgba(0,0,0,0.34),
+    0 0 34px rgba(142,143,199,0.16);
+  transform: translate(-50%, -50%) translate(0, -12px) rotate(0deg) scale(1.018);
 }
 .ld-landing .hero-card-nav {
   position: absolute;
@@ -1047,28 +1055,6 @@
   left: 22%;
   top: 76%;
   transform: translate(-50%, -50%);
-}
-@keyframes ld-card-cycle {
-  0%, 26% {
-    opacity: 1;
-    z-index: 3;
-    transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
-  }
-  33.333%, 59% {
-    opacity: 0.72;
-    z-index: 2;
-    transform: translate(-50%, -50%) translate(-78px, -58px) rotate(-7deg) scale(0.88);
-  }
-  66.666%, 92% {
-    opacity: 0.58;
-    z-index: 1;
-    transform: translate(-50%, -50%) translate(78px, 64px) rotate(8deg) scale(0.82);
-  }
-  100% {
-    opacity: 1;
-    z-index: 3;
-    transform: translate(-50%, -50%) translate(0, 0) rotate(0deg) scale(1);
-  }
 }
 .ld-landing .hero-copy {
   display: flex;
