@@ -97,24 +97,12 @@ function SortControls({ value, onChange }) {
   )
 }
 
-function VerifierReviewTopbar({ onBack }) {
-  return (
-    <div className="vf-topbar">
-      <div className="vf-topbar-main">
-        {onBack && <button className="vf-topbar-back" onClick={onBack}>← 이전으로</button>}
-        <div className="vf-topbar-title">
-          <strong>Verifier</strong>
-        </div>
-      </div>
-    </div>
-  )
-}
-
 function reviewTabClassName(tab, activeTab) {
   return cx('vf-review-tab', REVIEW_TAB_CLASS[tab], activeTab === tab && 'vf-review-tab--active')
 }
 
 function VerifierReviewHeader({
+  onBack,
   activeTab,
   lectureTitle,
   reviewCount,
@@ -129,6 +117,7 @@ function VerifierReviewHeader({
     <div className="vf-review-header">
       <div className="vf-review-header-main">
         <div className="vf-review-heading">
+          {onBack && <button className="vf-topbar-back" onClick={onBack}>◀</button>}
           <strong>{lectureTitle}</strong>
           <span>검토 결과</span>
         </div>
@@ -400,7 +389,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
   if (!verifier) {
     return (
       <div className="vf-shell">
-        <VerifierReviewTopbar />
         <div className="vf-error">Verifier 결과를 불러오는 중입니다.</div>
       </div>
     )
@@ -408,11 +396,9 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
 
   return (
     <div className="vf-shell">
-      <VerifierReviewTopbar onBack={actions.backToVerifyReady} />
-
-      <div className="vf-body">
         <section className="vf-review-panel">
           <VerifierReviewHeader
+            onBack={actions.backToVerifyReady}
             activeTab={activeTab}
             lectureTitle={lecture.title}
             reviewCount={reviewCount}
@@ -439,7 +425,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             </div>
           </div>
         </section>
-      </div>
 
       {showNextConfirm && (
         <ReviewConfirmModal
