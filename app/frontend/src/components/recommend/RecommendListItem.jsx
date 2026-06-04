@@ -1,5 +1,9 @@
 import { useState } from 'react'
 
+const DISPLAY_SCORE_FULL_RATIO = 0.8
+const CONDITION_CHART_SHARE = 20
+const CONTENT_MEANING_CHART_SHARE = 100 - CONDITION_CHART_SHARE
+
 /**
  * 추천 강의 목록 아이템
  * 레이아웃: [썸네일] [태그·제목] [추천 점수 / 자세히▼]
@@ -127,16 +131,17 @@ function ScorePills({ parts }) {
 }
 
 function RadialScoreChart({ parts }) {
-  const total = parts.reduce((sum, part) => sum + part.value, 0)
-  const maxPartValue = Math.max(...parts.map(part => part.value), 1)
+  const total = parts.reduce((sum, part) => sum + chartValue(part), 0)
   let cursor = -90
   const sectors = parts.map(part => {
-    const angle = total > 0 ? (part.value / total) * 360 : 360 / parts.length
+    const composition = chartValue(part)
+    const score = clampScore(part.value)
+    const angle = total > 0 ? (composition / total) * 360 : 360 / parts.length
     const sector = {
       ...part,
       startAngle: cursor,
       endAngle: cursor + angle,
-      radius: 56 * Math.max(0.18, Math.min(1, part.value / maxPartValue)),
+      radius: 56 * Math.max(0.18, Math.min(1, score / 100)),
     }
     cursor += angle
     return sector
@@ -163,7 +168,7 @@ function RadialScoreChart({ parts }) {
         {parts.map(part => (
           <div key={part.key} className={`rec-radial-legend-item rec-radial-legend-item--${part.key}`}>
             <span>{part.shortLabel}</span>
-            <div className="rec-radial-meter" aria-label={`${part.label} ${part.value} / 100`}>
+            <div className="rec-radial-meter" aria-label={`${part.label} 점수 ${part.value} / 100, 구성 비중 ${chartValue(part)} / 100`}>
               <i style={{ width: `${part.value}%` }} />
             </div>
           </div>
@@ -171,6 +176,10 @@ function RadialScoreChart({ parts }) {
       </div>
     </div>
   )
+}
+
+function chartValue(part) {
+  return clampScore(part.chartValue ?? part.value)
 }
 
 function describeSector(cx, cy, radius, startAngle, endAngle) {
@@ -196,44 +205,99 @@ function polarToCartesian(cx, cy, radius, angleInDegrees) {
 }
 
 function getScoreParts(detail, overallScore) {
-  const total = clampScore(overallScore ?? detail.score * 100 ?? 0)
+  const displayFloor = overallScore == null ? 0 : clampScore(overallScore)
+  const contentRaw = toRatio(detail.content_score ?? ((detail.content_pct ?? 0) / 100))
+  const meaningRaw = Math.max(
+    toRatio(detail.vec_score ?? 0),
+    toRatio(detail.graph_score ?? 0),
+    toRatio(detail.sim_keyword ?? 0),
+  )
+  const conditionRaw = getConditionScoreRatio(detail)
   const rawParts = [
     {
       key: 'content',
       label: '내용 일치',
       shortLabel: '내용',
-      raw: toRatio(detail.content_score ?? ((detail.content_pct ?? 0) / 100)),
+      raw: contentRaw,
     },
     {
       key: 'meaning',
-      label: '의미 유사',
+      label: '의미 유사도',
       shortLabel: '의미',
-      raw: toRatio(detail.vec_score ?? detail.graph_score ?? 0),
+      raw: meaningRaw,
     },
     {
       key: 'condition',
-      label: '조건 적합',
+      label: '조건 적합도',
       shortLabel: '조건',
-      raw: toRatio(detail.combined_boost ?? detail.duration_score ?? detail.dm_keyword ?? 0),
+      raw: conditionRaw,
     },
   ]
 
-  const rawTotal = rawParts.reduce((sum, part) => sum + part.raw, 0)
-  if (!total || rawTotal <= 0) {
-    return rawParts.map(part => ({ ...part, value: 0 }))
-  }
+  const contentChartValue = getContentChartValue(contentRaw, meaningRaw)
+  const meaningChartValue = CONTENT_MEANING_CHART_SHARE - contentChartValue
 
-  const values = rawParts.map(part => Math.max(0, Math.round((part.raw / rawTotal) * total)))
-  const diff = total - values.reduce((sum, value) => sum + value, 0)
-  if (values.length > 0) values[0] += diff
-
-  return rawParts.map((part, index) => ({
+  return rawParts.map(part => ({
     key: part.key,
     label: part.label,
     shortLabel: part.shortLabel,
-    value: clampScore(values[index]),
-    score10: Math.max(0, Math.min(10, Number((part.raw * 10).toFixed(1)))),
+    value: Math.max(displayRatioScore(part.raw), displayFloor),
+    chartValue: part.key === 'condition'
+      ? CONDITION_CHART_SHARE
+      : part.key === 'content'
+        ? contentChartValue
+        : meaningChartValue,
+    score10: Math.max(0, Math.min(10, Number((Math.max(displayRatioScore(part.raw), displayFloor) / 10).toFixed(1)))),
   }))
+}
+
+function getContentChartValue(contentRaw, meaningRaw) {
+  const content = Math.max(0, toRatio(contentRaw))
+  const meaning = Math.max(0, toRatio(meaningRaw))
+  const total = content + meaning
+  if (total <= 0) return CONTENT_MEANING_CHART_SHARE / 2
+  return Math.round((content / total) * CONTENT_MEANING_CHART_SHARE)
+}
+
+function displayRatioScore(value) {
+  return clampScore((toRatio(value) / DISPLAY_SCORE_FULL_RATIO) * 100)
+}
+
+function getConditionScoreRatio(detail) {
+  const explicitConditionScores = []
+  const hasDurationCondition = detail.duration_score > 0 || detail.duration_mismatch === true
+  const conditionWarnings = Array.isArray(detail.condition_warnings) ? detail.condition_warnings : []
+
+  if (hasDurationCondition) {
+    explicitConditionScores.push(toRatio(detail.duration_score ?? 0))
+  }
+  if (detail.visual_preference) {
+    explicitConditionScores.push(Math.max(
+      toRatio(detail.visual_score ?? 0),
+      toRatio(detail.visual_density_score ?? 0),
+      toRatio(detail.visual_concept_score ?? 0),
+    ))
+  }
+  if (detail.application_preference) {
+    explicitConditionScores.push(toRatio(detail.application_score ?? 0))
+  }
+  if (detail.listenability_preference) {
+    explicitConditionScores.push(toRatio(detail.listenability_score ?? 0))
+  }
+  if (detail.slow_speech_preference) {
+    explicitConditionScores.push(toRatio(detail.speech_rate_score ?? 0))
+  }
+  if (detail.recency_preference) {
+    explicitConditionScores.push(toRatio(detail.recency_score ?? 0))
+  }
+
+  if (explicitConditionScores.length > 0) {
+    const combined = toRatio(detail.combined_boost ?? 0)
+    if (combined > 0) return combined
+    return explicitConditionScores.reduce((sum, value) => sum + value, 0) / explicitConditionScores.length
+  }
+
+  return conditionWarnings.length > 0 ? toRatio(detail.combined_boost ?? 0) : 1
 }
 
 function toRatio(value) {
