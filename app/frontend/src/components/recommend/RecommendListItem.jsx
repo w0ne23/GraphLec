@@ -2,7 +2,7 @@ import { useState } from 'react'
 
 /**
  * 추천 강의 목록 아이템
- * 레이아웃: [썸네일] [태그·제목] [추천 점수 + 간접관련배지 / 자세히▼]
+ * 레이아웃: [썸네일] [태그·제목] [추천 점수 / 자세히▼]
  */
 export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const [isExpanded, setIsExpanded] = useState(false)
@@ -11,7 +11,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const durationLabel = formatDuration(lecture.duration_sec)
   const scoreParts    = getScoreParts(detail, overallScore)
 
-  const isRelated = lecture.tier === 'related'
   const showScore = overallScore != null
 
   // keywords 배열 우선 — reason 텍스트가 태그로 뽑히는 버그 방지
@@ -21,7 +20,7 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
   const durationMismatch = detail.duration_mismatch === true
 
   return (
-    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}${isRelated ? ' rec-item--related' : ''}`}>
+    <div className={`rec-item${isExpanded ? ' rec-item--expanded' : ''}`}>
 
       {/* ── 메인 행 ── */}
       <div className="rec-item-main" onClick={() => setIsExpanded(v => !v)}>
@@ -65,14 +64,9 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
             <ScorePills parts={scoreParts} />
           )}
           {showScore && (
-            <div className={`rec-overall-score${isRelated ? ' rec-overall-score--related' : ''}`}>
+            <div className="rec-overall-score">
               {overallScore}점
             </div>
-          )}
-          {isRelated && (
-            <span className="rec-tier-badge">
-              간접 관련
-            </span>
           )}
           <button className="rec-toggle-btn">
             {isExpanded ? '접기 ▲' : '자세히 ▼'}
@@ -86,12 +80,6 @@ export default function RecommendListItem({ lecture, onPlay, queryText = '' }) {
           <div className="rec-details-content">
             <div className="rec-details-grid">
               <div className="rec-details-copy">
-                {isRelated && (
-                  <p className="rec-related-notice">
-                    이 강의는 질의 주제와 직접 일치하지 않을 수 있습니다. 관련 개념을 포함하고 있어 함께 참고할 수 있습니다.
-                  </p>
-                )}
-
                 <section className="rec-detail-section">
                   <h4 className="rec-details-title">핵심 키워드</h4>
                   <div className="rec-detail-tags">
