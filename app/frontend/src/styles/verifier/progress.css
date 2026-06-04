@@ -63,6 +63,7 @@
   align-items: stretch;
   height: auto;
   margin: 0;
+  padding-inline: 2rem;
 }
 .vf-flow-row {
   display: flex;

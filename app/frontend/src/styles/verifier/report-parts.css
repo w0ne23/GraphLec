@@ -45,32 +45,32 @@
 
 .vf-chip--scope_error,
 .vf-chip--scope_overclaim {
-  border-color: rgba(217, 119, 6, .32);
-  background: var(--amber-bg);
-  color: var(--amber);
-  font-weight: 800;
-}
-
-.vf-chip--simple_factual_error,
-.vf-chip--factual_error {
-  border-color: rgba(220, 38, 38, .24);
+  border-color: transparent;
   background: var(--red-bg);
   color: var(--red);
   font-weight: 800;
 }
 
+.vf-chip--simple_factual_error,
+.vf-chip--factual_error {
+  border-color: transparent;
+  background: var(--blue-bg);
+  color: var(--blue);
+  font-weight: 800;
+}
+
 .vf-chip--outdated,
 .vf-chip--temporal_error {
-  border-color: rgba(124, 58, 237, .28);
-  background: rgba(124, 58, 237, .08);
-  color: #7c3aed;
+  border-color: transparent;
+  background: var(--green-bg);
+  color: var(--green-text);
   font-weight: 800;
 }
 
 .vf-chip--confusing_explanation {
-  border-color: rgba(37, 99, 235, .24);
-  background: var(--blue-bg);
-  color: var(--blue);
+  border-color: transparent;
+  background: var(--amber-bg);
+  color: var(--amber);
   font-weight: 800;
 }
 

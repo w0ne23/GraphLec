@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import PipelineProgress from '../../components/verifier/PipelineProgress'
 import PipelineStatusHeader from '../../components/verifier/PipelineStatusHeader'
+import VerifyReportPanels from '../../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../../components/verifier/verifierConstants'
 import { useJobStream } from '../../hooks/useJobStream'
@@ -24,24 +25,57 @@ function LoadingState({ mode }) {
   )
 }
 
+function VerifyDetailStep({ flow, onBackReview }) {
+  const headerActions = (
+    <div className="vf-flow-actions">
+      <button className="vf-flow-close-btn" onClick={onBackReview} aria-label="검토 결과로 돌아가기">
+        ×
+      </button>
+    </div>
+  )
+
+  return (
+    <div className="vf-flow-screen">
+      <div className="vf-flow-screen-inner">
+        <VerifyReportPanels flow={flow} headerActions={headerActions} />
+      </div>
+    </div>
+  )
+}
+
 function VerifyModePage({ flow }) {
-  const [isReviewOpen, setIsReviewOpen] = useState(false)
-  const canOpenResult = flow.phase === PHASES.VERIFY_READY && flow.verifier
+  const [reviewView, setReviewView] = useState('status')
+  const isVerifyReady = flow.phase === PHASES.VERIFY_READY
+  const canOpenResult = isVerifyReady && flow.verifier
   const isError = flow.phase === PHASES.ERROR
   const actionDisabled = flow.isRestarting || flow.isMutating
+  const reviewFlow = {
+    ...flow,
+    actions: {
+      ...flow.actions,
+      backToVerifyReady: () => setReviewView('status'),
+    },
+  }
 
-  if (isReviewOpen) {
+  useEffect(() => {
+    if (!isVerifyReady) setReviewView('status')
+  }, [isVerifyReady])
+
+  if (reviewView === 'review' && canOpenResult) {
     return (
       <div className="vf-page">
         <VerifierReviewPanel
-          flow={{
-            ...flow,
-            actions: {
-              ...flow.actions,
-              backToVerifyReady: () => setIsReviewOpen(false),
-            },
-          }}
+          flow={reviewFlow}
+          onOpenDetail={() => setReviewView('detail')}
         />
+      </div>
+    )
+  }
+
+  if (reviewView === 'detail' && canOpenResult) {
+    return (
+      <div className="vf-page">
+        <VerifyDetailStep flow={reviewFlow} onBackReview={() => setReviewView('review')} />
       </div>
     )
   }
@@ -49,27 +83,40 @@ function VerifyModePage({ flow }) {
   return (
     <div className="vf-page">
       <div className="vf-status-wrap">
-        <div className="vf-status-inner vf-status-inner--wide">
+        <div className="vf-status-inner">
           <PipelineStatusHeader title={flow.lecture.title || '강의 영상'} pipelineLabel={flow.pipelineLabel} />
           <PipelineProgress
             stages={flow.pipelineStages}
-            phase={canOpenResult ? PHASES.VERIFY_READY : flow.phase === PHASES.ERROR ? PHASES.ERROR : PHASES.PIPELINE1}
+            phase={isVerifyReady ? PHASES.VERIFY_READY : flow.phase === PHASES.ERROR ? PHASES.ERROR : PHASES.PIPELINE1}
             errorMessage={flow.errorMessage}
             statusMessage={flow.currentStage || '검증 파이프라인을 진행 중입니다.'}
             flowNodes={flow.pipelineFlowNodes}
             priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
-            <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={actionDisabled}>
-              작업 삭제
-            </button>
-            {(canOpenResult || isError) && (
+            {!isVerifyReady && (
+              <button className="vf-cancel-btn" onClick={flow.actions.cancelUpload} disabled={actionDisabled}>
+                검증 중단
+              </button>
+            )}
+            {isError && (
               <button
                 className="vf-confirm-btn"
-                disabled={actionDisabled || (canOpenResult && !flow.verifier)}
-                onClick={canOpenResult ? () => setIsReviewOpen(true) : () => flow.actions.restart('verify')}
+                disabled={actionDisabled}
+                onClick={() => flow.actions.restart('verify')}
               >
-                {canOpenResult ? '결과 보기' : flow.isRestarting ? '재시작 중' : '재시작'}
+                {flow.isRestarting ? '재시작 중' : '재시작'}
+              </button>
+            )}
+            {isVerifyReady && (
+              <button
+                className="vf-confirm-btn"
+                disabled={actionDisabled || !canOpenResult}
+                onClick={() => {
+                  if (canOpenResult) setReviewView('review')
+                }}
+              >
+                결과 보기
               </button>
             )}
           </div>
@@ -103,6 +150,15 @@ function PublishModePage({ flow }) {
             priorNodeIds={flow.pipelinePriorNodeIds}
           />
           <div className="vf-status-actions vf-status-actions--inline">
+            {!isDone && (
+              <button
+                className="vf-cancel-btn"
+                onClick={flow.actions.cancelUpload}
+                disabled={actionDisabled}
+              >
+                업로드 취소
+              </button>
+            )}
             {isError && (
               <button
                 className="vf-confirm-btn"
@@ -112,13 +168,11 @@ function PublishModePage({ flow }) {
                 {flow.isRestarting ? '재시작 중' : '재시작'}
               </button>
             )}
-            <button
-              className={isDone ? 'vf-reset-btn' : 'vf-cancel-btn'}
-              onClick={isDone ? flow.actions.reset : flow.actions.cancelUpload}
-              disabled={actionDisabled}
-            >
-              {isDone ? '새 강의 업로드' : '업로드 취소'}
-            </button>
+            {isDone && (
+              <button className="vf-reset-btn" onClick={flow.actions.reset} disabled={actionDisabled}>
+                처음으로
+              </button>
+            )}
           </div>
         </div>
       </div>

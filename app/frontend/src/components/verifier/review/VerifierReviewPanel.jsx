@@ -53,6 +53,7 @@ function IssueTypeBreakdown({ items, activeFilter = 'all', onFilterChange }) {
           <button
             className={cx(
               'vf-type-pill',
+              filter.key !== 'all' && `vf-type-pill--${filter.key}`,
               activeFilter === filter.key && 'vf-type-pill--active',
               !count && 'vf-type-pill--empty',
             )}
@@ -88,13 +89,13 @@ function SortControls({ value, onChange }) {
         className={cx('vf-sort-btn', value === 'utterance' && 'vf-sort-btn--active')}
         onClick={() => onChange('utterance')}
       >
-        발화순
+        발화시점순
       </button>
       <button
         className={cx('vf-sort-btn', value === 'score' && 'vf-sort-btn--active')}
         onClick={() => onChange('score')}
       >
-        신뢰도순
+        심각도순
       </button>
     </div>
   )
@@ -112,8 +113,6 @@ function VerifierReviewHeader({
   typoCount,
   onSelectTab,
   onOpenDetail,
-  onCancelUpload,
-  isCancelling,
   onComplete,
 }) {
   return (
@@ -121,15 +120,17 @@ function VerifierReviewHeader({
       <div className="vf-review-header-main">
         <div className="vf-review-heading">
           {onBack && <button className="vf-topbar-back" onClick={onBack}>◀</button>}
-          <strong>{lectureTitle}</strong>
-          <span>검토 결과</span>
-        </div>
-        <div className="vf-review-header-actions">
+          <span className="vf-review-heading-title">
+            <strong>{lectureTitle}</strong>
+            <span>검토 결과</span>
+          </span>
           {onOpenDetail && (
             <button className="vf-review-detail-btn" onClick={onOpenDetail}>
               상세보기
             </button>
           )}
+        </div>
+        <div className="vf-review-header-actions">
           <nav className="vf-review-tabs" aria-label="검토 항목">
             <button className={reviewTabClassName('review', activeTab)} onClick={() => onSelectTab('review')}>
               <span>검토 필요</span>
@@ -140,11 +141,6 @@ function VerifierReviewHeader({
               <strong>{typoCount}</strong>
             </button>
           </nav>
-          {onCancelUpload && (
-            <button className="vf-cancel-btn vf-review-cancel-btn" onClick={onCancelUpload} disabled={isCancelling}>
-              작업 삭제
-            </button>
-          )}
           <button className="vf-confirm-btn vf-review-complete-btn" onClick={onComplete}>
             검토 완료
           </button>
@@ -410,11 +406,12 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
             typoCount={typoCount}
             onSelectTab={selectTab}
             onOpenDetail={onOpenDetail}
-            onCancelUpload={actions.cancelUpload}
-            isCancelling={Boolean(flow.isMutating || flow.isRestarting || flow.isBusy)}
             onComplete={() => setShowNextConfirm(true)}
           />
           <div className="vf-review-content">
+            <div className="vf-review-scroll">
+              {renderActivePanel()}
+            </div>
             {flow.isVideoMode && (
               <VerifierVideoPane
                 lecture={lectureWithScenes}
@@ -425,9 +422,6 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
                 onClose={actions.exitVideo}
               />
             )}
-            <div className="vf-review-scroll">
-              {renderActivePanel()}
-            </div>
           </div>
         </section>
 

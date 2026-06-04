@@ -77,6 +77,10 @@
   align-items: stretch;
 }
 
+.vf-flow-screen-inner {
+  max-width: 960px;
+}
+
 .vf-choice-inner--resume {
   max-width: 560px;
 }
@@ -293,10 +297,8 @@
 .vf-status-actions--inline .vf-confirm-btn {
   width: auto;
   min-width: 150px;
-  order: 2;
 }
 .vf-status-actions--inline .vf-cancel-btn {
-  order: 1;
   align-self: auto;
 }
 .vf-error-actions { display: flex; gap: 10px; }
@@ -330,6 +332,30 @@
 
 .vf-flow-actions .vf-cancel-btn {
   align-self: auto;
+}
+
+.vf-flow-close-btn {
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--b2);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--t1);
+  cursor: pointer;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1;
+  transition: border-color .14s, background .14s, color .14s;
+}
+
+.vf-flow-close-btn:hover {
+  border-color: var(--b2);
+  background: var(--hover);
+  color: var(--t1);
 }
 
 @media (max-width: 600px) {

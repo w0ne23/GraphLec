@@ -1,19 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { VERIFY_STEPS } from './verifierConstants'
-import SlideReviewReportPanel from './SlideReviewReportPanel'
 import VerifyStageTimeline from './VerifyStageTimeline'
+import FlowReportPanel from './FlowReportPanel'
 import ClaimListPanel from './stages/ClaimListPanel'
 import {
-  FinalReviewConditionTooltip,
   renderClaimExtractionRows,
   renderFinalVerificationRows,
   renderIssueClassificationRows,
   renderIssueJudgeRows,
 } from './stages/ClaimListRows'
 import SlideReviewStage from './stages/SlideReviewStage'
-import {
-  MouseTooltip,
-} from './VerifyReportParts'
 
 import { 
   asArray, asObject, compactText, 
@@ -497,17 +493,6 @@ function renderClaimListDetail({
         rows={rows}
         sourceRows={sourceRows}
         status={status}
-        titleAddon={(
-          <MouseTooltip
-            className="vf-claim-flow-help-wrap"
-            tabIndex={0}
-            ariaLabel="최종 평가 조건"
-            tooltip={<FinalReviewConditionTooltip />}
-            tooltipClassName="vf-claim-flow-help-tooltip"
-          >
-            <span className="vf-claim-flow-help-icon" aria-hidden="true">?</span>
-          </MouseTooltip>
-        )}
         viewMode={claimListView}
         onViewModeChange={onClaimListViewChange}
       >
@@ -593,7 +578,7 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
     <div className="vf-report">
       <div className="vf-report-head">
         <div>
-          <span>검증 파이프라인</span>
+          <span>검증 과정 보고서</span>
           <h1>{flow.lecture?.title || '강의 영상'}</h1>
         </div>
         {headerActions}
@@ -612,11 +597,9 @@ export default function VerifyReportPanels({ flow, headerActions = null }) {
           <VerifyStageTimeline statuses={statuses} activeTab={activeTab} onSelectTab={selectTab} compact />
         </section>
       )}
-      {activeTab === 'slide_review' && (
-        <SlideReviewReportPanel model={model} />
-      )}
       <div className="vf-detail">
         <div className="vf-detail-body">
+          {activeTab !== 'slide_review' && <FlowReportPanel model={model} />}
           {renderActiveDetail({ 
             activeTab, 
             model, 

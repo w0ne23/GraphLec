@@ -1,5 +1,6 @@
 import {
   compactText,
+  firstFilled,
   formatScore,
   resultFileUrl,
   hideMissingImage,
@@ -10,6 +11,18 @@ import {
   ChipList,
   TextBlock,
 } from '../VerifyReportParts'
+
+function slideImageSource(item) {
+  return firstFilled(
+    item.slide_image_url,
+    item.image_url,
+    item.thumbnail_url,
+    item.slide_image_path,
+    item.image_path,
+    item.thumbnail_path,
+    item.base_path
+  )
+}
 
 /**
  * SlideReviewStage: 슬라이드 오타 검토 단계 메인 컴포넌트
@@ -51,7 +64,8 @@ export default function SlideReviewStage({ model, status, resultId }) {
       {rows.length ? (
         <div className="vf-record-list">
           {rows.map((item, index) => {
-            const imageUrl = resultFileUrl(item.slide_image_path, resultId)
+            const imageSource = slideImageSource(item)
+            const imageUrl = resultFileUrl(imageSource, resultId)
             return (
               <article
                 key={item.slide_error_id || index}
@@ -81,7 +95,7 @@ export default function SlideReviewStage({ model, status, resultId }) {
                     <div><span>수정 제안</span><span className="vf-bold">{compactText(item.corrected_text || item.suggested_fix)}</span></div>
                   </div>
                   <TextBlock label="근거">{item.reason}</TextBlock>
-                  <TextBlock label="슬라이드 이미지">{item.slide_image_path}</TextBlock>
+                  <TextBlock label="슬라이드 이미지">{imageSource}</TextBlock>
                 </div>
               </article>
             )

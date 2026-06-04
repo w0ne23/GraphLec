@@ -20,14 +20,14 @@ const ISSUE_CHIP_CLASS = {
   temporal_error: 'vf-chip--temporal_error',
 }
 
-const SCORE_CHIP_CLASS = {
-  agree: 'vf-chip--score-agree',
-  confirmed: 'vf-chip--score-confirmed',
-  disagree: 'vf-chip--score-disagree',
-  inconclusive: 'vf-chip--score-inconclusive',
-  professor_check: 'vf-chip--score-professor_check',
-  rejected: 'vf-chip--score-rejected',
-  review_needed: 'vf-chip--score-review_needed',
+const SCORE_TEXT_CLASS = {
+  agree: 'vf-claim-score-text--agree',
+  confirmed: 'vf-claim-score-text--confirmed',
+  disagree: 'vf-claim-score-text--disagree',
+  inconclusive: 'vf-claim-score-text--inconclusive',
+  professor_check: 'vf-claim-score-text--professor_check',
+  rejected: 'vf-claim-score-text--rejected',
+  review_needed: 'vf-claim-score-text--review_needed',
 }
 
 function cx(...classNames) {
@@ -99,15 +99,16 @@ function TranscriptText({ text, highlightText }) {
   )
 }
 
-function WatchLocationRow({ canWatch, onWatch }) {
+function WatchLocationRow({ canWatch, timestamp, onWatch }) {
   if (!canWatch) return null
   return (
     <div className="vf-detail-row">
       <dt>영상 위치</dt>
-      <dd>
+      <dd className="vf-watch-location">
         <button className="vf-transcript-toggle vf-transcript-toggle--button" type="button" onClick={onWatch}>
           동영상 보기
         </button>
+        <span className="vf-claim-time">({timestamp})</span>
       </dd>
     </div>
   )
@@ -186,29 +187,18 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
   const recommendation = uniqueDetailValue(claim.recommendation || claim.teaching_note, [claim.correct_info])
   const suggestedRephrase = uniqueDetailValue(claim.suggested_rephrase, [claim.correct_info, recommendation])
   const evidenceInContext = uniqueDetailValue(claim.evidence_in_context, [claim.issue, whyWrong])
-  const hasClaimChips = displayIssueKey || hasCrosscheckScore
   const locationLabel = [claim.scene_label, claim.slide_title].filter(Boolean).join(' ')
   const issueChipClass = ISSUE_CHIP_CLASS[displayIssueKey]
-  const scoreChipClass = SCORE_CHIP_CLASS[crosscheckStatus]
+  const scoreTextClass = SCORE_TEXT_CLASS[crosscheckStatus]
   const problemsByModel = modelProblemEntries(claim.model_verdicts)
 
   return (
     <article className={cx('vf-claim-card', expanded && 'vf-claim-card--expanded')}>
       <div className="vf-claim-summary">
         <button className="vf-claim-main" onClick={onToggle}>
-          {hasClaimChips && (
-            <div className="vf-chip-row">
-              {displayIssueKey && <span className={cx('vf-chip', issueChipClass)}>{displayIssueLabel}</span>}
-              {hasCrosscheckScore && (
-                <span className={cx('vf-chip', 'vf-chip--score', scoreChipClass)}>
-                  {scoreLabel(claim.crosscheck_score)}
-                </span>
-              )}
-            </div>
-          )}
           <div className="vf-claim-copy">
             <div className="vf-claim-headline">
-              <span className="vf-claim-time">{canWatch ? formatTime(startTime) : '-'}</span>
+              {displayIssueKey && <span className={cx('vf-chip', issueChipClass)}>{displayIssueLabel}</span>}
               <span className="vf-claim-title">{title}</span>
             </div>
             {(claim.scene_label || claim.slide_title) && (
@@ -218,6 +208,11 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
               </div>
             )}
           </div>
+          {hasCrosscheckScore && (
+            <div className="vf-claim-meta">
+              <span className={cx('vf-claim-score-text', scoreTextClass)}>{scoreLabel(claim.crosscheck_score)}</span>
+            </div>
+          )}
           <span
             className={cx('vf-claim-toggle', expanded && 'vf-claim-toggle--open')}
             aria-hidden="true"
@@ -228,7 +223,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
       {expanded && (
         <div className="vf-claim-detail">
           <dl>
-            <WatchLocationRow canWatch={canWatch} onWatch={onWatch} />
+            <WatchLocationRow canWatch={canWatch} timestamp={formatTime(startTime)} onWatch={onWatch} />
             <TranscriptRow contexts={claim.transcript_contexts} highlightText={claim.transcript_claim_text} />
             <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="유형 근거" value={claim.issue_type_rationale} />

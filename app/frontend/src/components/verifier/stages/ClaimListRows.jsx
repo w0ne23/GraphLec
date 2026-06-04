@@ -248,7 +248,7 @@ function FinalVerificationRow({ row, displayId }) {
             <ModelEvidenceAccordion items={severity.model_judgments} valueFormat="unit" />
           </>
         ) : (
-          <div className="vf-report-note" data-report-note="true">최종 평가 데이터가 없습니다.</div>
+          <div className="vf-report-note" data-report-note="true">멀티 LLM 검증 데이터가 없습니다.</div>
         )}
       </div>
     </details>
@@ -266,16 +266,5 @@ export function renderFinalVerificationRows(rows) {
         />
       ))}
     </div>
-  )
-}
-
-export function FinalReviewConditionTooltip() {
-  return (
-    <span className="vf-final-condition-tooltip">
-      <span>강의자 검토가 필요한 경우</span>
-      <span>문제 기준 초과: 최종 점수 &gt; 0.20</span>
-      <span>모델 의견 불합치: 모델 불일치 &gt;= 0.35</span>
-      <span>분류 모호함: 유형 margin &lt; 0.10</span>
-    </span>
   )
 }

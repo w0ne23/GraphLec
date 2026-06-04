@@ -59,9 +59,9 @@ export const PIPELINE_NODES = {
   }),
   slide_review: createNode({
     id: 'slide_review',
-    label: '최종 검증',
+    label: '슬라이드 오류',
     stageKey: 'verify_slide_errors',
-    stageLabel: '최종 검증',
+    stageLabel: '슬라이드 오류 검사',
   }),
   structure: createNode({
     id: 'structure',

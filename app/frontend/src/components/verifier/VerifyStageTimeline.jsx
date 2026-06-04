@@ -31,7 +31,7 @@ export default function VerifyStageTimeline({ statuses = [], activeTab, onSelect
             >
               <div className="vf-report-step-body">
                 <span className="vf-bold">{step.label}</span>
-                <span className="vf-report-step-status">{statusText(status)}</span>
+                {status === 'run' && <span className="vf-report-step-status">{statusText(status)}</span>}
               </div>
             </button>
             {index < 3 && <span className={cx('vf-report-step-link', linkStatus === 'done' && 'vf-report-step-link--done')} aria-hidden="true" />}

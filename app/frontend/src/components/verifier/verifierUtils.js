@@ -58,15 +58,30 @@ export function sceneIdFromIndex(value) {
 }
 
 export function typeLabel(type) {
-  // ISSUE_TYPE_LABELS는 상수로 관리되거나 이 함수 내에서 직접 처리
+  const key = compactText(type, '')
   const labels = {
-    factual_error: 'factual_error',
-    temporal_error: 'temporal_error',
-    scope_overclaim: 'scope_overclaim',
-    confusing_explanation: 'confusing_explanation',
+    factual_error: '사실 오류',
+    simple_factual_error: '사실 오류',
+    '단순 사실 오류': '사실 오류',
+    '사실 오류': '사실 오류',
+    temporal_error: '오래된 내용',
+    outdated: '오래된 내용',
+    '시간성 오류': '오래된 내용',
+    '최신성 오류': '오래된 내용',
+    '오래된 정보': '오래된 내용',
+    '오래된 내용': '오래된 내용',
+    scope_overclaim: '과도한 일반화',
+    scope_error: '과도한 일반화',
+    '범위 과잉 단정': '과도한 일반화',
+    '범위 과잉': '과도한 일반화',
+    '과잉 단정': '과도한 일반화',
+    '과도한 일반화': '과도한 일반화',
+    confusing_explanation: '혼동 가능 설명',
+    '혼동 유발 설명': '혼동 가능 설명',
+    '혼동 가능 설명': '혼동 가능 설명',
     unknown: 'unknown',
   }
-  return labels[type] || compactText(type)
+  return labels[key] || compactText(type)
 }
 
 export function agreementLabel(type) {
@@ -243,20 +258,17 @@ export function hideMissingImage(event) {
 
 const FINAL_REVIEW_SCORE_THRESHOLD = 0.2
 const MANUAL_REVIEW_DISAGREEMENT_THRESHOLD = 0.35
-const LOW_MARGIN_THRESHOLD = 0.1
 
 export function finalReviewReasonFlags(severity) {
   if (!severity) {
     return {
       problemThreshold: false,
       modelDisagreement: false,
-      lowMargin: false,
     }
   }
   const score = Number(getScore(severity))
   const status = severity.status || statusFromSeverityScore(score)
   const disagreement = Number(severity.model_disagreement ?? severity.classified_issue_verifier?.model_disagreement)
-  const margin = Number(severity.previous_classification?.margin)
   return {
     problemThreshold: (
       status === 'confirmed' ||
@@ -265,10 +277,6 @@ export function finalReviewReasonFlags(severity) {
       (Number.isFinite(score) && score > FINAL_REVIEW_SCORE_THRESHOLD)
     ),
     modelDisagreement: Number.isFinite(disagreement) && disagreement >= MANUAL_REVIEW_DISAGREEMENT_THRESHOLD,
-    lowMargin: Boolean(
-      severity.previous_classification?.low_margin ||
-      (Number.isFinite(margin) && margin < LOW_MARGIN_THRESHOLD)
-    ),
   }
 }
 
@@ -277,7 +285,6 @@ export function finalReviewReasonLabels(severity) {
   const labels = []
   if (flags.problemThreshold) labels.push('문제 기준 초과')
   if (flags.modelDisagreement) labels.push('모델 의견 불합치')
-  if (flags.lowMargin) labels.push('분류 모호함')
   return labels
 }
 
