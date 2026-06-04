@@ -51,7 +51,7 @@ app.add_middleware(
 
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY_2") or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 GEMINI_ANSWER_MODEL = os.getenv("GEMINI_ANSWER_MODEL", "gemini-2.5-flash")
-QUERY_LLM_PROVIDER = os.getenv("QUERY_SERVICE_LLM_PROVIDER", "openai").strip().lower()
+QUERY_LLM_PROVIDER = os.getenv("QUERY_SERVICE_LLM_PROVIDER", "gemini").strip().lower()
 QUERY_OPENAI_MODEL = os.getenv("QUERY_SERVICE_OPENAI_MODEL", "gpt-5.4").strip()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 TOP_K = int(os.getenv("GRAPHLEC_TOP_K", "8"))
