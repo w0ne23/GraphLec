@@ -4,7 +4,6 @@ import {
   claimDisplayIssueKey,
   compactText,
   formatModelName,
-  formatPercent,
   formatTime,
   labelForClaimIssue,
   scoreLabel,
@@ -35,12 +34,50 @@ function cx(...classNames) {
   return classNames.filter(Boolean).join(' ')
 }
 
-function DetailRow({ label, value }) {
+function DetailRow({ label, value, className = '' }) {
   if (value === undefined || value === null || value === '') return null
   return (
-    <div className="vf-detail-row">
+    <div className={cx('vf-detail-row', className)}>
       <dt>{label}</dt>
       <dd>{value}</dd>
+    </div>
+  )
+}
+
+function textFromVerdict(verdict) {
+  return compactText(
+    verdict?.reason ||
+      verdict?.problem ||
+      verdict?.summary ||
+      verdict?.why_wrong ||
+      verdict?.rationale ||
+      verdict?.explanation,
+    ''
+  )
+}
+
+function modelProblemEntries(verdicts) {
+  return Object.entries(verdicts || {})
+    .map(([model, verdict]) => ({
+      model,
+      text: textFromVerdict(verdict),
+    }))
+    .filter(item => item.text)
+}
+
+function ModelProblemList({ entries }) {
+  if (!entries.length) return null
+
+  return (
+    <div className="vf-model-problem-list">
+      {entries.map(entry => (
+        <div className="vf-model-problem" key={entry.model}>
+          <div className="vf-model-problem-head">
+            <strong>{formatModelName(entry.model)}</strong>
+          </div>
+          <p>{entry.text}</p>
+        </div>
+      ))}
     </div>
   )
 }
@@ -111,30 +148,6 @@ function TranscriptRow({ contexts, highlightText }) {
   )
 }
 
-function ModelVerdicts({ verdicts }) {
-  const entries = Object.entries(verdicts || {})
-  if (!entries.length) return null
-  return (
-    <div className="vf-evidence-block">
-      <div className="vf-evidence-title">모델 판정</div>
-      <div className="vf-verdict-grid">
-        {entries.map(([model, verdict]) => (
-          <div className="vf-verdict" key={model}>
-            <div className="vf-verdict-model">
-              <span>{formatModelName(model)}</span>
-              {verdict?.model_weight !== undefined && <span className="vf-verdict-meta">가중치 {Number(verdict.model_weight).toFixed(2)}</span>}
-            </div>
-            <strong>{formatPercent(verdict?.confidence ?? verdict?.vote_score)}</strong>
-            {(verdict?.decision || verdict?.verdict || verdict?.status) && (
-              <span className="vf-verdict-meta">판정 유형: {compactText(verdict?.decision || verdict?.verdict || verdict?.status)}</span>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 function EvidenceSources({ sources }) {
   const items = asArray(sources).slice(0, 5)
   if (!items.length) return null
@@ -177,6 +190,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
   const locationLabel = [claim.scene_label, claim.slide_title].filter(Boolean).join(' ')
   const issueChipClass = ISSUE_CHIP_CLASS[displayIssueKey]
   const scoreChipClass = SCORE_CHIP_CLASS[crosscheckStatus]
+  const problemsByModel = modelProblemEntries(claim.model_verdicts)
 
   return (
     <article className={cx('vf-claim-card', expanded && 'vf-claim-card--expanded')}>
@@ -218,12 +232,12 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             <TranscriptRow contexts={claim.transcript_contexts} highlightText={claim.transcript_claim_text} />
             <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="유형 근거" value={claim.issue_type_rationale} />
-            <DetailRow label="문제점" value={claim.issue} />
+            <DetailRow label="문제점" value={problemsByModel.length ? <ModelProblemList entries={problemsByModel} /> : claim.issue} />
+            <DetailRow label="수정 제안" value={claim.correct_info} className="vf-detail-row--separated" />
             <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
             <DetailRow label="왜 문제인가" value={whyWrong} />
             <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
             <DetailRow label="학생 오해 가능성" value={claim.student_misunderstanding} />
-            <DetailRow label="올바른 정보/보충 조건" value={claim.correct_info} />
             <DetailRow label="왜 중요한가" value={claim.why_it_matters} />
             <DetailRow label="권장 수정" value={recommendation} />
             <DetailRow label="대체 표현" value={suggestedRephrase} />
@@ -232,7 +246,6 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
             <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
           </dl>
-          <ModelVerdicts verdicts={claim.model_verdicts} />
           <EvidenceSources sources={sources} />
         </div>
       )}

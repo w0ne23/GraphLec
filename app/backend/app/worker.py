@@ -98,7 +98,7 @@ PIPELINE_STAGE_LABELS = {
     "verifier_issue_judge": "이슈 후보 판단",
     "verifier_issue_classification": "이슈 유형 분류",
     "verifier_final_verification": "최종 평가",
-    "verify_slide_errors": "슬라이드 오류 검사",
+    "verify_slide_errors": "슬라이드 오타 검사",
     "verifier_run": "강의 내용 검증 실행",
     "graph_classify_scene": "강의 구조 파악",
     "graph_fusion": "데이터 통합",

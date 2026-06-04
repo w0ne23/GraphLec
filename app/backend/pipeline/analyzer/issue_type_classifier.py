@@ -40,8 +40,8 @@ DEFAULT_MODEL_WEIGHTS = {
     "google": 0.2,
 }
 ISSUE_TYPE_LABELS = {
-    "temporal_error": "시대적 오류",
-    "scope_overclaim": "범위 과잉 단정",
+    "temporal_error": "오래된 내용",
+    "scope_overclaim": "과도한 일반화",
     "factual_error": "사실 오류",
     "confusing_explanation": "혼동 가능 설명",
 }

@@ -502,7 +502,7 @@ def detect_classified_slide_errors(
     def worker(args: tuple[str, dict[str, Any]]) -> dict[str, Any]:
         model, slide = args
         slide_number = _slide_number(slide) or "?"
-        print(f"    슬라이드 오류 검사 [{slide_number}]", flush=True)
+        print(f"    슬라이드 오타 검사 [{slide_number}]", flush=True)
         errors, parse_failed, api_calls, usage = _check_single_slide(
             model=model,
             slide=slide,

@@ -46,13 +46,13 @@ export default function VerifySection() {
               <div className="vf-summary-num warn">4</div>
               <div>
                 <div className="vf-summary-text">일반 오류</div>
-                <div className="vf-summary-sub">사실·시대·혼동·범위</div>
+                <div className="vf-summary-sub">사실·오래됨·혼동·일반화</div>
               </div>
             </div>
             <div className="vf-summary-item">
               <div className="vf-summary-num info">2</div>
               <div>
-                <div className="vf-summary-text">슬라이드 오류</div>
+                <div className="vf-summary-text">슬라이드 오타</div>
                 <div className="vf-summary-sub">오타 · 표기 오류</div>
               </div>
             </div>
@@ -72,7 +72,7 @@ export default function VerifySection() {
               </div>
               <div className="vf-error-block vf-error-block-separated">
                 <div className="vf-error-head">
-                  <span className="vf-type-badge time">시대적 오류</span>
+                  <span className="vf-type-badge time">오래된 내용</span>
                   <span className="vf-card-issue">현대 OS는 세그멘테이션만 사용합니다.</span>
                 </div>
                 <div className="vf-card-reason">
@@ -81,7 +81,7 @@ export default function VerifySection() {
               </div>
               <div className="vf-error-block vf-error-block-separated">
                 <div className="vf-error-head">
-                  <span className="vf-type-badge confuse">혼동 오류</span>
+                  <span className="vf-type-badge confuse">혼동 가능 설명</span>
                   <span className="vf-card-issue">페이지 폴트는 메모리 부족 오류입니다.</span>
                 </div>
                 <div className="vf-card-reason">
@@ -90,7 +90,7 @@ export default function VerifySection() {
               </div>
               <div className="vf-error-block vf-error-block-separated">
                 <div className="vf-error-head">
-                  <span className="vf-type-badge scope">범위 오류</span>
+                  <span className="vf-type-badge scope">과도한 일반화</span>
                   <span className="vf-card-issue">세그먼트 베이스와 리미트까지 외우면 됩니다.</span>
                 </div>
                 <div className="vf-card-reason">
@@ -99,7 +99,7 @@ export default function VerifySection() {
               </div>
             </div>
 
-            {/* 슬라이드 오류 카드 */}
+            {/* 슬라이드 오타 카드 */}
             <div className="vf-card">
               <div className="vf-typo-stack">
                 <div className="vf-typo-item">

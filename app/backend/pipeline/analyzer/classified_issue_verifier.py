@@ -46,9 +46,9 @@ JUDGMENTS = {
 
 CATEGORY_LABELS = {
     "factual_error": "사실 오류",
-    "temporal_error": "시대적 오류",
+    "temporal_error": "오래된 내용",
     "confusing_explanation": "혼동 가능 설명",
-    "scope_overclaim": "범위 과잉 단정",
+    "scope_overclaim": "과도한 일반화",
 }
 
 

@@ -37,7 +37,7 @@ export const PIPELINE_STAGES = {
   },
   verify_slide_errors: {
     key: 'verify_slide_errors',
-    label: '슬라이드 오류 검사',
+    label: '슬라이드 오타 검사',
   },
   graph_classify_scene: {
     key: 'graph_classify_scene',
@@ -127,7 +127,7 @@ export const PIPELINE_NODES = {
   }),
   slide_review: createNode({
     id: 'slide_review',
-    label: '슬라이드 오류',
+    label: '슬라이드 오타',
     stageKeys: ['verify_slide_errors'],
   }),
   verified: createNode({ id: 'verified', label: '검증 결과 확인', type: 'major' }),

@@ -93,7 +93,7 @@ export default function SlideReviewReportPanel({ model }) {
   const summary = asObject(model.slideErrors.summary)
 
   return (
-    <section className="vf-stage-data" aria-label="슬라이드 오류 보고서">
+    <section className="vf-stage-data" aria-label="슬라이드 오타 보고서">
       <div className="vf-stage-data-head">
         <span className="vf-bold">흐름 보고서</span>
       </div>
@@ -101,7 +101,7 @@ export default function SlideReviewReportPanel({ model }) {
         <div className="vf-stage-data-panel-head">
           <div>
             <span>슬라이드</span>
-            <span className="vf-bold">슬라이드 오류</span>
+            <span className="vf-bold">슬라이드 오타</span>
           </div>
           <HeaderChips chips={[isReady ? slideReviewModelChip(model) : '']} />
         </div>

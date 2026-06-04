@@ -2,9 +2,9 @@ const PROFESSOR_CHECK_MIN_SCORE = 0.4
 
 export const ISSUE_FILTERS = [
   { key: 'all', label: '전체' },
-  { key: 'factual_error', code: 'A', label: '발언 자체 오류' },
-  { key: 'temporal_error', code: 'B', label: '시간적 오류' },
-  { key: 'scope_overclaim', code: 'C', label: '범위 과잉 단정' },
+  { key: 'factual_error', code: 'A', label: '사실 오류' },
+  { key: 'temporal_error', code: 'B', label: '오래된 내용' },
+  { key: 'scope_overclaim', code: 'C', label: '과도한 일반화' },
   { key: 'confusing_explanation', code: 'D', label: '혼동 가능 설명' },
 ]
 
@@ -93,26 +93,26 @@ export function uniqueDetailValue(value, previousValues) {
 
 function labelForIssueType(type) {
   const labels = {
-    factual_error: '발언 자체 오류',
-    temporal_error: '시간적 오류',
-    scope_overclaim: '범위 과잉 단정',
+    factual_error: '사실 오류',
+    temporal_error: '오래된 내용',
+    scope_overclaim: '과도한 일반화',
     confusing_explanation: '혼동 가능 설명',
-    outdated: '시간적 오류',
-    simple_factual_error: '단순 사실 오류',
-    scope_error: '범위 오류',
+    outdated: '오래된 내용',
+    simple_factual_error: '사실 오류',
+    scope_error: '과도한 일반화',
   }
   return labels[type] || compactText(type)
 }
 
 function labelForIssueSubtype(type) {
   const labels = {
-    factual_error: '발언 자체 오류',
-    temporal_error: '시간적 오류',
-    scope_overclaim: '범위 과잉 단정',
+    factual_error: '사실 오류',
+    temporal_error: '오래된 내용',
+    scope_overclaim: '과도한 일반화',
     confusing_explanation: '혼동 가능 설명',
-    simple_factual_error: '단순 사실 오류',
-    scope_error: '범위 오류',
-    outdated: '시간적 오류',
+    simple_factual_error: '사실 오류',
+    scope_error: '과도한 일반화',
+    outdated: '오래된 내용',
   }
   return labels[type] || compactText(type)
 }
@@ -505,7 +505,11 @@ function getRejectionReason(item) {
 }
 
 function getModelVerdicts(item) {
-  const rows = asArray(item.checks?.crosscheck?.model_results)
+  const rows = [
+    ...asArray(item.checks?.crosscheck?.model_results),
+    ...asArray(item.checks?.severity?.model_results),
+    ...asArray(item.model_judgments),
+  ]
   return rows.reduce((acc, row) => {
     const model = row?.model || row?.resolved_model || row?.source_model
     if (model) acc[model] = row
