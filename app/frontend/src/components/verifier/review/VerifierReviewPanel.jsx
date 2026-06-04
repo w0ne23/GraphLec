@@ -236,7 +236,7 @@ export default function VerifierReviewPanel({ flow, onOpenDetail }) {
     if (feedbackItems.length > 0) {
       const normalized = feedbackItems
         .map(item => feedbackItemToClaim(item, claimById))
-      const needsReview = normalized.filter(item => item.stage === 'professor_check' || item.stage === 'review_needed')
+      const needsReview = normalized.filter(item => item.stage === 'confirmed' || item.stage === 'professor_check' || item.stage === 'review_needed')
       const rejected = normalized.filter(item => item.stage === 'rejected')
       return {
         needsReview,

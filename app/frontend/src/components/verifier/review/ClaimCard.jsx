@@ -23,6 +23,7 @@ const ISSUE_CHIP_CLASS = {
 
 const SCORE_CHIP_CLASS = {
   agree: 'vf-chip--score-agree',
+  confirmed: 'vf-chip--score-confirmed',
   disagree: 'vf-chip--score-disagree',
   inconclusive: 'vf-chip--score-inconclusive',
   professor_check: 'vf-chip--score-professor_check',

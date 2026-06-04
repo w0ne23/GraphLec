@@ -544,7 +544,7 @@ function getCrosscheckScore(item, crosscheck = {}) {
 
 function displayStageFromScore(score, fallbackStatus = '') {
   const status = fallbackStatus === 'review_needed' ? 'professor_check' : fallbackStatus
-  if (status === 'confirmed') return ''
+  if (status === 'confirmed') return 'confirmed'
   if (status) return status
   if (score !== undefined) {
     return score >= PROFESSOR_CHECK_MIN_SCORE ? 'professor_check' : 'rejected'

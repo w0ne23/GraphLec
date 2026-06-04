@@ -82,6 +82,7 @@
   font-variant-numeric: tabular-nums;
 }
 
+.vf-chip--score-confirmed,
 .vf-chip--score-agree {
   border-color: rgba(220, 38, 38, .24);
   background: var(--red-bg);
