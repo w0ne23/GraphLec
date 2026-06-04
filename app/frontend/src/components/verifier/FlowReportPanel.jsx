@@ -47,10 +47,6 @@ function finalModelDisagreementCount(items) {
   return asArray(items).filter(item => finalReviewReasonFlags(item).modelDisagreement).length
 }
 
-function finalLowMarginCount(items) {
-  return asArray(items).filter(item => finalReviewReasonFlags(item).lowMargin).length
-}
-
 function issueTypeCountRows(issuesByType, isReady) {
   return ISSUE_TYPE_KEYS.map(type => ({
     label: typeLabel(type),
@@ -367,7 +363,7 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={finalDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <FlowSummaryHeader title="최종 평가" ariaLabel="최종 평가 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryHeader title="멀티 LLM 검증" ariaLabel="멀티 LLM 검증 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
                     <FlowSummaryNode label="final" value={finalCount} detailContent={detailContent} />
                     <FlowSummaryBranch rows={finalTypeRows} />
                   </>
@@ -390,9 +386,6 @@ function StageSummaryGrid({ model }) {
 }
 
 function ClaimExtractionDetailPanel({ model, isReady }) {
-  const resolvedClaims = model.claims.filter(claim => claim.resolution_status === 'resolved').length
-  const contextNeeded = model.claims.filter(claim => claim.needs_context).length
-  const approximate = model.claims.filter(claim => claim.is_approximate).length
   const claimModel = stageModelList(model, 'claim_extraction')[0] || UNKNOWN_MODEL_LABEL
   const claimTypes = model.claims.reduce((counts, claim) => {
     const key = compactText(claim.claim_type || 'claim')
@@ -403,18 +396,7 @@ function ClaimExtractionDetailPanel({ model, isReady }) {
 
   return (
     <>
-      <FlowDetailDivider />
-      <FlowDetailRows
-        indent
-        rows={[
-          { label: 'resolved', value: isReady ? resolvedClaims : '-' },
-          { label: 'needs_context', value: isReady ? contextNeeded : '-' },
-        ]}
-      />
-      <FlowDetailDivider indent />
-      <FlowDetailRows indent rows={[{ label: 'approx', value: isReady ? approximate : '-' }]} />
-      <FlowDetailDivider indent />
-      <FlowDetailRows indent rows={isReady ? claimTypeRows : [{ label: 'claim_type', value: '-' }]} />
+      <FlowDetailRows rows={isReady ? claimTypeRows : [{ label: 'claim_type', value: '-' }]} />
       <FlowDetailDivider />
       <FlowDetailRows rows={[{ label: '사용 모델', value: isReady ? claimModel : '-' }]} />
     </>
@@ -474,7 +456,6 @@ function IssueTypeDetailPanel({ model, isReady, typeRows = [] }) {
 function FinalVerificationDetailPanel({ model, isReady }) {
   const problemThresholdCount = finalProblemThresholdCount(model.severityItems)
   const modelDisagreementCount = finalModelDisagreementCount(model.severityItems)
-  const lowMarginCount = finalLowMarginCount(model.severityItems)
   const configuredWeights = {
     ...asObject(model.finalVerifierModelWeights),
     ...asObject(model.issueVerifier.model_weights),
@@ -492,7 +473,6 @@ function FinalVerificationDetailPanel({ model, isReady }) {
         rows={[
           { label: '문제 기준 초과', value: isReady ? problemThresholdCount : '-' },
           { label: '모델 의견 불합치', value: isReady ? modelDisagreementCount : '-' },
-          { label: '분류 모호함', value: isReady ? lowMarginCount : '-' },
         ]}
       />
       <FlowDetailDivider />

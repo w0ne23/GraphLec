@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import PipelineProgress from '../components/verifier/PipelineProgress'
+import PipelineStatusHeader from '../components/verifier/PipelineStatusHeader'
 import VerifyReportPanels from '../components/verifier/VerifyReportPanels'
 import VerifierReviewPanel from '../components/verifier/review/VerifierReviewPanel'
 import { PHASES } from '../components/verifier/verifierConstants'
@@ -104,12 +105,12 @@ function VerifyChoiceStep({ flow }) {
 
 function VerifyPipelineStep({ flow }) {
   const { actions } = flow
+  const isVerifyReady = flow.phase === PHASES.VERIFY_READY
 
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">{flow.pipelineLabel}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
@@ -118,18 +119,16 @@ function VerifyPipelineStep({ flow }) {
           flowNodes={flow.pipelineFlowNodes}
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
-        <div className="vf-status-actions">
-      {flow.phase === PHASES.VERIFY_READY ? (
-        <button className="vf-confirm-btn" onClick={actions.openReview}>
-          결과 보기
-        </button>
-      ) : (
-        <button className="vf-confirm-btn" disabled>
-          검증 진행 중
-        </button>
-      )}
-          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
-    </div>
+        <div className="vf-status-actions vf-status-actions--inline">
+          {!isVerifyReady && (
+            <button className="vf-cancel-btn" onClick={actions.reset}>검증 중단</button>
+          )}
+          {isVerifyReady && (
+            <button className="vf-confirm-btn" onClick={actions.openReview}>
+              결과 보기
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )
@@ -141,8 +140,7 @@ function PipelineRunStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-title">{flow.lecture.title}</div>
-        <div className="vf-status-label">{flow.pipelineLabel}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={flow.phase}
@@ -163,17 +161,16 @@ function VerifierDoneStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-done-icon">✅</div>
-        <div className="vf-status-title">{flow.lecture.title}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={PHASES.DONE}
           errorMessage={flow.errorMessage}
-          statusMessage="분석이 완료되었습니다."
+          statusMessage="업로드가 완료되었습니다."
           flowNodes={flow.pipelineFlowNodes}
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
-        <button className="vf-reset-btn" onClick={flow.actions.reset}>새 강의 업로드</button>
+        <button className="vf-reset-btn" onClick={flow.actions.reset}>처음으로</button>
       </div>
     </div>
   )
@@ -185,8 +182,7 @@ function VerifierErrorStep({ flow }) {
   return (
     <div className="vf-status-wrap">
       <div className="vf-status-inner">
-        <div className="vf-status-label vf-status-label--err">오류 발생</div>
-        <div className="vf-status-title">{flow.lecture.title}</div>
+        <PipelineStatusHeader title={flow.lecture.title} pipelineLabel={flow.pipelineLabel} />
         <PipelineProgress
           stages={flow.pipelineStages}
           phase={PHASES.ERROR}
@@ -195,9 +191,9 @@ function VerifierErrorStep({ flow }) {
           flowNodes={flow.pipelineFlowNodes}
           priorNodeIds={flow.pipelinePriorNodeIds}
         />
-        <div className="vf-error-actions">
-          <button className="vf-retry-btn" onClick={actions.retry}>재시도</button>
-          <button className="vf-cancel-btn" onClick={actions.reset}>작업 취소</button>
+        <div className="vf-status-actions vf-status-actions--inline">
+          <button className="vf-cancel-btn" onClick={actions.reset}>검증 중단</button>
+          <button className="vf-confirm-btn" onClick={actions.retry}>재시작</button>
         </div>
       </div>
     </div>
@@ -207,8 +203,8 @@ function VerifierErrorStep({ flow }) {
 function VerifyDetailStep({ flow, onBackReview }) {
   const headerActions = (
     <div className="vf-flow-actions">
-      <button className="vf-cancel-btn" onClick={onBackReview}>
-        검토 결과
+      <button className="vf-flow-close-btn" onClick={onBackReview} aria-label="검토 결과로 돌아가기">
+        ×
       </button>
     </div>
   )

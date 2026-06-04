@@ -136,7 +136,7 @@ button.vf-report-step {
 }
 
 .vf-report-step-link--done {
-  background: var(--green-text);
+  background: var(--peri);
 }
 
 button.vf-report-step:hover {
@@ -187,12 +187,12 @@ button.vf-report-step:hover {
 }
 
 .vf-report-step--done {
-  border-color: rgba(22, 163, 74, .24);
-  background: var(--green-bg);
+  border-color: rgba(102, 103, 171, .24);
+  background: var(--peri-pale);
 }
 
 .vf-report-step--done .vf-bold {
-  color: var(--t1);
+  color: var(--peri-dark);
 }
 
 @media (max-width: 600px) {

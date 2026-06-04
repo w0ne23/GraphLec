@@ -196,11 +196,13 @@ const UPLOAD_STAGE_GROUPS = createStageGroups(UPLOAD_PIPELINE_FLOW_NODES)
 const VERIFY_TO_UPLOAD_PRIOR_STAGE_KEYS = [
   'preprocess_extract_media',
   'preprocess_textualize_transcribe',
+  'preprocess_enrich_audio_annotation',
 ]
-const VERIFY_TO_UPLOAD_DONE_STAGE_KEYS = ['preprocess_enrich_audio_annotation']
+const VERIFY_TO_UPLOAD_DONE_STAGE_KEYS = []
 const VERIFY_TO_UPLOAD_PRIOR_NODE_IDS = [
   'data_extract',
   'content_extract',
+  'context_analysis',
 ]
 const PREVIEW_DEFAULT_STAGE_DELAY_MS = 2000
 const VERIFY_PREPROCESS_STAGE_DELAY_MS = 3000
@@ -218,7 +220,7 @@ function getPreviewStageGroups(phase, verifyEnabled = true) {
 }
 
 function getPipelinePriorStageKeys(phase, verifyEnabled) {
-  return (phase === PHASES.PIPELINE2 || phase === PHASES.DONE) && verifyEnabled
+  return phase === PHASES.PIPELINE2 || phase === PHASES.DONE
     ? VERIFY_TO_UPLOAD_PRIOR_STAGE_KEYS
     : []
 }
@@ -227,7 +229,7 @@ function getPreviewInitialStageGroupIndex(phase, verifyEnabled) {
   const stageGroups = getPreviewStageGroups(phase, verifyEnabled)
   const priorStageKeySet = new Set(getPipelinePriorStageKeys(phase, verifyEnabled))
 
-  if (phase === PHASES.PIPELINE2 && verifyEnabled) {
+  if (phase === PHASES.PIPELINE2) {
     const nextIndex = stageGroups.findIndex(group => group.some(stage => !priorStageKeySet.has(stage)))
     return nextIndex >= 0 ? nextIndex : 0
   }
@@ -243,7 +245,7 @@ function getPreviewStageDelayMs(phase, stageGroup) {
 }
 
 function getPipelinePriorNodeIds(phase, verifyEnabled) {
-  return (phase === PHASES.PIPELINE2 || phase === PHASES.DONE) && verifyEnabled
+  return phase === PHASES.PIPELINE2 || phase === PHASES.DONE
     ? VERIFY_TO_UPLOAD_PRIOR_NODE_IDS
     : []
 }
@@ -253,7 +255,7 @@ function createPreviewStages(phase, stageGroupIndex = -1, verifyEnabled = true) 
   const priorStageKeys = getPipelinePriorStageKeys(phase, verifyEnabled)
   const priorStageKeySet = new Set(priorStageKeys)
   const doneHandoffStageSet = new Set(
-    (phase === PHASES.PIPELINE2 || phase === PHASES.DONE) && verifyEnabled
+    (phase === PHASES.PIPELINE2 || phase === PHASES.DONE)
       ? VERIFY_TO_UPLOAD_DONE_STAGE_KEYS
       : []
   )
@@ -295,9 +297,8 @@ function createPreviewStages(phase, stageGroupIndex = -1, verifyEnabled = true) 
   }
 
   if (phase === PHASES.DONE) {
-    const completedStageKeys = verifyEnabled
-      ? UPLOAD_STAGE_KEYS.filter(stage => !priorStageKeySet.has(stage) && !doneHandoffStageSet.has(stage))
-      : UPLOAD_STAGE_KEYS
+    const completedStageKeys = UPLOAD_STAGE_KEYS
+      .filter(stage => !priorStageKeySet.has(stage) && !doneHandoffStageSet.has(stage))
     return normalizePipelineStages([
       ...priorStageKeys.map(stage => ({ stage, status: 'prior' })),
       ...doneHandoffStageKeys.map(stage => ({ stage, status: 'done' })),
@@ -318,7 +319,7 @@ function getPipelineFlowNodes(phase, verifyEnabled) {
 }
 
 function getPipelineLabel(phase, verifyEnabled) {
-  if (phase === PHASES.PIPELINE2 || phase === PHASES.DONE || !verifyEnabled) return '일반 파이프라인'
+  if (phase === PHASES.PIPELINE2 || phase === PHASES.DONE || !verifyEnabled) return '그래프화 파이프라인'
   return '검증 파이프라인'
 }
 
@@ -340,7 +341,7 @@ function getCurrentStageMessage(phase, stageGroupIndex, verifyEnabled = true) {
   if (selectedStage) return `${selectedStage.groupLabel} 진행 중`
   if (phase === PHASES.PIPELINE1) return '검증 파이프라인 진행 중'
   if (phase === PHASES.VERIFY_READY) return '검증 결과가 준비되었습니다.'
-  if (phase === PHASES.PIPELINE2) return '일반 파이프라인 진행 중'
+  if (phase === PHASES.PIPELINE2) return '그래프화 파이프라인 진행 중'
   return ''
 }
 

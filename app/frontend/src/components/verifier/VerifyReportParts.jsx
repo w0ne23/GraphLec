@@ -46,6 +46,11 @@ function scoreLabel(type) {
   return SCORE_LABELS[type] || typeLabel(type)
 }
 
+function issueResultLabel(value) {
+  const text = compactText(value, '')
+  return text ? typeLabel(text) : ''
+}
+
 function issueJudgeModelCount(row) {
   const issueModels = asArray(row?.comparison?.agreement?.issue_models)
   if (issueModels.length) return uniqueTexts(issueModels).length
@@ -444,7 +449,7 @@ function ModelEvidence({ items, valueFormat }) {
           context: item.context_resolution,
           final: item.final_model_score,
         }
-        const topLabel = compactText(item.judgment || item.top_issue_type_label || item.top_issue_type || item.final_model_score, '')
+        const topLabel = issueResultLabel(item.judgment || item.top_issue_type_label || item.top_issue_type || item.final_model_score)
         const confidenceLabel = item.confidence != null ? `신뢰도 ${formatScore(item.confidence)}` : ''
         return (
           <div key={`${item.model || item.provider || 'model'}-${index}`} className="vf-model-card">
