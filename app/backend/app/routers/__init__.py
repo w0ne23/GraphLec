@@ -1,1 +1,1 @@
-from . import jobs, results
+from . import jobs, results, recommend

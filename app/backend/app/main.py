@@ -21,7 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.lifecycle import lifespan, LOCAL_STORAGE_DIR
-from app.routers import jobs, results
+from app.routers import jobs, results, recommend
 
 app = FastAPI(lifespan=lifespan)
 
@@ -42,6 +42,7 @@ app.mount("/files", StaticFiles(directory=LOCAL_STORAGE_DIR), name="files")
 
 app.include_router(jobs.router)
 app.include_router(results.router)
+app.include_router(recommend.router)
 
 @app.get("/health")
 def health_check():
