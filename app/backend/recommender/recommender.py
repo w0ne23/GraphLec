@@ -488,98 +488,30 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
 # ============================================================================
 
 class MetadataCollection:
-    def __init__(self, metadata_dir: str):
+    def __init__(self, metadata_dir: str | None = None):
+        # metadata_dir is accepted for backward compatibility. Runtime serving
+        # uses the DB as its declared source and does not read artifact files.
         self.lectures: dict[str, LectureMetadata] = {}
-        use_file_metadata = os.getenv("RECOMMENDER_USE_FILE_METADATA", "1").lower() not in {"0", "false", "no"}
-        if use_file_metadata:
-            self._load_files(Path(metadata_dir))
-        else:
-            print("[파일 로드] RECOMMENDER_USE_FILE_METADATA=0 — 파일 metadata 로드 생략")
         self._load_db()
-
-    def _load_files(self, directory: Path):
-        if not directory.exists():
-            print(f"[Recommender] 메타데이터 디렉토리 없음, 빈 컬렉션으로 시작: {directory}")
-            return
-        files = list(directory.glob("*_metadata.json"))
-        if not files:
-            print(f"[Recommender] 메타데이터 파일 없음, 빈 컬렉션으로 시작: {directory}")
-            return
-        for path in files:
-            with open(path, encoding="utf-8") as f:
-                raw = json.load(f)
-            items = raw if isinstance(raw, list) else [raw]
-            for item in items:
-                if not self._metadata_item_is_published(item):
-                    continue
-                lec = self._from_metadata_item(item)
-                self.lectures[lec.video_id] = lec
-        print(f"[파일 로드] {len(self.lectures)}개 강의 메타데이터 로드 완료")
 
     def _load_db(self):
         database_url = _database_url_sync()
         if not database_url:
-            print("[DB 로드] DATABASE_URL 없음 — 파일 metadata만 사용\n")
+            print("[DB 로드] DATABASE_URL 없음 — 추천 가능한 강의 메타데이터를 로드하지 못했습니다.\n")
             return
 
         try:
             rows = _fetch_lecture_metadata_rows(database_url)
         except Exception as exc:
-            print(f"[DB 로드] lecture_metadata 로드 실패 — 파일 metadata만 사용: {exc}\n")
+            print(f"[DB 로드] lecture_metadata 로드 실패 — 추천 가능한 강의 메타데이터를 로드하지 못했습니다: {exc}\n")
             return
 
-        added = 0
-        merged = 0
         for row in rows:
             lec = self._from_db_row(row)
-            existing = self.lectures.get(lec.video_id)
-            if existing:
-                self.lectures[lec.video_id] = self._merge_db_with_existing(existing, lec)
-                merged += 1
-            else:
-                self.lectures[lec.video_id] = lec
-                added += 1
+            self.lectures[lec.video_id] = lec
         print(
-            f"[DB 로드] lecture_metadata {len(rows)}개 로드 "
-            f"(추가 {added}, 병합 {merged}) — 총 {len(self.lectures)}개\n"
-        )
-
-    @staticmethod
-    def _metadata_item_is_published(item: dict) -> bool:
-        if "is_published" in item:
-            value = item.get("is_published")
-            if isinstance(value, bool):
-                return value
-            return str(value).strip().lower() in {"1", "true", "yes", "y"}
-
-        publication_status = item.get("publication_status")
-        if publication_status is not None:
-            return str(publication_status).strip().lower() == "published"
-
-        return True
-
-    @staticmethod
-    def _from_metadata_item(item: dict) -> LectureMetadata:
-        return LectureMetadata(
-            video_id          = item["video_id"],
-            title             = item["title"],
-            instructor_id     = item.get("instructor_id", ""),
-            uploaded_at       = item.get("uploaded_at"),
-            domain            = _canonical_domain(item.get("graph_domain") or item.get("domain")),
-            graph_subdomain   = _normalize_subdomain(item.get("graph_subdomain")),
-            difficulty        = item.get("difficulty", "unknown"),
-            duration_sec      = item.get("duration_sec", 0.0),
-            summary           = item.get("summary", ""),
-            keywords          = item.get("keywords", []),
-            concept_roles     = item.get("concept_roles", []),
-            concept_relations = item.get("concept_relations", []),
-            communities       = item.get("communities", []),
-            pedagogy          = item.get("pedagogy", {}),
-            diagnostics       = item.get("diagnostics", {}),
-            visual_concept_terms = (
-                item.get("visual_concept_terms")
-                or item.get("pedagogy", {}).get("visual_concept_terms", [])
-            ),
+            f"[DB 로드] published lecture_metadata {len(rows)}개 로드 "
+            f"— 총 {len(self.lectures)}개\n"
         )
 
     @staticmethod
@@ -604,36 +536,6 @@ class MetadataCollection:
             pedagogy          = row.get("pedagogy") or {},
             diagnostics       = row.get("diagnostics") or {},
             visual_concept_terms = row.get("visual_concept_terms") or [],
-        )
-
-    @staticmethod
-    def _merge_db_with_existing(existing: LectureMetadata, db_lecture: LectureMetadata) -> LectureMetadata:
-        db_concept_roles = db_lecture.concept_roles
-        concept_roles = (
-            db_concept_roles
-            if (
-                isinstance(db_concept_roles, dict)
-                and (db_concept_roles.get("core") or db_concept_roles.get("introduced"))
-            )
-            else existing.concept_roles
-        )
-        return LectureMetadata(
-            video_id          = existing.video_id,
-            title             = db_lecture.title or existing.title,
-            instructor_id     = db_lecture.instructor_id or existing.instructor_id,
-            uploaded_at       = db_lecture.uploaded_at or existing.uploaded_at,
-            domain            = _canonical_domain(db_lecture.domain or existing.domain),
-            graph_subdomain   = db_lecture.graph_subdomain or existing.graph_subdomain,
-            difficulty        = db_lecture.difficulty or existing.difficulty,
-            duration_sec      = db_lecture.duration_sec or existing.duration_sec,
-            summary           = db_lecture.summary or existing.summary,
-            keywords          = db_lecture.keywords or existing.keywords,
-            concept_roles     = concept_roles,
-            concept_relations = db_lecture.concept_relations or existing.concept_relations,
-            communities       = db_lecture.communities or existing.communities,
-            pedagogy          = db_lecture.pedagogy or existing.pedagogy,
-            diagnostics       = db_lecture.diagnostics or existing.diagnostics,
-            visual_concept_terms = db_lecture.visual_concept_terms or existing.visual_concept_terms,
         )
 
     def get(self, video_id: str) -> Optional[LectureMetadata]:
@@ -1918,7 +1820,9 @@ def _display_score(internal_score: float, tier: str, detail: Optional[dict] = No
 
 class Recommender:
     def __init__(self, metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
-        self.collection          = MetadataCollection(metadata_dir)
+        # metadata_dir is kept for backward compatibility; runtime serving now
+        # loads its lecture universe from the declared DB source.
+        self.collection          = MetadataCollection()
         self.cfg                 = config or RecommenderConfig()
         self._recommend_lock     = threading.RLock()
         self._available_domains  = self.collection.available_domains()
