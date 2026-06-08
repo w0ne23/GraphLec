@@ -190,16 +190,18 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - RECOMMENDER_LLM_PROVIDER=${RECOMMENDER_LLM_PROVIDER:-openai}
       - RECOMMENDER_OPENAI_MODEL=${RECOMMENDER_OPENAI_MODEL:-gpt-5.4}
-      - METADATA_DIR=/app/metadata
       - RECOMMENDER_DB_DIR=/lance/lancedb
-      - RECOMMENDER_USE_FILE_METADATA=${RECOMMENDER_USE_FILE_METADATA:-1}
     volumes:
       - ./app/backend:/app
       - lance_data:/lance
     command:
-      - /bin/sh
-      - -lc
-      - python -m recommender.ensure_index --metadata_dir "$$METADATA_DIR" --db_dir "$$RECOMMENDER_DB_DIR" && uvicorn recommender.recommender_web:app --host 0.0.0.0 --port 8002 --reload
+      - uvicorn
+      - recommender.recommender_web:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8002"
+      - --reload
     depends_on:
       - backend
 
