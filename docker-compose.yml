@@ -178,7 +178,7 @@ services:
   recommender:
     build:
       context: .
-      dockerfile: ./app/backend/Dockerfile
+      dockerfile: ./app/backend/recommender/Dockerfile
       network: host
     env_file:
       - .env
@@ -192,7 +192,6 @@ services:
       - RECOMMENDER_OPENAI_MODEL=${RECOMMENDER_OPENAI_MODEL:-gpt-5.4}
       - RECOMMENDER_DB_DIR=/lance/lancedb
     volumes:
-      - ./app/backend:/app
       - lance_data:/lance
     command:
       - uvicorn
@@ -201,7 +200,6 @@ services:
       - 0.0.0.0
       - --port
       - "8002"
-      - --reload
     depends_on:
       - backend
 
