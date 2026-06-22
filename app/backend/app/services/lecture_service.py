@@ -54,7 +54,7 @@ PROJECT_ROOT = Path("/pipeline") if Path("/pipeline").exists() else Path(__file_
 LOCAL_STORAGE_DIR = os.getenv("LOCAL_STORAGE_DIR", str(PROJECT_ROOT / "local_storage"))
 GRAPH_SESSION_TTL_SEC = int(os.getenv("GRAPH_SESSION_TTL_SEC", "180"))
 CHAT_HISTORY_TURNS = int(os.getenv("CHAT_HISTORY_TURNS", "6"))
-QNA_QUERY_TIMEOUT_SEC = float(os.getenv("QNA_QUERY_TIMEOUT_SEC", "10"))
+QNA_QUERY_TIMEOUT_SEC = float(os.getenv("QNA_QUERY_TIMEOUT_SEC", "30"))
 QNA_DEMO_FALLBACK_ENABLED = os.getenv("QNA_DEMO_FALLBACK_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
 DOMAIN_VALUES = {
     "engineering",
