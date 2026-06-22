@@ -73,7 +73,7 @@ function ModelProblemList({ entries }) {
       {entries.map(entry => (
         <div className="vf-model-problem" key={entry.model}>
           <div className="vf-model-problem-head">
-            <strong>{formatModelName(entry.model)}</strong>
+            <strong>{entry.model === 'web_grounding' ? 'web_grounding' : formatModelName(entry.model)}</strong>
           </div>
           <p>{entry.text}</p>
         </div>
@@ -175,7 +175,7 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
   const title = claim.claim_text || claim.resolved_claim || claim.problematic_content || '-'
   const startTime = Number(claim.start_time)
   const canWatch = Number.isFinite(startTime)
-  const grounding = claim.grounding || {}
+  const grounding = claim.web_grounding || claim.grounding || {}
   const displayIssueKey = claimDisplayIssueKey(claim)
   const displayIssueLabel = labelForClaimIssue(claim)
   const sources = asArray(grounding.evidence_sources).length
@@ -239,7 +239,8 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             <DetailRow label="문맥 근거" value={evidenceInContext} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
-            <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
+            <DetailRow label="web_grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
+            <DetailRow label="web 근거 요약" value={grounding.evidence_summary} />
           </dl>
           <EvidenceSources sources={sources} />
         </div>

@@ -11,7 +11,7 @@ const SUGGESTIONS = [
   '마방진을 다루는 고대 수학 강의 뭐 있어?',
   '그림 위주로 설명하는 30분 내외 운영체제 강의 알려줘',
   'LLM 프롬프트 단계 설명해주는 음질 좋은 강의 추천해줘',
-  '유통 서비스 예시 위주로 설명해주는 강의 보여줘',
+  '유통 서비스 알려주는 강의 보여줘',
 ]
 
 const RECOMMEND_CACHE_KEY = 'graphlec:recommend:last'

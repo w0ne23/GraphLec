@@ -363,7 +363,7 @@ function StageSummaryGrid({ model }) {
               <FlowDetailExpansion className="vf-flow-detail-trigger" openClassName="vf-flow-detail-trigger--open" detail={finalDetail}>
                 {({ isOpen, toggleDetail, detailContent }) => (
                   <>
-                    <FlowSummaryHeader title="멀티 LLM 검증" ariaLabel="멀티 LLM 검증 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
+                    <FlowSummaryHeader title="이슈 유형 확정" ariaLabel="멀티 LLM 검증 상세정보" isOpen={isOpen} onToggle={toggleDetail} />
                     <FlowSummaryNode label="final" value={finalCount} detailContent={detailContent} />
                     <FlowSummaryBranch rows={finalTypeRows} />
                   </>

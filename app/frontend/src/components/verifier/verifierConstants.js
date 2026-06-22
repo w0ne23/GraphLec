@@ -54,12 +54,12 @@ export const PIPELINE_NODES = {
   }),
   final_verification: createNode({
     id: 'final_verification',
-    label: '멀티 LLM 검증',
+    label: '이슈 확정',
     stageKey: 'verifier_final_verification',
   }),
   slide_review: createNode({
     id: 'slide_review',
-    label: '슬라이드 오류',
+    label: '최종 검증',
     stageKey: 'verify_slide_errors',
     stageLabel: '슬라이드 오류 검사',
   }),

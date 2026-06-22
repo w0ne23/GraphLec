@@ -16,7 +16,7 @@ const DEV_FILE_BASE = typeof window !== 'undefined' && window.location?.hostname
   : ''
 const FILE_BASE = (import.meta.env.VITE_API_BASE_URL || DEV_FILE_BASE || '').replace(/\/$/, '')
 const DEFAULT_PREVIEW_ID = 'preview'
-const DEFAULT_PREVIEW_VIDEO_TITLE = '운영체제 강의 영상'
+const DEFAULT_PREVIEW_VIDEO_TITLE = '가짜강의'
 const DEFAULT_PREVIEW_ANALYZER_DIR = 'preview_analyzer'
 
 function fileUrl(path) {
@@ -399,19 +399,19 @@ function mergeSlideErrorArtifact(result, slideErrorResult) {
 }
 
 async function loadPreviewSlideErrors() {
-  const response = await fetch(DEFAULT_PREVIEW_SLIDE_ERROR_URL).catch(() => null)
+  const response = await fetch(DEFAULT_PREVIEW_SLIDE_ERROR_URL, { cache: 'no-store' }).catch(() => null)
   if (!response?.ok) return null
   return response.json()
 }
 
 async function loadJsonArtifact(url) {
-  const response = await fetch(url).catch(() => null)
+  const response = await fetch(url, { cache: 'no-store' }).catch(() => null)
   if (!response?.ok) return null
   return response.json()
 }
 
 async function loadJsonlArtifact(url) {
-  const response = await fetch(url).catch(() => null)
+  const response = await fetch(url, { cache: 'no-store' }).catch(() => null)
   if (!response?.ok) return []
   const text = await response.text()
   return text
@@ -505,7 +505,7 @@ function createPreviewScenesFromSlideData(data) {
 }
 
 async function loadPreviewScenes() {
-  const response = await fetch(DEFAULT_PREVIEW_SLIDE_DATA_URL).catch(() => null)
+  const response = await fetch(DEFAULT_PREVIEW_SLIDE_DATA_URL, { cache: 'no-store' }).catch(() => null)
   if (!response?.ok) return []
   const slideData = await response.json()
   return createPreviewScenesFromSlideData(slideData)
@@ -539,7 +539,7 @@ export function useVerifierPreviewFlow() {
 
     async function loadVerificationResult() {
       try {
-        const response = await fetch(DEFAULT_PREVIEW_RESULT_URL)
+        const response = await fetch(DEFAULT_PREVIEW_RESULT_URL, { cache: 'no-store' })
         if (!response.ok) throw new Error('verification result load failed')
         const result = await response.json()
         const artifacts = await loadPreviewArtifacts()

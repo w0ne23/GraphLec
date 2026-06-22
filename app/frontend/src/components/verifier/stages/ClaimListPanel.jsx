@@ -26,7 +26,7 @@ const CLAIM_LIST_STAGE_COPY = {
     pendingWaitingText: '분류된 이슈 유형이 없습니다.',
   },
   final_verification: {
-    title: '멀티 LLM 검증',
+    title: '이슈 확정',
     pendingRunningText: '멀티 LLM 검증 결과가 생성되는 중입니다.',
     pendingWaitingText: '진행된 멀티 LLM 검증 결과가 없습니다.',
   },

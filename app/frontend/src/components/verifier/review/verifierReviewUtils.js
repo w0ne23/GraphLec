@@ -505,16 +505,24 @@ function getRejectionReason(item) {
 }
 
 function getModelVerdicts(item) {
+  const acc = {}
+  if (item.web_grounding && typeof item.web_grounding === 'object') {
+    acc.web_grounding = {
+      ...item.web_grounding,
+      model: 'web_grounding',
+      reason: item.web_grounding.reason || item.web_grounding.evidence_summary,
+    }
+  }
   const rows = [
     ...asArray(item.checks?.crosscheck?.model_results),
     ...asArray(item.checks?.severity?.model_results),
     ...asArray(item.model_judgments),
   ]
-  return rows.reduce((acc, row) => {
+  return rows.reduce((result, row) => {
     const model = row?.model || row?.resolved_model || row?.source_model
-    if (model) acc[model] = row
-    return acc
-  }, {})
+    if (model) result[model] = row
+    return result
+  }, acc)
 }
 
 function getCrosscheckScoreFromModels(modelResults) {
@@ -621,7 +629,8 @@ export function feedbackItemToClaim(item, claimById) {
     crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
     crosscheck_weighted_status: status,
     model_verdicts: getModelVerdicts(item),
+    web_grounding: item.web_grounding,
     rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
-    evidence_sources: evidence.evidence_sources || item.evidence_sources,
+    evidence_sources: evidence.evidence_sources || item.web_grounding?.evidence_sources || item.evidence_sources,
   }
 }

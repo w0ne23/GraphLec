@@ -51,6 +51,18 @@ function issueResultLabel(value) {
   return text ? typeLabel(text) : ''
 }
 
+function groundingStatusLabel(value) {
+  const labels = {
+    supports_issue: 'web 근거: 오류 지지',
+    refutes_issue: 'web 근거: 오류 반박',
+    insufficient_evidence: 'web 근거 부족',
+    grounding_unavailable: 'web grounding 실패',
+    not_applicable: 'web grounding 제외',
+    not_run: 'web grounding 미실행',
+  }
+  return labels[value] || compactText(value, '')
+}
+
 function issueJudgeModelCount(row) {
   const issueModels = asArray(row?.comparison?.agreement?.issue_models)
   if (issueModels.length) return uniqueTexts(issueModels).length
@@ -441,6 +453,7 @@ function ModelEvidence({ items, valueFormat }) {
   return (
     <div className="vf-model-evidence">
       {rows.map((item, index) => {
+        const isWebGrounding = item.source === 'web_grounding' || item.model === 'web_grounding'
         const isTypeDistribution = Boolean(item.probabilities)
         const isFinalModelScore = !isTypeDistribution && item.final_model_score != null
         const scores = item.probabilities || {
@@ -449,7 +462,9 @@ function ModelEvidence({ items, valueFormat }) {
           context: item.context_resolution,
           final: item.final_model_score,
         }
-        const topLabel = issueResultLabel(item.judgment || item.top_issue_type_label || item.top_issue_type || item.final_model_score)
+        const topLabel = isWebGrounding
+          ? groundingStatusLabel(item.status || item.judgment)
+          : issueResultLabel(item.judgment || item.top_issue_type_label || item.top_issue_type || item.final_model_score)
         const confidenceLabel = item.confidence != null ? `신뢰도 ${formatScore(item.confidence)}` : ''
         return (
           <div key={`${item.model || item.provider || 'model'}-${index}`} className="vf-model-card">
@@ -466,11 +481,13 @@ function ModelEvidence({ items, valueFormat }) {
               <DistributionScores scores={scores} valueFormat="unit" />
             ) : isFinalModelScore ? (
               <FinalModelScoreSummary item={item} />
-            ) : (
+            ) : isWebGrounding ? null : (
               <ScoreBars scores={scores} valueFormat={valueFormat || (item.final_model_score != null ? 'unit' : 'percent')} />
             )}
+            <TextBlock label="근거 요약">{item.evidence_summary}</TextBlock>
             <TextBlock label="판단 근거">{item.reason || item.candidate_reason || item.issue}</TextBlock>
             <TextBlock label="수정 제안">{item.minimal_fix}</TextBlock>
+            {isWebGrounding && <EvidenceSourceList sources={item.evidence_sources} />}
             {!isFinalModelScore && item.final_model_score != null && <ChipList items={[`모델 점수 ${formatUnitValue(item.final_model_score)}`]} />}
           </div>
         )
@@ -508,6 +525,30 @@ export function ModelDecisionStrip({ models }) {
           </span>
         )
       })}
+    </div>
+  )
+}
+
+function EvidenceSourceList({ sources }) {
+  const urls = asArray(sources).map(item => compactText(item, '')).filter(Boolean)
+  if (!urls.length) return null
+  function sourceLabel(url, index) {
+    try {
+      return new URL(url).hostname || `source ${index + 1}`
+    } catch {
+      return `source ${index + 1}`
+    }
+  }
+  return (
+    <div className="vf-text-block" data-text-block="true">
+      <span>참조 출처</span>
+      <div className="vf-chip-list" data-chip-list="true">
+        {urls.map((url, index) => (
+          <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer">
+            {sourceLabel(url, index)}
+          </a>
+        ))}
+      </div>
     </div>
   )
 }

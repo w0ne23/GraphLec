@@ -218,6 +218,22 @@ export function renderIssueClassificationRows(rows) {
   )
 }
 
+function finalVerificationEvidenceItems(severity) {
+  const grounding = severity?.web_grounding
+  const groundingItem = grounding && typeof grounding === 'object'
+    ? [{
+        ...grounding,
+        model: 'web_grounding',
+        source: 'web_grounding',
+        judgment: grounding.status,
+      }]
+    : []
+  return [
+    ...groundingItem,
+    ...asArray(severity?.model_judgments),
+  ]
+}
+
 function FinalVerificationRow({ row, displayId }) {
   const source = getClaimFlowSource(row)
   const severity = row.severity
@@ -245,7 +261,7 @@ function FinalVerificationRow({ row, displayId }) {
         {severity ? (
           <>
             <FinalScoreSummary severity={severity} />
-            <ModelEvidenceAccordion items={severity.model_judgments} valueFormat="unit" />
+            <ModelEvidenceAccordion items={finalVerificationEvidenceItems(severity)} valueFormat="unit" />
           </>
         ) : (
           <div className="vf-report-note" data-report-note="true">멀티 LLM 검증 데이터가 없습니다.</div>
