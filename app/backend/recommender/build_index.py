@@ -21,6 +21,7 @@ import os
 import sys
 import time
 import argparse
+import json
 from pathlib import Path
 
 from google import genai
@@ -75,19 +76,42 @@ def embed_texts(texts: list[str], batch_size: int = 20) -> list[list[float]]:
     return results
 
 
-def load_metadata(metadata_dir: Path) -> list[dict]:
-    from recommender.recommender import MetadataCollection
+def _metadata_items_from_file(path: Path) -> list[dict]:
+    with path.open(encoding="utf-8") as f:
+        raw = json.load(f)
+    return raw if isinstance(raw, list) else [raw]
 
-    collection = MetadataCollection(str(metadata_dir))
+
+def _metadata_record(item: dict) -> dict | None:
+    video_id = str(item.get("video_id") or "").strip()
+    if not video_id:
+        return None
+    return {
+        "video_id": video_id,
+        "title": item.get("title") or item.get("summary", "")[:50],
+        "domain": item.get("graph_domain") or item.get("domain") or "unknown",
+        "summary": item.get("summary") or "",
+        "keywords": item.get("keywords") or [],
+    }
+
+
+def load_metadata(metadata_dir: Path) -> list[dict]:
     records = []
-    for lec in collection.all():
-        records.append({
-            "video_id": lec.video_id,
-            "title": lec.title,
-            "domain": lec.domain,
-            "summary": lec.summary,
-            "keywords": lec.keywords,
-        })
+    if not metadata_dir.exists():
+        print(f"[메타데이터 로드] 디렉토리 없음: {metadata_dir}")
+        return records
+    for path in sorted(metadata_dir.glob("*_metadata.json")):
+        try:
+            items = _metadata_items_from_file(path)
+        except Exception as exc:
+            print(f"  ⚠ metadata 파일 로드 실패: {path} ({exc})")
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            record = _metadata_record(item)
+            if record:
+                records.append(record)
     return records
 
 

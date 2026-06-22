@@ -1,5 +1,4 @@
 const API_BASE = '/api'
-const RECOMMENDER_BASE = import.meta.env.VITE_RECOMMENDER_API_BASE || '/recommender-api'
 
 export async function uploadLecture({ file, title, category, description, workflowMode = 'legacy_full' }) {
   const formData = new FormData();
@@ -230,7 +229,7 @@ export async function getLectureGraphSessionStatus(lectureId) {
 export async function recommendLectures(query, topK = 3) {
   let res
   try {
-    res = await fetch(`${RECOMMENDER_BASE}/recommend`, {
+    res = await fetch(`${API_BASE}/recommend`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, top_k: topK }),

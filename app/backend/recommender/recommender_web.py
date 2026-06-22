@@ -24,13 +24,6 @@ from pydantic import BaseModel
 from recommender.recommender import Recommender, RecommenderConfig
 
 
-# ============================================================================
-#  앱 초기화
-# ============================================================================
-
-_BACKEND_ROOT = Path(__file__).resolve().parents[1]
-
-
 def _resolve_repo_root() -> Path:
     env_root = os.getenv("GRAPHLEC_ROOT") or os.getenv("PIPELINE_ROOT")
     if env_root:
@@ -40,7 +33,6 @@ def _resolve_repo_root() -> Path:
 
 
 _REPO_ROOT = _resolve_repo_root()
-METADATA_DIR = os.getenv("METADATA_DIR", str(_BACKEND_ROOT / "metadata"))
 RECOMMENDER_DB_DIR = os.getenv("RECOMMENDER_DB_DIR", str(_REPO_ROOT / "data" / "lancedb"))
 _recommender: Optional[Recommender] = None
 _UUID_RE = re.compile(
@@ -67,9 +59,8 @@ def _thumbnail_url(video_id: str) -> Optional[str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _recommender
-    print(f"[시작] 메타데이터 로드: {METADATA_DIR}")
+    print("[시작] DB에서 강의 메타데이터 로드")
     _recommender = Recommender(
-        metadata_dir=METADATA_DIR,
         config=RecommenderConfig(DB_DIR=RECOMMENDER_DB_DIR),
     )
     yield
