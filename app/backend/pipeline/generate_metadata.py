@@ -49,6 +49,13 @@ GEMINI_METADATA_BACKOFF_BASE_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKO
 GEMINI_METADATA_BACKOFF_MAX_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKOFF_MAX_SEC", "90"))
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _sample_uniform(texts: list[str], n: int) -> list[str]:
     """리스트에서 균등 간격으로 n개 샘플링"""
     if len(texts) <= n:
@@ -1332,6 +1339,42 @@ def generate_summary(
     return _gemini(prompt)
 
 
+def try_generate_graph_first_metadata_parts(
+    *,
+    stem: str,
+    output_dir: Path,
+    fused: dict,
+    concept_degrees: dict[str, int],
+    emphasized: dict[str, float],
+    slide_texts: list[str],
+    transcript_texts: list[str],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+    duration_sec: float,
+) -> dict | None:
+    """
+    Graph-first 추천 메타데이터 생성 진입점.
+
+    현재 단계에서는 feature flag와 fallback 경로만 마련한다. 이후 이 함수에서
+    그래프 핵심 노드 기반 keywords, community 기반 summary, graph-aware
+    concept_roles를 만들어 기존 legacy 산출물을 대체한다.
+    """
+    _ = (
+        stem,
+        output_dir,
+        fused,
+        concept_degrees,
+        emphasized,
+        slide_texts,
+        transcript_texts,
+        core_slide_texts,
+        core_trans_texts,
+        duration_sec,
+    )
+    print(f"[{stem}] graph-first metadata 생성 로직 미구현 — 기존 로직으로 fallback")
+    return None
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def generate_metadata(
@@ -1370,51 +1413,82 @@ def generate_metadata(
         print(f"[{stem}] 도메인 분류 중...")
         domain = classify_domain(slide_texts, transcript_texts)
 
-    print(f"[{stem}] 요약 생성 중...")
-    summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
+    graph_first_parts = None
+    if _env_flag("GRAPHLEC_METADATA_GRAPH_FIRST"):
+        print(f"[{stem}] graph-first metadata 모드 활성화")
+        try:
+            graph_first_parts = try_generate_graph_first_metadata_parts(
+                stem=stem,
+                output_dir=output_dir,
+                fused=fused,
+                concept_degrees=concept_degrees,
+                emphasized=emphasized,
+                slide_texts=slide_texts,
+                transcript_texts=transcript_texts,
+                core_slide_texts=core_slide_texts,
+                core_trans_texts=core_trans_texts,
+                duration_sec=duration_sec,
+            )
+        except Exception as exc:
+            print(f"[경고] graph-first metadata 생성 실패 — 기존 로직으로 fallback: {exc}")
 
-    print(f"[{stem}] 키워드 점수 산출 중...")
-    keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
-        concept_degrees, emphasized, slide_texts, transcript_texts, duration_sec,
-        debug=True,
-    )
-    print(f"       → {len(keywords)}개 선택")
-    visual_concept_terms = collect_visual_concept_terms(
-        fused,
-        [k.get("keyword", "") for k in keywords]
-        + list(concept_degrees.keys())
-        + list(scored.keys()),
-    )
-    print(f"       → visual_concept_terms {len(visual_concept_terms)}개")
+    if graph_first_parts:
+        summary = graph_first_parts["summary"]
+        keywords = graph_first_parts["keywords"]
+        scored = graph_first_parts["scored"]
+        norm_slide_freq = graph_first_parts["norm_slide_freq"]
+        norm_trans_freq = graph_first_parts["norm_trans_freq"]
+        norm_emph = graph_first_parts["norm_emph"]
+        norm_cent = graph_first_parts["norm_cent"]
+        role_candidates = graph_first_parts["role_candidates"]
+        concept_roles = graph_first_parts["concept_roles"]
+        visual_concept_terms = graph_first_parts["visual_concept_terms"]
+    else:
+        print(f"[{stem}] 요약 생성 중...")
+        summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
 
-    # concept_roles: scored 평균 × 0.6 이상 + 노이즈 필터 통과한 개념만 분류
-    # (keywords 임계값 1.2보다 낮게 → prerequisite/introduced도 충분히 포함)
-    print(f"[{stem}] concept_roles 분류 중...")
-    role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
-    role_candidates = {
-        n for n, s in scored.items()
-        if s >= role_threshold
-        and _is_valid_concept(n)
-        and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
-    }
-    print(f"       → 분류 대상 {len(role_candidates)}개 (전체 {len(scored)}개 중)")
-    slide_role_freq = collect_slide_role_freq(fused, role_candidates)
-    concept_roles = classify_concept_roles(
-        role_candidates,
-        norm_slide_freq,
-        norm_trans_freq,
-        norm_emph,
-        norm_cent,
-        slide_role_freq,
-    )
-    print(
-        f"       → core {len(concept_roles['core'])}개 | "
-        f"introduced {len(concept_roles['introduced'])}개"
-    )
-    print(f"\n[디버그] concept_roles 상세:")
-    for role, names in concept_roles.items():
-        print(f"  [{role}] {names[:10]}")
-    print()
+        print(f"[{stem}] 키워드 점수 산출 중...")
+        keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
+            concept_degrees, emphasized, slide_texts, transcript_texts, duration_sec,
+            debug=True,
+        )
+        print(f"       → {len(keywords)}개 선택")
+        visual_concept_terms = collect_visual_concept_terms(
+            fused,
+            [k.get("keyword", "") for k in keywords]
+            + list(concept_degrees.keys())
+            + list(scored.keys()),
+        )
+        print(f"       → visual_concept_terms {len(visual_concept_terms)}개")
+
+        # concept_roles: scored 평균 × 0.6 이상 + 노이즈 필터 통과한 개념만 분류
+        # (keywords 임계값 1.2보다 낮게 → prerequisite/introduced도 충분히 포함)
+        print(f"[{stem}] concept_roles 분류 중...")
+        role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
+        role_candidates = {
+            n for n, s in scored.items()
+            if s >= role_threshold
+            and _is_valid_concept(n)
+            and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
+        }
+        print(f"       → 분류 대상 {len(role_candidates)}개 (전체 {len(scored)}개 중)")
+        slide_role_freq = collect_slide_role_freq(fused, role_candidates)
+        concept_roles = classify_concept_roles(
+            role_candidates,
+            norm_slide_freq,
+            norm_trans_freq,
+            norm_emph,
+            norm_cent,
+            slide_role_freq,
+        )
+        print(
+            f"       → core {len(concept_roles['core'])}개 | "
+            f"introduced {len(concept_roles['introduced'])}개"
+        )
+        print(f"\n[디버그] concept_roles 상세:")
+        for role, names in concept_roles.items():
+            print(f"  [{role}] {names[:10]}")
+        print()
 
     print(f"[{stem}] concept_relations 조회 중...")
     concept_relations = fetch_concept_relations(stem, role_candidates)
