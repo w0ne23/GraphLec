@@ -1516,6 +1516,13 @@ def _norm_text(value: str) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _stringify_for_match(value) -> str:
+    values = _iter_values(value)
+    if len(values) == 1 and values[0] is value:
+        return str(value or "")
+    return " ".join(str(item or "") for item in values)
+
+
 def _term_matches_text(term: str, text: str) -> bool:
     term_norm = _norm_text(term)
     text_norm = _norm_text(text)
@@ -1547,6 +1554,72 @@ def _score_entity_text_grounding(
     return float(slide_hits + transcript_hits * 0.5)
 
 
+def _community_report_mention_score(title: str, report: dict | None) -> float:
+    if not title or not report:
+        return 0.0
+
+    score = 0.0
+    if _term_matches_text(title, str(report.get("title") or "")):
+        score += 1.0
+    if _term_matches_text(title, str(report.get("summary") or "")):
+        score += 0.7
+    if _term_matches_text(title, _stringify_for_match(report.get("findings"))):
+        score += 0.6
+    if _term_matches_text(title, str(report.get("full_content") or "")):
+        score += 0.4
+    return score
+
+
+_EXAMPLE_RELATION_TERMS = (
+    "example",
+    "instance",
+    "instance_of",
+    "kind",
+    "type",
+    "종류",
+    "예시",
+    "사례",
+    "대표적인",
+    "중 하나",
+    "중의 하나",
+    "예로",
+    "예에는",
+    "포함된다",
+    "포함되는",
+)
+
+
+def _has_example_relation_terms(rel: dict) -> bool:
+    source = str(rel.get("source") or "").strip()
+    target = str(rel.get("target") or "").strip()
+    description = str(rel.get("description") or "")
+    rel_type = str(rel.get("type") or rel.get("rel_type") or rel.get("predicate") or "")
+    haystack = _norm_text(" ".join([source, target, description, rel_type]))
+    return any(term in haystack for term in _EXAMPLE_RELATION_TERMS)
+
+
+def _example_child_title(rel: dict, importance_by_title: dict[str, float]) -> str:
+    if not _has_example_relation_terms(rel):
+        return ""
+
+    source = str(rel.get("source") or "").strip()
+    target = str(rel.get("target") or "").strip()
+    if not source or not target or source == target:
+        return ""
+
+    source_importance = importance_by_title.get(source, 0.0)
+    target_importance = importance_by_title.get(target, 0.0)
+    if source_importance != target_importance:
+        return source if source_importance < target_importance else target
+
+    description = _norm_text(str(rel.get("description") or ""))
+    source_norm = _norm_text(source)
+    target_norm = _norm_text(target)
+    if source_norm and target_norm and source_norm in description and target_norm in description:
+        return source
+    return target
+
+
 def build_graph_keyword_candidates(
     artifacts: dict,
     slide_texts: list[str],
@@ -1571,42 +1644,94 @@ def build_graph_keyword_candidates(
         entity_id: str(entity.get("title") or "").strip()
         for entity_id, entity in entity_by_id.items()
     }
-    report_rank_by_community = {
-        str(report.get("community") or ""): _to_float(report.get("rank"))
+    report_by_community = {
+        str(report.get("community") or ""): report
         for report in reports
     }
+    importance_by_title = {
+        str(entity.get("title") or "").strip(): (
+            _to_float(entity.get("degree"))
+            + math.log1p(max(_to_float(entity.get("frequency")), 0.0))
+        )
+        for entity in entities
+        if str(entity.get("title") or "").strip()
+    }
 
-    community_signal: Counter[str] = Counter()
+    raw_community_quality: Counter[str] = Counter()
+    raw_community_report_presence: Counter[str] = Counter()
     community_memberships: dict[str, set[str]] = {}
+    community_rel_endpoint_signal: dict[str, Counter[str]] = {}
+    relationship_by_id = {
+        str(rel.get("id") or ""): rel
+        for rel in relationships
+        if str(rel.get("id") or "").strip()
+    }
+
     for community in communities:
         community_id = str(community.get("community") or "")
-        rank = report_rank_by_community.get(community_id, 0.0)
+        report = report_by_community.get(community_id)
+        rank = _to_float((report or {}).get("rank"))
         size = _to_float(community.get("size"))
-        signal = rank + math.log1p(max(size, 0.0))
+        quality = rank / math.sqrt(max(size, 1.0))
+        endpoint_counter: Counter[str] = Counter()
+        for rel_id in _iter_values(community.get("relationship_ids")):
+            rel = relationship_by_id.get(str(rel_id))
+            if not rel:
+                continue
+            signal = _to_float(rel.get("weight")) + math.log1p(max(_to_float(rel.get("combined_degree")), 0.0))
+            for key in ("source", "target"):
+                title = str(rel.get(key) or "").strip()
+                if title:
+                    endpoint_counter[title] += signal
+        community_rel_endpoint_signal[community_id] = endpoint_counter
+
         for entity_id in _iter_values(community.get("entity_ids")):
             entity_id = str(entity_id)
             title = title_by_id.get(entity_id)
             if not title:
                 continue
-            community_signal[title] += signal
+            raw_community_quality[title] += quality
+            raw_community_report_presence[title] += _community_report_mention_score(title, report)
             community_memberships.setdefault(title, set()).add(community_id)
 
     relation_endpoint_signal: Counter[str] = Counter()
+    example_relation_signal: Counter[str] = Counter()
     for rel in relationships:
         weight = _to_float(rel.get("weight"))
         combined_degree = _to_float(rel.get("combined_degree"))
         signal = weight + math.log1p(max(combined_degree, 0.0))
+        example_child = _example_child_title(rel, importance_by_title)
         for key in ("source", "target"):
             title = str(rel.get(key) or "").strip()
             if title:
                 relation_endpoint_signal[title] += signal
+                if title == example_child:
+                    example_relation_signal[title] += signal
 
     raw_graph_importance: dict[str, float] = {}
     raw_community: dict[str, float] = {}
+    raw_community_member_quality: dict[str, float] = {}
+    raw_community_inner_representative: dict[str, float] = {}
+    raw_community_cross_bridge: dict[str, float] = {}
     raw_emphasis: dict[str, float] = {}
     raw_bridge: dict[str, float] = {}
     raw_grounding: dict[str, float] = {}
     entity_by_title: dict[str, dict] = {}
+
+    norm_member_quality = _normalize(dict(raw_community_quality))
+    norm_report_presence = _normalize(dict(raw_community_report_presence))
+    raw_inner_relation: dict[str, float] = {}
+    for title, memberships in community_memberships.items():
+        raw_inner_relation[title] = sum(
+            community_rel_endpoint_signal.get(community_id, Counter()).get(title, 0.0)
+            for community_id in memberships
+        )
+    norm_inner_relation = _normalize(raw_inner_relation)
+    raw_cross_membership = {
+        title: float(max(len(memberships) - 1, 0))
+        for title, memberships in community_memberships.items()
+    }
+    norm_cross_membership = _normalize(raw_cross_membership)
 
     for entity in entities:
         title = str(entity.get("title") or "").strip()
@@ -1617,7 +1742,20 @@ def build_graph_keyword_candidates(
             _to_float(entity.get("degree"))
             + math.log1p(max(_to_float(entity.get("frequency")), 0.0))
         )
-        raw_community[title] = community_signal.get(title, 0.0)
+        member_quality = norm_member_quality.get(title, 0.0)
+        inner_representative = (
+            0.60 * norm_report_presence.get(title, 0.0)
+            + 0.40 * norm_inner_relation.get(title, 0.0)
+        )
+        cross_bridge = norm_cross_membership.get(title, 0.0)
+        raw_community_member_quality[title] = member_quality
+        raw_community_inner_representative[title] = inner_representative
+        raw_community_cross_bridge[title] = cross_bridge
+        raw_community[title] = (
+            0.40 * member_quality
+            + 0.40 * inner_representative
+            + 0.20 * cross_bridge
+        )
         raw_emphasis[title] = _score_entity_emphasis(entity, emphasis)
         raw_bridge[title] = (
             relation_endpoint_signal.get(title, 0.0)
@@ -1630,25 +1768,39 @@ def build_graph_keyword_candidates(
     norm_emphasis = _normalize(raw_emphasis)
     norm_bridge = _normalize(raw_bridge)
     norm_grounding = _normalize(raw_grounding)
+    norm_example_penalty = _normalize(dict(example_relation_signal))
 
     candidates = []
     for title in norm_graph:
         entity = entity_by_title.get(title, {})
-        score = (
+        base_score = (
             0.45 * norm_graph.get(title, 0.0)
             + 0.25 * norm_community.get(title, 0.0)
             + 0.15 * norm_emphasis.get(title, 0.0)
             + 0.10 * norm_bridge.get(title, 0.0)
             + 0.05 * norm_grounding.get(title, 0.0)
         )
+        example_penalty = norm_example_penalty.get(title, 0.0)
+        protected_core_signal = max(
+            norm_graph.get(title, 0.0),
+            norm_grounding.get(title, 0.0),
+        )
+        penalty_strength = 0.55 * example_penalty * (1.0 - 0.5 * protected_core_signal)
+        score = base_score * (1.0 - min(max(penalty_strength, 0.0), 0.55))
         candidates.append({
             "keyword": title,
             "score": round(score, 4),
+            "base_score": round(base_score, 4),
             "graph_importance": round(norm_graph.get(title, 0.0), 4),
             "community_representativeness": round(norm_community.get(title, 0.0), 4),
+            "community_quality": round(raw_community_member_quality.get(title, 0.0), 4),
+            "community_inner_representative": round(raw_community_inner_representative.get(title, 0.0), 4),
+            "community_cross_bridge": round(raw_community_cross_bridge.get(title, 0.0), 4),
             "emphasis_boost": round(norm_emphasis.get(title, 0.0), 4),
             "relation_bridge_score": round(norm_bridge.get(title, 0.0), 4),
             "text_grounding": round(norm_grounding.get(title, 0.0), 4),
+            "example_penalty": round(example_penalty, 4),
+            "penalty_strength": round(penalty_strength, 4),
             "raw_degree": round(_to_float(entity.get("degree")), 4),
             "raw_frequency": round(_to_float(entity.get("frequency")), 4),
         })
@@ -1665,9 +1817,11 @@ def _log_graph_keyword_candidates(stem: str, candidates: list[dict], limit: int 
             f"{item['keyword']:<24} score={item['score']:.4f} "
             f"graph={item['graph_importance']:.3f} "
             f"comm={item['community_representativeness']:.3f} "
+            f"(q={item['community_quality']:.2f},in={item['community_inner_representative']:.2f},x={item['community_cross_bridge']:.2f}) "
             f"emph={item['emphasis_boost']:.3f} "
             f"bridge={item['relation_bridge_score']:.3f} "
-            f"text={item['text_grounding']:.3f}"
+            f"text={item['text_grounding']:.3f} "
+            f"example_penalty={item['example_penalty']:.3f}"
         )
 
 
