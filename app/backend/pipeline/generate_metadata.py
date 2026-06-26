@@ -1339,6 +1339,158 @@ def generate_summary(
     return _gemini(prompt)
 
 
+def _read_parquet_records(path: Path) -> tuple[list[dict], str | None]:
+    if not path.is_file():
+        return [], "missing"
+    try:
+        import pandas as pd
+
+        return pd.read_parquet(path).to_dict(orient="records"), None
+    except Exception as exc:
+        return [], str(exc)
+
+
+def _first_existing_path(paths: list[Path]) -> Path | None:
+    seen: set[Path] = set()
+    for path in paths:
+        normalized = path
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if normalized.is_file():
+            return normalized
+    return None
+
+
+def _candidate_stage_graph_dirs(stem: str, output_dir: Path) -> list[Path]:
+    return [
+        output_dir,
+        output_dir / "parquet",
+        output_dir / stem,
+        output_dir.parent / stem,
+    ]
+
+
+def _find_stage_graph_file(stem: str, output_dir: Path, suffix: str) -> Path | None:
+    candidates = [
+        directory / f"{stem}_{suffix}.parquet"
+        for directory in _candidate_stage_graph_dirs(stem, output_dir)
+    ]
+    return _first_existing_path(candidates)
+
+
+def _candidate_graphrag_output_dirs(stem: str, output_dir: Path) -> list[Path]:
+    candidates = [
+        output_dir / "graphrag" / "output",
+        output_dir / stem / "graphrag" / "output",
+        output_dir.parent / stem / "graphrag" / "output",
+    ]
+    try:
+        candidates.extend(
+            path / "graphrag" / "output"
+            for path in sorted(output_dir.parent.glob(f"{stem}*"))
+            if path.is_dir()
+        )
+    except Exception:
+        pass
+    return candidates
+
+
+def _find_graphrag_output_dir(stem: str, output_dir: Path) -> Path | None:
+    seen: set[Path] = set()
+    for directory in _candidate_graphrag_output_dirs(stem, output_dir):
+        if directory in seen:
+            continue
+        seen.add(directory)
+        if (directory / "entities.parquet").is_file() or (directory / "community_reports.parquet").is_file():
+            return directory
+    return None
+
+
+def _count_label(rows: list[dict], key: str) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        value = str(row.get(key) or "").strip()
+        if value:
+            counts[value] += 1
+    return dict(counts)
+
+
+def load_graph_artifacts_for_metadata(stem: str, output_dir: Path, fused: dict) -> dict:
+    """
+    추천 메타데이터 graph-first 경로에서 사용할 파일 기반 그래프 산출물.
+
+    Neo4j는 metadata 생성 시점의 필수 입력이 아니므로 여기서 호출하지 않는다.
+    """
+    graph_dir = _find_graphrag_output_dir(stem, output_dir)
+    graphrag: dict[str, dict] = {}
+    if graph_dir:
+        for name in ("entities", "relationships", "communities", "community_reports", "text_units"):
+            path = graph_dir / f"{name}.parquet"
+            records, error = _read_parquet_records(path)
+            graphrag[name] = {
+                "path": str(path),
+                "rows": records,
+                "count": len(records),
+                "error": error,
+            }
+    else:
+        graphrag["error"] = "graphrag output not found"
+
+    stage_graph: dict[str, dict] = {}
+    for name, suffix in (
+        ("nodes", "nodes"),
+        ("edges", "edges"),
+        ("graph_triples", "graph_triples"),
+    ):
+        path = _find_stage_graph_file(stem, output_dir, suffix)
+        records, error = _read_parquet_records(path) if path else ([], "missing")
+        stage_graph[name] = {
+            "path": str(path) if path else "",
+            "rows": records,
+            "count": len(records),
+            "error": error,
+        }
+
+    emphasis = collect_emphasized(fused)
+    return {
+        "graphrag_output_dir": str(graph_dir) if graph_dir else "",
+        "graphrag": graphrag,
+        "stage_graph": stage_graph,
+        "emphasis": emphasis,
+        "summary": {
+            "graphrag_entities": graphrag.get("entities", {}).get("count", 0),
+            "graphrag_relationships": graphrag.get("relationships", {}).get("count", 0),
+            "graphrag_communities": graphrag.get("communities", {}).get("count", 0),
+            "graphrag_reports": graphrag.get("community_reports", {}).get("count", 0),
+            "stage_nodes": stage_graph.get("nodes", {}).get("count", 0),
+            "stage_edges": stage_graph.get("edges", {}).get("count", 0),
+            "stage_triples": stage_graph.get("graph_triples", {}).get("count", 0),
+            "stage_node_labels": _count_label(stage_graph.get("nodes", {}).get("rows", []), "label"),
+            "stage_edge_types": _count_label(stage_graph.get("edges", {}).get("rows", []), "rel_type"),
+            "emphasis_terms": len(emphasis),
+        },
+    }
+
+
+def _log_graph_artifact_summary(stem: str, artifacts: dict) -> None:
+    summary = artifacts.get("summary", {})
+    print(
+        f"[{stem}] graph artifacts: "
+        f"GraphRAG entities={summary.get('graphrag_entities', 0)}, "
+        f"relationships={summary.get('graphrag_relationships', 0)}, "
+        f"communities={summary.get('graphrag_communities', 0)}, "
+        f"reports={summary.get('graphrag_reports', 0)}"
+    )
+    print(
+        f"[{stem}] stage graph: "
+        f"nodes={summary.get('stage_nodes', 0)}, "
+        f"edges={summary.get('stage_edges', 0)}, "
+        f"triples={summary.get('stage_triples', 0)}, "
+        f"emphasis_terms={summary.get('emphasis_terms', 0)}"
+    )
+
+
 def try_generate_graph_first_metadata_parts(
     *,
     stem: str,
@@ -1359,10 +1511,9 @@ def try_generate_graph_first_metadata_parts(
     그래프 핵심 노드 기반 keywords, community 기반 summary, graph-aware
     concept_roles를 만들어 기존 legacy 산출물을 대체한다.
     """
+    artifacts = load_graph_artifacts_for_metadata(stem, output_dir, fused)
+    _log_graph_artifact_summary(stem, artifacts)
     _ = (
-        stem,
-        output_dir,
-        fused,
         concept_degrees,
         emphasized,
         slide_texts,
