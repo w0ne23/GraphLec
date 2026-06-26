@@ -1589,6 +1589,54 @@ _EXAMPLE_RELATION_TERMS = (
 )
 
 
+_OPERATIONAL_TITLE_TERMS = (
+    "교수",
+    "강사",
+    "시험",
+    "출석",
+    "평가",
+    "학점",
+    "과제",
+    "퀴즈",
+    "중간고사",
+    "기말고사",
+    "참고 문헌",
+    "참고문헌",
+    "교재",
+    "주차",
+    "공지",
+    "대학교",
+    "대학",
+    "학과",
+    "처장",
+    "총장",
+)
+
+_GENERIC_SUFFIX_TERMS = (
+    "개념",
+    "정의",
+    "기능",
+    "목적",
+    "특징",
+    "원리",
+    "이해",
+    "소개",
+    "기초",
+    "관련",
+)
+
+_MERGE_BRIDGE_TERMS = (
+    "와",
+    "과",
+    "및",
+    "또는",
+    "그리고",
+    "차이",
+    "관계",
+    "비교",
+    "대조",
+)
+
 def _has_example_relation_terms(rel: dict) -> bool:
     source = str(rel.get("source") or "").strip()
     target = str(rel.get("target") or "").strip()
@@ -1618,6 +1666,189 @@ def _example_child_title(rel: dict, importance_by_title: dict[str, float]) -> st
     if source_norm and target_norm and source_norm in description and target_norm in description:
         return source
     return target
+
+
+def _candidate_canonical_key(title: str) -> str:
+    text = _norm_text(title)
+    text = re.sub(r"\([^)]*\)", "", text)
+    text = re.sub(r"[\s_./#+:;,\-·'\"`~!?\[\]{}<>]", "", text)
+    text = re.sub(r"(에대한|에관한|관련된|관련)$", "", text)
+    text = text.replace("의", "")
+    for suffix in _GENERIC_SUFFIX_TERMS:
+        suffix_key = _norm_text(suffix).replace(" ", "")
+        if len(text) > len(suffix_key) + 2 and text.endswith(suffix_key):
+            text = text[: -len(suffix_key)]
+            break
+    return text
+
+
+def _operational_penalty(title: str, entity: dict) -> float:
+    title_norm = _norm_text(title)
+    entity_type = _norm_text(entity.get("type"))
+    penalty = 0.0
+    if entity_type in {"person", "organization", "geo"}:
+        penalty = max(penalty, 0.45)
+    if any(term in title_norm for term in _OPERATIONAL_TITLE_TERMS):
+        penalty = max(penalty, 0.65)
+    return penalty
+
+
+def _operational_score_cap(
+    title: str,
+    entity: dict,
+    graph_importance: float,
+    emphasis_boost: float,
+    text_grounding: float,
+) -> float | None:
+    title_norm = _norm_text(title)
+    entity_type = _norm_text(entity.get("type"))
+
+    if any(term in title_norm for term in _OPERATIONAL_TITLE_TERMS):
+        return 0.16
+
+    if (
+        entity_type == "person"
+        and graph_importance < 0.65
+        and max(emphasis_boost, text_grounding) < 0.25
+    ):
+        return 0.22
+
+    if entity_type in {"organization", "geo"} and max(emphasis_boost, text_grounding) < 0.20:
+        return 0.24
+
+    if entity_type in {"organization", "geo"} and graph_importance < 0.35:
+        return 0.24
+
+    return None
+
+
+def _code_like_penalty(title: str) -> float:
+    stripped = re.sub(r"[\s_\-./#+]", "", str(title or ""))
+    if not stripped:
+        return 0.0
+    has_alpha = bool(re.search(r"[A-Za-z]", stripped))
+    if not has_alpha:
+        return 0.0
+    if re.fullmatch(r"[A-Za-z]+[0-9]+", stripped) and len(stripped) <= 8:
+        return 1.0
+    if stripped.isupper() and 2 <= len(stripped) <= 3:
+        return 0.35
+    if stripped.isupper() and 2 <= len(stripped) <= 6:
+        return 0.75
+    if re.fullmatch(r"[A-Za-z]+[0-9]*", stripped) and len(stripped) <= 6:
+        return 0.55
+    return 0.0
+
+
+def _looks_like_merge_bridge(title: str) -> bool:
+    title_norm = _norm_text(title)
+    return any(term in title_norm for term in _MERGE_BRIDGE_TERMS)
+
+
+def _is_suffix_expansion(base_key: str, expanded_key: str) -> bool:
+    if base_key == expanded_key:
+        return True
+    if len(expanded_key) <= len(base_key):
+        return False
+    if not expanded_key.startswith(base_key):
+        return False
+    remainder = expanded_key[len(base_key):]
+    if not remainder:
+        return True
+    return any(
+        remainder == _norm_text(suffix).replace(" ", "")
+        for suffix in _GENERIC_SUFFIX_TERMS
+    )
+
+
+def _has_independent_graph_signal(a: dict, b: dict) -> bool:
+    return (
+        float(a.get("graph_importance", 0.0)) >= 0.12
+        and float(b.get("graph_importance", 0.0)) >= 0.12
+        and float(a.get("community_inner_representative", 0.0)) >= 0.20
+        and float(b.get("community_inner_representative", 0.0)) >= 0.20
+    )
+
+
+def _should_merge_keyword_candidates(
+    a: dict,
+    b: dict,
+) -> bool:
+    a_key = str(a.get("canonical_key") or "")
+    b_key = str(b.get("canonical_key") or "")
+    if not a_key or not b_key:
+        return False
+    if a_key == b_key:
+        return True
+    if len(a_key) < 3 or len(b_key) < 3:
+        return False
+    a_title = str(a.get("keyword") or "")
+    b_title = str(b.get("keyword") or "")
+    if _looks_like_merge_bridge(a_title) or _looks_like_merge_bridge(b_title):
+        return False
+    if _has_independent_graph_signal(a, b):
+        return False
+    return _is_suffix_expansion(a_key, b_key) or _is_suffix_expansion(b_key, a_key)
+
+
+def _candidate_representative_score(item: dict) -> float:
+    return (
+        float(item.get("graph_importance", 0.0))
+        + float(item.get("community_inner_representative", 0.0))
+        + float(item.get("text_grounding", 0.0))
+        - float(item.get("example_penalty", 0.0))
+        - float(item.get("operational_penalty", 0.0))
+        - float(item.get("code_like_penalty", 0.0))
+    )
+
+
+def _merge_graph_keyword_candidates(
+    candidates: list[dict],
+    limit: int,
+) -> list[dict]:
+    clusters: list[list[dict]] = []
+
+    for candidate in sorted(candidates, key=lambda item: item["score"], reverse=True):
+        target_cluster = None
+        for cluster in clusters:
+            if any(
+                _should_merge_keyword_candidates(
+                    candidate,
+                    existing,
+                )
+                for existing in cluster
+            ):
+                target_cluster = cluster
+                break
+        if target_cluster is None:
+            clusters.append([candidate])
+        else:
+            target_cluster.append(candidate)
+
+    merged = []
+    for cluster in clusters:
+        representative = max(
+            cluster,
+            key=lambda item: (
+                _candidate_representative_score(item),
+                float(item.get("score", 0.0)),
+                -len(str(item.get("keyword") or "")),
+            ),
+        ).copy()
+        alternates = [
+            item["keyword"]
+            for item in sorted(cluster, key=lambda row: row["score"], reverse=True)
+            if item["keyword"] != representative["keyword"]
+        ]
+        if alternates:
+            representative["merged_variants"] = alternates[:6]
+            representative["merged_count"] = len(cluster)
+        merged.append(representative)
+
+    merged.sort(key=lambda item: item["score"], reverse=True)
+    for item in merged:
+        item.pop("canonical_key", None)
+    return merged[:limit]
 
 
 def build_graph_keyword_candidates(
@@ -1785,11 +2016,31 @@ def build_graph_keyword_candidates(
             norm_graph.get(title, 0.0),
             norm_grounding.get(title, 0.0),
         )
-        penalty_strength = 0.55 * example_penalty * (1.0 - 0.5 * protected_core_signal)
-        score = base_score * (1.0 - min(max(penalty_strength, 0.0), 0.55))
+        operational_penalty = _operational_penalty(title, entity)
+        code_like_penalty = _code_like_penalty(title)
+        penalty_strength = (
+            0.55 * example_penalty
+            + 0.35 * operational_penalty
+            + 0.65 * code_like_penalty
+        ) * (1.0 - 0.5 * protected_core_signal)
+        score = base_score * (1.0 - min(max(penalty_strength, 0.0), 0.65))
+        if code_like_penalty >= 0.75 and norm_graph.get(title, 0.0) < 0.60:
+            score = min(score, 0.18)
+        elif code_like_penalty >= 0.55 and norm_graph.get(title, 0.0) < 0.35:
+            score = min(score, 0.20)
+        operational_score_cap = _operational_score_cap(
+            title,
+            entity,
+            norm_graph.get(title, 0.0),
+            norm_emphasis.get(title, 0.0),
+            norm_grounding.get(title, 0.0),
+        )
+        if operational_score_cap is not None:
+            score = min(score, operational_score_cap)
         candidates.append({
             "keyword": title,
             "score": round(score, 4),
+            "canonical_key": _candidate_canonical_key(title),
             "base_score": round(base_score, 4),
             "graph_importance": round(norm_graph.get(title, 0.0), 4),
             "community_representativeness": round(norm_community.get(title, 0.0), 4),
@@ -1800,13 +2051,22 @@ def build_graph_keyword_candidates(
             "relation_bridge_score": round(norm_bridge.get(title, 0.0), 4),
             "text_grounding": round(norm_grounding.get(title, 0.0), 4),
             "example_penalty": round(example_penalty, 4),
+            "operational_penalty": round(operational_penalty, 4),
+            "operational_score_cap": (
+                round(operational_score_cap, 4)
+                if operational_score_cap is not None else None
+            ),
+            "code_like_penalty": round(code_like_penalty, 4),
             "penalty_strength": round(penalty_strength, 4),
             "raw_degree": round(_to_float(entity.get("degree")), 4),
             "raw_frequency": round(_to_float(entity.get("frequency")), 4),
         })
 
     candidates.sort(key=lambda item: item["score"], reverse=True)
-    return candidates[:limit]
+    return _merge_graph_keyword_candidates(
+        candidates,
+        limit,
+    )
 
 
 def _log_graph_keyword_candidates(stem: str, candidates: list[dict], limit: int = 12) -> None:
@@ -1821,8 +2081,64 @@ def _log_graph_keyword_candidates(stem: str, candidates: list[dict], limit: int 
             f"emph={item['emphasis_boost']:.3f} "
             f"bridge={item['relation_bridge_score']:.3f} "
             f"text={item['text_grounding']:.3f} "
-            f"example_penalty={item['example_penalty']:.3f}"
+            f"penalty={item['penalty_strength']:.3f}"
         )
+
+
+def _merge_graph_keywords_with_legacy(
+    graph_candidates: list[dict],
+    legacy_keywords: list[dict],
+    target_count: int,
+) -> list[dict]:
+    """검증된 그래프 후보를 우선 사용하고 부족분만 legacy 키워드로 보충한다."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+
+    def add_keyword(keyword: str, score: float) -> None:
+        key = _norm_text(keyword)
+        if not keyword or not key or key in seen:
+            return
+        seen.add(key)
+        merged.append({
+            "keyword": keyword,
+            "score": round(score, 4),
+        })
+
+    for candidate in graph_candidates:
+        if len(merged) >= target_count:
+            break
+        add_keyword(
+            str(candidate.get("keyword") or "").strip(),
+            _to_float(candidate.get("score")),
+        )
+
+    for keyword in legacy_keywords:
+        if len(merged) >= target_count:
+            break
+        add_keyword(
+            str(keyword.get("keyword") or "").strip(),
+            _to_float(keyword.get("score")),
+        )
+
+    return merged
+
+
+def _graph_keyword_debug_summary(
+    keyword_candidates: list[dict],
+    artifacts: dict,
+) -> dict:
+    return {
+        "graph_keyword_source": "graphrag_entity_community",
+        "graph_keyword_candidate_count": len(keyword_candidates),
+        "graph_keyword_top_preview": [
+            {
+                "keyword": str(candidate.get("keyword") or ""),
+                "score": round(_to_float(candidate.get("score")), 4),
+            }
+            for candidate in keyword_candidates[:5]
+        ],
+        "graph_artifact_summary": artifacts.get("summary", {}),
+    }
 
 
 def try_generate_graph_first_metadata_parts(
@@ -1841,9 +2157,8 @@ def try_generate_graph_first_metadata_parts(
     """
     Graph-first 추천 메타데이터 생성 진입점.
 
-    현재 단계에서는 feature flag와 fallback 경로만 마련한다. 이후 이 함수에서
-    그래프 핵심 노드 기반 keywords, community 기반 summary, graph-aware
-    concept_roles를 만들어 기존 legacy 산출물을 대체한다.
+    현재 단계에서는 graph-first keywords만 실제 메타데이터에 연결한다.
+    summary, concept_roles 등은 기존 산출 로직을 재사용한다.
     """
     artifacts = load_graph_artifacts_for_metadata(stem, output_dir, fused)
     _log_graph_artifact_summary(stem, artifacts)
@@ -1853,15 +2168,82 @@ def try_generate_graph_first_metadata_parts(
         transcript_texts,
     )
     _log_graph_keyword_candidates(stem, keyword_candidates)
-    _ = (
+
+    if not keyword_candidates:
+        print(f"[{stem}] graph keyword candidates 없음 — 기존 로직으로 fallback")
+        return {
+            "metadata_parts": None,
+            "debug": {
+                "keyword_source": "legacy_text_graph_mixed",
+                **_graph_keyword_debug_summary(keyword_candidates, artifacts),
+            },
+        }
+
+    print(f"[{stem}] graph-first summary/roles는 기존 로직 재사용")
+    summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
+
+    legacy_keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
         concept_degrees,
         emphasized,
-        core_slide_texts,
-        core_trans_texts,
+        slide_texts,
+        transcript_texts,
         duration_sec,
+        debug=True,
     )
-    print(f"[{stem}] graph-first metadata 생성 로직 미구현 — 기존 로직으로 fallback")
-    return None
+    target_count = len(legacy_keywords) or min(30, max(7, len(keyword_candidates)))
+    keywords = _merge_graph_keywords_with_legacy(
+        keyword_candidates,
+        legacy_keywords,
+        target_count,
+    )
+    print(
+        f"[{stem}] graph-first keywords {len(keywords)}개 선택 "
+        f"(target={target_count}, graph_candidates={len(keyword_candidates)}, "
+        f"legacy_candidates={len(legacy_keywords)})"
+    )
+
+    visual_concept_terms = collect_visual_concept_terms(
+        fused,
+        [k.get("keyword", "") for k in keywords]
+        + list(concept_degrees.keys())
+        + list(scored.keys()),
+    )
+
+    role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
+    role_candidates = {
+        n for n, s in scored.items()
+        if s >= role_threshold
+        and _is_valid_concept(n)
+        and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
+    }
+    slide_role_freq = collect_slide_role_freq(fused, role_candidates)
+    concept_roles = classify_concept_roles(
+        role_candidates,
+        norm_slide_freq,
+        norm_trans_freq,
+        norm_emph,
+        norm_cent,
+        slide_role_freq,
+    )
+
+    return {
+        "metadata_parts": {
+            "summary": summary,
+            "keywords": keywords,
+            "scored": scored,
+            "norm_slide_freq": norm_slide_freq,
+            "norm_trans_freq": norm_trans_freq,
+            "norm_emph": norm_emph,
+            "norm_cent": norm_cent,
+            "role_candidates": role_candidates,
+            "concept_roles": concept_roles,
+            "visual_concept_terms": visual_concept_terms,
+        },
+        "debug": {
+            "keyword_source": "graph_first_with_legacy_fallback",
+            **_graph_keyword_debug_summary(keyword_candidates, artifacts),
+        },
+    }
 
 
 # ── 메인 ──────────────────────────────────────────────────────────────────────
@@ -1903,10 +2285,11 @@ def generate_metadata(
         domain = classify_domain(slide_texts, transcript_texts)
 
     graph_first_parts = None
+    graph_first_debug = {}
     if _env_flag("GRAPHLEC_METADATA_GRAPH_FIRST"):
         print(f"[{stem}] graph-first metadata 모드 활성화")
         try:
-            graph_first_parts = try_generate_graph_first_metadata_parts(
+            graph_first_result = try_generate_graph_first_metadata_parts(
                 stem=stem,
                 output_dir=output_dir,
                 fused=fused,
@@ -1918,6 +2301,9 @@ def generate_metadata(
                 core_trans_texts=core_trans_texts,
                 duration_sec=duration_sec,
             )
+            if graph_first_result:
+                graph_first_parts = graph_first_result.get("metadata_parts")
+                graph_first_debug = graph_first_result.get("debug") or {}
         except Exception as exc:
             print(f"[경고] graph-first metadata 생성 실패 — 기존 로직으로 fallback: {exc}")
 
@@ -2008,6 +2394,8 @@ def generate_metadata(
         "pedagogy":            pedagogy,
         "diagnostics":         diagnostics,
     }
+    if graph_first_debug:
+        metadata.update(graph_first_debug)
 
     # 저장
     metadata_dir.mkdir(parents=True, exist_ok=True)
