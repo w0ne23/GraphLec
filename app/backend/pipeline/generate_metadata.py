@@ -1416,6 +1416,27 @@ def _count_label(rows: list[dict], key: str) -> dict[str, int]:
     return dict(counts)
 
 
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+        return parsed if math.isfinite(parsed) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _iter_values(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    try:
+        return value.tolist()
+    except AttributeError:
+        return [value]
+
+
 def load_graph_artifacts_for_metadata(stem: str, output_dir: Path, fused: dict) -> dict:
     """
     추천 메타데이터 graph-first 경로에서 사용할 파일 기반 그래프 산출물.
@@ -1491,6 +1512,165 @@ def _log_graph_artifact_summary(stem: str, artifacts: dict) -> None:
     )
 
 
+def _norm_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _term_matches_text(term: str, text: str) -> bool:
+    term_norm = _norm_text(term)
+    text_norm = _norm_text(text)
+    return bool(term_norm and text_norm and term_norm in text_norm)
+
+
+def _score_entity_emphasis(entity: dict, emphasis: dict[str, float]) -> float:
+    title = str(entity.get("title") or "")
+    description = str(entity.get("description") or "")
+    score = 0.0
+    for keyword, weight in emphasis.items():
+        if _term_matches_text(keyword, title):
+            score += float(weight)
+        elif _term_matches_text(keyword, description):
+            score += float(weight) * 0.5
+    return score
+
+
+def _score_entity_text_grounding(
+    entity: dict,
+    slide_texts: list[str],
+    transcript_texts: list[str],
+) -> float:
+    title = str(entity.get("title") or "")
+    if not title:
+        return 0.0
+    slide_hits = sum(1 for text in slide_texts if title in str(text or ""))
+    transcript_hits = sum(1 for text in transcript_texts if title in str(text or ""))
+    return float(slide_hits + transcript_hits * 0.5)
+
+
+def build_graph_keyword_candidates(
+    artifacts: dict,
+    slide_texts: list[str],
+    transcript_texts: list[str],
+    limit: int = 30,
+) -> list[dict]:
+    """GraphRAG entity 중심의 추천 키워드 후보와 점수 breakdown."""
+    entities = artifacts.get("graphrag", {}).get("entities", {}).get("rows", []) or []
+    relationships = artifacts.get("graphrag", {}).get("relationships", {}).get("rows", []) or []
+    communities = artifacts.get("graphrag", {}).get("communities", {}).get("rows", []) or []
+    reports = artifacts.get("graphrag", {}).get("community_reports", {}).get("rows", []) or []
+    emphasis = artifacts.get("emphasis", {}) or {}
+    if not entities:
+        return []
+
+    entity_by_id = {
+        str(entity.get("id") or ""): entity
+        for entity in entities
+        if str(entity.get("id") or "").strip()
+    }
+    title_by_id = {
+        entity_id: str(entity.get("title") or "").strip()
+        for entity_id, entity in entity_by_id.items()
+    }
+    report_rank_by_community = {
+        str(report.get("community") or ""): _to_float(report.get("rank"))
+        for report in reports
+    }
+
+    community_signal: Counter[str] = Counter()
+    community_memberships: dict[str, set[str]] = {}
+    for community in communities:
+        community_id = str(community.get("community") or "")
+        rank = report_rank_by_community.get(community_id, 0.0)
+        size = _to_float(community.get("size"))
+        signal = rank + math.log1p(max(size, 0.0))
+        for entity_id in _iter_values(community.get("entity_ids")):
+            entity_id = str(entity_id)
+            title = title_by_id.get(entity_id)
+            if not title:
+                continue
+            community_signal[title] += signal
+            community_memberships.setdefault(title, set()).add(community_id)
+
+    relation_endpoint_signal: Counter[str] = Counter()
+    for rel in relationships:
+        weight = _to_float(rel.get("weight"))
+        combined_degree = _to_float(rel.get("combined_degree"))
+        signal = weight + math.log1p(max(combined_degree, 0.0))
+        for key in ("source", "target"):
+            title = str(rel.get(key) or "").strip()
+            if title:
+                relation_endpoint_signal[title] += signal
+
+    raw_graph_importance: dict[str, float] = {}
+    raw_community: dict[str, float] = {}
+    raw_emphasis: dict[str, float] = {}
+    raw_bridge: dict[str, float] = {}
+    raw_grounding: dict[str, float] = {}
+    entity_by_title: dict[str, dict] = {}
+
+    for entity in entities:
+        title = str(entity.get("title") or "").strip()
+        if not title or not _is_valid_concept(title):
+            continue
+        entity_by_title[title] = entity
+        raw_graph_importance[title] = (
+            _to_float(entity.get("degree"))
+            + math.log1p(max(_to_float(entity.get("frequency")), 0.0))
+        )
+        raw_community[title] = community_signal.get(title, 0.0)
+        raw_emphasis[title] = _score_entity_emphasis(entity, emphasis)
+        raw_bridge[title] = (
+            relation_endpoint_signal.get(title, 0.0)
+            * (1.0 + 0.25 * max(len(community_memberships.get(title, set())) - 1, 0))
+        )
+        raw_grounding[title] = _score_entity_text_grounding(entity, slide_texts, transcript_texts)
+
+    norm_graph = _normalize(raw_graph_importance)
+    norm_community = _normalize(raw_community)
+    norm_emphasis = _normalize(raw_emphasis)
+    norm_bridge = _normalize(raw_bridge)
+    norm_grounding = _normalize(raw_grounding)
+
+    candidates = []
+    for title in norm_graph:
+        entity = entity_by_title.get(title, {})
+        score = (
+            0.45 * norm_graph.get(title, 0.0)
+            + 0.25 * norm_community.get(title, 0.0)
+            + 0.15 * norm_emphasis.get(title, 0.0)
+            + 0.10 * norm_bridge.get(title, 0.0)
+            + 0.05 * norm_grounding.get(title, 0.0)
+        )
+        candidates.append({
+            "keyword": title,
+            "score": round(score, 4),
+            "graph_importance": round(norm_graph.get(title, 0.0), 4),
+            "community_representativeness": round(norm_community.get(title, 0.0), 4),
+            "emphasis_boost": round(norm_emphasis.get(title, 0.0), 4),
+            "relation_bridge_score": round(norm_bridge.get(title, 0.0), 4),
+            "text_grounding": round(norm_grounding.get(title, 0.0), 4),
+            "raw_degree": round(_to_float(entity.get("degree")), 4),
+            "raw_frequency": round(_to_float(entity.get("frequency")), 4),
+        })
+
+    candidates.sort(key=lambda item: item["score"], reverse=True)
+    return candidates[:limit]
+
+
+def _log_graph_keyword_candidates(stem: str, candidates: list[dict], limit: int = 12) -> None:
+    print(f"[{stem}] graph-first keyword candidates 상위 {min(limit, len(candidates))}개")
+    for item in candidates[:limit]:
+        print(
+            "  "
+            f"{item['keyword']:<24} score={item['score']:.4f} "
+            f"graph={item['graph_importance']:.3f} "
+            f"comm={item['community_representativeness']:.3f} "
+            f"emph={item['emphasis_boost']:.3f} "
+            f"bridge={item['relation_bridge_score']:.3f} "
+            f"text={item['text_grounding']:.3f}"
+        )
+
+
 def try_generate_graph_first_metadata_parts(
     *,
     stem: str,
@@ -1513,11 +1693,15 @@ def try_generate_graph_first_metadata_parts(
     """
     artifacts = load_graph_artifacts_for_metadata(stem, output_dir, fused)
     _log_graph_artifact_summary(stem, artifacts)
+    keyword_candidates = build_graph_keyword_candidates(
+        artifacts,
+        slide_texts,
+        transcript_texts,
+    )
+    _log_graph_keyword_candidates(stem, keyword_candidates)
     _ = (
         concept_degrees,
         emphasized,
-        slide_texts,
-        transcript_texts,
         core_slide_texts,
         core_trans_texts,
         duration_sec,
