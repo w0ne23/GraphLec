@@ -1328,6 +1328,194 @@ def generate_summary(
     return _gemini(prompt)
 
 
+_COMMUNITY_BOILERPLATE_TERMS = (
+    "법적",
+    "규제",
+    "평판",
+    "분쟁",
+    "악의적",
+    "위반",
+    "리스크",
+    "위험",
+)
+
+
+def _clean_community_summary(summary: str, max_chars: int = 360) -> str:
+    sentences = re.split(r"(?<=[.!?。！？])\s+|(?<=다\.)\s*", str(summary or "").strip())
+    kept = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(term in sentence for term in _COMMUNITY_BOILERPLATE_TERMS):
+            continue
+        kept.append(sentence)
+    cleaned = " ".join(kept) if kept else str(summary or "").strip()
+    return cleaned[:max_chars].strip()
+
+
+def _select_summary_community_reports(
+    artifacts: dict,
+    concept_roles: dict[str, list[str]],
+    limit: int = 5,
+) -> list[dict]:
+    reports = artifacts.get("graphrag", {}).get("community_reports", {}).get("rows", []) or []
+    core_names = concept_roles.get("core", []) or []
+    introduced_names = concept_roles.get("introduced", []) or []
+    terms = core_names + introduced_names[:8]
+    if not reports or not terms:
+        return []
+
+    selected = []
+    for report in reports:
+        title = str(report.get("title") or "").strip()
+        summary = _clean_community_summary(str(report.get("summary") or ""))
+        if not title and not summary:
+            continue
+        haystack = _norm_text(" ".join([title, summary, _stringify_for_match(report.get("findings"))]))
+        mention_score = 0.0
+        for index, term in enumerate(terms):
+            term_norm = _norm_text(term)
+            if term_norm and term_norm in haystack:
+                mention_score += 2.0 if index < len(core_names) else 1.0
+        if mention_score <= 0:
+            continue
+        selected.append({
+            "title": title,
+            "summary": summary,
+            "rank": _to_float(report.get("rank")),
+            "score": mention_score + _to_float(report.get("rank")) * 0.2,
+        })
+
+    selected.sort(key=lambda row: row["score"], reverse=True)
+    return selected[:limit]
+
+
+def generate_graph_first_summary(
+    *,
+    artifacts: dict,
+    keyword_candidates: list[dict],
+    concept_roles: dict[str, list[str]],
+    concept_relations: list[dict],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+) -> str:
+    core_names = concept_roles.get("core", [])[:10]
+    introduced_names = concept_roles.get("introduced", [])[:12]
+    top_candidates = [
+        str(candidate.get("keyword") or "").strip()
+        for candidate in keyword_candidates[:12]
+        if str(candidate.get("keyword") or "").strip()
+    ]
+    relation_lines = [
+        f"{rel.get('from')} -[{rel.get('type')}]-> {rel.get('to')}"
+        for rel in concept_relations[:14]
+        if rel.get("from") and rel.get("to")
+    ]
+    community_reports = _select_summary_community_reports(
+        artifacts,
+        concept_roles,
+    )
+    community_block = "\n".join(
+        f"- {report.get('title')}: {report.get('summary')}"
+        for report in community_reports
+    )
+
+    MAX_PER_SLIDE = 120
+    slide_block = " / ".join(
+        s.strip()[:MAX_PER_SLIDE] for s in core_slide_texts if s.strip()
+    )[:1200]
+
+    n_sample = min(24, len(core_trans_texts))
+    sampled_trans = _sample_uniform(core_trans_texts, n_sample)
+    trans_block = " ".join(sampled_trans)[:1200]
+
+    prompt = f"""아래는 강의의 그래프 기반 메타데이터와 텍스트 근거다.
+
+그래프 핵심 개념:
+{', '.join(core_names)}
+
+그래프 보조 개념:
+{', '.join(introduced_names)}
+
+그래프 상위 후보:
+{', '.join(top_candidates)}
+
+주요 개념 관계:
+{chr(10).join(relation_lines)}
+
+커뮤니티 요약:
+{community_block}
+
+텍스트 근거 슬라이드:
+{slide_block}
+
+텍스트 근거 전사:
+{trans_block}
+
+위 정보를 바탕으로 강의 내용을 3문장으로 요약하라.
+
+작성 규칙:
+- 그래프 핵심 개념과 관계를 우선 반영하라.
+- 텍스트 근거는 그래프 정보가 실제 강의 내용과 맞는지 보조 검증용으로만 사용하라.
+- 커뮤니티 보고서의 법적/평판/리스크 관련 boilerplate는 요약하지 마라.
+- 단순 키워드 나열이 아니라 강의의 핵심 흐름과 개념 간 관계가 드러나도록 작성하라.
+- 한국어로 작성하고 설명 없이 요약문만 출력하라.
+"""
+
+    print(f"\n[디버그] graph-first 요약 입력 core={core_names}")
+    print(f"[디버그] graph-first 요약 관계 수: {len(relation_lines)}")
+    print(f"[디버그] graph-first 요약 community report 수: {len(community_reports)}")
+    print(f"[디버그] graph-first slide_block ({len(slide_block)}자):\n{slide_block[:400]}")
+    print(f"[디버그] graph-first trans_block ({len(trans_block)}자):\n{trans_block[:240]}\n")
+    return _gemini(prompt)
+
+
+def _fallback_summary_from_graph(concept_roles: dict[str, list[str]]) -> str:
+    core = [name for name in concept_roles.get("core", []) if str(name or "").strip()]
+    introduced = [name for name in concept_roles.get("introduced", []) if str(name or "").strip()]
+    primary = ", ".join(core[:5])
+    secondary = ", ".join(introduced[:5])
+    if primary and secondary:
+        return (
+            f"이 강의는 {primary}를 중심으로 관련 개념을 설명한다. "
+            f"또한 {secondary}를 함께 다루며 핵심 개념 간 관계를 정리한다."
+        )
+    if primary:
+        return f"이 강의는 {primary}를 중심으로 핵심 개념과 관계를 설명한다."
+    return "이 강의는 그래프 기반 핵심 개념과 관계를 중심으로 내용을 설명한다."
+
+
+def generate_graph_first_summary_with_fallback(
+    *,
+    stem: str,
+    artifacts: dict,
+    keyword_candidates: list[dict],
+    concept_roles: dict[str, list[str]],
+    concept_relations: list[dict],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+    concept_degrees: dict[str, int],
+) -> tuple[str, str]:
+    try:
+        return generate_graph_first_summary(
+            artifacts=artifacts,
+            keyword_candidates=keyword_candidates,
+            concept_roles=concept_roles,
+            concept_relations=concept_relations,
+            core_slide_texts=core_slide_texts,
+            core_trans_texts=core_trans_texts,
+        ), "graph_first"
+    except Exception as exc:
+        print(f"[경고] graph-first summary 생성 실패 — 기존 텍스트 요약으로 fallback: {exc}")
+
+    try:
+        return generate_summary(core_slide_texts, core_trans_texts, concept_degrees), "legacy_text_fallback"
+    except Exception as exc:
+        print(f"[경고] legacy summary fallback 실패 — 그래프 핵심 개념 기반 안전 요약 사용: {exc}")
+        return _fallback_summary_from_graph(concept_roles), "graph_core_safe_fallback"
+
+
 def _read_parquet_records(path: Path) -> tuple[list[dict], str | None]:
     if not path.is_file():
         return [], "missing"
@@ -2462,8 +2650,7 @@ def try_generate_graph_first_metadata_parts(
             },
         }
 
-    print(f"[{stem}] graph-first summary는 기존 로직 재사용, roles/relations는 GraphRAG 기반 생성")
-    summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
+    print(f"[{stem}] graph-first keywords/roles/relations 생성 중")
 
     legacy_keywords, _legacy_scored, _legacy_slide_freq, _legacy_trans_freq, _legacy_emph, _legacy_cent = score_keywords(
         concept_degrees,
@@ -2503,6 +2690,17 @@ def try_generate_graph_first_metadata_parts(
         f"introduced={len(concept_roles.get('introduced', []))}, "
         f"relations={len(concept_relations)}"
     )
+    print(f"[{stem}] graph-first summary 생성 중")
+    summary, summary_source = generate_graph_first_summary_with_fallback(
+        stem=stem,
+        artifacts=artifacts,
+        keyword_candidates=keyword_candidates,
+        concept_roles=concept_roles,
+        concept_relations=concept_relations,
+        core_slide_texts=core_slide_texts,
+        core_trans_texts=core_trans_texts,
+        concept_degrees=concept_degrees,
+    )
 
     visual_concept_terms = collect_visual_concept_terms(
         fused,
@@ -2529,6 +2727,7 @@ def try_generate_graph_first_metadata_parts(
         },
         "debug": {
             "keyword_source": "graph_first_with_legacy_fallback",
+            "summary_source": summary_source,
             **_graph_keyword_debug_summary(keyword_candidates, artifacts),
         },
     }
