@@ -643,19 +643,7 @@ def collect_visual_concept_terms(fused: dict, concept_terms: list[str]) -> list[
             if len(matched) >= MAX_VISUAL_CONCEPT_TERMS:
                 break
 
-    if matched:
-        return matched
-
-    # concept 후보와 직접 매칭되지 않는 image_only 슬라이드를 위한 fallback.
-    fallback = []
-    for token in _VISUAL_TERM_RE.findall(structure_text):
-        if token in seen or not _is_valid_concept(token):
-            continue
-        seen.add(token)
-        fallback.append(token)
-        if len(fallback) >= min(MAX_VISUAL_CONCEPT_TERMS, 30):
-            break
-    return fallback
+    return matched
 
 
 def collect_graphrag_communities(output_dir: Path) -> list[dict]:
@@ -1004,7 +992,7 @@ _NOISE_SUFFIX_RE = re.compile(
     r"|대해|에서|으로|에게|으로써|이다|아니다|있다|없다|한다"
     r"|하거나|하지|하면|이지|하니|않고|이후|이전"
     r"|있도록|있음|없던|만든|만드|된|될|할|함|함으로|함께"
-    r"|하$|않는다$|아님$|준다$|포함한$|보여주$|느끼$|제공받$"
+    r"|하다$|된다$|되다$|가능하다$|하$|않는다$|아님$|준다$|포함한$|보여주$|느끼$|제공받$"
     r"|반영하$|전달하$|구현하$|쫓아가$)$"
 )
 
@@ -2141,6 +2129,183 @@ def _graph_keyword_debug_summary(
     }
 
 
+def build_graph_concept_roles(
+    keyword_candidates: list[dict],
+    core_keywords: list[str] | None = None,
+) -> dict[str, list[str]]:
+    """GraphRAG 후보 점수 기반으로 core/introduced 역할을 구성한다."""
+    if not keyword_candidates:
+        return {"core": [], "introduced": []}
+
+    core: list[str] = []
+    introduced: list[str] = []
+    seen: set[str] = set()
+    candidate_by_key = {
+        _norm_text(str(candidate.get("keyword") or "").strip()): candidate
+        for candidate in keyword_candidates
+        if str(candidate.get("keyword") or "").strip()
+    }
+
+    def is_role_candidate(keyword: str, candidate: dict | None) -> bool:
+        if not _is_valid_concept(keyword):
+            return False
+        if not candidate:
+            return True
+        if candidate.get("operational_score_cap") is not None:
+            return False
+        if _to_float(candidate.get("code_like_penalty")) >= 0.75:
+            return False
+        if (
+            _to_float(candidate.get("example_penalty")) >= 0.65
+            and _to_float(candidate.get("graph_importance")) < 0.30
+        ):
+            return False
+        return True
+
+    if core_keywords:
+        for keyword in core_keywords:
+            keyword = str(keyword or "").strip()
+            key = _norm_text(keyword)
+            if not keyword or not key or key in seen:
+                continue
+            if not is_role_candidate(keyword, candidate_by_key.get(key)):
+                continue
+            core.append(keyword)
+            seen.add(key)
+            if len(core) >= 12:
+                break
+
+    for candidate in keyword_candidates:
+        keyword = str(candidate.get("keyword") or "").strip()
+        key = _norm_text(keyword)
+        if not keyword or not key or key in seen:
+            continue
+        if not is_role_candidate(keyword, candidate):
+            seen.add(key)
+            continue
+        if core_keywords:
+            if len(introduced) < 40:
+                introduced.append(keyword)
+            seen.add(key)
+            continue
+        score = _to_float(candidate.get("score"))
+        graph_importance = _to_float(candidate.get("graph_importance"))
+        community_inner = _to_float(candidate.get("community_inner_representative"))
+        example_penalty = _to_float(candidate.get("example_penalty"))
+        operational_cap = candidate.get("operational_score_cap")
+        code_penalty = _to_float(candidate.get("code_like_penalty"))
+
+        core_like = (
+            score >= 0.30
+            and graph_importance >= 0.20
+            and community_inner >= 0.20
+            and example_penalty < 0.35
+            and operational_cap is None
+            and code_penalty < 0.75
+        )
+        if core_like and len(core) < 12:
+            core.append(keyword)
+        elif len(introduced) < 40:
+            introduced.append(keyword)
+        seen.add(key)
+
+    if not core:
+        for candidate in keyword_candidates[:5]:
+            keyword = str(candidate.get("keyword") or "").strip()
+            key = _norm_text(keyword)
+            if keyword and key and key not in seen:
+                core.append(keyword)
+                seen.add(key)
+
+    return {
+        "core": core,
+        "introduced": introduced[:40],
+    }
+
+
+def build_graph_role_scores(
+    keyword_candidates: list[dict],
+) -> tuple[dict[str, float], dict[str, float], dict[str, float], dict[str, float], dict[str, float]]:
+    """GraphRAG 후보 breakdown을 기존 metadata score/norm shape에 맞춘다."""
+    scored: dict[str, float] = {}
+    norm_slide_freq: dict[str, float] = {}
+    norm_trans_freq: dict[str, float] = {}
+    norm_emph: dict[str, float] = {}
+    norm_cent: dict[str, float] = {}
+
+    for candidate in keyword_candidates:
+        keyword = str(candidate.get("keyword") or "").strip()
+        if not keyword:
+            continue
+        scored[keyword] = _to_float(candidate.get("score"))
+        norm_slide_freq[keyword] = _to_float(candidate.get("text_grounding"))
+        norm_trans_freq[keyword] = _to_float(candidate.get("text_grounding"))
+        norm_emph[keyword] = _to_float(candidate.get("emphasis_boost"))
+        norm_cent[keyword] = _to_float(candidate.get("graph_importance"))
+
+    return scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent
+
+
+def _graph_relation_type(rel: dict) -> str:
+    haystack = _norm_text(" ".join([
+        str(rel.get("source") or ""),
+        str(rel.get("target") or ""),
+        str(rel.get("description") or ""),
+    ]))
+    if any(term in haystack for term in ("비교", "대조", "차이", "vs", "versus")):
+        return "CONTRASTS_WITH"
+    return "RELATED_TO"
+
+
+def build_graph_concept_relations(
+    artifacts: dict,
+    concept_roles: dict[str, list[str]],
+    limit: int = 120,
+) -> list[dict]:
+    """GraphRAG relationships에서 metadata concept_relations를 구성한다."""
+    relationships = artifacts.get("graphrag", {}).get("relationships", {}).get("rows", []) or []
+    role_names = {
+        str(name).strip()
+        for names in concept_roles.values()
+        for name in (names or [])
+        if str(name).strip()
+    }
+    if not relationships or not role_names:
+        return []
+
+    selected = []
+    seen: set[tuple[str, str, str]] = set()
+    for rel in sorted(
+        relationships,
+        key=lambda row: (
+            _to_float(row.get("weight"))
+            + math.log1p(max(_to_float(row.get("combined_degree")), 0.0))
+        ),
+        reverse=True,
+    ):
+        source = str(rel.get("source") or "").strip()
+        target = str(rel.get("target") or "").strip()
+        if not source or not target or source == target:
+            continue
+        if source not in role_names or target not in role_names:
+            continue
+        rel_type = _graph_relation_type(rel)
+        dedupe_key = (source, rel_type, target)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        selected.append({
+            "from": source,
+            "type": rel_type,
+            "to": target,
+            "weight": round(_to_float(rel.get("weight")), 4),
+        })
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def try_generate_graph_first_metadata_parts(
     *,
     stem: str,
@@ -2157,8 +2322,8 @@ def try_generate_graph_first_metadata_parts(
     """
     Graph-first 추천 메타데이터 생성 진입점.
 
-    현재 단계에서는 graph-first keywords만 실제 메타데이터에 연결한다.
-    summary, concept_roles 등은 기존 산출 로직을 재사용한다.
+    GraphRAG 파일 산출물로 keywords, concept_roles, concept_relations를 구성한다.
+    summary는 아직 기존 텍스트 요약 경로를 재사용한다.
     """
     artifacts = load_graph_artifacts_for_metadata(stem, output_dir, fused)
     _log_graph_artifact_summary(stem, artifacts)
@@ -2179,16 +2344,16 @@ def try_generate_graph_first_metadata_parts(
             },
         }
 
-    print(f"[{stem}] graph-first summary/roles는 기존 로직 재사용")
+    print(f"[{stem}] graph-first summary는 기존 로직 재사용, roles/relations는 GraphRAG 기반 생성")
     summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
 
-    legacy_keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
+    legacy_keywords, _legacy_scored, _legacy_slide_freq, _legacy_trans_freq, _legacy_emph, _legacy_cent = score_keywords(
         concept_degrees,
         emphasized,
         slide_texts,
         transcript_texts,
         duration_sec,
-        debug=True,
+        debug=False,
     )
     target_count = len(legacy_keywords) or min(30, max(7, len(keyword_candidates)))
     keywords = _merge_graph_keywords_with_legacy(
@@ -2201,29 +2366,27 @@ def try_generate_graph_first_metadata_parts(
         f"(target={target_count}, graph_candidates={len(keyword_candidates)}, "
         f"legacy_candidates={len(legacy_keywords)})"
     )
+    concept_roles = build_graph_concept_roles(
+        keyword_candidates,
+        [item.get("keyword", "") for item in keywords],
+    )
+    role_candidates = set(concept_roles.get("core", [])) | set(concept_roles.get("introduced", []))
+    concept_relations = build_graph_concept_relations(artifacts, concept_roles)
+    scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = build_graph_role_scores(
+        keyword_candidates
+    )
+    print(
+        f"[{stem}] graph-first concept_roles "
+        f"core={len(concept_roles.get('core', []))}, "
+        f"introduced={len(concept_roles.get('introduced', []))}, "
+        f"relations={len(concept_relations)}"
+    )
 
     visual_concept_terms = collect_visual_concept_terms(
         fused,
         [k.get("keyword", "") for k in keywords]
         + list(concept_degrees.keys())
         + list(scored.keys()),
-    )
-
-    role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
-    role_candidates = {
-        n for n, s in scored.items()
-        if s >= role_threshold
-        and _is_valid_concept(n)
-        and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
-    }
-    slide_role_freq = collect_slide_role_freq(fused, role_candidates)
-    concept_roles = classify_concept_roles(
-        role_candidates,
-        norm_slide_freq,
-        norm_trans_freq,
-        norm_emph,
-        norm_cent,
-        slide_role_freq,
     )
 
     return {
@@ -2237,6 +2400,7 @@ def try_generate_graph_first_metadata_parts(
             "norm_cent": norm_cent,
             "role_candidates": role_candidates,
             "concept_roles": concept_roles,
+            "concept_relations": concept_relations,
             "visual_concept_terms": visual_concept_terms,
         },
         "debug": {
@@ -2269,9 +2433,14 @@ def generate_metadata(
     learning_objectives = collect_learning_objectives(fused)
     print(f"[{stem}] 학습 목표 {len(learning_objectives)}개 수집")
 
-    print(f"[{stem}] Neo4j Concept 노드 조회 중...")
-    concept_degrees = fetch_concept_degrees(stem)
-    print(f"       → Concept {len(concept_degrees)}개")
+    graph_first_enabled = _env_flag("GRAPHLEC_METADATA_GRAPH_FIRST")
+    if graph_first_enabled:
+        print(f"[{stem}] graph-first metadata 모드: Neo4j Concept 조회 건너뜀")
+        concept_degrees = {}
+    else:
+        print(f"[{stem}] Neo4j Concept 노드 조회 중...")
+        concept_degrees = fetch_concept_degrees(stem)
+        print(f"       → Concept {len(concept_degrees)}개")
 
     metadata_domain, graph_domain, graph_subdomain = load_graph_domain(stem, output_dir)
     if metadata_domain:
@@ -2286,7 +2455,7 @@ def generate_metadata(
 
     graph_first_parts = None
     graph_first_debug = {}
-    if _env_flag("GRAPHLEC_METADATA_GRAPH_FIRST"):
+    if graph_first_enabled:
         print(f"[{stem}] graph-first metadata 모드 활성화")
         try:
             graph_first_result = try_generate_graph_first_metadata_parts(
@@ -2317,8 +2486,13 @@ def generate_metadata(
         norm_cent = graph_first_parts["norm_cent"]
         role_candidates = graph_first_parts["role_candidates"]
         concept_roles = graph_first_parts["concept_roles"]
+        concept_relations = graph_first_parts.get("concept_relations", [])
         visual_concept_terms = graph_first_parts["visual_concept_terms"]
     else:
+        if graph_first_enabled and not concept_degrees:
+            print(f"[{stem}] graph-first fallback: Neo4j Concept 노드 조회 중...")
+            concept_degrees = fetch_concept_degrees(stem)
+            print(f"       → Concept {len(concept_degrees)}개")
         print(f"[{stem}] 요약 생성 중...")
         summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
 
@@ -2365,8 +2539,11 @@ def generate_metadata(
             print(f"  [{role}] {names[:10]}")
         print()
 
-    print(f"[{stem}] concept_relations 조회 중...")
-    concept_relations = fetch_concept_relations(stem, role_candidates)
+    if graph_first_parts:
+        print(f"[{stem}] graph-first concept_relations {len(concept_relations)}개 사용")
+    else:
+        print(f"[{stem}] concept_relations 조회 중...")
+        concept_relations = fetch_concept_relations(stem, role_candidates)
 
     # difficulty: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
     difficulty = estimate_difficulty(concept_roles, norm_cent)
