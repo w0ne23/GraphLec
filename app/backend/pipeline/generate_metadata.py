@@ -1152,16 +1152,16 @@ def collect_learning_objectives(fused: dict) -> list[str]:
     return objectives
 
 
-# ── difficulty 추정 ────────────────────────────────────────────────────────────
+# ── concept complexity 추정 ───────────────────────────────────────────────────
 
-def estimate_difficulty(
+def estimate_concept_complexity(
     concept_roles: dict[str, list[str]],
     norm_cent:     dict[str, float],
 ) -> str:
     """
-    core 개념들의 평균 KG 중심성으로 난이도 추정
+    core 개념들의 평균 그래프 중심성으로 개념 복잡도 추정
 
-    직관: core 개념이 KG에서 촘촘하게 연결될수록 → 개념 밀도 높은 강의 → 어려움
+    직관: core 개념이 그래프에서 촘촘하게 연결될수록 → 개념 밀도 높은 강의
     low_intro_ratio 제거: 개론 강의일수록 예시가 많아 저중심성 introduced가 많아지므로
                          오히려 역방향으로 작동하는 구조적 결함 있음
 
@@ -1177,17 +1177,17 @@ def estimate_difficulty(
     )
 
     if avg_core_cent >= 0.65:
-        difficulty = "advanced"
+        concept_complexity = "high"
     elif avg_core_cent >= 0.35:
-        difficulty = "intermediate"
+        concept_complexity = "medium"
     else:
-        difficulty = "beginner"
+        concept_complexity = "low"
 
     print(
-        f"[디버그] difficulty: {difficulty}  "
+        f"[디버그] concept_complexity: {concept_complexity}  "
         f"(core={len(cores)}, avg_core_cent={avg_core_cent:.3f})"
     )
-    return difficulty
+    return concept_complexity
 
 
 # ── LLM 호출 ──────────────────────────────────────────────────────────────────
@@ -1533,13 +1533,16 @@ def _score_entity_text_grounding(
     entity: dict,
     slide_texts: list[str],
     transcript_texts: list[str],
-) -> float:
+) -> tuple[float, float, float]:
     title = str(entity.get("title") or "")
     if not title:
-        return 0.0
+        return 0.0, 0.0, 0.0
     slide_hits = sum(1 for text in slide_texts if title in str(text or ""))
     transcript_hits = sum(1 for text in transcript_texts if title in str(text or ""))
-    return float(slide_hits + transcript_hits * 0.5)
+    slide_grounding = float(slide_hits)
+    transcript_grounding = float(transcript_hits)
+    combined_grounding = slide_grounding + transcript_grounding * 0.5
+    return slide_grounding, transcript_grounding, combined_grounding
 
 
 def _community_report_mention_score(title: str, report: dict | None) -> float:
@@ -1934,6 +1937,8 @@ def build_graph_keyword_candidates(
     raw_community_cross_bridge: dict[str, float] = {}
     raw_emphasis: dict[str, float] = {}
     raw_bridge: dict[str, float] = {}
+    raw_slide_grounding: dict[str, float] = {}
+    raw_transcript_grounding: dict[str, float] = {}
     raw_grounding: dict[str, float] = {}
     entity_by_title: dict[str, dict] = {}
 
@@ -1980,12 +1985,21 @@ def build_graph_keyword_candidates(
             relation_endpoint_signal.get(title, 0.0)
             * (1.0 + 0.25 * max(len(community_memberships.get(title, set())) - 1, 0))
         )
-        raw_grounding[title] = _score_entity_text_grounding(entity, slide_texts, transcript_texts)
+        slide_grounding, transcript_grounding, combined_grounding = _score_entity_text_grounding(
+            entity,
+            slide_texts,
+            transcript_texts,
+        )
+        raw_slide_grounding[title] = slide_grounding
+        raw_transcript_grounding[title] = transcript_grounding
+        raw_grounding[title] = combined_grounding
 
     norm_graph = _normalize(raw_graph_importance)
     norm_community = _normalize(raw_community)
     norm_emphasis = _normalize(raw_emphasis)
     norm_bridge = _normalize(raw_bridge)
+    norm_slide_grounding = _normalize(raw_slide_grounding)
+    norm_transcript_grounding = _normalize(raw_transcript_grounding)
     norm_grounding = _normalize(raw_grounding)
     norm_example_penalty = _normalize(dict(example_relation_signal))
 
@@ -2037,6 +2051,8 @@ def build_graph_keyword_candidates(
             "community_cross_bridge": round(raw_community_cross_bridge.get(title, 0.0), 4),
             "emphasis_boost": round(norm_emphasis.get(title, 0.0), 4),
             "relation_bridge_score": round(norm_bridge.get(title, 0.0), 4),
+            "slide_grounding": round(norm_slide_grounding.get(title, 0.0), 4),
+            "transcript_grounding": round(norm_transcript_grounding.get(title, 0.0), 4),
             "text_grounding": round(norm_grounding.get(title, 0.0), 4),
             "example_penalty": round(example_penalty, 4),
             "operational_penalty": round(operational_penalty, 4),
@@ -2069,6 +2085,7 @@ def _log_graph_keyword_candidates(stem: str, candidates: list[dict], limit: int 
             f"emph={item['emphasis_boost']:.3f} "
             f"bridge={item['relation_bridge_score']:.3f} "
             f"text={item['text_grounding']:.3f} "
+            f"(s={item.get('slide_grounding', 0.0):.2f},t={item.get('transcript_grounding', 0.0):.2f}) "
             f"penalty={item['penalty_strength']:.3f}"
         )
 
@@ -2238,8 +2255,8 @@ def build_graph_role_scores(
         if not keyword:
             continue
         scored[keyword] = _to_float(candidate.get("score"))
-        norm_slide_freq[keyword] = _to_float(candidate.get("text_grounding"))
-        norm_trans_freq[keyword] = _to_float(candidate.get("text_grounding"))
+        norm_slide_freq[keyword] = _to_float(candidate.get("slide_grounding"))
+        norm_trans_freq[keyword] = _to_float(candidate.get("transcript_grounding"))
         norm_emph[keyword] = _to_float(candidate.get("emphasis_boost"))
         norm_cent[keyword] = _to_float(candidate.get("graph_importance"))
 
@@ -2545,8 +2562,8 @@ def generate_metadata(
         print(f"[{stem}] concept_relations 조회 중...")
         concept_relations = fetch_concept_relations(stem, role_candidates)
 
-    # difficulty: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
-    difficulty = estimate_difficulty(concept_roles, norm_cent)
+    # concept_complexity: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
+    concept_complexity = estimate_concept_complexity(concept_roles, norm_cent)
 
     print(f"[{stem}] GraphRAG community report 수집 중...")
     communities = collect_graphrag_communities(output_dir)
@@ -2560,7 +2577,7 @@ def generate_metadata(
         "domain":              domain,
         "graph_domain":        graph_domain,
         "graph_subdomain":     graph_subdomain,
-        "difficulty":          difficulty,
+        "concept_complexity":  concept_complexity,
         "summary":             summary,
         "learning_objectives": learning_objectives,
         "keywords":            keywords,

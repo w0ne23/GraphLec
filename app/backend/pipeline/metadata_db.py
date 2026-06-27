@@ -71,7 +71,9 @@ def upsert_lecture_metadata_sync(
         "domain": metadata.get("domain"),
         "graph_domain": metadata.get("graph_domain"),
         "graph_subdomain": metadata.get("graph_subdomain"),
-        "difficulty": metadata.get("difficulty"),
+        # DB 컬럼은 아직 difficulty지만, metadata 의미는 concept_complexity로 정정했다.
+        # 스키마 마이그레이션 전까지 추천 런타임 호환을 위해 기존 컬럼에 임시 저장한다.
+        "difficulty": metadata.get("concept_complexity") or metadata.get("difficulty"),
         "summary": metadata.get("summary"),
         "learning_objectives": _text_list(metadata.get("learning_objectives")),
         "keywords": Json(metadata.get("keywords") or []),
