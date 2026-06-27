@@ -25,6 +25,7 @@ import random
 import time
 from pathlib import Path
 from collections import Counter
+from difflib import SequenceMatcher
 
 from neo4j import GraphDatabase
 from google import genai
@@ -1752,6 +1753,55 @@ def _is_suffix_expansion(base_key: str, expanded_key: str) -> bool:
     )
 
 
+def _sequence_similarity(a_key: str, b_key: str) -> float:
+    if not a_key or not b_key:
+        return 0.0
+    return SequenceMatcher(None, a_key, b_key).ratio()
+
+
+def _same_length_single_char_variant(a_key: str, b_key: str) -> bool:
+    if len(a_key) != len(b_key) or len(a_key) < 4:
+        return False
+    return sum(1 for left, right in zip(a_key, b_key) if left != right) == 1
+
+
+def _has_structural_variant_marker(title: str) -> bool:
+    text = str(title or "").strip()
+    return bool(
+        re.match(r"^\d+\s*[.)]", text)
+        or re.search(r"[①-⑳]", text)
+        or ("(" in text and ")" in text)
+        or ("（" in text and "）" in text)
+    )
+
+
+def _looks_like_transcription_variant(a: dict, b: dict) -> bool:
+    a_key = str(a.get("canonical_key") or "")
+    b_key = str(b.get("canonical_key") or "")
+    if len(a_key) < 4 or len(b_key) < 4:
+        return False
+
+    a_title = str(a.get("keyword") or "")
+    b_title = str(b.get("keyword") or "")
+    if _looks_like_merge_bridge(a_title) or _looks_like_merge_bridge(b_title):
+        return False
+
+    if _has_structural_variant_marker(a_title) or _has_structural_variant_marker(b_title):
+        return False
+
+    if a_key in b_key or b_key in a_key:
+        return False
+
+    sequence_sim = _sequence_similarity(a_key, b_key)
+    typo_like = (
+        _same_length_single_char_variant(a_key, b_key)
+        and sequence_sim >= 0.84
+    )
+    if not typo_like:
+        return False
+    return True
+
+
 def _has_independent_graph_signal(a: dict, b: dict) -> bool:
     return (
         float(a.get("graph_importance", 0.0)) >= 0.12
@@ -1769,14 +1819,18 @@ def _should_merge_keyword_candidates(
     b_key = str(b.get("canonical_key") or "")
     if not a_key or not b_key:
         return False
-    if a_key == b_key:
-        return True
     if len(a_key) < 3 or len(b_key) < 3:
         return False
     a_title = str(a.get("keyword") or "")
     b_title = str(b.get("keyword") or "")
+    if _has_structural_variant_marker(a_title) or _has_structural_variant_marker(b_title):
+        return False
+    if a_key == b_key:
+        return True
     if _looks_like_merge_bridge(a_title) or _looks_like_merge_bridge(b_title):
         return False
+    if _looks_like_transcription_variant(a, b):
+        return True
     if _has_independent_graph_signal(a, b):
         return False
     return _is_suffix_expansion(a_key, b_key) or _is_suffix_expansion(b_key, a_key)
@@ -2146,6 +2200,44 @@ def _graph_keyword_debug_summary(
     }
 
 
+def build_graph_candidate_alias_map(keyword_candidates: list[dict]) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    for candidate in keyword_candidates:
+        representative = str(candidate.get("keyword") or "").strip()
+        if not representative:
+            continue
+        for variant in candidate.get("merged_variants") or []:
+            variant = str(variant or "").strip()
+            if variant and _norm_text(variant) != _norm_text(representative):
+                alias_map[variant] = representative
+    return alias_map
+
+
+def _canonicalize_graph_name(name: str, alias_map: dict[str, str]) -> str:
+    name = str(name or "").strip()
+    if not name:
+        return ""
+    if name in alias_map:
+        return alias_map[name]
+    norm_name = _norm_text(name)
+    for alias, representative in alias_map.items():
+        if _norm_text(alias) == norm_name:
+            return representative
+    return name
+
+
+def _canonicalize_graph_name_list(names: list[str], alias_map: dict[str, str]) -> list[str]:
+    canonicalized: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        representative = _canonicalize_graph_name(name, alias_map)
+        key = _norm_text(representative)
+        if representative and key and key not in seen:
+            seen.add(key)
+            canonicalized.append(representative)
+    return canonicalized
+
+
 def build_graph_concept_roles(
     keyword_candidates: list[dict],
     core_keywords: list[str] | None = None,
@@ -2277,10 +2369,12 @@ def _graph_relation_type(rel: dict) -> str:
 def build_graph_concept_relations(
     artifacts: dict,
     concept_roles: dict[str, list[str]],
+    alias_map: dict[str, str] | None = None,
     limit: int = 120,
 ) -> list[dict]:
     """GraphRAG relationships에서 metadata concept_relations를 구성한다."""
     relationships = artifacts.get("graphrag", {}).get("relationships", {}).get("rows", []) or []
+    alias_map = alias_map or {}
     role_names = {
         str(name).strip()
         for names in concept_roles.values()
@@ -2300,8 +2394,8 @@ def build_graph_concept_relations(
         ),
         reverse=True,
     ):
-        source = str(rel.get("source") or "").strip()
-        target = str(rel.get("target") or "").strip()
+        source = _canonicalize_graph_name(str(rel.get("source") or "").strip(), alias_map)
+        target = _canonicalize_graph_name(str(rel.get("target") or "").strip(), alias_map)
         if not source or not target or source == target:
             continue
         if source not in role_names or target not in role_names:
@@ -2350,6 +2444,13 @@ def try_generate_graph_first_metadata_parts(
         transcript_texts,
     )
     _log_graph_keyword_candidates(stem, keyword_candidates)
+    alias_map = build_graph_candidate_alias_map(keyword_candidates)
+    if alias_map:
+        preview = list(alias_map.items())[:8]
+        print(
+            f"[{stem}] graph variant aliases {len(alias_map)}개 감지: "
+            f"{preview}"
+        )
 
     if not keyword_candidates:
         print(f"[{stem}] graph keyword candidates 없음 — 기존 로직으로 fallback")
@@ -2387,8 +2488,12 @@ def try_generate_graph_first_metadata_parts(
         keyword_candidates,
         [item.get("keyword", "") for item in keywords],
     )
+    concept_roles = {
+        role: _canonicalize_graph_name_list(names, alias_map)
+        for role, names in concept_roles.items()
+    }
     role_candidates = set(concept_roles.get("core", [])) | set(concept_roles.get("introduced", []))
-    concept_relations = build_graph_concept_relations(artifacts, concept_roles)
+    concept_relations = build_graph_concept_relations(artifacts, concept_roles, alias_map)
     scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = build_graph_role_scores(
         keyword_candidates
     )
@@ -2403,8 +2508,10 @@ def try_generate_graph_first_metadata_parts(
         fused,
         [k.get("keyword", "") for k in keywords]
         + list(concept_degrees.keys())
-        + list(scored.keys()),
+        + list(scored.keys())
+        + list(alias_map.keys()),
     )
+    visual_concept_terms = _canonicalize_graph_name_list(visual_concept_terms, alias_map)
 
     return {
         "metadata_parts": {
