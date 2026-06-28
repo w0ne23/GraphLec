@@ -75,6 +75,18 @@ _REPO_ROOT     = _resolve_repo_root()
 DEFAULT_METADATA_DIR = str(_REPO_ROOT / "app" / "backend" / "metadata")
 DEFAULT_DB_DIR = str(_REPO_ROOT / "data" / "lancedb")
 _TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
+_TRAILING_PARTICLES = (
+    "으로부터", "로부터", "에서", "에게", "한테", "으로", "까지", "부터",
+    "처럼", "보다", "마다", "에서", "으로", "로", "와", "과", "의",
+    "을", "를", "이", "가", "은", "는", "에", "도", "만",
+)
+_QUERY_META_PHRASES = (
+    "추천해줘", "추천해 주세요", "추천해주세요", "추천해", "추천",
+    "알려줘", "알려 주세요", "알려주세요", "알려", "찾아줘", "찾아 주세요",
+    "찾아주세요", "찾아", "보여줘", "보여 주세요", "보여주세요", "보여",
+    "설명해줘", "설명해 주세요", "설명해주세요", "설명", "강의", "관련",
+    "대해서", "대해", "관한", "다루는", "배우는", "학습", "수업",
+)
 _DOMAIN_ALIASES = {
     "컴퓨터공학": "engineering",
     "컴공": "engineering",
@@ -607,6 +619,57 @@ def _normalize_term(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
+def _compact_term(text: str) -> str:
+    """공백 차이만 있는 표현을 같은 lookup key로 보기 위한 compact form."""
+    return re.sub(r"\s+", "", _normalize_term(text))
+
+
+def _strip_query_meta_phrases(text: str) -> str:
+    """추천 요청 표현을 제거하고 남은 주제 후보를 반환한다."""
+    cleaned = _normalize_term(text)
+    for phrase in sorted(_QUERY_META_PHRASES, key=len, reverse=True):
+        cleaned = re.sub(rf"(?<![0-9A-Za-z가-힣]){re.escape(phrase)}(?![0-9A-Za-z가-힣])", " ", cleaned)
+        cleaned = cleaned.replace(phrase, " ")
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _strip_trailing_particles(text: str) -> str:
+    """한국어 조사/보조사를 term 끝에서만 보수적으로 제거한다."""
+    cleaned = _normalize_term(text)
+    changed = True
+    while changed and len(cleaned) > 2:
+        changed = False
+        for particle in sorted(_TRAILING_PARTICLES, key=len, reverse=True):
+            if cleaned.endswith(particle) and len(cleaned) - len(particle) >= 2:
+                cleaned = cleaned[:-len(particle)].strip()
+                changed = True
+                break
+    return cleaned
+
+
+def _query_term_base(text: str) -> str:
+    """자연어 질의 term을 metadata lookup에 쓰기 좋은 기본형으로 정리한다."""
+    cleaned = _strip_query_meta_phrases(text)
+    cleaned = _strip_trailing_particles(cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _term_lookup_keys(text: str) -> set[str]:
+    """동일 개념 lookup에 사용할 보수적 key 집합."""
+    keys: set[str] = set()
+    normalized = _normalize_term(text)
+    base = _query_term_base(normalized)
+    for value in (normalized, base):
+        value = _normalize_term(value)
+        if not value:
+            continue
+        keys.add(value)
+        compact = _compact_term(value)
+        if compact:
+            keys.add(compact)
+    return {key for key in keys if len(key) > 1}
+
+
 def _tokenize_text(text: str) -> list[str]:
     """한글/영문/숫자 혼합 텍스트를 가볍게 토큰화."""
     normalized = _normalize_term(text)
@@ -644,6 +707,17 @@ def _expanded_topic_terms(terms: Iterable[str]) -> list[str]:
     return expanded
 
 
+def _expanded_lookup_terms(terms: Iterable[str]) -> set[str]:
+    expanded: set[str] = set()
+    for term in _expanded_topic_terms(terms):
+        normalized = _normalize_term(term)
+        if not normalized:
+            continue
+        expanded.add(normalized)
+        expanded.update(_term_lookup_keys(normalized))
+    return expanded
+
+
 def _append_topic_expansions(
     query_keywords: list[str],
     inferred_keywords: list[str],
@@ -673,7 +747,20 @@ def _community_report_terms(text: str) -> Counter:
         return terms
     for token in _tokenize_text(normalized):
         terms[token] += 1.0
+        for key in _term_lookup_keys(token):
+            if key != token:
+                terms[key] += 0.75
     return terms
+
+
+def _add_lexical_variants(counter: Counter, text: str, weight: float) -> None:
+    phrase = _normalize_term(text)
+    if not phrase:
+        return
+    counter[phrase] += weight
+    for key in _term_lookup_keys(phrase):
+        if key != phrase:
+            counter[key] += weight * 0.8
 
 
 def _keyword_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
@@ -706,10 +793,13 @@ def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
         }
 
         for term, weight in _keyword_terms(lec):
-            field_tf["keyword"][term] += weight
+            _add_lexical_variants(field_tf["keyword"], term, weight)
             # 복합 키워드는 phrase term과 구성 토큰을 함께 보존한다.
             for token in _tokenize_text(term):
                 field_tf["keyword"][token] += weight * 0.5
+                for key in _term_lookup_keys(token):
+                    if key != token:
+                        field_tf["keyword"][key] += weight * 0.4
 
         term_tf = Counter()
         for field_counter in field_tf.values():
@@ -905,16 +995,16 @@ def _direct_match_score(
 
     keyword 매칭: 완전 일치 또는 토큰이 keyword의 prefix인 경우만 허용
     """
-    q_tokens = set(_expanded_topic_terms(query_keywords))
-    i_tokens = set(_expanded_topic_terms(inferred_keywords))
+    q_tokens = _expanded_lookup_terms(query_keywords)
+    i_tokens = _expanded_lookup_terms(inferred_keywords)
     all_tokens = q_tokens | i_tokens
     if not all_tokens:
         return {"title": 0.0, "keyword": 0.0, "summary": 0.0}
 
     # ── title 매칭 ─────────────────────────────────────────────────
-    title_words = set(lec.title.split())
+    title_words = set(_tokenize_text(lec.title))
     def title_hit(tokens: set) -> float:
-        hits = sum(1 for t in tokens if any(t in w or w in t for w in title_words))
+        hits = sum(1 for t in tokens if any(_concept_match(w, t) for w in title_words))
         return hits / len(tokens) if tokens else 0.0
 
     title_match = (
@@ -929,7 +1019,7 @@ def _direct_match_score(
         return sum(
             k["score"] for k in lec.keywords
             if any(
-                t == k["keyword"] or k["keyword"].startswith(t) or t.startswith(k["keyword"])
+                _concept_match(str(k.get("keyword", "")), t)
                 for t in tokens
                 if len(t) > 1
             )
@@ -941,7 +1031,8 @@ def _direct_match_score(
 
     # ── summary 매칭 ───────────────────────────────────────────────
     def summary_hit(tokens: set) -> float:
-        hits = sum(1 for t in tokens if t in lec.summary)
+        summary_terms = _tokenize_text(lec.summary)
+        hits = sum(1 for t in tokens if any(_concept_match(term, t) for term in summary_terms))
         return hits / len(tokens) if tokens else 0.0
 
     sum_match = (
@@ -976,8 +1067,8 @@ def _direct_match_score_tfirf(
         inferred_weight=inferred_weight,
     )
 
-    q_tokens = {_normalize_term(t) for t in _expanded_topic_terms(query_keywords) if _normalize_term(t)}
-    i_tokens = {_normalize_term(t) for t in _expanded_topic_terms(inferred_keywords) if _normalize_term(t)}
+    q_tokens = _expanded_lookup_terms(query_keywords)
+    i_tokens = _expanded_lookup_terms(inferred_keywords)
     if not (q_tokens or i_tokens):
         base["keyword_legacy"] = base["keyword"]
         return base
@@ -1001,7 +1092,7 @@ def _direct_match_score_tfirf(
             weight
             for keyword, weight in keyword_weights
             if any(
-                token == keyword or keyword.startswith(token) or token.startswith(keyword)
+                _concept_match(keyword, token)
                 for token in tokens
                 if len(token) > 1
             )
@@ -1020,7 +1111,17 @@ def _direct_match_score_tfirf(
 
 
 def _concept_match(concept: str, focus: str) -> bool:
-    return focus in concept or concept in focus
+    concept_norm = _normalize_term(concept)
+    focus_norm = _normalize_term(focus)
+    if not concept_norm or not focus_norm:
+        return False
+    if concept_norm == focus_norm:
+        return True
+    if _compact_term(concept_norm) == _compact_term(focus_norm):
+        return True
+    if _term_lookup_keys(concept_norm) & _term_lookup_keys(focus_norm):
+        return True
+    return focus_norm in concept_norm or concept_norm in focus_norm
 
 
 def _append_terms(target: list[str], values) -> None:
@@ -1041,6 +1142,107 @@ def _append_terms(target: list[str], values) -> None:
         return
     if isinstance(values, (int, float)):
         target.append(str(values))
+
+
+@dataclass
+class QueryConceptIndex:
+    """metadata에서 자동 수집한 concept lookup index."""
+    alias_to_canonical: dict[str, str]
+    canonical_weight: dict[str, float]
+
+    def canonicalize(self, term: str) -> tuple[str, bool]:
+        base = _query_term_base(term)
+        if not base:
+            return "", False
+        best = ""
+        best_weight = -1.0
+        for key in _term_lookup_keys(base):
+            canonical = self.alias_to_canonical.get(key)
+            if not canonical:
+                continue
+            weight = self.canonical_weight.get(canonical, 0.0)
+            if weight > best_weight:
+                best = canonical
+                best_weight = weight
+        return (best, True) if best else (base, False)
+
+
+def _metadata_concept_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
+    """추천 질의와 매칭할 metadata concept 후보를 자동 수집한다."""
+    terms: list[tuple[str, float]] = []
+    for item in lec.keywords or []:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("keyword") or "").strip()
+        if not term:
+            continue
+        try:
+            score = float(item.get("score", 1.0))
+        except (TypeError, ValueError):
+            score = 1.0
+        terms.append((term, 3.0 + max(score, 0.0)))
+
+    concept_roles = lec.concept_roles
+    if isinstance(concept_roles, dict):
+        for term in concept_roles.get("core", []) or []:
+            terms.append((str(term), 3.0))
+        for term in concept_roles.get("introduced", []) or []:
+            terms.append((str(term), 1.5))
+    elif isinstance(concept_roles, list):
+        for item in concept_roles or []:
+            if not isinstance(item, dict):
+                continue
+            weight = 3.0 if item.get("role") == "core" else 1.5
+            terms.append((str(item.get("concept") or ""), weight))
+
+    for relation in lec.concept_relations or []:
+        if not isinstance(relation, dict):
+            continue
+        for key in ("from", "to", "source", "target"):
+            value = str(relation.get(key) or "").strip()
+            if value:
+                terms.append((value, 1.25))
+
+    for community in lec.communities or []:
+        if not isinstance(community, dict):
+            continue
+        for key in ("title", "nodes"):
+            values: list[str] = []
+            _append_terms(values, community.get(key))
+            for value in values:
+                terms.append((value, 0.75))
+
+    for term in lec.visual_concept_terms or []:
+        terms.append((str(term), 0.75))
+
+    return [(term, weight) for term, weight in terms if _normalize_term(term)]
+
+
+def _build_query_concept_index(lectures: list[LectureMetadata]) -> QueryConceptIndex:
+    """강의 metadata 전체에서 사람이 관리하지 않는 자동 concept index를 만든다."""
+    alias_to_canonical: dict[str, str] = {}
+    alias_weight: dict[str, float] = {}
+    canonical_weight: defaultdict[str, float] = defaultdict(float)
+
+    for lec in lectures:
+        for term, weight in _metadata_concept_terms(lec):
+            canonical = _normalize_term(term)
+            if not canonical:
+                continue
+            canonical_weight[canonical] += weight
+            for key in _term_lookup_keys(canonical):
+                prev_weight = alias_weight.get(key, -1.0)
+                prev = alias_to_canonical.get(key)
+                if weight > prev_weight or (
+                    weight == prev_weight and prev and len(canonical) < len(prev)
+                ):
+                    alias_to_canonical[key] = canonical
+                    alias_weight[key] = weight
+
+    return QueryConceptIndex(
+        alias_to_canonical=alias_to_canonical,
+        canonical_weight=dict(canonical_weight),
+    )
 
 
 def _role_weight_for_concept(
@@ -1356,19 +1558,29 @@ def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
     return [_normalize_term(term) for term in terms if _normalize_term(term)]
 
 
-def _has_required_subject_match(lec: LectureMetadata, required_terms: set[str]) -> bool:
-    """
-    길이/도메인/전달 조건이 내용 적합성을 대체하지 못하도록,
-    원본 질의의 명시 주제가 강의 메타데이터에 직접 걸리는지 확인한다.
-    """
+def _required_subject_match_type(lec: LectureMetadata, required_terms: set[str]) -> str:
     if not required_terms:
-        return True
+        return "not_required"
     lecture_terms = _lecture_subject_terms(lec)
-    return any(
+    if not lecture_terms:
+        return "none"
+
+    lecture_keys = set()
+    for term in lecture_terms:
+        lecture_keys.update(_term_lookup_keys(term))
+    required_keys = set()
+    for term in required_terms:
+        required_keys.update(_term_lookup_keys(term))
+
+    if lecture_keys & required_keys:
+        return "canonical"
+    if any(
         _concept_match(lecture_term, required_term)
         for lecture_term in lecture_terms
         for required_term in required_terms
-    )
+    ):
+        return "partial"
+    return "none"
 
 
 def _parse_uploaded_at(uploaded_at: Optional[str]) -> Optional[datetime]:
@@ -1511,6 +1723,65 @@ def _copy_analysis_result(result: tuple) -> tuple:
     )
 
 
+def _fallback_query_analysis(
+    query: str,
+    available_domains: list[str],
+    available_keywords: list[str],
+) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]:
+    """LLM 질의 분석 실패 시 metadata keyword pool만으로 안전하게 질의를 해석한다."""
+    domain, subdomain = _infer_domain_filters(query, available_domains, [])
+    query_base = _query_term_base(query)
+    query_keys = _term_lookup_keys(query_base or query)
+    query_compact = _compact_term(query_base or query)
+
+    matched: list[str] = []
+    seen: set[str] = set()
+    for keyword in sorted(available_keywords, key=lambda value: (-len(str(value)), str(value))):
+        normalized = _normalize_term(keyword)
+        if not normalized or normalized in seen:
+            continue
+        keyword_keys = _term_lookup_keys(normalized)
+        keyword_compact = _compact_term(normalized)
+        if (
+            keyword_keys & query_keys
+            or (keyword_compact and keyword_compact in query_compact)
+            or (query_compact and query_compact in keyword_compact)
+        ):
+            seen.add(normalized)
+            matched.append(normalized)
+        if len(matched) >= 4:
+            break
+
+    if not matched and query_base:
+        matched = [query_base]
+
+    inferred = _append_topic_expansions(matched, [])
+    inferred = [term for term in inferred if _normalize_term(term) not in {_normalize_term(m) for m in matched}]
+    search_text = " ".join(matched + inferred) or query
+    focus_concept = matched[0] if len(matched) == 1 and matched[0] in available_keywords else None
+    conditions = {
+        "issue_free": False,
+        "prefers_visual": any(term in query for term in _VISUAL_CONDITION_TERMS),
+        "prefers_application": any(term in query for term in _APPLICATION_CONDITION_TERMS),
+        "prefers_slow_speech": any(term in query for term in _DELIVERY_CONDITION_TERMS),
+        "prefers_listenability": any(term in query for term in _DELIVERY_CONDITION_TERMS),
+        "prefers_recency": any(term in query for term in _RECENCY_CONDITION_TERMS),
+    }
+    if subdomain:
+        conditions["subdomain"] = subdomain
+
+    return (
+        "recommend",
+        search_text,
+        matched,
+        inferred[:6],
+        domain,
+        focus_concept,
+        None,
+        conditions,
+    )
+
+
 def analyze_query(
     query:              str,
     available_domains:  list[str],
@@ -1604,8 +1875,14 @@ def analyze_query(
 
 [키워드 목록]: {keyword_list}"""
 
-    text   = _call_query_analysis_llm(prompt).replace("```json", "").replace("```", "").strip()
-    parsed = json.loads(text)
+    try:
+        text   = _call_query_analysis_llm(prompt).replace("```json", "").replace("```", "").strip()
+        parsed = json.loads(text)
+    except Exception as exc:
+        print(f"  ⚠ 질의 LLM 분석 실패 — metadata 기반 fallback 사용: {exc}")
+        result = _fallback_query_analysis(query, available_domains, available_keywords)
+        _ANALYZE_QUERY_CACHE[cache_key] = _copy_analysis_result(result)
+        return result
 
     intent            = parsed.get("intent") or "recommend"
     query_keywords    = parsed.get("query_keywords", [])
@@ -1683,6 +1960,10 @@ class QueryContext:
     search_text:       str
     query_keywords:    list[str]
     inferred_keywords: list[str]
+    raw_query_keywords: list[str]
+    raw_inferred_keywords: list[str]
+    canonical_matches: dict[str, str]
+    unmatched_query_terms: list[str]
     domain:            Optional[str]
     subdomain:         Optional[str]
     focus_concept:     Optional[str]
@@ -1850,6 +2131,7 @@ class Recommender:
         ]
         metadata_lectures = self.collection.all()
         scoring_lectures = indexed_lectures if indexed_lectures else metadata_lectures
+        self._concept_index = _build_query_concept_index(metadata_lectures)
         self._lexical_stats = _build_lexical_stats(scoring_lectures)
         self._community_index = CommunityIndex(scoring_lectures)
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
@@ -1867,6 +2149,7 @@ class Recommender:
             f"[Lexical]   {len(self._lexical_stats.doc_freq)}개 term, "
             f"avg_len={self._lexical_stats.avg_doc_len:.1f}\n"
         )
+        print(f"[ConceptIndex] {len(self._concept_index.alias_to_canonical)}개 alias key\n")
         print(f"[Vector]    matrix rows={len(self._vector_search_index.video_ids)}\n")
 
     def _load_lancedb_rows(self) -> list[dict]:
@@ -1882,6 +2165,31 @@ class Recommender:
             print(f"  ⚠ LanceDB 로드 실패: {exc}")
             return []
 
+    def _canonicalize_query_terms(
+        self,
+        terms: list[str],
+        existing: Optional[set[str]] = None,
+    ) -> tuple[list[str], dict[str, str], list[str]]:
+        canonical_terms: list[str] = []
+        matches: dict[str, str] = {}
+        unmatched: list[str] = []
+        seen = set(existing or set())
+
+        for raw in terms or []:
+            normalized_raw = _normalize_term(raw)
+            canonical, matched = self._concept_index.canonicalize(normalized_raw)
+            if not canonical:
+                continue
+            if matched:
+                matches[normalized_raw] = canonical
+            else:
+                unmatched.append(canonical)
+            if canonical not in seen:
+                seen.add(canonical)
+                canonical_terms.append(canonical)
+
+        return canonical_terms, matches, unmatched
+
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
         fast_analysis = _fast_list_query_analysis(query, self._available_domains, self._available_subdomains)
@@ -1891,6 +2199,22 @@ class Recommender:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = analyze_query(
                 query, self._available_domains, self._available_keywords
             )
+        raw_query_keywords = list(query_keywords)
+        raw_inferred_keywords = list(inferred_keywords)
+        raw_focus_concept = focus_concept
+        query_keywords, query_matches, query_unmatched = self._canonicalize_query_terms(query_keywords)
+        inferred_keywords, inferred_matches, inferred_unmatched = self._canonicalize_query_terms(
+            inferred_keywords,
+            existing=set(query_keywords),
+        )
+        canonical_matches = {**query_matches, **inferred_matches}
+        unmatched_query_terms = query_unmatched + [
+            term for term in inferred_unmatched if term not in query_unmatched
+        ]
+        if focus_concept:
+            focus_concept, focus_matched = self._concept_index.canonicalize(focus_concept)
+            if focus_matched:
+                canonical_matches[_normalize_term(raw_focus_concept)] = focus_concept
         subdomain = _normalize_subdomain(conditions.get("subdomain"))
         if not subdomain:
             inferred_domain, inferred_subdomain = _infer_domain_filters(
@@ -1907,6 +2231,14 @@ class Recommender:
             inferred_keywords,
             seed_terms=[query],
         )
+        inferred_keywords, expansion_matches, expansion_unmatched = self._canonicalize_query_terms(
+            inferred_keywords,
+            existing=set(query_keywords),
+        )
+        canonical_matches.update(expansion_matches)
+        for term in expansion_unmatched:
+            if term not in unmatched_query_terms:
+                unmatched_query_terms.append(term)
         search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
         issue_free_preference = bool(conditions.get("issue_free"))
@@ -1917,8 +2249,14 @@ class Recommender:
         recency_preference = bool(conditions.get("prefers_recency"))
 
         print(f"[질의 의도]   {intent}")
+        print(f"[LLM 원본]    {raw_query_keywords}")
         print(f"[원본 키워드] {query_keywords}")
+        print(f"[LLM 확장]    {raw_inferred_keywords}")
         print(f"[확장 키워드] {inferred_keywords}")
+        if canonical_matches:
+            print(f"[정규화 매칭] {canonical_matches}")
+        if unmatched_query_terms:
+            print(f"[미매칭 용어] {unmatched_query_terms}")
         print(f"[추론 도메인] {domain or '미확정'}")
         print(f"[추론 세부]   {subdomain or '미확정'}")
         print(f"[깊이 개념]   {focus_concept or '없음'}")
@@ -1939,6 +2277,10 @@ class Recommender:
             search_text       = search_text,
             query_keywords    = query_keywords,
             inferred_keywords = inferred_keywords,
+            raw_query_keywords = raw_query_keywords,
+            raw_inferred_keywords = raw_inferred_keywords,
+            canonical_matches = canonical_matches,
+            unmatched_query_terms = unmatched_query_terms,
             domain            = domain,
             subdomain         = subdomain,
             focus_concept     = focus_concept,
@@ -2078,10 +2420,13 @@ class Recommender:
             phrase = _normalize_term(text)
             if not phrase:
                 return
-            terms[phrase] += weight
+            _add_lexical_variants(terms, phrase, weight)
             for token in _tokenize_text(phrase):
                 if token != phrase:
                     terms[token] += weight * 0.5
+                    for key in _term_lookup_keys(token):
+                        if key != token:
+                            terms[key] += weight * 0.4
 
         for keyword in ctx.query_keywords:
             add_term(keyword, 1.0)
@@ -2469,6 +2814,13 @@ class Recommender:
 
         return {
             "score":                round(total, 4),
+            "raw_query_keywords":   ctx.raw_query_keywords,
+            "raw_inferred_keywords": ctx.raw_inferred_keywords,
+            "canonical_query_keywords": ctx.query_keywords,
+            "canonical_inferred_keywords": ctx.inferred_keywords,
+            "canonical_matches":    ctx.canonical_matches,
+            "unmatched_query_terms": ctx.unmatched_query_terms,
+            "graph_query_concepts": sorted(query_concepts),
             "content_score":        round(content_score, 4),
             "content_pct":          round(content_score * 100, 1),
             "vec_score":            round(vec_score, 4),
@@ -2541,8 +2893,7 @@ class Recommender:
             lec = self.collection.get(video_id)
             if lec is None:
                 continue
-            if not _has_required_subject_match(lec, required_subject_terms):
-                continue
+            subject_match_type = _required_subject_match_type(lec, required_subject_terms)
             detail = self._score_candidate(
                 row,
                 lec,
@@ -2552,6 +2903,16 @@ class Recommender:
                 query_terms,
                 weights,
             )
+            detail["required_subject_terms"] = sorted(required_subject_terms)
+            detail["required_subject_match"] = subject_match_type
+            if subject_match_type == "none":
+                detail["score"] = round(detail["score"] * self.cfg.Q_KW_MISMATCH_PENALTY, 4)
+                detail["subject_mismatch_penalty"] = self.cfg.Q_KW_MISMATCH_PENALTY
+            elif subject_match_type == "partial":
+                detail["score"] = round(detail["score"] * 0.85, 4)
+                detail["subject_mismatch_penalty"] = 0.85
+            else:
+                detail["subject_mismatch_penalty"] = 1.0
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
