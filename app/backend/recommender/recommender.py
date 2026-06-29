@@ -29,11 +29,11 @@ import argparse
 import math
 import threading
 from collections import Counter, defaultdict
-from typing import Any, Optional
+from typing import Optional
 
 import lancedb
 
-from recommender.config import DEFAULT_DB_DIR, DEFAULT_METADATA_DIR, RecommenderConfig
+from recommender.config import DEFAULT_METADATA_DIR, RecommenderConfig
 from recommender.display import _build_reason, _display_score
 from recommender.index import (
     CommunityIndex,
@@ -82,9 +82,7 @@ from recommender.utils import (
 # ============================================================================
 
 class Recommender:
-    def __init__(self, _metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
-        # metadata_dir is kept for backward compatibility; runtime serving now
-        # loads its lecture universe from the declared DB source.
+    def __init__(self, config: Optional[RecommenderConfig] = None):
         self.collection          = MetadataCollection()
         self.cfg                 = config or RecommenderConfig()
         self._recommend_lock     = threading.RLock()

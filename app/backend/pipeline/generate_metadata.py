@@ -24,7 +24,6 @@ import argparse
 import random
 import time
 from pathlib import Path
-from collections import Counter
 
 from neo4j import GraphDatabase
 from google import genai
@@ -164,7 +163,6 @@ CORE_FREQ_THRESHOLD  = 0.25
 MAX_COMMUNITIES_IN_METADATA = int(os.getenv("GRAPHLEC_METADATA_MAX_COMMUNITIES", "12"))
 MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY_CHARS", "800"))
 MAX_VISUAL_CONCEPT_TERMS = int(os.getenv("GRAPHLEC_METADATA_MAX_VISUAL_TERMS", "80"))
-_VISUAL_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 _KOREAN_SYLLABLE_RE = re.compile(r"[가-힣]")
 METADATA_DOMAIN_ALIASES = {
     "eng": "engineering",
@@ -729,35 +727,6 @@ def as_float(value, default=0.0):
         return default
 
 
-def collect_slide_role_freq(
-    fused: dict,
-    all_names: set[str],
-) -> dict[str, dict[str, int]]:
-    """
-    개념명 → 슬라이드 role별 텍스트 등장 횟수
-    반환: {개념명: {"core": n, "elaborated": n, "supplementary": n, "other": n}}
-
-    concept_roles 분류 시 슬라이드 내 역할 분포 판단에 사용
-    """
-    TRACKED_ROLES = ("core", "elaborated", "supplementary")
-    result = {n: {"core": 0, "elaborated": 0, "supplementary": 0, "other": 0}
-              for n in all_names}
-
-    for slide in fused_scene_entries(fused):
-        role = slide.get("role", "other")
-        role_key = role if role in TRACKED_ROLES else "other"
-
-        text = " ".join(filter(None, [
-            slide.get("title", ""),
-            slide.get("slide_text", ""),
-        ]))
-
-        for name in all_names:
-            if name in text:
-                result[name][role_key] += text.count(name)
-
-    return result
-
 
 # ── Neo4j: Concept 노드 degree 조회 ──────────────────────────────────────────
 
@@ -1015,10 +984,8 @@ def _is_background_noise(
 def classify_concept_roles(
     all_names:       set[str],
     norm_slide_freq: dict[str, float],
-    norm_trans_freq: dict[str, float],
     norm_emph:       dict[str, float],
     norm_cent:       dict[str, float],
-    slide_role_freq: dict[str, dict[str, int]],
 ) -> dict[str, list[str]]:
     """
     각 개념을 core / introduced 중 하나로 분류
@@ -1036,7 +1003,6 @@ def classify_concept_roles(
 
     for name in all_names:
         s_freq = norm_slide_freq.get(name, 0.0)
-        t_freq = norm_trans_freq.get(name, 0.0)
         emph   = norm_emph.get(name, 0.0)
         cent   = norm_cent.get(name, 0.0)
 
@@ -1429,7 +1395,6 @@ def _fallback_summary_from_graph(concept_roles: dict[str, list[str]]) -> str:
 
 def generate_graph_first_summary_with_fallback(
     *,
-    stem: str,
     artifacts: dict,
     keyword_candidates: list[dict],
     concept_roles: dict[str, list[str]],
@@ -1505,7 +1470,7 @@ def try_generate_graph_first_metadata_parts(
 
     print(f"[{stem}] graph-first keywords/roles/relations 생성 중")
 
-    legacy_keywords, _legacy_scored, _legacy_slide_freq, _legacy_trans_freq, _legacy_emph, _legacy_cent = score_keywords(
+    legacy_keywords, *_ = score_keywords(
         concept_degrees,
         emphasized,
         slide_texts,
@@ -1545,7 +1510,6 @@ def try_generate_graph_first_metadata_parts(
     )
     print(f"[{stem}] graph-first summary 생성 중")
     summary, summary_source = generate_graph_first_summary_with_fallback(
-        stem=stem,
         artifacts=artifacts,
         keyword_candidates=keyword_candidates,
         concept_roles=concept_roles,
@@ -1700,14 +1664,11 @@ def generate_metadata(
             and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
         }
         print(f"       → 분류 대상 {len(role_candidates)}개 (전체 {len(scored)}개 중)")
-        slide_role_freq = collect_slide_role_freq(fused, role_candidates)
         concept_roles = classify_concept_roles(
             role_candidates,
             norm_slide_freq,
-            norm_trans_freq,
             norm_emph,
             norm_cent,
-            slide_role_freq,
         )
         print(
             f"       → core {len(concept_roles['core'])}개 | "
