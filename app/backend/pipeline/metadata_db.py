@@ -82,7 +82,10 @@ def upsert_lecture_metadata_sync(
         "communities": Json(metadata.get("communities") or []),
         "visual_concept_terms": _text_list(metadata.get("visual_concept_terms")),
         "pedagogy": Json(metadata.get("pedagogy") or {}),
-        "diagnostics": Json(metadata.get("diagnostics") or {}),
+        "diagnostics": Json({
+            **(metadata.get("diagnostics") or {}),
+            **({"keyword_aliases": metadata["keyword_aliases"]} if metadata.get("keyword_aliases") else {}),
+        }),
         "duration_sec": metadata.get("duration_sec"),
         "uploaded_at": metadata.get("uploaded_at"),
         "metadata_version": 1,

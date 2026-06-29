@@ -1259,6 +1259,19 @@ def _build_query_concept_index(lectures: list[LectureMetadata]) -> QueryConceptI
                     alias_to_canonical[key] = canonical
                     alias_weight[key] = weight
 
+        # graph-first 전사/OCR 변형 alias (diagnostics.keyword_aliases) 반영
+        if isinstance(lec.diagnostics, dict):
+            for alias, canonical_raw in (lec.diagnostics.get("keyword_aliases") or {}).items():
+                alias_norm = _normalize_term(alias)
+                canonical_norm = _normalize_term(canonical_raw)
+                if not alias_norm or not canonical_norm:
+                    continue
+                w = canonical_weight.get(canonical_norm, 0.5)
+                for key in _term_lookup_keys(alias_norm):
+                    if alias_weight.get(key, -1.0) < w:
+                        alias_to_canonical[key] = canonical_norm
+                        alias_weight[key] = w
+
     return QueryConceptIndex(
         alias_to_canonical=alias_to_canonical,
         canonical_weight=dict(canonical_weight),
@@ -2095,7 +2108,7 @@ def _content_display_share(content_ratio: float, meaning_ratio: float) -> int:
     return int(round((max(content_ratio, 0.0) / total) * CONTENT_MEANING_DISPLAY_SHARE))
 
 
-def _display_score(internal_score: float, tier: str, detail: Optional[dict] = None) -> int:
+def _display_score(internal_score: float, _tier: str, detail: Optional[dict] = None) -> int:
     """
     내부 랭킹 점수를 사용자 표시용 추천 적합도로 변환한다.
     추천 순위와 tier 판단에는 영향을 주지 않는다.
@@ -2127,7 +2140,7 @@ def _display_score(internal_score: float, tier: str, detail: Optional[dict] = No
 # ============================================================================
 
 class Recommender:
-    def __init__(self, metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
+    def __init__(self, _metadata_dir: str = DEFAULT_METADATA_DIR, config: Optional[RecommenderConfig] = None):
         # metadata_dir is kept for backward compatibility; runtime serving now
         # loads its lecture universe from the declared DB source.
         self.collection          = MetadataCollection()
@@ -2388,8 +2401,8 @@ class Recommender:
             top_n=self.cfg.VECTOR_RETRIEVE_TOP_N,
         )
         rankings = [
-            [video_id for video_id, _score in bm25_candidates],
-            [video_id for video_id, _score in vector_candidates],
+            [video_id for video_id, _ in bm25_candidates],
+            [video_id for video_id, _ in vector_candidates],
         ]
 
         pref_bm25_candidates = []
@@ -2406,8 +2419,8 @@ class Recommender:
                 top_n=self.cfg.VECTOR_RETRIEVE_TOP_N,
             )
             rankings.extend([
-                [video_id for video_id, _score in pref_bm25_candidates],
-                [video_id for video_id, _score in pref_vector_candidates],
+                [video_id for video_id, _ in pref_bm25_candidates],
+                [video_id for video_id, _ in pref_vector_candidates],
             ])
 
         candidate_ids = self._rrf_fuse(
@@ -3007,7 +3020,6 @@ class Recommender:
         results = []
         for lec, detail in candidates:
             score      = detail["score"]
-            dm_kw      = detail["dm_keyword"]
             graph_sc   = detail.get("graph_score", 0.0)
             community_sc = detail.get("community_score", 0.0)
             core_match = _query_concept_in_role(lec, query_concepts, "core")
