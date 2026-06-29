@@ -959,7 +959,10 @@ class CommunityIndex:
             summary_overlap = self._coverage(query_terms, report.summary_terms)
             base = 0.60 * title_overlap + 0.40 * summary_overlap
             rank_norm = min(max(report.rank / 10.0, 0.0), 1.0)
-            rank_weight = 0.85 + 0.15 * rank_norm
+            # level 0=최상위(광역) → 강의 대주제 표현력 높음, 낮을수록 importance 증가
+            level_signal = max(1.0 - report.level * 0.25, 0.25)
+            importance = 0.70 * rank_norm + 0.30 * level_signal
+            rank_weight = 0.85 + 0.15 * importance
             best = max(best, base * rank_weight)
 
         return round(min(best, 1.0), 4)
@@ -1352,26 +1355,28 @@ def _compute_graph_score(
     ]
     role_score = sum(role_hits) / len(query_concepts)
 
-    graph: dict[str, list[str]] = {}
+    graph: dict[str, list[tuple[str, float]]] = {}
     for rel in (lec.concept_relations or []):
         src = rel.get("from", rel.get("source", ""))
         dst = rel.get("to", rel.get("target", ""))
+        weight = float(rel.get("weight") or 1.0)
         if src and dst:
-            graph.setdefault(src, []).append(dst)
-            graph.setdefault(dst, []).append(src)
+            graph.setdefault(src, []).append((dst, weight))
+            graph.setdefault(dst, []).append((src, weight))
 
     relation_scores = []
-    for node, neighbors in graph.items():
+    for node, neighbor_weights in graph.items():
         if not any(_concept_match(node, qc) for qc in query_concepts):
             continue
-        if not neighbors:
+        if not neighbor_weights:
             continue
-        related_neighbors = sum(
-            1
-            for neighbor in neighbors
+        total_weight = sum(w for _, w in neighbor_weights) or 1.0
+        related_weight = sum(
+            w
+            for neighbor, w in neighbor_weights
             if any(_concept_match(neighbor, qc) for qc in query_concepts)
         )
-        relation_scores.append(related_neighbors / len(neighbors))
+        relation_scores.append(related_weight / total_weight)
 
     relation_score = (
         sum(relation_scores) / len(relation_scores)
@@ -1414,14 +1419,16 @@ def _compute_depth_score(focus_concept: str, target: LectureMetadata) -> float:
                 elif role == "introduced":
                     role_score = max(role_score, 0.1)
 
-    # ── 2. 로컬 그래프 구성 ──────────────────────────────────────
-    graph: dict[str, list[str]] = {}
+    # ── 2. 로컬 그래프 구성 (weighted) ──────────────────────────
+    graph: dict[str, list[tuple[str, float]]] = {}
     for rel in (target.concept_relations or []):
         src = rel.get("from", rel.get("source", ""))
         dst = rel.get("to",   rel.get("target", ""))
+        w_raw = float(rel.get("weight") or 1.0)
+        weight = w_raw / (1.0 + w_raw)  # co-occurrence count → (0, 1) 정규화
         if src and dst:
-            graph.setdefault(src, []).append(dst)
-            graph.setdefault(dst, []).append(src)  # 양방향
+            graph.setdefault(src, []).append((dst, weight))
+            graph.setdefault(dst, []).append((src, weight))  # 양방향
 
     # focus_concept과 매칭되는 그래프 내 노드 탐색 (부분 일치 허용)
     focus_node = next(
@@ -1429,26 +1436,29 @@ def _compute_depth_score(focus_concept: str, target: LectureMetadata) -> float:
         None
     )
 
-    # ── 3. BFS 홉 거리 점수 ──────────────────────────────────────
+    # ── 3. BFS 홉 거리 점수 (weighted) ──────────────────────────
     if focus_node:
         # BFS: 최대 3홉 이내 노드와 거리 계산
         dist_map: dict[str, int] = {focus_node: 0}
+        weight_map: dict[str, float] = {focus_node: 1.0}
         frontier = [focus_node]
         for _ in range(3):
             next_frontier = []
             for node in frontier:
-                for neighbor in graph.get(node, []):
+                for neighbor, w in graph.get(node, []):
                     if neighbor and neighbor not in dist_map:
                         dist_map[neighbor] = dist_map[node] + 1
+                        # 경로상 최소 weight (가장 약한 엣지가 병목)
+                        weight_map[neighbor] = min(weight_map[node], w)
                         next_frontier.append(neighbor)
             frontier = next_frontier
             if not frontier:
                 break
 
-        # 거리 d 노드 기여: 1/(d+1)  [1홉=0.5, 2홉=0.33, 3홉=0.25]
-        # 정규화 기준: 5개 인접 노드가 모두 1홉 → hop_score=1.0
+        # 거리 d, 경로 weight w인 노드 기여: w / (d+1)
+        # 정규화 기준: 5개 1홉 노드가 모두 weight=1 → hop_score=1.0
         hop_score = sum(
-            1.0 / (d + 1)
+            weight_map.get(n, 1.0) / (d + 1)
             for n, d in dist_map.items()
             if n != focus_node and d > 0
         )
@@ -1642,11 +1652,13 @@ def _compute_contrast_signal(lec: LectureMetadata) -> float:
     relations = lec.concept_relations or []
     if not relations:
         return 0.0
-    contrast_count = sum(
-        1 for rel in relations
+    total_weight = sum(float(rel.get("weight") or 1.0) for rel in relations) or 1.0
+    contrast_weight = sum(
+        float(rel.get("weight") or 1.0)
+        for rel in relations
         if rel.get("type", "").lower() in _CONTRAST_TYPES
     )
-    return round(min(contrast_count / len(relations), 1.0), 4)
+    return round(min(contrast_weight / total_weight, 1.0), 4)
 
 
 def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
