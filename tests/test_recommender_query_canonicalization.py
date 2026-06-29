@@ -1,9 +1,14 @@
+import sys
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 
-import app.backend.recommender.recommender as recmod
-from app.backend.recommender.recommender import (
+_BACKEND = Path(__file__).resolve().parents[1] / "app" / "backend"
+sys.path.insert(0, str(_BACKEND))
+
+import recommender.recommender as recmod
+from recommender.recommender import (
     CommunityIndex,
     LectureMetadata,
     QueryContext,
@@ -13,12 +18,12 @@ from app.backend.recommender.recommender import (
     _build_lexical_stats,
     _compute_graph_score,
     _direct_match_score,
-    _fallback_query_analysis,
     _build_reason,
-    _query_term_base,
     _required_subject_match_type,
     _soft_threshold_similarity,
 )
+from recommender.query import _fallback_query_analysis
+from recommender.utils import _query_term_base
 
 
 def _lecture(**overrides):

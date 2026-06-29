@@ -376,7 +376,7 @@ def _compute_depth_score(focus_concept: str, target: LectureMetadata) -> float:
         src = rel.get("from", rel.get("source", ""))
         dst = rel.get("to",   rel.get("target", ""))
         w_raw = float(rel.get("weight") or 1.0)
-        weight = w_raw / (1.0 + w_raw)  # co-occurrence count → (0, 1) 정규화
+        weight = min(max(w_raw, 0.0), 1.0)
         if src and dst:
             graph.setdefault(src, []).append((dst, weight))
             graph.setdefault(dst, []).append((src, weight))
