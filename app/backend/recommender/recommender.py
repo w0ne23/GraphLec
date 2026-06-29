@@ -299,8 +299,9 @@ class RecommenderConfig:
     W_SUMMARY:           float = 0.25
     # 벡터 유사도 vs 직접 매칭 블렌딩 비율 (벡터:직접 = VEC_BLEND : 1-VEC_BLEND)
     VEC_BLEND:           float = 0.70
-    # keyword vec 유사도 threshold — 미만이면 기여 0으로 처리
+    # keyword vec 유사도 threshold — floor~threshold 구간은 soft decay
     KW_VEC_THRESHOLD:    float = 0.60
+    KW_VEC_SOFT_FLOOR:   float = 0.45
     # 메인 점수 컴포넌트 가중치
     W_CONTENT:           float = 0.60
     W_GRAPH:             float = 0.20
@@ -332,6 +333,7 @@ class RecommenderConfig:
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60  # 도메인 상위 카테고리 불일치
     Q_KW_MISMATCH_PENALTY:   float = 0.60  # 원본 query_keyword 완전 미매칭
+    SUBJECT_PARTIAL_MATCH_PENALTY: float = 0.85
     # 비교 의도 × 강의 대조 관계 보너스
     W_CONTRAST_BOOST:        float = 0.10
     # 벡터 DB 경로
@@ -612,6 +614,21 @@ def _normalize_vector(vector: list[float]) -> np.ndarray:
     if norm == 0:
         return arr
     return arr / norm
+
+
+def _soft_threshold_similarity(value, threshold: float, floor: float):
+    """
+    floor 미만은 0, threshold 이상은 원래 값을 유지하고,
+    사이 구간은 점진적 감쇠한다 (value * ratio 형태로 비선형).
+    numpy array와 scalar 모두 지원한다.
+    """
+    safe_threshold = max(float(threshold), 0.0)
+    safe_floor = min(max(float(floor), 0.0), safe_threshold)
+    if safe_threshold <= safe_floor:
+        return np.where(value >= safe_threshold, value, 0.0)
+    ratio = (value - safe_floor) / (safe_threshold - safe_floor)
+    ratio = np.clip(ratio, 0.0, 1.0)
+    return value * ratio
 
 
 def _normalize_term(text: str) -> str:
@@ -2008,8 +2025,6 @@ def _build_reason(detail: dict, tier: str = "direct") -> str:
         parts.append(f"키워드 유사도 {detail['sim_keyword']:.0%}")
     if detail.get("dm_keyword", 0) > 0.1:
         parts.append(f"키워드 직접 매칭 {detail['dm_keyword']:.0%}")
-    if detail.get("frag_penalty", 0) > 0.3:
-        parts.append(f"파편화 -{detail['frag_penalty']:.0%}")
     return " · ".join(parts) if parts else "관련 강의"
 
 
@@ -2613,10 +2628,10 @@ class Recommender:
         sim_title = index.title_matrix @ q
         sim_keyword = index.keyword_matrix @ q
         sim_summary = index.summary_matrix @ q
-        sim_keyword_filtered = np.where(
-            sim_keyword >= self.cfg.KW_VEC_THRESHOLD,
+        sim_keyword_filtered = _soft_threshold_similarity(
             sim_keyword,
-            0.0,
+            self.cfg.KW_VEC_THRESHOLD,
+            self.cfg.KW_VEC_SOFT_FLOOR,
         )
         vec_scores = (
             self.cfg.W_TITLE   * sim_title +
@@ -2668,9 +2683,13 @@ class Recommender:
             sim_keyword = _cosine_sim(query_vec, row["keyword_vec"])
             sim_summary = _cosine_sim(query_vec, row["summary_vec"])
 
-            # keyword vec threshold 필터
-            sim_keyword_filtered = (
-                sim_keyword if sim_keyword >= self.cfg.KW_VEC_THRESHOLD else 0.0
+            # keyword vec soft threshold
+            sim_keyword_filtered = float(
+                _soft_threshold_similarity(
+                    sim_keyword,
+                    self.cfg.KW_VEC_THRESHOLD,
+                    self.cfg.KW_VEC_SOFT_FLOOR,
+                )
             )
             vec_score = (
                 self.cfg.W_TITLE   * sim_title            +
@@ -2909,8 +2928,8 @@ class Recommender:
                 detail["score"] = round(detail["score"] * self.cfg.Q_KW_MISMATCH_PENALTY, 4)
                 detail["subject_mismatch_penalty"] = self.cfg.Q_KW_MISMATCH_PENALTY
             elif subject_match_type == "partial":
-                detail["score"] = round(detail["score"] * 0.85, 4)
-                detail["subject_mismatch_penalty"] = 0.85
+                detail["score"] = round(detail["score"] * self.cfg.SUBJECT_PARTIAL_MATCH_PENALTY, 4)
+                detail["subject_mismatch_penalty"] = self.cfg.SUBJECT_PARTIAL_MATCH_PENALTY
             else:
                 detail["subject_mismatch_penalty"] = 1.0
             candidates.append((lec, detail))

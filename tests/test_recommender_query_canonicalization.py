@@ -14,8 +14,10 @@ from app.backend.recommender.recommender import (
     _compute_graph_score,
     _direct_match_score,
     _fallback_query_analysis,
+    _build_reason,
     _query_term_base,
     _required_subject_match_type,
+    _soft_threshold_similarity,
 )
 
 
@@ -130,6 +132,23 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
         self.assertEqual(result[0], "recommend")
         self.assertEqual(result[2], ["운영체제"])
         self.assertIn("운영체제", result[1])
+
+    def test_keyword_vector_soft_decay_avoids_threshold_cliff(self):
+        self.assertEqual(_soft_threshold_similarity(0.44, 0.60, 0.45), 0.0)
+        self.assertGreater(_soft_threshold_similarity(0.55, 0.60, 0.45), 0.0)
+        self.assertEqual(_soft_threshold_similarity(0.60, 0.60, 0.45), 0.60)
+
+    def test_user_reason_hides_internal_fragmentation_penalty(self):
+        reason = _build_reason(
+            {
+                "sim_keyword": 0.7,
+                "dm_keyword": 0.2,
+                "frag_penalty": 0.75,
+            }
+        )
+
+        self.assertIn("키워드", reason)
+        self.assertNotIn("파편화", reason)
 
     def test_ranking_keeps_subject_mismatch_soft_and_orders_canonical_match_first(self):
         os_lecture = _lecture(video_id="os")
