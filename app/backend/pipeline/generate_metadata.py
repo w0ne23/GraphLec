@@ -2341,15 +2341,14 @@ def _merge_graph_keywords_with_legacy(
     merged: list[dict] = []
     seen: set[str] = set()
 
-    def add_keyword(keyword: str, score: float) -> None:
+    def add_keyword(keyword: str, score: float, **breakdown: float) -> None:
         key = _norm_text(keyword)
         if not keyword or not key or key in seen:
             return
         seen.add(key)
-        merged.append({
-            "keyword": keyword,
-            "score": round(score, 4),
-        })
+        entry: dict = {"keyword": keyword, "score": round(score, 4)}
+        entry.update({k: round(v, 4) for k, v in breakdown.items() if v > 0.0})
+        merged.append(entry)
 
     for candidate in graph_candidates:
         if len(merged) >= target_count:
@@ -2357,6 +2356,8 @@ def _merge_graph_keywords_with_legacy(
         add_keyword(
             str(candidate.get("keyword") or "").strip(),
             _to_float(candidate.get("score")),
+            community_representativeness=_to_float(candidate.get("community_representativeness")),
+            text_grounding=_to_float(candidate.get("text_grounding")),
         )
 
     for keyword in legacy_keywords:
@@ -2715,6 +2716,7 @@ def try_generate_graph_first_metadata_parts(
         "metadata_parts": {
             "summary": summary,
             "keywords": keywords,
+            "keyword_aliases": alias_map,
             "scored": scored,
             "norm_slide_freq": norm_slide_freq,
             "norm_trans_freq": norm_trans_freq,
@@ -2802,6 +2804,7 @@ def generate_metadata(
     if graph_first_parts:
         summary = graph_first_parts["summary"]
         keywords = graph_first_parts["keywords"]
+        keyword_aliases = graph_first_parts.get("keyword_aliases") or {}
         scored = graph_first_parts["scored"]
         norm_slide_freq = graph_first_parts["norm_slide_freq"]
         norm_trans_freq = graph_first_parts["norm_trans_freq"]
@@ -2812,6 +2815,7 @@ def generate_metadata(
         concept_relations = graph_first_parts.get("concept_relations", [])
         visual_concept_terms = graph_first_parts["visual_concept_terms"]
     else:
+        keyword_aliases = {}
         if graph_first_enabled and not concept_degrees:
             print(f"[{stem}] graph-first fallback: Neo4j Concept 노드 조회 중...")
             concept_degrees = fetch_concept_degrees(stem)
@@ -2887,6 +2891,7 @@ def generate_metadata(
         "summary":             summary,
         "learning_objectives": learning_objectives,
         "keywords":            keywords,
+        "keyword_aliases":     keyword_aliases,
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
         "communities":         communities,
