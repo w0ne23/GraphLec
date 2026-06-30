@@ -221,6 +221,19 @@ def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
                     if key != token:
                         field_tf["keyword"][key] += weight * 0.4
 
+        _COMMUNITY_NODE_WEIGHT = 0.4
+        for community in (lec.communities or []):
+            for node in (community.get("nodes") or []):
+                node_term = _normalize_term(node)
+                if not node_term:
+                    continue
+                _add_lexical_variants(field_tf["keyword"], node_term, _COMMUNITY_NODE_WEIGHT)
+                for token in _tokenize_text(node_term):
+                    field_tf["keyword"][token] += _COMMUNITY_NODE_WEIGHT * 0.5
+                    for key in _term_lookup_keys(token):
+                        if key != token:
+                            field_tf["keyword"][key] += _COMMUNITY_NODE_WEIGHT * 0.4
+
         term_tf = Counter()
         for field_counter in field_tf.values():
             term_tf.update(field_counter)
