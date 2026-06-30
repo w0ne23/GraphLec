@@ -163,6 +163,7 @@ services:
     volumes:
       - ./input:/pipeline/input
       - ./local_storage:/pipeline/local_storage
+      - ./evaluations:/evaluations
       - lance_data:/lance
       - ./app/backend:/app
     extra_hosts:

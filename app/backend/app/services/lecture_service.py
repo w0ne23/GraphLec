@@ -1359,6 +1359,7 @@ async def ask_question(
                 "graph": qr.get("graph", {"nodes": [], "edges": []}),
                 "core_graph": qr.get("core_graph", {"nodes": [], "edges": []}),
                 "retrieved_chunks": qr.get("retrieved_chunks", []),
+                "prompt_contexts": qr.get("prompt_contexts", []),
                 "related_slides": qr.get("related_slides", []),
                 "source_mode": qr.get("source_mode", "default"),
                 "chat_session_id": chat_session.session_id,
@@ -1396,6 +1397,7 @@ async def ask_question(
         await db.commit()
         return {
             **fallback,
+            "prompt_contexts": fallback.get("prompt_contexts", []),
             "chat_session_id": chat_session.session_id,
             "query_type": query_type,
         }

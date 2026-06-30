@@ -758,7 +758,27 @@ def build_sectioned_context(
         "[검색·재순위로 선택된 근거]",
         "아래 내용만 사실로 사용한다. 서로 다른 출처를 골랐다.",
     ]
-    # group by kind for readability
+    for context in build_prompt_contexts(intent_weights, items, max_chars):
+        lines.append(context)
+        lines.append("")
+    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
+        lines.append(
+            "강의 전체 요약 질문이다. 슬라이드 순서를 중심으로 전체 흐름을 요약하고, 핵심 개념과 중요한 시각자료/강조 근거는 보조로만 사용한다. "
+            "답변은 한 문장 요약, 강의 흐름 3~5개, 핵심 개념 3~5개로 간결하게 작성한다."
+        )
+    else:
+        lines.append(
+            "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
+            "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
+        )
+    return "\n".join(lines).strip()
+
+
+def _prompt_ordered_items(
+    intent_weights: dict[str, float],
+    items: list[EvidenceItem],
+) -> list[EvidenceItem]:
+    """Return evidence in the same order used inside the answer prompt."""
     buckets: dict[str, list[EvidenceItem]] = {}
     for it in items:
         buckets.setdefault(it.kind, []).append(it)
@@ -787,40 +807,40 @@ def build_sectioned_context(
             "lance_strict",
             "lance_soft",
         ]
+    ordered: list[EvidenceItem] = []
     for bk in order:
-        for it in buckets.get(bk, []):
-            tag = {
-                "sub_concept": "개념 관계",
-                "graphrag_entity": "GraphRAG 개념",
-                "graphrag_relationship": "GraphRAG 개념 관계",
-                "visual_asset": "시각자료",
-                "slide_text": "슬라이드 본문",
-                "slide_concept": "슬라이드-개념",
-                "segment": "음성 구간",
-                "lance_strict": "의미 검색(그래프 연동)",
-                "lance_soft": "의미 검색(보조)",
-            }.get(bk, bk)
-            meta = f"[{tag}]"
-            if it.slide_number is not None:
-                meta += f" 슬라이드 {it.slide_number}"
-            if it.start_sec is not None:
-                meta += f" · 약 {it.start_sec:.1f}초"
-            if it.kind == "lance_soft":
-                meta += " (그래프 id 미일치 보조)"
-            chunk = it.text[:max_chars]
-            lines.append(f"{meta}\n{chunk}")
-            lines.append("")
-    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
-        lines.append(
-            "강의 전체 요약 질문이다. 슬라이드 순서를 중심으로 전체 흐름을 요약하고, 핵심 개념과 중요한 시각자료/강조 근거는 보조로만 사용한다. "
-            "답변은 한 문장 요약, 강의 흐름 3~5개, 핵심 개념 3~5개로 간결하게 작성한다."
-        )
-    else:
-        lines.append(
-            "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
-            "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
-        )
-    return "\n".join(lines).strip()
+        ordered.extend(buckets.get(bk, []))
+    return ordered
+
+
+def build_prompt_contexts(
+    intent_weights: dict[str, float],
+    items: list[EvidenceItem],
+    max_chars: int,
+) -> list[str]:
+    """Build evidence snippets in the exact evidence order used by the prompt."""
+    contexts: list[str] = []
+    for it in _prompt_ordered_items(intent_weights, items):
+        tag = {
+            "sub_concept": "개념 관계",
+            "graphrag_entity": "GraphRAG 개념",
+            "graphrag_relationship": "GraphRAG 개념 관계",
+            "visual_asset": "시각자료",
+            "slide_text": "슬라이드 본문",
+            "slide_concept": "슬라이드-개념",
+            "segment": "음성 구간",
+            "lance_strict": "의미 검색(그래프 연동)",
+            "lance_soft": "의미 검색(보조)",
+        }.get(it.kind, it.kind)
+        meta = f"[{tag}]"
+        if it.slide_number is not None:
+            meta += f" 슬라이드 {it.slide_number}"
+        if it.start_sec is not None:
+            meta += f" · 약 {it.start_sec:.1f}초"
+        if it.kind == "lance_soft":
+            meta += " (그래프 id 미일치 보조)"
+        contexts.append(f"{meta}\n{it.text[:max_chars]}")
+    return contexts
 
 
 def run_enhanced_content_pipeline(

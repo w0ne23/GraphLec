@@ -36,6 +36,7 @@ from pipeline.lance_ingest import default_lance_root, lance_search  # noqa: E402
 
 from .content_retrieval import (  # noqa: E402
     EvidenceItem,
+    build_prompt_contexts,
     build_sectioned_context,
     infer_intents_json,
     run_enhanced_content_pipeline,
@@ -131,9 +132,9 @@ ANSWER_SYSTEM_PROMPT = """
 1. 질문에 직접 필요한 내용만 답한다. 근거가 많아도 전부 나열하지 말고 핵심만 추린다.
 2. 기본 답변은 1문장 요약 + 최대 4개 항목으로 작성한다. 각 항목은 한 문장으로 짧게 쓴다.
 3. 사용자가 "자세히", "구체적으로", "전부", "비교표"처럼 확장을 요청한 경우에만 더 길게 답한다.
-4. 초 단위 시간·구간·슬라이드 번호는 UI의 출처 버튼으로 따로 제공된다. 답변 본문에는 시간·구간·슬라이드 확인 안내를 쓰지 않는다.
-5. "어디", "장면", "구간"이라는 단어만으로는 시간값을 본문에 쓰지 않는다. 사용자가 "정확히 몇 초", "전체 구간을 모두", "시작/끝 시간을 표로"처럼 명시적으로 시간 목록을 요구한 경우에만 시간 범위를 본문에 나열한다.
-6. "장면 4:", "슬라이드 8:"처럼 출처 위치를 항목 제목으로 쓰지 않는다. 위치는 UI 버튼에서만 제공된다.
+4. 내용 설명 질문에서는 초 단위 시간·구간·슬라이드 번호를 불필요하게 본문에 쓰지 않는다.
+5. 사용자가 "어디", "어느 슬라이드", "장면", "구간", "언제"처럼 위치를 물으면 슬라이드 번호와 시간 정보를 본문에 직접 답한다. 시간은 가능하면 "24분 57초"처럼 분·초 형식으로 쓴다.
+6. 위치 질문이 아닐 때는 "장면 4:", "슬라이드 8:"처럼 출처 위치를 항목 제목으로 쓰지 않는다. 위치 질문일 때는 필요한 위치 정보를 짧게 쓴다.
 7. "(GraphRAG 개념)", "(GraphRAG 개념 관계)" 같은 내부 근거 종류명은 사용자에게 노출하지 않는다.
 8. 질문에 사례·예시·예를 들어 등이 있으면 근거에서 1개 사례만 넣고, 없으면 "제공된 근거만으로는 사례를 확인하기 어렵습니다."라고 말한다.
 9. "정의:", "음성 발췌:" 같은 인위적 소제목 블록을 만들지 않는다.
@@ -174,6 +175,7 @@ class QueryResponse(BaseModel):
     graph: dict
     core_graph: dict = Field(default_factory=lambda: {"nodes": [], "edges": []})
     retrieved_chunks: list[RetrievedChunk]
+    prompt_contexts: list[str] = Field(default_factory=list)
     related_slides: list[dict] = Field(default_factory=list)
     source_mode: str = "default"
 
@@ -571,6 +573,26 @@ def _format_time_label(seconds: float) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+def _format_seconds_ko(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    minutes = total // 60
+    secs = total % 60
+    if minutes:
+        return f"{minutes}분 {secs}초"
+    return f"{secs}초"
+
+
+def _convert_second_mentions_to_min_sec(text: str) -> str:
+    def repl(match: re.Match) -> str:
+        number = match.group(1)
+        try:
+            return _format_seconds_ko(float(number))
+        except (TypeError, ValueError):
+            return match.group(0)
+
+    return re.sub(r"(?<!분\s)(?<!\d)(\d+(?:\.\d+)?)\s*초", repl, text)
+
+
 def _format_source_block(sources: list[str]) -> str:
     slides: list[str] = []
     times: list[str] = []
@@ -634,62 +656,46 @@ def _compact_answer(
 
     cleaned = _clean_answer_text(raw)
     cleaned = cleaned.replace("**", "")
+    preserve_location_text = source_mode in {"visual_location", "scene_location"} or _is_location_question(question)
 
     cleaned = re.sub(r"[ \t]+[*-]\s+([^:：\n]{1,40})[:：]\s*", r"\n- \1: ", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
-    cleaned = re.sub(r"\n*\s*출처\s*\n(?:\s*[-*].*(?:\n|$))+\s*$", "", cleaned).strip()
-    cleaned = re.sub(
-        r"\s*\((?:슬라이드\s*\d+\s*,?\s*)?(?:약\s*)?\d+(?:\.\d+)?초\)\s*",
-        " ",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"\s*\(슬라이드\s*\d+\)\s*",
-        " ",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"\s*\(?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
-        "",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"\n?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*",
-        "\n",
-        cleaned,
-    )
-    cleaned = re.sub(
-        r"\s*\(?\s*관련\s*(?:장면|구간|출처)에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
-        "",
-        cleaned,
-    )
-    if source_mode == "visual_location":
+    if not preserve_location_text:
+        cleaned = re.sub(r"\s*출처\s*:.*$", "", cleaned, flags=re.S).strip()
+        cleaned = re.sub(r"\n*\s*출처\s*\n(?:\s*[-*].*(?:\n|$))+\s*$", "", cleaned).strip()
         cleaned = re.sub(
-            r"(?:은|는)?\s*\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?(?:,\s*(?:그리고\s*)?\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?)*\s*(?:나옵니다|등장합니다|확인됩니다|확인할\s*수\s*있습니다)\.?",
-            "입니다.",
+            r"\s*\((?:슬라이드\s*\d+\s*,?\s*)?(?:약\s*)?\d+(?:\.\d+)?초\)\s*",
+            " ",
             cleaned,
         )
         cleaned = re.sub(
-            r"\s*\d+(?:\.\d+)?초부터\s*\d+(?:\.\d+)?초(?:까지)?",
+            r"\s*\(슬라이드\s*\d+\)\s*",
+            " ",
+            cleaned,
+        )
+        cleaned = re.sub(
+            r"\s*\(?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
             "",
             cleaned,
         )
         cleaned = re.sub(
-            r"\n?\s*해당\s*내용은\s*관련\s*영상\s*구간\s*\([^)]*\)\s*에서\s*확인할\s*수\s*있습니다\.?\s*",
+            r"\n?\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*",
             "\n",
             cleaned,
         )
         cleaned = re.sub(
-            r"\n?\s*해당\s*내용은\s*관련\s*영상\s*구간에서\s*확인할\s*수\s*있습니다\.?\s*",
-            "\n",
+            r"\s*\(?\s*관련\s*(?:장면|구간|출처)에서\s*확인할\s*수\s*있습니다\.?\s*\)?",
+            "",
             cleaned,
         )
-        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
-        cleaned = _compact_visual_location_answer(cleaned)
+    elif source_mode == "visual_location":
+        cleaned = _compact_visual_location_answer(cleaned, preserve_location=True)
 
     if _is_refusal_answer(cleaned):
         return cleaned
+
+    if preserve_location_text:
+        cleaned = _convert_second_mentions_to_min_sec(cleaned)
 
     return cleaned.strip()
 
@@ -2386,7 +2392,7 @@ def _related_slides_from_chunks_for_topic(
     return out
 
 
-def _compact_visual_location_answer(answer: str) -> str:
+def _compact_visual_location_answer(answer: str, preserve_location: bool = False) -> str:
     lines = [ln.strip() for ln in answer.splitlines()]
     kept: list[str] = []
     for ln in lines:
@@ -2396,15 +2402,17 @@ def _compact_visual_location_answer(answer: str) -> str:
             continue
         line = re.sub(r"^\d+\.\s*", "- ", ln)
         line = re.sub(r"^[*-]\s*", "- ", line)
-        line = re.sub(r"^-\s*(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "- ", line, flags=re.IGNORECASE)
-        line = re.sub(r"^-\s*슬라이드\s*\d+\s*[:：]\s*", "- ", line)
-        line = re.sub(r"^(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "", line, flags=re.IGNORECASE)
-        line = re.sub(r"^슬라이드\s*\d+\s*[:：]\s*", "", line)
+        if not preserve_location:
+            line = re.sub(r"^-\s*(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "- ", line, flags=re.IGNORECASE)
+            line = re.sub(r"^-\s*슬라이드\s*\d+\s*[:：]\s*", "- ", line)
+            line = re.sub(r"^(?:장면|씬|Scene)\s*\d+\s*[:：]\s*", "", line, flags=re.IGNORECASE)
+            line = re.sub(r"^슬라이드\s*\d+\s*[:：]\s*", "", line)
         kept.append(line)
 
     text = "\n".join(kept).strip()
-    text = re.sub(r"\b(?:장면|씬|Scene)\s*\d+\b", "해당 장면", text, flags=re.IGNORECASE)
-    text = re.sub(r"\b슬라이드\s*\d+\b", "해당 슬라이드", text)
+    if not preserve_location:
+        text = re.sub(r"\b(?:장면|씬|Scene)\s*\d+\b", "해당 장면", text, flags=re.IGNORECASE)
+        text = re.sub(r"\b슬라이드\s*\d+\b", "해당 슬라이드", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
@@ -2834,9 +2842,16 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
     retrieved_chunks: list[RetrievedChunk] = []
     supporting_chunks: list[RetrievedChunk] = []
     source_items = _source_items_for_question(question, selected_items)
+    prompt_contexts: list[str] = []
     if q_type == "content" and source_items != selected_items:
         graph_context = build_sectioned_context(
             question,
+            intent_weights_for_context,
+            source_items,
+            max_chars=900,
+        )
+    if q_type == "content":
+        prompt_contexts = build_prompt_contexts(
             intent_weights_for_context,
             source_items,
             max_chars=900,
@@ -2875,6 +2890,8 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         if q_type == "content"
         else _build_hybrid_context_base(graph_context, supporting_chunks)
     )
+    if q_type != "content":
+        prompt_contexts = [context] if context.strip() else []
     context = _augment_answer_context_for_question(context, question)
     source_mode = _source_mode_for(question, source_items)
     if _is_visual_list_question(question):
@@ -2887,6 +2904,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         answer = _compact_answer(answer, question, retrieved_chunks, source_mode=source_mode)
     if _is_refusal_answer(answer):
         retrieved_chunks = []
+        prompt_contexts = []
         timestamps = []
         graph = {"nodes": [], "edges": []}
     if (
@@ -2959,6 +2977,7 @@ async def internal_query(req: InternalQueryRequest) -> QueryResponse:
         graph=graph,
         core_graph=core_graph,
         retrieved_chunks=retrieved_chunks,
+        prompt_contexts=prompt_contexts,
         related_slides=related_slides,
         source_mode=source_mode,
     )
