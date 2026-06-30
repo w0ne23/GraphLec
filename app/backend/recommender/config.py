@@ -61,17 +61,15 @@ class RecommenderConfig:
     # 벡터 유사도 vs 직접 매칭 블렌딩 비율 (벡터:직접 = VEC_BLEND : 1-VEC_BLEND)
     VEC_BLEND:           float = 0.70
     # keyword vec 유사도 threshold — floor~threshold 구간은 soft decay
-    KW_VEC_THRESHOLD:    float = 0.60
-    KW_VEC_SOFT_FLOOR:   float = 0.45
-    # 메인 점수 컴포넌트 가중치
-    W_CONTENT:           float = 0.60
+    KW_VEC_THRESHOLD:    float = 0.50
+    KW_VEC_SOFT_FLOOR:   float = 0.35
+    # 메인 점수 컴포넌트 가중치 (community 제거 → content로 흡수)
+    W_CONTENT:           float = 0.70
     W_GRAPH:             float = 0.20
-    W_COMMUNITY:         float = 0.10
     W_VISUAL:            float = 0.03
     W_BOOST:             float = 0.07
-    W_CONTENT_VISUAL_QUERY:   float = 0.52
+    W_CONTENT_VISUAL_QUERY:   float = 0.62
     W_GRAPH_VISUAL_QUERY:     float = 0.18
-    W_COMMUNITY_VISUAL_QUERY: float = 0.10
     W_VISUAL_QUERY:           float = 0.15
     W_BOOST_VISUAL_QUERY:     float = 0.05
     # graph_score role 가중치
@@ -81,20 +79,11 @@ class RecommenderConfig:
     W_DEPTH_BOOST:       float = 0.30
     # 파편화 패널티 강도 λ
     FRAG_PENALTY_WEIGHT: float = 0.10
-    # 이중 레이어 임계값
-    DIRECT_RATIO:            float = 0.90
-    RELATED_RATIO:           float = 0.55
-    ABS_MIN_SCORE:           float = 0.30
-    ABS_DIRECT_FLOOR:        float = 0.50
-    CORE_MATCH_DIRECT_FLOOR: float = 0.35
-    GAP_THRESHOLD:           float = 0.08
-    DIRECT_GRAPH_FLOOR:      float = 0.55
-    RELATED_GRAPH_FLOOR:     float = 0.25
-    RELATED_COMMUNITY_FLOOR: float = 0.20
+    # 포함 임계값 — score >= ABS_MIN_SCORE인 강의만 결과에 포함
+    ABS_MIN_SCORE:           float = 0.22
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60
     Q_KW_MISMATCH_PENALTY:   float = 0.60
-    SUBJECT_PARTIAL_MATCH_PENALTY: float = 0.85
     # 비교 의도 × 강의 대조 관계 보너스
     W_CONTRAST_BOOST:        float = 0.10
     # 벡터 DB 경로
@@ -120,8 +109,7 @@ class RecommenderConfig:
     RRF_K:               int = 60
     HYBRID_CANDIDATE_TOP_N: int = 50
     MIN_HYBRID_CANDIDATES: int = 10
-    USE_TF_IRF_DM:       bool = True
+    USE_TF_IRF_DM:       bool = False
     TF_IRF_IDF_FLOOR:    float = 0.05
     USE_METADATA_PREFILTER: bool = True
     METADATA_DURATION_GRACE_SEC: int = 300
-    LIST_QUERY_TOP_K:    int = 50

@@ -60,11 +60,24 @@ def _condition_score_ratio(detail: dict) -> float:
     return _ratio(detail.get("combined_boost")) if warnings else 1.0
 
 
-def _content_display_share(content_ratio: float, meaning_ratio: float) -> int:
+def _has_condition_signal(detail: dict) -> bool:
+    return bool(
+        detail.get("duration_mismatch") is True
+        or _ratio(detail.get("duration_score")) > 0.0
+        or detail.get("visual_preference")
+        or detail.get("application_preference")
+        or detail.get("listenability_preference")
+        or detail.get("slow_speech_preference")
+        or detail.get("recency_preference")
+        or (detail.get("condition_warnings") if isinstance(detail.get("condition_warnings"), list) else [])
+    )
+
+
+def _content_display_share(content_ratio: float, meaning_ratio: float, total_share: int) -> int:
     total = max(content_ratio, 0.0) + max(meaning_ratio, 0.0)
     if total <= 0.0:
-        return CONTENT_MEANING_DISPLAY_SHARE // 2
-    return int(round((max(content_ratio, 0.0) / total) * CONTENT_MEANING_DISPLAY_SHARE))
+        return total_share // 2
+    return int(round((max(content_ratio, 0.0) / total) * total_share))
 
 
 def _display_score(internal_score: float, _tier: str, detail: Optional[dict] = None) -> int:
@@ -78,15 +91,18 @@ def _display_score(internal_score: float, _tier: str, detail: Optional[dict] = N
         _ratio(detail.get("graph_score")),
         _ratio(detail.get("sim_keyword")),
     )
-    condition_ratio = _condition_score_ratio(detail)
+    has_condition = _has_condition_signal(detail)
+    condition_ratio = _condition_score_ratio(detail) if has_condition else 0.0
+    condition_share = CONDITION_DISPLAY_SHARE if has_condition else 0
+    content_meaning_share = 100 - condition_share
 
-    content_share = _content_display_share(content_ratio, meaning_ratio)
-    meaning_share = CONTENT_MEANING_DISPLAY_SHARE - content_share
+    content_share = _content_display_share(content_ratio, meaning_ratio, content_meaning_share)
+    meaning_share = content_meaning_share - content_share
 
     score = (
         _display_component_score(content_ratio) * (content_share / 100.0)
         + _display_component_score(meaning_ratio) * (meaning_share / 100.0)
-        + _display_component_score(condition_ratio) * (CONDITION_DISPLAY_SHARE / 100.0)
+        + _display_component_score(condition_ratio) * (condition_share / 100.0)
     )
     return int(round(score))
 

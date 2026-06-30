@@ -53,9 +53,10 @@ from recommender.scoring import (
     _detect_comparison_intent,
     _direct_match_score,
     _direct_match_score_tfirf,
-    _query_concept_in_role,
     _required_subject_match_type,
     _required_subject_terms,
+    _topic_centrality_profile,
+    _topic_score_cap,
 )
 from recommender.types import (
     LectureLexicalDocument,
@@ -424,14 +425,12 @@ class Recommender:
             return {
                 "content": self.cfg.W_CONTENT_VISUAL_QUERY,
                 "graph": self.cfg.W_GRAPH_VISUAL_QUERY,
-                "community": self.cfg.W_COMMUNITY_VISUAL_QUERY,
                 "visual": self.cfg.W_VISUAL_QUERY,
                 "boost": self.cfg.W_BOOST_VISUAL_QUERY,
             }
         return {
             "content": self.cfg.W_CONTENT,
             "graph": self.cfg.W_GRAPH,
-            "community": self.cfg.W_COMMUNITY,
             "visual": self.cfg.W_VISUAL,
             "boost": self.cfg.W_BOOST,
         }
@@ -772,7 +771,6 @@ class Recommender:
         total = max(
             weights["content"] * content_score
             + weights["graph"] * graph_score
-            + weights["community"] * community_score
             + weights["visual"] * visual_score
             + weights["boost"] * boost_signal
             - self.cfg.FRAG_PENALTY_WEIGHT * frag,
@@ -841,7 +839,6 @@ class Recommender:
             "recency_weight":       round(recency_weight, 4),
             "weight_content":       round(weights["content"], 4),
             "weight_graph":         round(weights["graph"], 4),
-            "weight_community":     round(weights["community"], 4),
             "weight_visual":        round(weights["visual"], 4),
             "weight_boost":         round(weights["boost"], 4),
             "depth_score":          round(depth_score, 4),
@@ -868,8 +865,7 @@ class Recommender:
         print(
             "[Rerank weights] "
             f"content={weights['content']:.2f} graph={weights['graph']:.2f} "
-            f"community={weights['community']:.2f} visual={weights['visual']:.2f} "
-            f"boost={weights['boost']:.2f}"
+            f"visual={weights['visual']:.2f} boost={weights['boost']:.2f}"
         )
         candidates = []
         for video_id in candidate_ids:
@@ -889,14 +885,31 @@ class Recommender:
             )
             detail["required_subject_terms"] = sorted(required_subject_terms)
             detail["required_subject_match"] = subject_match_type
+            topic_profile = _topic_centrality_profile(
+                lec,
+                required_subject_terms or query_concepts,
+            )
+            detail.update(topic_profile)
             if subject_match_type == "none":
                 detail["score"] = round(detail["score"] * self.cfg.Q_KW_MISMATCH_PENALTY, 4)
                 detail["subject_mismatch_penalty"] = self.cfg.Q_KW_MISMATCH_PENALTY
-            elif subject_match_type == "partial":
-                detail["score"] = round(detail["score"] * self.cfg.SUBJECT_PARTIAL_MATCH_PENALTY, 4)
-                detail["subject_mismatch_penalty"] = self.cfg.SUBJECT_PARTIAL_MATCH_PENALTY
             else:
                 detail["subject_mismatch_penalty"] = 1.0
+            if required_subject_terms:
+                cap = _topic_score_cap(
+                    detail["topic_match_level"],
+                    detail["topic_centrality"],
+                    detail["topic_all_terms_matched"],
+                )
+                detail["topic_score_cap"] = cap
+                if detail["score"] > cap:
+                    detail["score"] = round(cap, 4)
+                    detail["topic_cap_applied"] = True
+                else:
+                    detail["topic_cap_applied"] = False
+            else:
+                detail["topic_score_cap"] = 1.0
+                detail["topic_cap_applied"] = False
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -922,7 +935,6 @@ class Recommender:
     def _classify_tiers(
         self,
         candidates: list[tuple[LectureMetadata, dict]],
-        ctx: QueryContext,
         top_k: int,
     ) -> list[RecommendResult]:
         if not candidates:
@@ -933,65 +945,15 @@ class Recommender:
             print(f"  → top 점수 {max_score:.3f} < ABS_MIN_SCORE {self.cfg.ABS_MIN_SCORE} — 결과 없음")
             return []
 
-        scores = [d["score"] for _, d in candidates]
-        if len(scores) >= 2 and (scores[0] - scores[1]) >= self.cfg.GAP_THRESHOLD:
-            # 자연 경계도 ABS_DIRECT_FLOOR 이상이어야 함
-            direct_threshold = max(
-                (scores[0] + scores[1]) / 2,
-                self.cfg.ABS_DIRECT_FLOOR,
-            )
-            print(f"  → 자연 경계 감지 (gap={scores[0]-scores[1]:.3f}): "
-                  f"direct_threshold={direct_threshold:.3f}")
-        else:
-            direct_threshold = max(
-                max_score * self.cfg.DIRECT_RATIO,
-                self.cfg.ABS_DIRECT_FLOOR,
-            )
-
-        related_threshold = max_score * self.cfg.RELATED_RATIO
-        print(f"  [임계값] direct ≥ {direct_threshold:.3f} (floor={self.cfg.ABS_DIRECT_FLOOR})  "
-              f"core_direct_floor={self.cfg.CORE_MATCH_DIRECT_FLOOR:.2f}  "
-              f"related ≥ {related_threshold:.3f}  "
-              f"direct_graph ≥ {self.cfg.DIRECT_GRAPH_FLOOR:.2f}  "
-              f"related_graph/community ≥ {self.cfg.RELATED_GRAPH_FLOOR:.2f}/{self.cfg.RELATED_COMMUNITY_FLOOR:.2f}  "
-              f"(top={max_score:.3f})\n")
-
-        query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         results = []
         for lec, detail in candidates:
-            score      = detail["score"]
-            graph_sc   = detail.get("graph_score", 0.0)
-            community_sc = detail.get("community_score", 0.0)
-            core_match = _query_concept_in_role(lec, query_concepts, "core")
-            introduced_match = _query_concept_in_role(lec, query_concepts, "introduced")
-            strong_graph = graph_sc >= self.cfg.DIRECT_GRAPH_FLOOR
-            related_graph = graph_sc >= self.cfg.RELATED_GRAPH_FLOOR
-            related_community = community_sc >= self.cfg.RELATED_COMMUNITY_FLOOR
-            direct_threshold_for_candidate = (
-                min(direct_threshold, self.cfg.CORE_MATCH_DIRECT_FLOOR)
-                if core_match
-                else direct_threshold
-            )
+            score = detail["score"]
+            if score < self.cfg.ABS_MIN_SCORE:
+                break
 
-            if score >= direct_threshold_for_candidate and (core_match or strong_graph):
-                tier = "direct"
-                if core_match:
-                    detail["tier_reason"] = "core_match"
-                else:
-                    detail["tier_reason"] = "strong_graph"
-            elif score >= related_threshold and (introduced_match or related_graph or related_community):
-                tier = "related"
-                if introduced_match:
-                    detail["tier_reason"] = "introduced_match"
-                elif related_graph:
-                    detail["tier_reason"] = "related_graph"
-                else:
-                    detail["tier_reason"] = "related_community"
-            else:
-                if score < related_threshold:
-                    break
-                continue
-
+            topic_level = detail.get("topic_match_level", "none")
+            tier = "direct" if topic_level in {"core", "keyword_high"} else "related"
+            detail["tier_reason"] = f"topic_{topic_level}"
             detail["duration_sec"] = lec.duration_sec
             results.append(RecommendResult(
                 video_id     = lec.video_id,
@@ -1040,27 +1002,10 @@ class Recommender:
 
         restored_cfg = None
         config_locked = False
-        effective_top_k = top_k
-        if ctx.intent == "list_by_topic" or min_score is not None:
+        if min_score is not None:
             self._recommend_lock.acquire()
             config_locked = True
-        if ctx.intent == "list_by_topic":
-            effective_top_k = max(top_k, self.cfg.LIST_QUERY_TOP_K)
-            restored_cfg = {
-                "ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE,
-                "Q_KW_MISMATCH_PENALTY": self.cfg.Q_KW_MISMATCH_PENALTY,
-                "RELATED_RATIO": self.cfg.RELATED_RATIO,
-                "HYBRID_CANDIDATE_TOP_N": self.cfg.HYBRID_CANDIDATE_TOP_N,
-            }
-            self.cfg.ABS_MIN_SCORE = 0.05
-            self.cfg.Q_KW_MISMATCH_PENALTY = 1.0
-            self.cfg.RELATED_RATIO = 0.35
-            self.cfg.HYBRID_CANDIDATE_TOP_N = max(
-                self.cfg.HYBRID_CANDIDATE_TOP_N,
-                self.cfg.LIST_QUERY_TOP_K,
-            )
-
-        if min_score is not None:
+            restored_cfg = {"ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE}
             self.cfg.ABS_MIN_SCORE = min_score
 
         try:
@@ -1076,7 +1021,7 @@ class Recommender:
 
             # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
             self._print_candidate_scores(candidates)
-            return self._classify_tiers(candidates, ctx, effective_top_k)
+            return self._classify_tiers(candidates, top_k)
         finally:
             if restored_cfg:
                 for key, value in restored_cfg.items():

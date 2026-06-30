@@ -119,11 +119,11 @@ def _fast_list_query_analysis(
 
     query_terms = [query]
     if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "list_by_topic", query, query_terms, [], None, None, None, {}
+        return "recommend", query, query_terms, [], None, None, None, {}
 
     domain, subdomain = _infer_domain_filters(query, available_domains, available_subdomains)
     if domain:
-        return "list_by_topic", query, query_terms, [], domain, None, None, {"subdomain": subdomain}
+        return "recommend", query, query_terms, [], domain, None, None, {"subdomain": subdomain}
 
     return None
 
@@ -324,7 +324,7 @@ def analyze_query(
             duration_max_sec = int(duration_max_sec)
         except (ValueError, TypeError):
             duration_max_sec = None
-    if intent not in ("recommend", "list_by_topic"):
+    if intent != "recommend":
         intent = "recommend"
 
     result = (

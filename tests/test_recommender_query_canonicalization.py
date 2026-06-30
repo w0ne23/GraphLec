@@ -22,6 +22,8 @@ from recommender.recommender import (
     _required_subject_match_type,
     _soft_threshold_similarity,
 )
+from recommender.display import _display_score
+from recommender.scoring import _topic_centrality_profile, _topic_score_cap
 from recommender.query import _fallback_query_analysis
 from recommender.utils import _query_term_base
 
@@ -154,6 +156,172 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
 
         self.assertIn("키워드", reason)
         self.assertNotIn("파편화", reason)
+
+    def test_display_score_has_no_free_condition_points_without_conditions(self):
+        score = _display_score(
+            0.5,
+            "related",
+            {
+                "content_score": 0.4,
+                "vec_score": 0.4,
+                "graph_score": 0.0,
+                "sim_keyword": 0.0,
+                "combined_boost": 1.0,
+                "duration_score": 0.0,
+                "duration_mismatch": False,
+                "condition_warnings": [],
+            },
+        )
+
+        self.assertLess(score, 70)
+
+    def test_topic_centrality_distinguishes_summary_mention_from_core(self):
+        summary_only = _lecture(
+            summary="운영체제의 역사에서 커널이라는 용어가 잠깐 언급된다.",
+            keywords=[{"keyword": "운영체제", "score": 1.0}],
+            concept_roles={"core": ["운영체제"], "introduced": []},
+            concept_relations=[],
+            communities=[],
+        )
+        core = _lecture(
+            summary="커널 공간과 사용자 공간을 설명한다.",
+            keywords=[{"keyword": "커널", "score": 1.0}],
+            concept_roles={"core": ["커널"], "introduced": []},
+            concept_relations=[],
+            communities=[],
+        )
+
+        weak_profile = _topic_centrality_profile(summary_only, {"커널"})
+        strong_profile = _topic_centrality_profile(core, {"커널"})
+
+        self.assertEqual(weak_profile["topic_match_level"], "summary")
+        self.assertLess(_topic_score_cap(**{
+            "level": weak_profile["topic_match_level"],
+            "centrality": weak_profile["topic_centrality"],
+            "all_terms_matched": weak_profile["topic_all_terms_matched"],
+        }), 0.5)
+        self.assertEqual(strong_profile["topic_match_level"], "core")
+        self.assertEqual(_topic_score_cap(
+            strong_profile["topic_match_level"],
+            strong_profile["topic_centrality"],
+            strong_profile["topic_all_terms_matched"],
+        ), 1.0)
+
+    def test_ranking_caps_summary_only_subject_match(self):
+        lec = _lecture(
+            video_id="os",
+            summary="운영체제 강의에서 커널이라는 용어를 배경으로 언급한다.",
+            keywords=[{"keyword": "운영체제", "score": 1.0}],
+            concept_roles={"core": ["운영체제"], "introduced": []},
+            concept_relations=[],
+            communities=[],
+        )
+        recommender = Recommender.__new__(Recommender)
+        recommender.cfg = RecommenderConfig()
+        recommender.collection = _MemoryCollection([lec])
+        recommender._row_by_video_id = {}
+
+        def fake_score_candidate(*_args, **_kwargs):
+            return {"score": 0.9}
+
+        recommender._score_candidate = fake_score_candidate
+        ctx = QueryContext(
+            query="커널 관련 강의 있어?",
+            intent="recommend",
+            search_text="커널",
+            query_keywords=["커널"],
+            inferred_keywords=["운영체제"],
+            raw_query_keywords=["커널"],
+            raw_inferred_keywords=["운영체제"],
+            canonical_matches={},
+            unmatched_query_terms=[],
+            domain=None,
+            subdomain=None,
+            focus_concept=None,
+            duration_max_sec=None,
+            comparison_intent=False,
+            issue_free_preference=False,
+            visual_preference=False,
+            application_preference=False,
+            listenability_preference=False,
+            slow_speech_preference=False,
+            recency_preference=False,
+        )
+
+        with redirect_stdout(StringIO()):
+            ranked = recommender._rank_candidates(["os"], ctx, [])
+
+        detail = ranked[0][1]
+        self.assertEqual(detail["topic_match_level"], "summary")
+        self.assertTrue(detail["topic_cap_applied"])
+        self.assertLessEqual(detail["score"], 0.42)
+
+    def test_weak_related_candidate_is_shown_with_low_score(self):
+        lec = _lecture(
+            video_id="os",
+            summary="운영체제는 하드웨어 자원을 관리한다.",
+            keywords=[{"keyword": "운영체제", "score": 1.0}],
+            concept_roles={"core": ["운영체제"], "introduced": []},
+            concept_relations=[],
+            communities=[],
+        )
+        recommender = Recommender.__new__(Recommender)
+        recommender.cfg = RecommenderConfig()
+        recommender.collection = _MemoryCollection([lec])
+
+        ctx = QueryContext(
+            query="커널 관련 강의 있어?",
+            intent="recommend",
+            search_text="커널",
+            query_keywords=["커널"],
+            inferred_keywords=[],
+            raw_query_keywords=["커널"],
+            raw_inferred_keywords=[],
+            canonical_matches={},
+            unmatched_query_terms=[],
+            domain=None,
+            subdomain=None,
+            focus_concept=None,
+            duration_max_sec=None,
+            comparison_intent=False,
+            issue_free_preference=False,
+            visual_preference=False,
+            application_preference=False,
+            listenability_preference=False,
+            slow_speech_preference=False,
+            recency_preference=False,
+        )
+        detail = {
+            "score": 0.30,
+            "content_score": 0.30,
+            "dm_keyword": 0.0,
+            "sim_keyword": 0.0,
+            "graph_score": 0.0,
+            "community_score": 0.0,
+            "domain_score": 0.0,
+            "depth_score": 0.0,
+            "contrast_bonus": 0.0,
+            "application_preference": False,
+            "listenability_preference": False,
+            "slow_speech_preference": False,
+            "recency_preference": False,
+            "visual_preference": False,
+            "duration_score": 0.0,
+            "duration_mismatch": False,
+            "condition_warnings": [],
+            "combined_boost": 0.0,
+            "frag_penalty": 0.0,
+            "topic_match_level": "none",
+            "required_subject_match": "none",
+        }
+
+        with redirect_stdout(StringIO()):
+            results = recommender._classify_tiers([(lec, detail)], top_k=3)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].tier, "related")
+        self.assertEqual(results[0].score, 0.30)
+        self.assertEqual(results[0].score_detail["tier_reason"], "topic_none")
 
     def test_ranking_keeps_subject_mismatch_soft_and_orders_canonical_match_first(self):
         os_lecture = _lecture(video_id="os")

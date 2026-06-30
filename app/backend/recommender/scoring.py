@@ -472,6 +472,209 @@ def _compute_fragmentation_penalty(concept_roles) -> float:
     return float(min(intro_ratio * (1.0 - core_ratio), 1.0))
 
 
+# ── 질의 주제 중심성 ─────────────────────────────────────────────────────────
+
+def _keyword_score_bounds(lec: LectureMetadata) -> tuple[float, float]:
+    scores = []
+    for item in lec.keywords or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            scores.append(max(float(item.get("score", 0.0)), 0.0))
+        except (TypeError, ValueError):
+            continue
+    if not scores:
+        return 0.0, 1.0
+    return max(scores), sum(scores) or 1.0
+
+
+def _keyword_match_strength(lec: LectureMetadata, term: str) -> float:
+    best = 0.0
+    max_score, _ = _keyword_score_bounds(lec)
+    if max_score <= 0:
+        return 0.0
+    for item in lec.keywords or []:
+        if not isinstance(item, dict):
+            continue
+        keyword = str(item.get("keyword", ""))
+        if not _concept_match(keyword, term):
+            continue
+        try:
+            score = max(float(item.get("score", 0.0)), 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        best = max(best, score / max_score)
+    return min(best, 1.0)
+
+
+def _role_match_strength(lec: LectureMetadata, term: str) -> float:
+    return _role_weight_for_concept(lec, term, core_weight=1.0, intro_weight=0.35)
+
+
+def _relation_match_strength(lec: LectureMetadata, term: str) -> float:
+    relations = lec.concept_relations or []
+    if not relations:
+        return 0.0
+    total_weight = 0.0
+    hit_weight = 0.0
+    for rel in relations:
+        if not isinstance(rel, dict):
+            continue
+        try:
+            weight = max(float(rel.get("weight") or 1.0), 0.0)
+        except (TypeError, ValueError):
+            weight = 1.0
+        nodes = [
+            str(rel.get("from", rel.get("source", ""))),
+            str(rel.get("to", rel.get("target", ""))),
+        ]
+        total_weight += weight
+        if any(_concept_match(node, term) for node in nodes):
+            hit_weight += weight
+    if total_weight <= 0.0:
+        return 0.0
+    return min(hit_weight / total_weight, 1.0)
+
+
+def _community_match_strength(lec: LectureMetadata, term: str) -> float:
+    communities = lec.communities or []
+    if not communities:
+        return 0.0
+    hits = 0
+    total = 0
+    for community in communities:
+        if not isinstance(community, dict):
+            continue
+        values: list[str] = []
+        _append_terms(values, community.get("title"))
+        _append_terms(values, community.get("nodes"))
+        for value in values:
+            normalized = _normalize_term(value)
+            if not normalized:
+                continue
+            total += 1
+            if _concept_match(normalized, term):
+                hits += 1
+    if total <= 0:
+        return 0.0
+    return min(hits / total, 1.0)
+
+
+def _text_mention_strength(lec: LectureMetadata, term: str) -> float:
+    if _concept_match(lec.title, term):
+        return 0.9
+    title_terms = _tokenize_text(lec.title)
+    if any(_concept_match(title_term, term) for title_term in title_terms):
+        return 0.9
+    if _concept_match(lec.summary, term):
+        return 0.2
+    summary_terms = _tokenize_text(lec.summary)
+    if any(_concept_match(summary_term, term) for summary_term in summary_terms):
+        return 0.2
+    return 0.0
+
+
+def _topic_centrality_for_term(lec: LectureMetadata, term: str) -> tuple[float, str]:
+    normalized = _normalize_term(term)
+    if not normalized:
+        return 0.0, "none"
+
+    role = _role_match_strength(lec, normalized)
+    keyword = _keyword_match_strength(lec, normalized)
+    text = _text_mention_strength(lec, normalized)
+    relation = _relation_match_strength(lec, normalized)
+    community = _community_match_strength(lec, normalized)
+
+    centrality = max(
+        role,
+        keyword * 0.9,
+        text,
+        relation * 0.45,
+        community * 0.35,
+    )
+    if role >= 0.95:
+        level = "core"
+    elif keyword >= 0.65:
+        level = "keyword_high"
+    elif role >= 0.30:
+        level = "introduced"
+    elif keyword > 0.0:
+        level = "keyword_low"
+    elif relation >= 0.20:
+        level = "relation"
+    elif community > 0.0:
+        level = "community"
+    elif text > 0.0:
+        level = "summary"
+    else:
+        level = "none"
+
+    return round(min(max(centrality, 0.0), 1.0), 4), level
+
+
+def _topic_level_rank(level: str) -> int:
+    order = {
+        "none": 0,
+        "summary": 1,
+        "community": 2,
+        "relation": 3,
+        "keyword_low": 4,
+        "introduced": 5,
+        "keyword_high": 6,
+        "core": 7,
+    }
+    return order.get(level, 0)
+
+
+def _topic_centrality_profile(
+    lec: LectureMetadata,
+    query_concepts: set[str],
+) -> dict:
+    concepts = [_normalize_term(term) for term in query_concepts if _normalize_term(term)]
+    if not concepts:
+        return {
+            "topic_centrality": 0.0,
+            "topic_match_level": "none",
+            "topic_match_levels": {},
+            "topic_all_terms_matched": False,
+        }
+
+    scores = []
+    levels = {}
+    best_level = "none"
+    for concept in concepts:
+        score, level = _topic_centrality_for_term(lec, concept)
+        scores.append(score)
+        levels[concept] = level
+        if _topic_level_rank(level) > _topic_level_rank(best_level):
+            best_level = level
+
+    matched_scores = [score for score in scores if score > 0.0]
+    centrality = sum(scores) / len(scores) if scores else 0.0
+    return {
+        "topic_centrality": round(min(max(centrality, 0.0), 1.0), 4),
+        "topic_match_level": best_level,
+        "topic_match_levels": levels,
+        "topic_all_terms_matched": len(matched_scores) == len(scores),
+    }
+
+
+def _topic_score_cap(level: str, centrality: float, all_terms_matched: bool) -> float:
+    if level in {"core", "keyword_high"}:
+        return 1.0
+    if level == "introduced":
+        return 0.68 if all_terms_matched else 0.58
+    if level == "keyword_low":
+        return 0.62 if all_terms_matched else 0.52
+    if level == "relation":
+        return 0.52 if all_terms_matched else 0.42
+    if level == "community":
+        return 0.48 if all_terms_matched else 0.40
+    if level == "summary":
+        return 0.42 if all_terms_matched and centrality >= 0.2 else 0.35
+    return 0.30
+
+
 # ── subject 매칭 ─────────────────────────────────────────────────────────────
 
 def _required_subject_terms(ctx: QueryContext) -> set[str]:
