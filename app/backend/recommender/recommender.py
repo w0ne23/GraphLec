@@ -592,14 +592,9 @@ class Recommender:
         sim_title = index.title_matrix @ q
         sim_keyword = index.keyword_matrix @ q
         sim_summary = index.summary_matrix @ q
-        sim_keyword_filtered = _soft_threshold_similarity(
-            sim_keyword,
-            self.cfg.KW_VEC_THRESHOLD,
-            self.cfg.KW_VEC_SOFT_FLOOR,
-        )
         vec_scores = (
             self.cfg.W_TITLE   * sim_title +
-            self.cfg.W_KEYWORD * sim_keyword_filtered +
+            self.cfg.W_KEYWORD * sim_keyword +
             self.cfg.W_SUMMARY * sim_summary
         )
 
