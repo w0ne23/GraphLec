@@ -13,7 +13,13 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from pipeline.embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, embed_query, get_genai_client
+from pipeline.embedding_utils import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROVIDER,
+    embed_documents,
+    embed_query,
+    get_embedding_client,
+)
 from pipeline.lance_ingest import default_lance_root, lance_search
 
 from .neo4j_content_queries import run_content_queries, run_overview_queries
@@ -473,6 +479,47 @@ def _is_exam_prep_query(question: str) -> bool:
     return any(k in q for k in ("시험", "출제", "시험대비", "나올것같", "나올만한"))
 
 
+def _is_example_query(question: str, intent_weights: dict[str, float] | None = None) -> bool:
+    if intent_weights and _intent_weight(intent_weights, "example") >= 0.25:
+        return True
+    q = question.replace(" ", "")
+    return any(k in q for k in ("예시", "사례", "예를들", "예는", "예가", "예로"))
+
+
+def _example_subject_terms(question: str, keywords: list[str]) -> list[str]:
+    terms: list[str] = []
+    m = re.search(r"(.+?)의\s*(?:예시|사례|예는|예가|예로)", question.strip())
+    if m:
+        subject = m.group(1).strip(" ?!.,，。")
+        if subject:
+            terms.append(subject)
+    for kw in keywords:
+        kw = str(kw or "").strip()
+        if len(kw) >= 2 and kw not in {"예시", "사례"} and kw not in terms:
+            terms.append(kw)
+    return terms[:5]
+
+
+def _example_directness_score(it: EvidenceItem, subject_terms: list[str]) -> float:
+    raw = it.text or ""
+    compact = re.sub(r"\s+", "", raw.lower())
+    if not compact or not subject_terms:
+        return 0.0
+    has_subject = any(
+        term.lower() in raw.lower() or term.lower().replace(" ", "") in compact
+        for term in subject_terms
+    )
+    if not has_subject:
+        return 0.0
+    if any(marker in compact for marker in ("예시", "사례", "예를들", "예로", "대표적예")):
+        return 1.0
+    if "등" in compact:
+        return 0.75
+    if re.search(r"\([^)]*,[^)]*\)", raw):
+        return 0.6
+    return 0.0
+
+
 def _is_overview_item(it: EvidenceItem) -> bool:
     text = (it.text or "").replace(" ", "").lower()
     return any(k in text for k in ("강의목표", "강의의목표", "학습목표", "목차", "개요", "chapter"))
@@ -928,15 +975,15 @@ def run_enhanced_content_pipeline(
         return "", intent_weights, allowed_ids, structured, []
 
     # Embedding rerank + MMR
-    client = get_genai_client()
+    client = get_embedding_client(DEFAULT_EMBEDDING_PROVIDER)
     model = DEFAULT_EMBEDDING_MODEL
     texts = [it.text[:8000] for it in all_items]
-    q_emb = np.array(embed_query(client, question, model=model), dtype=np.float32)
+    q_emb = np.array(embed_query(client, question, model=model, provider=DEFAULT_EMBEDDING_PROVIDER), dtype=np.float32)
     doc_embs: list[np.ndarray] = []
     bs = 32
     for i in range(0, len(texts), bs):
         batch = texts[i : i + bs]
-        vecs = embed_documents(client, batch, model=model)
+        vecs = embed_documents(client, batch, model=model, provider=DEFAULT_EMBEDDING_PROVIDER)
         doc_embs.extend([np.array(v, dtype=np.float32) for v in vecs])
 
     sim_to_q = np.array(
@@ -955,6 +1002,8 @@ def run_enhanced_content_pipeline(
     current_visual_query = _is_current_visual_query(question)
     emphasis_overview_query = _is_emphasis_overview_query(question)
     core_keyword_query = _is_core_keyword_query(question)
+    example_query = _is_example_query(question, intent_weights)
+    example_subject_terms = _example_subject_terms(question, keywords) if example_query else []
     max_slide_emphasis = max(
         [_row_float(it.row, "emphasis_total") for it in all_items if it.kind in {"slide_text", "slide_concept"}] or [0.0]
     )
@@ -1029,6 +1078,18 @@ def run_enhanced_content_pipeline(
                 bonus = 0.15 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
                 combined[i] += bonus
                 bonus_total += bonus
+        if example_query:
+            directness = _example_directness_score(it, example_subject_terms)
+            if directness > 0:
+                if it.kind in {"visual_asset", "slide_text", "slide_concept"}:
+                    bonus = 0.45 * directness
+                elif it.kind in {"graphrag_entity", "graphrag_relationship"}:
+                    bonus = 0.35 * directness
+                else:
+                    bonus = 0.18 * directness
+                combined[i] += bonus
+                bonus_total += bonus
+                breakdown["example_directness"] = directness
         breakdown["bonus"] = bonus_total
         breakdown["total"] = float(combined[i])
         breakdown["raw_semantic"] = float(sim_to_q[i])

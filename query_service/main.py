@@ -432,63 +432,56 @@ def _format_conversation_history(history: list[dict[str, str]], max_chars: int =
     return text[-max_chars:]
 
 
-def _last_history_user_question(history: list[dict[str, str]]) -> str:
-    fallback = ""
-    for turn in reversed(history or []):
-        if turn.get("role") != "user":
-            continue
-        content = re.sub(r"\s+", " ", str(turn.get("content") or "")).strip()
-        if not content:
-            continue
-        if not fallback:
-            fallback = content
-        if not _looks_like_followup_question(content):
-            return content
-    return fallback
+FOLLOWUP_RESOLUTION_SYSTEM_PROMPT = """
+너는 강의 질의응답 시스템의 후속질문 판별기다. 현재 질문이 이전 대화 문맥 없이는 대상을 알 수 없는지 판단하고,
+검색에 사용할 독립형 질문을 만든다.
 
+출력은 JSON만 사용한다.
+{
+  "is_followup": true/false,
+  "standalone_question": "검색에 사용할 한국어 질문",
+  "reason": "짧은 이유"
+}
 
-def _looks_like_followup_question(question: str) -> bool:
-    compact = re.sub(r"\s+", "", question or "")
-    if not compact:
-        return False
-    followup_terms = (
-        "그이유",
-        "왜",
-        "그건",
-        "그게",
-        "그거",
-        "그것",
-        "이건",
-        "이게",
-        "이거",
-        "이것",
-        "앞에서",
-        "방금",
-        "좀더",
-        "자세히",
-        "구체적",
-        "예시",
-        "그러면",
-        "그럼",
-    )
-    has_followup_marker = any(term in compact for term in followup_terms)
-    has_topic_hint = len(re.findall(r"[가-힣A-Za-z0-9]{2,}", question or "")) >= 3
-    return (len(compact) <= 18 and has_followup_marker) or (has_followup_marker and not has_topic_hint)
+판단 기준:
+- 질문 안에 주어, 대상, 슬라이드 번호, 장면, 개념명이 명시되어 있으면 독립 질문이다.
+- "그 그림", "이 내용", "방금 말한 것", "그럼 예시는?"처럼 지시어나 생략된 주어가 이전 대화를 가리키면 후속 질문이다.
+- "슬라이드 3에 나온 그림 설명해줘"처럼 질문 안에서 대상이 특정되면 후속 질문이 아니다.
+- "운영체제의 예시는 무엇인가?"처럼 "예시"가 있어도 대상이 명시되어 있으면 후속 질문이 아니다.
+- 후속 질문이면 이전 대화의 대상과 현재 질문의 요구를 합쳐 standalone_question을 만든다.
+- 후속 질문이 아니면 standalone_question은 현재 질문을 그대로 둔다.
+"""
 
 
 def _resolve_followup_question(question: str, conversation_history: Optional[list[dict[str, str]]] = None) -> str:
     question = (question or "").strip()
-    if not question or not _looks_like_followup_question(question):
+    if not question or not conversation_history:
         return question
-    previous_question = _last_history_user_question(conversation_history or [])
-    if not previous_question:
+
+    history = _format_conversation_history(conversation_history, max_chars=1800)
+    if not history:
         return question
-    compact = re.sub(r"\s+", "", question)
-    if "이유" in compact or "왜" in compact:
-        if previous_question.endswith("?"):
-            previous_question = previous_question[:-1].strip()
-        return f"{previous_question} 이유"
-    return f"{previous_question} {question}"
+    contents = f"이전 대화:\n{history}\n\n현재 질문:\n{question}\n"
+    try:
+        raw = _call_llm_raw(
+            contents,
+            FOLLOWUP_RESOLUTION_SYSTEM_PROMPT,
+            temperature=0.0,
+            max_tokens=512,
+        )
+    except Exception:
+        return question
+    m = re.search(r"\{[\s\S]*\}", raw or "")
+    if not m:
+        return question
+    try:
+        obj = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return question
+    standalone = re.sub(r"\s+", " ", str(obj.get("standalone_question") or "")).strip()
+    if not standalone:
+        return question
+    return standalone[:500]
 
 
 def _call_gemini_answer(

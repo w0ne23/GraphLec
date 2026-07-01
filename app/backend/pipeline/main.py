@@ -15,7 +15,7 @@ main.py
          G1B save_scene_structure      — scene 구조 저장 (P3B 결과 기반)
   [직렬] G2  fusion                    — 최종 통합
   [직렬] G3  graph_triples             — 그래프 Parquet 생성
-  [직렬] G4  lance_index               — fused → Parquet + LanceDB (Gemini 임베딩, stem 필터)
+  [직렬] G4  lance_index               — fused → Parquet + LanceDB (임베딩, stem 필터)
   [직렬] G5  graphrag_index            — fused → GraphRAG parquet workspace
   [직렬] G6  metadata                  — 강의 메타데이터 생성
   [직렬] G7  recommender_index         — 추천 인덱스 생성
@@ -1468,15 +1468,21 @@ def generate_graph_triples(args, output_dir: Path, slides_dir: Path) -> dict:
 
 def build_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     """fused.json → 청크 임베딩 → Parquet + LanceDB (단일 테이블, stem 필터)."""
-    from .lance_ingest import default_lance_root, ingest_stem_to_lance
+    from .lance_ingest import default_lance_root, ingest_stem_to_lance, safe_index_label
 
     stem = Path(args.input).stem
     from .config import output_paths
 
     paths = output_paths(stem, output_dir, slides_dir)
     fused_path = paths["fused"]
-    lance_root = Path(args.lance_root) if getattr(args, "lance_root", None) else default_lance_root()
-    parquet_path = output_dir / f"{stem}_chunks_lance.parquet"
+    index_label = safe_index_label(getattr(args, "lance_index_label", None))
+    if getattr(args, "lance_root", None):
+        lance_root = Path(args.lance_root)
+    else:
+        default_root = default_lance_root()
+        lance_root = default_root.parent / f"{default_root.name}_{index_label}" if index_label else default_root
+    suffix = f"_{index_label}" if index_label else ""
+    parquet_path = output_dir / f"{stem}_chunks_lance{suffix}.parquet"
 
     if _is_done(parquet_path, "G4 lance_index — Lance 인덱스 생성", args.force):
         return {"elapsed": 0.0, "parquet_path": str(parquet_path), "skipped": True}
@@ -1484,13 +1490,21 @@ def build_lance_index(args, output_dir: Path, slides_dir: Path) -> dict:
     if not fused_path.exists():
         raise FileNotFoundError(f"G4 lance_index — fused 파일 없음. G2 fusion — 데이터 퓨전이 필요합니다: {fused_path}")
 
-    _banner("G4 lance_index — LanceDB 인덱스  (Gemini 임베딩 + lance_ingest)")
+    embedding_provider = getattr(args, "embedding_provider", "openai")
+    embedding_model = getattr(args, "embedding_model", None)
+    embedding_dimensions = getattr(args, "embedding_dimensions", None)
+    label_text = f", label={index_label}" if index_label else ""
+    _banner(f"G4 lance_index — LanceDB 인덱스  ({embedding_provider} 임베딩 + lance_ingest{label_text})")
     t0 = time.time()
     result = ingest_stem_to_lance(
         stem=stem,
         fused_path=fused_path,
         output_dir=output_dir,
         lance_root=lance_root,
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model,
+        embedding_dimensions=embedding_dimensions,
+        index_label=index_label,
     )
     elapsed = time.time() - t0
     cnt = result.get("count", 0)
@@ -2017,6 +2031,28 @@ def get_parser():
         "--lance-root",
         default=None,
         help="LanceDB 저장 경로 (기본: 환경변수 GRAPHLEC_LANCE_ROOT 또는 data/lancedb)",
+    )
+    parser.add_argument(
+        "--embedding-provider",
+        choices=["gemini", "openai"],
+        default=os.getenv("GRAPHLEC_EMBEDDING_PROVIDER", "openai"),
+        help="G4 Lance 인덱스 임베딩 provider (기본: openai)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        default=None,
+        help="G4 Lance 인덱스 임베딩 모델 (기본: provider별 기본값)",
+    )
+    parser.add_argument(
+        "--embedding-dimensions",
+        type=int,
+        default=None,
+        help="OpenAI 임베딩 차원 축소 옵션. 미지정 시 모델 기본 차원 사용",
+    )
+    parser.add_argument(
+        "--lance-index-label",
+        default=None,
+        help="별도 실험 인덱스 label. 지정하면 parquet/manifest 파일명에 suffix로 붙음",
     )
     parser.add_argument("--skip-graphrag-index", action="store_true",
                         help="G5 graphrag_index GraphRAG parquet 인덱스 생성 스킵")

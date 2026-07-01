@@ -253,7 +253,7 @@ def pipeline_process(
                         "--slides",       str(slides_dir),
                         "--skip-neo4j",
                         "--metadata-dir", str(output_dir / "metadata"),
-                        "--lance-root",   str(output_dir / "lancedb"),
+                        "--lance-root",   os.getenv("GRAPHLEC_LANCE_ROOT", str(output_dir / "lancedb")),
                         "--lecture-id",   lecture_id,
                     ] + (["--title", title] if title else [])
                       + (["--uploaded-at", uploaded_at] if uploaded_at else []))

@@ -47,6 +47,8 @@ services:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GRAPHLEC_EMBEDDING_PROVIDER=${GRAPHLEC_EMBEDDING_PROVIDER:-openai}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       - QUERY_SERVICE_LLM_PROVIDER=${QUERY_SERVICE_LLM_PROVIDER:-gemini}
       - QUERY_SERVICE_OPENAI_MODEL=${QUERY_SERVICE_OPENAI_MODEL:-gpt-5.4}
       - NEO4J_URI=bolt://neo4j:7687
@@ -56,6 +58,7 @@ services:
     volumes:
       - lance_data:/lance
       - ./query_service:/app/query_service
+      - ./app/backend/pipeline:/app/pipeline
     command:
       - uvicorn
       - query_service.main:app
@@ -84,6 +87,8 @@ services:
       - GOOGLE_API_KEY_2=${GOOGLE_API_KEY_2}
       - GRAPHRAG_API_KEY=${GRAPHRAG_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GRAPHLEC_EMBEDDING_PROVIDER=${GRAPHLEC_EMBEDDING_PROVIDER:-openai}
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - XAI_API_KEY=${XAI_API_KEY:-}
       - XAI_BASE_URL=${XAI_BASE_URL:-https://api.x.ai/v1}
