@@ -166,6 +166,7 @@ def _fallback_query_analysis(
     inferred = [term for term in inferred if _normalize_term(term) not in {_normalize_term(m) for m in matched}]
     search_text = " ".join(matched + inferred) or query
     focus_concept = matched[0] if len(matched) == 1 and matched[0] in available_keywords else None
+    _has_duration = any(term in query for term in ("짧은", "짧게", "분 이내", "분 이하", "분 내외"))
     conditions = {
         "issue_free": False,
         "prefers_visual": any(term in query for term in _VISUAL_CONDITION_TERMS),
@@ -173,6 +174,8 @@ def _fallback_query_analysis(
         "prefers_slow_speech": any(term in query for term in _DELIVERY_CONDITION_TERMS),
         "prefers_listenability": any(term in query for term in _DELIVERY_CONDITION_TERMS),
         "prefers_recency": any(term in query for term in _RECENCY_CONDITION_TERMS),
+        "query_type": "condition_first" if _has_duration else "topic_browse",
+        "query_specificity": "broad",
     }
     if subdomain:
         conditions["subdomain"] = subdomain
@@ -225,7 +228,9 @@ def analyze_query(
 {{
   "query_keywords": ["원본 질의 핵심 용어1", ...],
   "inferred_keywords": ["확장 연관 용어1", ...],
-  "intent": "recommend 또는 list_by_topic",
+  "intent": "recommend",
+  "query_type": "topic_browse | concept_depth | condition_first | related_search",
+  "query_specificity": "broad | specific",
   "domain": "도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
@@ -239,11 +244,20 @@ def analyze_query(
   }}
 }}
 
-[intent]: 질의 목적 분류
-  - "recommend": 특정 강의를 추천받고 싶은 일반 질의
-    예) "가상 메모리 자세히 설명하는 강의 추천해줘"
-  - "list_by_topic": 특정 주제와 관련된 강의를 넓게/모두 보고 싶은 질의
-    예) "딥러닝 관련 강의 모두 알려줘", "운영체제 관련 강의 다 보여줘", "컴퓨터공학 강의 뭐 있어?"
+[query_type]: 질의 유형 분류
+  - "topic_browse": 넓은 주제 탐색 — 여러 강의 나와도 됨
+    예) "운영체제 강의 추천", "AI 강의 뭐 있어", "미적분 강의 알려줘"
+  - "concept_depth": 특정 개념의 원리·동작 방식 심화 요청
+    예) "가상 메모리 동작 원리 자세히", "커널 구조 깊게 설명하는 강의"
+  - "condition_first": 길이·최신성 등 조건이 명시적 주 요청
+    예) "짧은 AI 강의", "30분 이내 머신러닝 강의", "최근 올라온 딥러닝 강의"
+  - "related_search": 특정 개념이 포함된 강의를 탐색 — 핵심 주제가 아닌 연관 탐색
+    예) "커널 다루는 강의 있어?", "TCP 언급하는 강의 있나요?"
+
+[query_specificity]: 질의어 특이성
+  - "broad": 분야·주제 수준의 일반 용어 — 여러 강의에서 공통으로 다룰 법한 개념
+  - "specific": 특정 알고리즘명·인물·사건·고유 기법처럼 일부 강의만 다룰 법한 용어
+  - 판단 기준: query_keywords가 교과서 목차 수준이면 broad, 특정 챕터나 인물 이름 수준이면 specific
 
 [query_keywords]: 원본 질의에서 직접 등장하는 핵심 학술·기술 용어
 - "찾아줘", "알려줘", "강의", "어떻게" 같은 메타·구어체 표현 제외
@@ -304,6 +318,12 @@ def analyze_query(
     duration_max_sec  = parsed.get("duration_max_sec") or None
     conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
 
+    _valid_query_types = {"topic_browse", "concept_depth", "condition_first", "related_search"}
+    query_type = parsed.get("query_type") or "topic_browse"
+    if query_type not in _valid_query_types:
+        query_type = "topic_browse"
+    query_specificity = "specific" if parsed.get("query_specificity") == "specific" else "broad"
+
     normalized_conditions = {
         "issue_free":            bool(conditions.get("issue_free")),
         "prefers_visual":        bool(conditions.get("prefers_visual")),
@@ -311,6 +331,8 @@ def analyze_query(
         "prefers_slow_speech":   bool(conditions.get("prefers_slow_speech")),
         "prefers_listenability": bool(conditions.get("prefers_listenability")),
         "prefers_recency":       bool(conditions.get("prefers_recency")),
+        "query_type":            query_type,
+        "query_specificity":     query_specificity,
     }
     query_keywords    = _content_terms_only(query_keywords, normalized_conditions)
     inferred_keywords = _content_terms_only(inferred_keywords, normalized_conditions)

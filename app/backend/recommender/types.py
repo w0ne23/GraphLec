@@ -126,6 +126,8 @@ class QueryContext:
     subdomain:              Optional[str]
     focus_concept:          Optional[str]
     duration_max_sec:       Optional[int]
+    query_type:             str   # topic_browse | concept_depth | condition_first | related_search
+    query_specificity:      str   # broad | specific
     comparison_intent:      bool
     issue_free_preference:  bool
     visual_preference:      bool

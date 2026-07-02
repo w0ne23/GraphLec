@@ -80,7 +80,11 @@ class RecommenderConfig:
     # 파편화 패널티 강도 λ
     FRAG_PENALTY_WEIGHT: float = 0.10
     # 포함 임계값 — score >= ABS_MIN_SCORE인 강의만 결과에 포함
-    ABS_MIN_SCORE:           float = 0.22
+    ABS_MIN_SCORE:                  float = 0.22
+    # condition_first 쿼리: 재정렬 전 content 최소 임계값
+    CONDITION_FIRST_MIN_CONTENT:    float = 0.30
+    # specific 쿼리: BM25 미매칭 시 점수 감산 비율
+    SPECIFICITY_BM25_MISS_PENALTY:  float = 0.30
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60
     Q_KW_MISMATCH_PENALTY:   float = 0.60

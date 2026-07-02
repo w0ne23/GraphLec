@@ -196,6 +196,8 @@ class Recommender:
             focus_concept, focus_matched = self._concept_index.canonicalize(focus_concept)
             if focus_matched:
                 canonical_matches[_normalize_term(raw_focus_concept)] = focus_concept
+        query_type        = conditions.get("query_type", "topic_browse")
+        query_specificity = conditions.get("query_specificity", "broad")
         subdomain = _normalize_subdomain(conditions.get("subdomain"))
         if not subdomain:
             inferred_domain, inferred_subdomain = _infer_domain_filters(
@@ -249,7 +251,8 @@ class Recommender:
         print(f"[발화 속도]   {'빠르지 않음 선호' if slow_speech_preference else '없음'}")
         print(f"[최신성]     {'최근 업로드 선호' if recency_preference else '없음'}")
         if duration_max_sec:
-            print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초) — 조건 boost + warning 적용")
+            print(f"[질의 유형]   {query_type} / {query_specificity}")
+        print(f"[길이 조건]   기준 {duration_max_sec//60}분 ({duration_max_sec}초)" if duration_max_sec else "")
         print()
 
         return QueryContext(
@@ -273,6 +276,8 @@ class Recommender:
             listenability_preference = listenability_preference,
             slow_speech_preference = slow_speech_preference,
             recency_preference = recency_preference,
+            query_type        = query_type,
+            query_specificity = query_specificity,
         )
 
     def _all_candidate_ids(self) -> list[str]:
@@ -327,10 +332,12 @@ class Recommender:
 
         return preferred or None
 
-    def _get_initial_candidate_ids(self, ctx: QueryContext, query_vec: list[float]) -> list[str]:
+    def _get_initial_candidate_ids(
+        self, ctx: QueryContext, query_vec: list[float]
+    ) -> tuple[list[str], set[str]]:
         """
         BM25 lexical 후보와 vector semantic 후보를 RRF로 통합한다.
-        후보가 너무 적으면 기존 전체 후보 방식으로 되돌린다.
+        반환: (candidate_ids, bm25_matched_ids)
         """
         preferred_ids = self._metadata_preferred_ids(ctx)
         bm25_candidates = self._retrieve_bm25_candidates(
@@ -364,6 +371,10 @@ class Recommender:
                 [video_id for video_id, _ in pref_vector_candidates],
             ])
 
+        bm25_ids: set[str] = {vid for vid, _ in bm25_candidates}
+        if pref_bm25_candidates:
+            bm25_ids |= {vid for vid, _ in pref_bm25_candidates}
+
         candidate_ids = self._rrf_fuse(
             rankings,
             top_n=self.cfg.HYBRID_CANDIDATE_TOP_N,
@@ -380,15 +391,7 @@ class Recommender:
                 f"Vector {len(pref_vector_candidates)}개)"
             )
 
-        if len(candidate_ids) < self.cfg.MIN_HYBRID_CANDIDATES:
-            all_ids = self._all_candidate_ids()
-            print(
-                f"[후보 검색] RRF 후보 부족({len(candidate_ids)}개) — "
-                f"전체 후보 {len(all_ids)}개로 fallback"
-            )
-            return all_ids
-
-        return candidate_ids
+        return candidate_ids, bm25_ids
 
     def _query_lexical_terms(self, ctx: QueryContext) -> Counter:
         """
@@ -852,6 +855,7 @@ class Recommender:
         candidate_ids: list[str],
         ctx: QueryContext,
         query_vec: list[float],
+        bm25_ids: Optional[set[str]] = None,
     ) -> list[tuple[LectureMetadata, dict]]:
         query_concepts = set(ctx.query_keywords) | set(ctx.inferred_keywords)
         query_terms = self._query_lexical_terms(ctx)
@@ -905,6 +909,15 @@ class Recommender:
             else:
                 detail["topic_score_cap"] = 1.0
                 detail["topic_cap_applied"] = False
+            if (
+                ctx.query_specificity == "specific"
+                and bm25_ids is not None
+                and video_id not in bm25_ids
+            ):
+                detail["score"] = round(detail["score"] * self.cfg.SPECIFICITY_BM25_MISS_PENALTY, 4)
+                detail["specificity_penalty_applied"] = True
+            else:
+                detail["specificity_penalty_applied"] = False
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -1011,8 +1024,16 @@ class Recommender:
                     query_vec = _embed(ctx.search_text)
                 except Exception as exc:
                     print(f"  ⚠ 질의 임베딩 실패 — BM25/metadata 기반으로 계속 진행: {exc}")
-            candidate_ids = self._get_initial_candidate_ids(ctx, query_vec)
-            candidates = self._rank_candidates(candidate_ids, ctx, query_vec)
+            candidate_ids, bm25_ids = self._get_initial_candidate_ids(ctx, query_vec)
+            candidates = self._rank_candidates(candidate_ids, ctx, query_vec, bm25_ids)
+
+            # ── condition_first: content 필터 후 duration 재정렬 ─────────
+            if ctx.query_type == "condition_first" and ctx.duration_max_sec:
+                candidates = [
+                    (lec, d) for lec, d in candidates
+                    if d.get("content_score", 0.0) >= self.cfg.CONDITION_FIRST_MIN_CONTENT
+                ]
+                candidates.sort(key=lambda x: x[0].duration_sec)
 
             # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
             self._print_candidate_scores(candidates)
