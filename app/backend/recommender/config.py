@@ -85,6 +85,10 @@ class RecommenderConfig:
     CONDITION_FIRST_MIN_CONTENT:    float = 0.30
     # specific 쿼리: BM25 미매칭 시 점수 감산 비율
     SPECIFICITY_BM25_MISS_PENALTY:  float = 0.30
+    # concept_depth 쿼리: 핵심/키워드 수준 미만 강의 점수 감산 비율
+    CONCEPT_DEPTH_WEAK_TOPIC_PENALTY: float = 0.45
+    # related_search 쿼리: 완화된 최소 임계값
+    RELATED_SEARCH_ABS_MIN_SCORE:   float = 0.13
     # 패널티
     DOMAIN_MISMATCH_PENALTY: float = 0.60
     Q_KW_MISMATCH_PENALTY:   float = 0.60

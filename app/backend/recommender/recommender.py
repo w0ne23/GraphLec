@@ -918,6 +918,14 @@ class Recommender:
                 detail["specificity_penalty_applied"] = True
             else:
                 detail["specificity_penalty_applied"] = False
+            if (
+                ctx.query_type == "concept_depth"
+                and detail.get("topic_match_level") not in {"core", "keyword_high"}
+            ):
+                detail["score"] = round(detail["score"] * self.cfg.CONCEPT_DEPTH_WEAK_TOPIC_PENALTY, 4)
+                detail["concept_depth_penalty_applied"] = True
+            else:
+                detail["concept_depth_penalty_applied"] = False
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -944,19 +952,21 @@ class Recommender:
         self,
         candidates: list[tuple[LectureMetadata, dict]],
         top_k: int,
+        min_score: Optional[float] = None,
     ) -> list[RecommendResult]:
         if not candidates:
             return []
 
+        effective_min = min_score if min_score is not None else self.cfg.ABS_MIN_SCORE
         max_score = candidates[0][1]["score"]
-        if max_score < self.cfg.ABS_MIN_SCORE:
-            print(f"  → top 점수 {max_score:.3f} < ABS_MIN_SCORE {self.cfg.ABS_MIN_SCORE} — 결과 없음")
+        if max_score < effective_min:
+            print(f"  → top 점수 {max_score:.3f} < ABS_MIN_SCORE {effective_min} — 결과 없음")
             return []
 
         results = []
         for lec, detail in candidates:
             score = detail["score"]
-            if score < self.cfg.ABS_MIN_SCORE:
+            if score < effective_min:
                 break
 
             topic_level = detail.get("topic_match_level", "none")
@@ -1037,7 +1047,12 @@ class Recommender:
 
             # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
             self._print_candidate_scores(candidates)
-            return self._classify_tiers(candidates, top_k)
+            effective_min_score = (
+                self.cfg.RELATED_SEARCH_ABS_MIN_SCORE
+                if ctx.query_type == "related_search"
+                else self.cfg.ABS_MIN_SCORE
+            )
+            return self._classify_tiers(candidates, top_k, min_score=effective_min_score)
         finally:
             if restored_cfg:
                 for key, value in restored_cfg.items():
