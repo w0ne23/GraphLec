@@ -24,13 +24,30 @@ import argparse
 import random
 import time
 from pathlib import Path
-from collections import Counter
 
 from neo4j import GraphDatabase
 from google import genai
 from dotenv import load_dotenv
 
 from .config import GEMINI_GENERATIVE_MODEL
+from .metadata_graph import (
+    _is_valid_concept,
+    _normalize,
+    _norm_text,
+    _stringify_for_match,
+    _to_float,
+    load_graph_artifacts_for_metadata,
+    _log_graph_artifact_summary,
+    build_graph_keyword_candidates,
+    _log_graph_keyword_candidates,
+    build_graph_candidate_alias_map,
+    _graph_keyword_debug_summary,
+    _merge_graph_keywords_with_legacy,
+    build_graph_concept_roles,
+    _canonicalize_graph_name_list,
+    build_graph_concept_relations,
+    build_graph_role_scores,
+)
 
 load_dotenv(override=True)
 
@@ -47,6 +64,13 @@ MODEL   = GEMINI_GENERATIVE_MODEL
 GEMINI_METADATA_MAX_ATTEMPTS = int(os.getenv("GRAPHLEC_STAGE8_GEMINI_MAX_ATTEMPTS", "5"))
 GEMINI_METADATA_BACKOFF_BASE_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKOFF_BASE_SEC", "10"))
 GEMINI_METADATA_BACKOFF_MAX_SEC = float(os.getenv("GRAPHLEC_STAGE8_GEMINI_BACKOFF_MAX_SEC", "90"))
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _sample_uniform(texts: list[str], n: int) -> list[str]:
@@ -139,7 +163,6 @@ CORE_FREQ_THRESHOLD  = 0.25
 MAX_COMMUNITIES_IN_METADATA = int(os.getenv("GRAPHLEC_METADATA_MAX_COMMUNITIES", "12"))
 MAX_COMMUNITY_SUMMARY_CHARS = int(os.getenv("GRAPHLEC_METADATA_COMMUNITY_SUMMARY_CHARS", "800"))
 MAX_VISUAL_CONCEPT_TERMS = int(os.getenv("GRAPHLEC_METADATA_MAX_VISUAL_TERMS", "80"))
-_VISUAL_TERM_RE = re.compile(r"[0-9A-Za-z가-힣_#+./-]+")
 _KOREAN_SYLLABLE_RE = re.compile(r"[가-힣]")
 METADATA_DOMAIN_ALIASES = {
     "eng": "engineering",
@@ -636,19 +659,7 @@ def collect_visual_concept_terms(fused: dict, concept_terms: list[str]) -> list[
             if len(matched) >= MAX_VISUAL_CONCEPT_TERMS:
                 break
 
-    if matched:
-        return matched
-
-    # concept 후보와 직접 매칭되지 않는 image_only 슬라이드를 위한 fallback.
-    fallback = []
-    for token in _VISUAL_TERM_RE.findall(structure_text):
-        if token in seen or not _is_valid_concept(token):
-            continue
-        seen.add(token)
-        fallback.append(token)
-        if len(fallback) >= min(MAX_VISUAL_CONCEPT_TERMS, 30):
-            break
-    return fallback
+    return matched
 
 
 def collect_graphrag_communities(output_dir: Path) -> list[dict]:
@@ -715,35 +726,6 @@ def as_float(value, default=0.0):
     except (TypeError, ValueError):
         return default
 
-
-def collect_slide_role_freq(
-    fused: dict,
-    all_names: set[str],
-) -> dict[str, dict[str, int]]:
-    """
-    개념명 → 슬라이드 role별 텍스트 등장 횟수
-    반환: {개념명: {"core": n, "elaborated": n, "supplementary": n, "other": n}}
-
-    concept_roles 분류 시 슬라이드 내 역할 분포 판단에 사용
-    """
-    TRACKED_ROLES = ("core", "elaborated", "supplementary")
-    result = {n: {"core": 0, "elaborated": 0, "supplementary": 0, "other": 0}
-              for n in all_names}
-
-    for slide in fused_scene_entries(fused):
-        role = slide.get("role", "other")
-        role_key = role if role in TRACKED_ROLES else "other"
-
-        text = " ".join(filter(None, [
-            slide.get("title", ""),
-            slide.get("slide_text", ""),
-        ]))
-
-        for name in all_names:
-            if name in text:
-                result[name][role_key] += text.count(name)
-
-    return result
 
 
 # ── Neo4j: Concept 노드 degree 조회 ──────────────────────────────────────────
@@ -825,13 +807,6 @@ def fetch_concept_relations(
 
 
 # ── 키워드 점수 산출 ───────────────────────────────────────────────────────────
-
-def _normalize(d: dict[str, float]) -> dict[str, float]:
-    if not d:
-        return d
-    max_v = max(d.values()) or 1.0
-    return {k: v / max_v for k, v in d.items()}
-
 
 def _count_freq_split(
     name: str,
@@ -976,75 +951,6 @@ def score_keywords(
 
 # ── concept_roles 분류 ────────────────────────────────────────────────────────
 
-# ── 언어 규칙 기반 노이즈 필터 ───────────────────────────────────────────────
-#
-# 설계 원칙:
-#   하드코딩 도메인 불용어 목록(KOREAN_STOPWORDS) 제거.
-#   대신 두 가지 자동 필터를 사용한다:
-#
-#   1) _is_valid_concept  — 순수 언어 규칙 (길이, 동사 어미, 숫자, URL)
-#                           어떤 도메인·강의에도 동일하게 적용 가능
-#
-#   2) _is_background_noise — 신호 기반 자동 탐지 (계산된 norm 값 필요)
-#                           슬라이드에만 등장하고 전사·KG에 없는 항목
-#                           = 워터마크, 반복 헤더, 출처 표기 등
-#                           어떤 도메인이든 '실제로 강의한 내용'과
-#                           '슬라이드 장식'을 신호로 구분
-
-# 동사 어미·조사 패턴 (한국어 언어 규칙 — 도메인 무관)
-_NOISE_SUFFIX_RE = re.compile(
-    r"(하고|하며|하여|하는|하면서|하고자|이라고|이며|이나|이고"
-    r"|대해|에서|으로|에게|으로써|이다|아니다|있다|없다|한다"
-    r"|하거나|하지|하면|이지|하니|않고|이후|이전"
-    r"|있도록|있음|없던|만든|만드|된|될|할|함|함으로|함께"
-    r"|하$|않는다$|아님$|준다$|포함한$|보여주$|느끼$|제공받$"
-    r"|반영하$|전달하$|구현하$|쫓아가$)$"
-)
-
-# 영어 기능어 (문법적 역할만 하는 단어 — 도메인 무관)
-_ENGLISH_STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "need", "dare", "ought",
-    "and", "or", "but", "if", "in", "on", "at", "to", "for", "of",
-    "with", "by", "from", "as", "into", "about",
-}
-
-
-def _is_valid_concept(name: str) -> bool:
-    """
-    언어 규칙만으로 명백한 노이즈를 걸러내는 필터.
-    도메인·강의 무관하게 적용 가능한 규칙만 포함.
-
-    제거 대상:
-      - 길이 2자 미만
-      - 숫자만으로 구성된 토큰 (예: "001", "123")
-      - URL 잔재 (예: "proprofsurvey.com", "tistory.com")
-      - 동사 어미·조사 패턴으로 끝나는 한글 토큰
-      - 영어 기능어 (소문자 단독 단어)
-    """
-    name = name.strip()
-    if len(name) < 2:
-        return False
-
-    # 숫자만으로 구성
-    if re.fullmatch(r"\d+", name):
-        return False
-
-    # URL 잔재 (점+도메인 패턴)
-    if re.search(r"\.(com|kr|org|net|io|tistory|brunch|github)", name):
-        return False
-
-    # 영어 소문자 단독 단어 → 기능어 체크
-    if re.fullmatch(r"[a-z]+", name):
-        return name not in _ENGLISH_STOPWORDS
-
-    # 동사 어미·조사 패턴
-    if _NOISE_SUFFIX_RE.search(name):
-        return False
-
-    return True
-
 
 def _is_background_noise(
     name: str,
@@ -1078,10 +984,8 @@ def _is_background_noise(
 def classify_concept_roles(
     all_names:       set[str],
     norm_slide_freq: dict[str, float],
-    norm_trans_freq: dict[str, float],
     norm_emph:       dict[str, float],
     norm_cent:       dict[str, float],
-    slide_role_freq: dict[str, dict[str, int]],
 ) -> dict[str, list[str]]:
     """
     각 개념을 core / introduced 중 하나로 분류
@@ -1099,7 +1003,6 @@ def classify_concept_roles(
 
     for name in all_names:
         s_freq = norm_slide_freq.get(name, 0.0)
-        t_freq = norm_trans_freq.get(name, 0.0)
         emph   = norm_emph.get(name, 0.0)
         cent   = norm_cent.get(name, 0.0)
 
@@ -1157,16 +1060,16 @@ def collect_learning_objectives(fused: dict) -> list[str]:
     return objectives
 
 
-# ── difficulty 추정 ────────────────────────────────────────────────────────────
+# ── concept complexity 추정 ───────────────────────────────────────────────────
 
-def estimate_difficulty(
+def estimate_concept_complexity(
     concept_roles: dict[str, list[str]],
     norm_cent:     dict[str, float],
 ) -> str:
     """
-    core 개념들의 평균 KG 중심성으로 난이도 추정
+    core 개념들의 평균 그래프 중심성으로 개념 복잡도 추정
 
-    직관: core 개념이 KG에서 촘촘하게 연결될수록 → 개념 밀도 높은 강의 → 어려움
+    직관: core 개념이 그래프에서 촘촘하게 연결될수록 → 개념 밀도 높은 강의
     low_intro_ratio 제거: 개론 강의일수록 예시가 많아 저중심성 introduced가 많아지므로
                          오히려 역방향으로 작동하는 구조적 결함 있음
 
@@ -1182,17 +1085,17 @@ def estimate_difficulty(
     )
 
     if avg_core_cent >= 0.65:
-        difficulty = "advanced"
+        concept_complexity = "high"
     elif avg_core_cent >= 0.35:
-        difficulty = "intermediate"
+        concept_complexity = "medium"
     else:
-        difficulty = "beginner"
+        concept_complexity = "low"
 
     print(
-        f"[디버그] difficulty: {difficulty}  "
+        f"[디버그] concept_complexity: {concept_complexity}  "
         f"(core={len(cores)}, avg_core_cent={avg_core_cent:.3f})"
     )
-    return difficulty
+    return concept_complexity
 
 
 # ── LLM 호출 ──────────────────────────────────────────────────────────────────
@@ -1332,6 +1235,322 @@ def generate_summary(
     return _gemini(prompt)
 
 
+_COMMUNITY_BOILERPLATE_TERMS = (
+    "법적",
+    "규제",
+    "평판",
+    "분쟁",
+    "악의적",
+    "위반",
+    "리스크",
+    "위험",
+)
+
+
+def _clean_community_summary(summary: str, max_chars: int = 360) -> str:
+    sentences = re.split(r"(?<=[.!?。！？])\s+|(?<=다\.)\s*", str(summary or "").strip())
+    kept = []
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if any(term in sentence for term in _COMMUNITY_BOILERPLATE_TERMS):
+            continue
+        kept.append(sentence)
+    cleaned = " ".join(kept) if kept else str(summary or "").strip()
+    return cleaned[:max_chars].strip()
+
+
+def _select_summary_community_reports(
+    artifacts: dict,
+    concept_roles: dict[str, list[str]],
+    limit: int = 5,
+) -> list[dict]:
+    reports = artifacts.get("graphrag", {}).get("community_reports", {}).get("rows", []) or []
+    core_names = concept_roles.get("core", []) or []
+    introduced_names = concept_roles.get("introduced", []) or []
+    terms = core_names + introduced_names[:8]
+    if not reports or not terms:
+        return []
+
+    selected = []
+    for report in reports:
+        title = str(report.get("title") or "").strip()
+        summary = _clean_community_summary(str(report.get("summary") or ""))
+        if not title and not summary:
+            continue
+        haystack = _norm_text(" ".join([title, summary, _stringify_for_match(report.get("findings"))]))
+        mention_score = 0.0
+        for index, term in enumerate(terms):
+            term_norm = _norm_text(term)
+            if term_norm and term_norm in haystack:
+                mention_score += 2.0 if index < len(core_names) else 1.0
+        if mention_score <= 0:
+            continue
+        selected.append({
+            "title": title,
+            "summary": summary,
+            "rank": _to_float(report.get("rank")),
+            "score": mention_score + _to_float(report.get("rank")) * 0.2,
+        })
+
+    selected.sort(key=lambda row: row["score"], reverse=True)
+    return selected[:limit]
+
+
+def generate_graph_first_summary(
+    *,
+    artifacts: dict,
+    keyword_candidates: list[dict],
+    concept_roles: dict[str, list[str]],
+    concept_relations: list[dict],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+) -> str:
+    core_names = concept_roles.get("core", [])[:10]
+    introduced_names = concept_roles.get("introduced", [])[:12]
+    top_candidates = [
+        str(candidate.get("keyword") or "").strip()
+        for candidate in keyword_candidates[:12]
+        if str(candidate.get("keyword") or "").strip()
+    ]
+    relation_lines = [
+        f"{rel.get('from')} -[{rel.get('type')}]-> {rel.get('to')}"
+        for rel in concept_relations[:14]
+        if rel.get("from") and rel.get("to")
+    ]
+    community_reports = _select_summary_community_reports(
+        artifacts,
+        concept_roles,
+    )
+    community_block = "\n".join(
+        f"- {report.get('title')}: {report.get('summary')}"
+        for report in community_reports
+    )
+
+    MAX_PER_SLIDE = 120
+    slide_block = " / ".join(
+        s.strip()[:MAX_PER_SLIDE] for s in core_slide_texts if s.strip()
+    )[:1200]
+
+    n_sample = min(24, len(core_trans_texts))
+    sampled_trans = _sample_uniform(core_trans_texts, n_sample)
+    trans_block = " ".join(sampled_trans)[:1200]
+
+    prompt = f"""아래는 강의의 그래프 기반 메타데이터와 텍스트 근거다.
+
+그래프 핵심 개념:
+{', '.join(core_names)}
+
+그래프 보조 개념:
+{', '.join(introduced_names)}
+
+그래프 상위 후보:
+{', '.join(top_candidates)}
+
+주요 개념 관계:
+{chr(10).join(relation_lines)}
+
+커뮤니티 요약:
+{community_block}
+
+텍스트 근거 슬라이드:
+{slide_block}
+
+텍스트 근거 전사:
+{trans_block}
+
+위 정보를 바탕으로 강의 내용을 3문장으로 요약하라.
+
+작성 규칙:
+- 그래프 핵심 개념과 관계를 우선 반영하라.
+- 텍스트 근거는 그래프 정보가 실제 강의 내용과 맞는지 보조 검증용으로만 사용하라.
+- 커뮤니티 보고서의 법적/평판/리스크 관련 boilerplate는 요약하지 마라.
+- 단순 키워드 나열이 아니라 강의의 핵심 흐름과 개념 간 관계가 드러나도록 작성하라.
+- 한국어로 작성하고 설명 없이 요약문만 출력하라.
+"""
+
+    print(f"\n[디버그] graph-first 요약 입력 core={core_names}")
+    print(f"[디버그] graph-first 요약 관계 수: {len(relation_lines)}")
+    print(f"[디버그] graph-first 요약 community report 수: {len(community_reports)}")
+    print(f"[디버그] graph-first slide_block ({len(slide_block)}자):\n{slide_block[:400]}")
+    print(f"[디버그] graph-first trans_block ({len(trans_block)}자):\n{trans_block[:240]}\n")
+    return _gemini(prompt)
+
+
+def _fallback_summary_from_graph(concept_roles: dict[str, list[str]]) -> str:
+    core = [name for name in concept_roles.get("core", []) if str(name or "").strip()]
+    introduced = [name for name in concept_roles.get("introduced", []) if str(name or "").strip()]
+    primary = ", ".join(core[:5])
+    secondary = ", ".join(introduced[:5])
+    if primary and secondary:
+        return (
+            f"이 강의는 {primary}를 중심으로 관련 개념을 설명한다. "
+            f"또한 {secondary}를 함께 다루며 핵심 개념 간 관계를 정리한다."
+        )
+    if primary:
+        return f"이 강의는 {primary}를 중심으로 핵심 개념과 관계를 설명한다."
+    return "이 강의는 그래프 기반 핵심 개념과 관계를 중심으로 내용을 설명한다."
+
+
+def generate_graph_first_summary_with_fallback(
+    *,
+    artifacts: dict,
+    keyword_candidates: list[dict],
+    concept_roles: dict[str, list[str]],
+    concept_relations: list[dict],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+    concept_degrees: dict[str, int],
+) -> tuple[str, str]:
+    try:
+        return generate_graph_first_summary(
+            artifacts=artifacts,
+            keyword_candidates=keyword_candidates,
+            concept_roles=concept_roles,
+            concept_relations=concept_relations,
+            core_slide_texts=core_slide_texts,
+            core_trans_texts=core_trans_texts,
+        ), "graph_first"
+    except Exception as exc:
+        print(f"[경고] graph-first summary 생성 실패 — 기존 텍스트 요약으로 fallback: {exc}")
+
+    try:
+        return generate_summary(core_slide_texts, core_trans_texts, concept_degrees), "legacy_text_fallback"
+    except Exception as exc:
+        print(f"[경고] legacy summary fallback 실패 — 그래프 핵심 개념 기반 안전 요약 사용: {exc}")
+        return _fallback_summary_from_graph(concept_roles), "graph_core_safe_fallback"
+
+
+
+def try_generate_graph_first_metadata_parts(
+    *,
+    stem: str,
+    output_dir: Path,
+    fused: dict,
+    concept_degrees: dict[str, int],
+    emphasized: dict[str, float],
+    slide_texts: list[str],
+    transcript_texts: list[str],
+    core_slide_texts: list[str],
+    core_trans_texts: list[str],
+    duration_sec: float,
+) -> dict | None:
+    """
+    Graph-first 추천 메타데이터 생성 진입점.
+
+    GraphRAG 파일 산출물로 keywords, concept_roles, concept_relations를 구성한다.
+    summary는 아직 기존 텍스트 요약 경로를 재사용한다.
+    """
+    artifacts = load_graph_artifacts_for_metadata(stem, output_dir, fused, emphasized)
+    _log_graph_artifact_summary(stem, artifacts)
+    keyword_candidates = build_graph_keyword_candidates(
+        artifacts,
+        slide_texts,
+        transcript_texts,
+    )
+    _log_graph_keyword_candidates(stem, keyword_candidates)
+    alias_map = build_graph_candidate_alias_map(keyword_candidates)
+    if alias_map:
+        preview = list(alias_map.items())[:8]
+        print(
+            f"[{stem}] graph variant aliases {len(alias_map)}개 감지: "
+            f"{preview}"
+        )
+
+    if not keyword_candidates:
+        print(f"[{stem}] graph keyword candidates 없음 — 기존 로직으로 fallback")
+        return {
+            "metadata_parts": None,
+            "debug": {
+                "keyword_source": "legacy_text_graph_mixed",
+                **_graph_keyword_debug_summary(keyword_candidates, artifacts),
+            },
+        }
+
+    print(f"[{stem}] graph-first keywords/roles/relations 생성 중")
+
+    legacy_keywords, *_ = score_keywords(
+        concept_degrees,
+        emphasized,
+        slide_texts,
+        transcript_texts,
+        duration_sec,
+        debug=False,
+    )
+    target_count = len(legacy_keywords) or min(30, max(7, len(keyword_candidates)))
+    keywords = _merge_graph_keywords_with_legacy(
+        keyword_candidates,
+        legacy_keywords,
+        target_count,
+    )
+    print(
+        f"[{stem}] graph-first keywords {len(keywords)}개 선택 "
+        f"(target={target_count}, graph_candidates={len(keyword_candidates)}, "
+        f"legacy_candidates={len(legacy_keywords)})"
+    )
+    concept_roles = build_graph_concept_roles(
+        keyword_candidates,
+        [item.get("keyword", "") for item in keywords],
+    )
+    concept_roles = {
+        role: _canonicalize_graph_name_list(names, alias_map)
+        for role, names in concept_roles.items()
+    }
+    role_candidates = set(concept_roles.get("core", [])) | set(concept_roles.get("introduced", []))
+    concept_relations = build_graph_concept_relations(artifacts, concept_roles, alias_map)
+    scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = build_graph_role_scores(
+        keyword_candidates
+    )
+    print(
+        f"[{stem}] graph-first concept_roles "
+        f"core={len(concept_roles.get('core', []))}, "
+        f"introduced={len(concept_roles.get('introduced', []))}, "
+        f"relations={len(concept_relations)}"
+    )
+    print(f"[{stem}] graph-first summary 생성 중")
+    summary, summary_source = generate_graph_first_summary_with_fallback(
+        artifacts=artifacts,
+        keyword_candidates=keyword_candidates,
+        concept_roles=concept_roles,
+        concept_relations=concept_relations,
+        core_slide_texts=core_slide_texts,
+        core_trans_texts=core_trans_texts,
+        concept_degrees=concept_degrees,
+    )
+
+    visual_concept_terms = collect_visual_concept_terms(
+        fused,
+        [k.get("keyword", "") for k in keywords]
+        + list(concept_degrees.keys())
+        + list(scored.keys())
+        + list(alias_map.keys()),
+    )
+    visual_concept_terms = _canonicalize_graph_name_list(visual_concept_terms, alias_map)
+
+    return {
+        "metadata_parts": {
+            "summary": summary,
+            "keywords": keywords,
+            "keyword_aliases": alias_map,
+            "scored": scored,
+            "norm_slide_freq": norm_slide_freq,
+            "norm_trans_freq": norm_trans_freq,
+            "norm_emph": norm_emph,
+            "norm_cent": norm_cent,
+            "role_candidates": role_candidates,
+            "concept_roles": concept_roles,
+            "concept_relations": concept_relations,
+            "visual_concept_terms": visual_concept_terms,
+        },
+        "debug": {
+            "keyword_source": "graph_first_with_legacy_fallback",
+            "summary_source": summary_source,
+            **_graph_keyword_debug_summary(keyword_candidates, artifacts),
+        },
+    }
+
+
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def generate_metadata(
@@ -1355,9 +1574,14 @@ def generate_metadata(
     learning_objectives = collect_learning_objectives(fused)
     print(f"[{stem}] 학습 목표 {len(learning_objectives)}개 수집")
 
-    print(f"[{stem}] Neo4j Concept 노드 조회 중...")
-    concept_degrees = fetch_concept_degrees(stem)
-    print(f"       → Concept {len(concept_degrees)}개")
+    graph_first_enabled = _env_flag("GRAPHLEC_METADATA_GRAPH_FIRST")
+    if graph_first_enabled:
+        print(f"[{stem}] graph-first metadata 모드: Neo4j Concept 조회 건너뜀")
+        concept_degrees = {}
+    else:
+        print(f"[{stem}] Neo4j Concept 노드 조회 중...")
+        concept_degrees = fetch_concept_degrees(stem)
+        print(f"       → Concept {len(concept_degrees)}개")
 
     metadata_domain, graph_domain, graph_subdomain = load_graph_domain(stem, output_dir)
     if metadata_domain:
@@ -1370,57 +1594,99 @@ def generate_metadata(
         print(f"[{stem}] 도메인 분류 중...")
         domain = classify_domain(slide_texts, transcript_texts)
 
-    print(f"[{stem}] 요약 생성 중...")
-    summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
+    graph_first_parts = None
+    graph_first_debug = {}
+    if graph_first_enabled:
+        print(f"[{stem}] graph-first metadata 모드 활성화")
+        try:
+            graph_first_result = try_generate_graph_first_metadata_parts(
+                stem=stem,
+                output_dir=output_dir,
+                fused=fused,
+                concept_degrees=concept_degrees,
+                emphasized=emphasized,
+                slide_texts=slide_texts,
+                transcript_texts=transcript_texts,
+                core_slide_texts=core_slide_texts,
+                core_trans_texts=core_trans_texts,
+                duration_sec=duration_sec,
+            )
+            if graph_first_result:
+                graph_first_parts = graph_first_result.get("metadata_parts")
+                graph_first_debug = graph_first_result.get("debug") or {}
+        except Exception as exc:
+            print(f"[경고] graph-first metadata 생성 실패 — 기존 로직으로 fallback: {exc}")
 
-    print(f"[{stem}] 키워드 점수 산출 중...")
-    keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
-        concept_degrees, emphasized, slide_texts, transcript_texts, duration_sec,
-        debug=True,
-    )
-    print(f"       → {len(keywords)}개 선택")
-    visual_concept_terms = collect_visual_concept_terms(
-        fused,
-        [k.get("keyword", "") for k in keywords]
-        + list(concept_degrees.keys())
-        + list(scored.keys()),
-    )
-    print(f"       → visual_concept_terms {len(visual_concept_terms)}개")
+    if graph_first_parts:
+        summary = graph_first_parts["summary"]
+        keywords = graph_first_parts["keywords"]
+        keyword_aliases = graph_first_parts.get("keyword_aliases") or {}
+        scored = graph_first_parts["scored"]
+        norm_slide_freq = graph_first_parts["norm_slide_freq"]
+        norm_trans_freq = graph_first_parts["norm_trans_freq"]
+        norm_emph = graph_first_parts["norm_emph"]
+        norm_cent = graph_first_parts["norm_cent"]
+        role_candidates = graph_first_parts["role_candidates"]
+        concept_roles = graph_first_parts["concept_roles"]
+        concept_relations = graph_first_parts.get("concept_relations", [])
+        visual_concept_terms = graph_first_parts["visual_concept_terms"]
+    else:
+        keyword_aliases = {}
+        if graph_first_enabled and not concept_degrees:
+            print(f"[{stem}] graph-first fallback: Neo4j Concept 노드 조회 중...")
+            concept_degrees = fetch_concept_degrees(stem)
+            print(f"       → Concept {len(concept_degrees)}개")
+        print(f"[{stem}] 요약 생성 중...")
+        summary = generate_summary(core_slide_texts, core_trans_texts, concept_degrees)
 
-    # concept_roles: scored 평균 × 0.6 이상 + 노이즈 필터 통과한 개념만 분류
-    # (keywords 임계값 1.2보다 낮게 → prerequisite/introduced도 충분히 포함)
-    print(f"[{stem}] concept_roles 분류 중...")
-    role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
-    role_candidates = {
-        n for n, s in scored.items()
-        if s >= role_threshold
-        and _is_valid_concept(n)
-        and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
-    }
-    print(f"       → 분류 대상 {len(role_candidates)}개 (전체 {len(scored)}개 중)")
-    slide_role_freq = collect_slide_role_freq(fused, role_candidates)
-    concept_roles = classify_concept_roles(
-        role_candidates,
-        norm_slide_freq,
-        norm_trans_freq,
-        norm_emph,
-        norm_cent,
-        slide_role_freq,
-    )
-    print(
-        f"       → core {len(concept_roles['core'])}개 | "
-        f"introduced {len(concept_roles['introduced'])}개"
-    )
-    print(f"\n[디버그] concept_roles 상세:")
-    for role, names in concept_roles.items():
-        print(f"  [{role}] {names[:10]}")
-    print()
+        print(f"[{stem}] 키워드 점수 산출 중...")
+        keywords, scored, norm_slide_freq, norm_trans_freq, norm_emph, norm_cent = score_keywords(
+            concept_degrees, emphasized, slide_texts, transcript_texts, duration_sec,
+            debug=True,
+        )
+        print(f"       → {len(keywords)}개 선택")
+        visual_concept_terms = collect_visual_concept_terms(
+            fused,
+            [k.get("keyword", "") for k in keywords]
+            + list(concept_degrees.keys())
+            + list(scored.keys()),
+        )
+        print(f"       → visual_concept_terms {len(visual_concept_terms)}개")
 
-    print(f"[{stem}] concept_relations 조회 중...")
-    concept_relations = fetch_concept_relations(stem, role_candidates)
+        # concept_roles: scored 평균 × 0.6 이상 + 노이즈 필터 통과한 개념만 분류
+        # (keywords 임계값 1.2보다 낮게 → prerequisite/introduced도 충분히 포함)
+        print(f"[{stem}] concept_roles 분류 중...")
+        role_threshold = (sum(scored.values()) / len(scored) * 0.6) if scored else 0.0
+        role_candidates = {
+            n for n, s in scored.items()
+            if s >= role_threshold
+            and _is_valid_concept(n)
+            and not _is_background_noise(n, norm_slide_freq, norm_trans_freq, norm_cent)
+        }
+        print(f"       → 분류 대상 {len(role_candidates)}개 (전체 {len(scored)}개 중)")
+        concept_roles = classify_concept_roles(
+            role_candidates,
+            norm_slide_freq,
+            norm_emph,
+            norm_cent,
+        )
+        print(
+            f"       → core {len(concept_roles['core'])}개 | "
+            f"introduced {len(concept_roles['introduced'])}개"
+        )
+        print(f"\n[디버그] concept_roles 상세:")
+        for role, names in concept_roles.items():
+            print(f"  [{role}] {names[:10]}")
+        print()
 
-    # difficulty: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
-    difficulty = estimate_difficulty(concept_roles, norm_cent)
+    if graph_first_parts:
+        print(f"[{stem}] graph-first concept_relations {len(concept_relations)}개 사용")
+    else:
+        print(f"[{stem}] concept_relations 조회 중...")
+        concept_relations = fetch_concept_relations(stem, role_candidates)
+
+    # concept_complexity: concept_roles 결과 + norm_cent 활용 (LLM 호출 없음)
+    concept_complexity = estimate_concept_complexity(concept_roles, norm_cent)
 
     print(f"[{stem}] GraphRAG community report 수집 중...")
     communities = collect_graphrag_communities(output_dir)
@@ -1434,10 +1700,11 @@ def generate_metadata(
         "domain":              domain,
         "graph_domain":        graph_domain,
         "graph_subdomain":     graph_subdomain,
-        "difficulty":          difficulty,
+        "concept_complexity":  concept_complexity,
         "summary":             summary,
         "learning_objectives": learning_objectives,
         "keywords":            keywords,
+        "keyword_aliases":     keyword_aliases,
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
         "communities":         communities,
@@ -1445,6 +1712,8 @@ def generate_metadata(
         "pedagogy":            pedagogy,
         "diagnostics":         diagnostics,
     }
+    if graph_first_debug:
+        metadata.update(graph_first_debug)
 
     # 저장
     metadata_dir.mkdir(parents=True, exist_ok=True)

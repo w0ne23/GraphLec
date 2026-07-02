@@ -115,6 +115,10 @@ class ScoreDetail(BaseModel):
     recency_weight: float = 0.0
     domain_score:      float
     depth_score:       float
+    topic_centrality:  float = 0.0
+    topic_match_level: str = ""
+    topic_score_cap:   float = 1.0
+    topic_cap_applied: bool = False
     tier_reason:       str = ""
     combined_boost:    float
     duration_score:    float
@@ -215,6 +219,10 @@ def recommend(req: RecommendRequest):
                     recency_weight = r.score_detail.get("recency_weight", 0.0),
                     domain_score      = r.score_detail.get("domain_score",       0.0),
                     depth_score       = r.score_detail.get("depth_score",        0.0),
+                    topic_centrality  = r.score_detail.get("topic_centrality",   0.0),
+                    topic_match_level = r.score_detail.get("topic_match_level",  ""),
+                    topic_score_cap   = r.score_detail.get("topic_score_cap",    1.0),
+                    topic_cap_applied = r.score_detail.get("topic_cap_applied",  False),
                     tier_reason      = r.score_detail.get("tier_reason", ""),
                     combined_boost    = r.score_detail.get("combined_boost",     1.0),
                     duration_score    = r.score_detail.get("duration_score",     1.0),
