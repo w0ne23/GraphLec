@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from groq import Groq
 from google import genai
 
@@ -41,7 +41,24 @@ try:
 except ImportError:
     Anthropic = None
 
-load_dotenv()
+def _load_pipeline_env() -> None:
+    env_candidates = [
+        find_dotenv(".env", usecwd=True),
+        str(Path(__file__).resolve().parents[3] / ".env"),
+        "/Users/mvrock/Graphlec_verifier/graphLec_refactor/.env",
+        "/Users/mvrock/Graphlec_verifier/graphLec/.env",
+    ]
+    for env_file in env_candidates:
+        if env_file and Path(env_file).is_file():
+            load_dotenv(env_file, override=True)
+            if not os.getenv("OPENAI_API_KEY"):
+                for line in Path(env_file).read_text(encoding="utf-8").splitlines():
+                    if line.startswith("OPENAI_API_KEY="):
+                        os.environ["OPENAI_API_KEY"] = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+
+
+_load_pipeline_env()
 
 # ──────────────────────────────────────────────────────────────
 # API 키
@@ -140,6 +157,8 @@ def output_paths(stem: str, output_dir: Path, slides_dir: Path) -> dict[str, Pat
 
 def get_openai_client():
     global openai_client, _openai_client_key
+    if not os.getenv("OPENAI_API_KEY"):
+        _load_pipeline_env()
     current_key = os.getenv("OPENAI_API_KEY") or ""
     if current_key != _openai_client_key:
         _openai_client_key = current_key
