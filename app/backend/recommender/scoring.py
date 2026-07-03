@@ -560,6 +560,15 @@ def _community_match_strength(lec: LectureMetadata, term: str) -> float:
     return min(hits / total, 1.0)
 
 
+def _mentioned_term_strength(lec: LectureMetadata, term: str) -> float:
+    for item in lec.mentioned_terms or []:
+        if not isinstance(item, dict):
+            continue
+        if _concept_match(str(item.get("term", "")), term):
+            return 1.0
+    return 0.0
+
+
 def _text_mention_strength(lec: LectureMetadata, term: str) -> float:
     if _concept_match(lec.title, term):
         return 0.9
@@ -584,6 +593,7 @@ def _topic_centrality_for_term(lec: LectureMetadata, term: str) -> tuple[float, 
     text = _text_mention_strength(lec, normalized)
     relation = _relation_match_strength(lec, normalized)
     community = _community_match_strength(lec, normalized)
+    mention = _mentioned_term_strength(lec, normalized)
 
     centrality = max(
         role,
@@ -591,6 +601,7 @@ def _topic_centrality_for_term(lec: LectureMetadata, term: str) -> tuple[float, 
         text,
         relation * 0.45,
         community * 0.35,
+        mention * 0.30,
     )
     if role >= 0.95:
         level = "core"
@@ -604,6 +615,8 @@ def _topic_centrality_for_term(lec: LectureMetadata, term: str) -> tuple[float, 
         level = "relation"
     elif community > 0.0:
         level = "community"
+    elif mention > 0.0:
+        level = "mention"
     elif text > 0.0:
         level = "summary"
     else:
@@ -616,12 +629,13 @@ def _topic_level_rank(level: str) -> int:
     order = {
         "none": 0,
         "summary": 1,
-        "community": 2,
-        "relation": 3,
-        "keyword_low": 4,
-        "introduced": 5,
-        "keyword_high": 6,
-        "core": 7,
+        "mention": 2,
+        "community": 3,
+        "relation": 4,
+        "keyword_low": 5,
+        "introduced": 6,
+        "keyword_high": 7,
+        "core": 8,
     }
     return order.get(level, 0)
 
@@ -670,6 +684,8 @@ def _topic_score_cap(level: str, centrality: float, all_terms_matched: bool) -> 
         return 0.52 if all_terms_matched else 0.42
     if level == "community":
         return 0.48 if all_terms_matched else 0.40
+    if level == "mention":
+        return 0.45 if all_terms_matched else 0.40
     if level == "summary":
         return 0.42 if all_terms_matched and centrality >= 0.2 else 0.35
     return 0.30
@@ -706,6 +722,10 @@ def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
         _append_terms(terms, community.get("title"))
         _append_terms(terms, community.get("summary"))
         _append_terms(terms, community.get("nodes"))
+    for item in lec.mentioned_terms or []:
+        if not isinstance(item, dict):
+            continue
+        _append_terms(terms, item.get("term"))
     return [_normalize_term(term) for term in terms if _normalize_term(term)]
 
 

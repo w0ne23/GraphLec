@@ -190,6 +190,7 @@ class MetadataCollection:
             pedagogy           = item.get("pedagogy") or {},
             diagnostics        = item.get("diagnostics") or {},
             visual_concept_terms = item.get("visual_concept_terms") or [],
+            mentioned_terms      = item.get("mentioned_terms") or [],
         )
 
     @staticmethod
@@ -214,6 +215,7 @@ class MetadataCollection:
             pedagogy           = row.get("pedagogy") or {},
             diagnostics        = row.get("diagnostics") or {},
             visual_concept_terms = row.get("visual_concept_terms") or [],
+            mentioned_terms      = row.get("mentioned_terms") or [],
         )
 
     def get(self, video_id: str) -> Optional[LectureMetadata]:
@@ -283,6 +285,20 @@ def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
                     for key in _term_lookup_keys(token):
                         if key != token:
                             field_tf["keyword"][key] += _COMMUNITY_NODE_WEIGHT * 0.4
+
+        _MENTIONED_TERM_WEIGHT = 0.3
+        for item in (lec.mentioned_terms or []):
+            if not isinstance(item, dict):
+                continue
+            m_term = _normalize_term(str(item.get("term") or ""))
+            if not m_term:
+                continue
+            _add_lexical_variants(field_tf["keyword"], m_term, _MENTIONED_TERM_WEIGHT)
+            for token in _tokenize_text(m_term):
+                field_tf["keyword"][token] += _MENTIONED_TERM_WEIGHT * 0.5
+                for key in _term_lookup_keys(token):
+                    if key != token:
+                        field_tf["keyword"][key] += _MENTIONED_TERM_WEIGHT * 0.4
 
         term_tf = Counter()
         for field_counter in field_tf.values():
@@ -483,6 +499,13 @@ def _metadata_concept_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
 
     for term in lec.visual_concept_terms or []:
         terms.append((str(term), 0.75))
+
+    for item in lec.mentioned_terms or []:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or "").strip()
+        if term:
+            terms.append((term, 0.5))
 
     return [(term, weight) for term, weight in terms if _normalize_term(term)]
 

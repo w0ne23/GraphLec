@@ -7,7 +7,7 @@ recommender/types.py
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -35,6 +35,7 @@ class LectureMetadata:
     pedagogy:          dict
     diagnostics:       dict
     visual_concept_terms: list[str]
+    mentioned_terms:      list[dict] = field(default_factory=list)
 
 
 @dataclass

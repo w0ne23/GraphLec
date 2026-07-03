@@ -662,6 +662,66 @@ def collect_visual_concept_terms(fused: dict, concept_terms: list[str]) -> list[
     return matched
 
 
+def _extract_vocab_from_metadata(data: dict, vocab: set[str]) -> None:
+    for kw in data.get("keywords") or []:
+        if isinstance(kw, dict) and kw.get("keyword"):
+            vocab.add(str(kw["keyword"]).strip())
+    roles = data.get("concept_roles") or {}
+    if isinstance(roles, dict):
+        for role_terms in roles.values():
+            if isinstance(role_terms, list):
+                vocab.update(str(t).strip() for t in role_terms if t)
+
+
+def _build_global_vocab(metadata_dir: Path) -> set[str]:
+    """기존 메타데이터 파일들에서 전역 개념 어휘 수집."""
+    vocab: set[str] = set()
+    if not metadata_dir.exists():
+        return vocab
+    for path in metadata_dir.glob("*_metadata.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                for item in data:
+                    if isinstance(item, dict):
+                        _extract_vocab_from_metadata(item, vocab)
+            elif isinstance(data, dict):
+                _extract_vocab_from_metadata(data, vocab)
+        except Exception:
+            pass
+    return vocab
+
+
+def collect_mentioned_terms(
+    slide_texts: list[str],
+    transcript_texts: list[str],
+    own_terms: set[str],
+    global_vocab: set[str],
+    max_terms: int = 80,
+) -> list[dict]:
+    """
+    전역 개념 어휘 중 이 강의 텍스트에 언급되지만 keywords/concept_roles에 없는 용어.
+    related_search 질의를 위한 '언급 층' 구성.
+    """
+    text_lower = " ".join(slide_texts + transcript_texts).lower()
+    if not text_lower.strip():
+        return []
+    own_lower = {t.lower() for t in own_terms if t}
+    result = []
+    for term in global_vocab:
+        term = term.strip()
+        if not term or len(term) < 2:
+            continue
+        term_lower = term.lower()
+        if term_lower in own_lower:
+            continue
+        count = text_lower.count(term_lower)
+        if count > 0:
+            result.append({"term": term, "count": count})
+    result.sort(key=lambda x: -x["count"])
+    return result[:max_terms]
+
+
 def _build_community_nodes_map(output_dir: Path) -> dict[str, list[str]]:
     """community ID → entity 이름 목록 매핑 (communities + entities parquet 조인)."""
     graphrag_dir = output_dir / "graphrag" / "output"
@@ -1721,6 +1781,19 @@ def generate_metadata(
     print(f"[{stem}] GraphRAG community report 수집 중...")
     communities = collect_graphrag_communities(output_dir)
 
+    print(f"[{stem}] mentioned_terms 수집 중...")
+    global_vocab = _build_global_vocab(metadata_dir)
+    own_terms = (
+        {kw.get("keyword", "") for kw in keywords if isinstance(kw, dict)}
+        | set(concept_roles.get("core", []))
+        | set(concept_roles.get("introduced", []))
+    )
+    own_terms.discard("")
+    mentioned_terms = collect_mentioned_terms(
+        slide_texts, transcript_texts, own_terms, global_vocab
+    )
+    print(f"       → {len(mentioned_terms)}개 (vocab {len(global_vocab)}개 중)")
+
     metadata = {
         "video_id":            stem,
         "title":               title,
@@ -1738,6 +1811,7 @@ def generate_metadata(
         "concept_roles":       concept_roles,
         "concept_relations":   concept_relations,
         "communities":         communities,
+        "mentioned_terms":     mentioned_terms,
         "visual_concept_terms": visual_concept_terms,
         "pedagogy":            pedagogy,
         "diagnostics":         diagnostics,
