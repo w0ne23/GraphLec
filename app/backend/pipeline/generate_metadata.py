@@ -662,6 +662,32 @@ def collect_visual_concept_terms(fused: dict, concept_terms: list[str]) -> list[
     return matched
 
 
+def _build_community_nodes_map(output_dir: Path) -> dict[str, list[str]]:
+    """community ID → entity 이름 목록 매핑 (communities + entities parquet 조인)."""
+    graphrag_dir = output_dir / "graphrag" / "output"
+    try:
+        import pyarrow.parquet as pq
+        c_rows = pq.read_table(graphrag_dir / "communities.parquet").to_pylist()
+        e_rows = pq.read_table(graphrag_dir / "entities.parquet").to_pylist()
+    except Exception:
+        return {}
+    entity_title: dict[str, str] = {
+        str(r.get("id") or ""): str(r.get("title") or "").strip()
+        for r in e_rows
+    }
+    nodes_map: dict[str, list[str]] = {}
+    for row in c_rows:
+        cid = str(row.get("community") or "")
+        nodes = [
+            entity_title[str(eid)]
+            for eid in (row.get("entity_ids") or [])
+            if entity_title.get(str(eid))
+        ]
+        if nodes:
+            nodes_map[cid] = nodes
+    return nodes_map
+
+
 def collect_graphrag_communities(output_dir: Path) -> list[dict]:
     """GraphRAG community_reports를 추천용 metadata에 저장할 compact 구조로 변환."""
     reports_path = output_dir / "graphrag" / "output" / "community_reports.parquet"
@@ -690,6 +716,8 @@ def collect_graphrag_communities(output_dir: Path) -> list[dict]:
             reverse=True,
         )
 
+    nodes_map = _build_community_nodes_map(output_dir)
+
     communities = []
     for row in rows[:MAX_COMMUNITIES_IN_METADATA]:
         title = str(row.get("title") or "").strip()
@@ -705,14 +733,16 @@ def collect_graphrag_communities(output_dir: Path) -> list[dict]:
             except (TypeError, ValueError):
                 return default
 
+        cid = str(row.get("community") or "")
         communities.append({
-            "id":        str(row.get("id") or row.get("community") or ""),
-            "community": str(row.get("community") or ""),
+            "id":        str(row.get("id") or cid or ""),
+            "community": cid,
             "level":     as_int(row.get("level")),
             "title":     title,
             "summary":   summary,
             "rank":      round(as_float(row.get("rank")), 4),
             "size":      as_int(row.get("size")),
+            "nodes":     nodes_map.get(cid, []),
         })
 
     print(f"[디버그] GraphRAG communities metadata 저장: {len(communities)}개")
