@@ -339,11 +339,8 @@ def analyze_query(
 
     search_text = " ".join(query_keywords + inferred_keywords) or query
 
-    kw_set = set(available_keywords)
     if domain not in available_domains:
         domain = None
-    if focus_concept and focus_concept not in kw_set:
-        focus_concept = None
     if duration_max_sec is not None:
         try:
             duration_max_sec = int(duration_max_sec)

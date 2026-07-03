@@ -193,9 +193,14 @@ class Recommender:
             term for term in inferred_unmatched if term not in query_unmatched
         ]
         if focus_concept:
-            focus_concept, focus_matched = self._concept_index.canonicalize(focus_concept)
+            focus_concept_canonical, focus_matched = self._concept_index.canonicalize(focus_concept)
             if focus_matched:
-                canonical_matches[_normalize_term(raw_focus_concept)] = focus_concept
+                canonical_matches[_normalize_term(raw_focus_concept)] = focus_concept_canonical
+                focus_concept = focus_concept_canonical
+            elif focus_concept_canonical:
+                focus_concept = focus_concept_canonical
+            else:
+                focus_concept = None
         query_type        = conditions.get("query_type", "topic_browse")
         query_specificity = conditions.get("query_specificity", "broad")
         subdomain = _normalize_subdomain(conditions.get("subdomain"))
@@ -744,8 +749,8 @@ class Recommender:
 
         # ── 가중합 구조 점수 ──────────────────────────────────
         MAX_BOOST = (
-            self.cfg.W_DOMAIN_BOOST +
-            self.cfg.W_DEPTH_BOOST +
+            (self.cfg.W_DOMAIN_BOOST if ctx.domain or ctx.subdomain else 0.0) +
+            (self.cfg.W_DEPTH_BOOST if ctx.focus_concept else 0.0) +
             (self.cfg.W_DURATION_BOOST if ctx.duration_max_sec else 0.0) +
             (self.cfg.W_APPLICATION_BOOST if ctx.application_preference else 0.0) +
             (self.cfg.W_LISTENABILITY_BOOST if ctx.listenability_preference else 0.0) +
@@ -787,7 +792,8 @@ class Recommender:
         # ── 패널티 체계 ───────────────────────────────────────
         # 도메인 상위 카테고리 불일치 패널티
         if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
-            total *= self.cfg.DOMAIN_MISMATCH_PENALTY
+            if ctx.query_type != "topic_browse":
+                total *= self.cfg.DOMAIN_MISMATCH_PENALTY
         elif ctx.domain:
             if ctx.domain != lec.domain:
                 total *= self.cfg.DOMAIN_MISMATCH_PENALTY
@@ -958,7 +964,7 @@ class Recommender:
             return []
 
         effective_min = min_score if min_score is not None else self.cfg.ABS_MIN_SCORE
-        max_score = candidates[0][1]["score"]
+        max_score = max(d["score"] for _, d in candidates)
         if max_score < effective_min:
             print(f"  → top 점수 {max_score:.3f} < ABS_MIN_SCORE {effective_min} — 결과 없음")
             return []
@@ -967,7 +973,7 @@ class Recommender:
         for lec, detail in candidates:
             score = detail["score"]
             if score < effective_min:
-                break
+                continue
 
             topic_level = detail.get("topic_match_level", "none")
             tier = "direct" if topic_level in {"core", "keyword_high"} else "related"
@@ -1048,8 +1054,8 @@ class Recommender:
             # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
             self._print_candidate_scores(candidates)
             effective_min_score = (
-                self.cfg.RELATED_SEARCH_ABS_MIN_SCORE
-                if ctx.query_type == "related_search"
+                min_score if min_score is not None
+                else self.cfg.RELATED_SEARCH_ABS_MIN_SCORE if ctx.query_type == "related_search"
                 else self.cfg.ABS_MIN_SCORE
             )
             return self._classify_tiers(candidates, top_k, min_score=effective_min_score)

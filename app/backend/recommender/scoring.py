@@ -27,7 +27,7 @@ from recommender.utils import (
 # ── 대조·비교형 signals ───────────────────────────────────────────────────────
 
 _CONTRAST_TYPES = frozenset({
-    "contrasts", "lacks", "differs", "vs", "versus",
+    "contrasts", "contrasts_with", "lacks", "differs", "vs", "versus",
     "compared_to", "unlike", "opposes", "excludes",
 })
 
