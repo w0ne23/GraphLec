@@ -27,7 +27,6 @@ CLI 실행:
 
 import argparse
 import math
-import threading
 from collections import Counter, defaultdict
 from typing import Optional
 
@@ -86,7 +85,6 @@ class Recommender:
     def __init__(self, config: Optional[RecommenderConfig] = None):
         self.collection          = MetadataCollection()
         self.cfg                 = config or RecommenderConfig()
-        self._recommend_lock     = threading.RLock()
         self._available_domains  = self.collection.available_domains()
         self._available_subdomains = self.collection.available_subdomains()
         self._available_keywords = self.collection.available_keywords()
@@ -817,7 +815,6 @@ class Recommender:
             "sim_summary":          round(sim_summary, 4),
             "dm_title":             round(dm["title"], 4),
             "dm_keyword":           round(dm["keyword"], 4),
-            "dm_keyword_legacy":    round(dm.get("keyword_legacy", dm["keyword"]), 4),
             "dm_summary":           round(dm["summary"], 4),
             "domain_score":         round(domain_score, 4),
             "subdomain_score":      round(subdomain_score, 4),
@@ -1024,47 +1021,32 @@ class Recommender:
         """
         ctx = self._prepare_query_context(query)
 
-        restored_cfg = None
-        config_locked = False
-        if min_score is not None:
-            self._recommend_lock.acquire()
-            config_locked = True
-            restored_cfg = {"ABS_MIN_SCORE": self.cfg.ABS_MIN_SCORE}
-            self.cfg.ABS_MIN_SCORE = min_score
+        # ── 질의 벡터화 ───────────────────────────────────────────────
+        query_vec = []
+        if self._vector_search_index.video_ids:
+            try:
+                query_vec = _embed(ctx.search_text)
+            except Exception as exc:
+                print(f"  ⚠ 질의 임베딩 실패 — BM25/metadata 기반으로 계속 진행: {exc}")
+        candidate_ids, bm25_ids = self._get_initial_candidate_ids(ctx, query_vec)
+        candidates = self._rank_candidates(candidate_ids, ctx, query_vec, bm25_ids)
 
-        try:
-            # ── 질의 벡터화 ───────────────────────────────────────────────
-            query_vec = []
-            if self._vector_search_index.video_ids:
-                try:
-                    query_vec = _embed(ctx.search_text)
-                except Exception as exc:
-                    print(f"  ⚠ 질의 임베딩 실패 — BM25/metadata 기반으로 계속 진행: {exc}")
-            candidate_ids, bm25_ids = self._get_initial_candidate_ids(ctx, query_vec)
-            candidates = self._rank_candidates(candidate_ids, ctx, query_vec, bm25_ids)
+        # ── condition_first: content 필터 후 duration 재정렬 ─────────
+        if ctx.query_type == "condition_first" and ctx.duration_max_sec:
+            candidates = [
+                (lec, d) for lec, d in candidates
+                if d.get("content_score", 0.0) >= self.cfg.CONDITION_FIRST_MIN_CONTENT
+            ]
+            candidates.sort(key=lambda x: x[0].duration_sec)
 
-            # ── condition_first: content 필터 후 duration 재정렬 ─────────
-            if ctx.query_type == "condition_first" and ctx.duration_max_sec:
-                candidates = [
-                    (lec, d) for lec, d in candidates
-                    if d.get("content_score", 0.0) >= self.cfg.CONDITION_FIRST_MIN_CONTENT
-                ]
-                candidates.sort(key=lambda x: x[0].duration_sec)
-
-            # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
-            self._print_candidate_scores(candidates)
-            effective_min_score = (
-                min_score if min_score is not None
-                else self.cfg.RELATED_SEARCH_ABS_MIN_SCORE if ctx.query_type == "related_search"
-                else self.cfg.ABS_MIN_SCORE
-            )
-            return self._classify_tiers(candidates, top_k, min_score=effective_min_score)
-        finally:
-            if restored_cfg:
-                for key, value in restored_cfg.items():
-                    setattr(self.cfg, key, value)
-            if config_locked:
-                self._recommend_lock.release()
+        # ── 전체 후보 점수 출력 (디버그) ─────────────────────────────
+        self._print_candidate_scores(candidates)
+        effective_min_score = (
+            min_score if min_score is not None
+            else self.cfg.RELATED_SEARCH_ABS_MIN_SCORE if ctx.query_type == "related_search"
+            else self.cfg.ABS_MIN_SCORE
+        )
+        return self._classify_tiers(candidates, top_k, min_score=effective_min_score)
 
     def print_results(self, results: list[RecommendResult], title: str = "추천 결과", top_k: int = 3):
         top = results[:top_k]
@@ -1087,9 +1069,9 @@ class Recommender:
                 dm_t      = round(d.get("dm_title",    0) * 100, 1)
                 dm_k      = round(d.get("dm_keyword",  0) * 100, 1)
                 dm_s      = round(d.get("dm_summary",  0) * 100, 1)
-                boost_pct    = round((d.get("domain_boost",   1.0) - 1.0) * 100, 1)
-                depth_pct    = round((d.get("depth_boost",    1.0) - 1.0) * 100, 1)
-                duration_pct = round((d.get("duration_score", 1.0)) * 100, 1)
+                boost_pct    = round(d.get("boost_signal", 0.0) * 100, 1)
+                depth_pct    = round(d.get("depth_score",   0.0) * 100, 1)
+                duration_pct = round(d.get("duration_score", 0.0) * 100, 1)
                 frag_pct     = round(d.get("frag_penalty", 0.0) * 100, 1)
                 tier_label = {
                     "direct": "✅ 직접 추천",
@@ -1099,7 +1081,7 @@ class Recommender:
                 print(f"     점수:   {score_100}점  |  {r.reason}")
                 print(f"     벡터:   title {t_pct}점  keyword {k_pct}점  summary {s_pct}점")
                 print(f"     직접:   title {dm_t}점  keyword {dm_k}점  summary {dm_s}점")
-                print(f"     boost:  domain +{boost_pct}%  depth +{depth_pct}%  duration {duration_pct}%")
+                print(f"     boost:  combined {boost_pct}%  depth {depth_pct}%  duration {duration_pct}%")
                 if d.get("contrast_bonus", 0) > 0:
                     print(f"     대조형: contrast_signal {d['contrast_signal']:.2f}  bonus +{d['contrast_bonus']:.3f}")
                 if frag_pct > 0:
