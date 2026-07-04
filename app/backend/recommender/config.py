@@ -90,8 +90,8 @@ class RecommenderConfig:
     # related_search 쿼리: 완화된 최소 임계값
     RELATED_SEARCH_ABS_MIN_SCORE:   float = 0.13
     # 패널티
-    DOMAIN_MISMATCH_PENALTY: float = 0.60
-    Q_KW_MISMATCH_PENALTY:   float = 0.60
+    DOMAIN_MISMATCH_PENALTY:   float = 0.60
+    SUBJECT_MISMATCH_PENALTY:  float = 0.60
     # 비교 의도 × 강의 대조 관계 보너스
     W_CONTRAST_BOOST:        float = 0.10
     # 벡터 DB 경로

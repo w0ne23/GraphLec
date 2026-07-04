@@ -41,6 +41,50 @@ from recommender.utils import (
 )
 
 
+# ── 로드 시 정규화 ────────────────────────────────────────────────────────────
+
+def _normalize_concept_roles(raw) -> dict[str, list[str]]:
+    """concept_roles를 항상 dict[str, list[str]]로 정규화."""
+    if isinstance(raw, dict):
+        return {
+            role: [str(c) for c in concepts if c]
+            for role, concepts in raw.items()
+            if isinstance(concepts, list)
+        }
+    if isinstance(raw, list):
+        result: dict[str, list[str]] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "")
+            concept = str(item.get("concept") or "")
+            if role and concept:
+                result.setdefault(role, []).append(concept)
+        return result
+    return {}
+
+
+def _normalize_concept_relations(raw) -> list[dict]:
+    """concept_relations를 항상 {from, to, type} 형식으로 정규화.
+    메타데이터에 weight가 없어 weighted 그래프 계산이 퇴화한 상태이므로 weight 필드는 제거."""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for rel in raw:
+        if not isinstance(rel, dict):
+            continue
+        src = str(rel.get("from") or rel.get("source") or "").strip()
+        dst = str(rel.get("to") or rel.get("target") or "").strip()
+        if not src or not dst:
+            continue
+        result.append({
+            "from": src,
+            "to": dst,
+            "type": str(rel.get("type") or "").lower(),
+        })
+    return result
+
+
 # ── 임베딩 ────────────────────────────────────────────────────────────────────
 
 def _embed(text: str) -> list[float]:
@@ -184,8 +228,8 @@ class MetadataCollection:
             duration_sec       = item.get("duration_sec") or 0.0,
             summary            = item.get("summary") or "",
             keywords           = item.get("keywords") or [],
-            concept_roles      = item.get("concept_roles") or {},
-            concept_relations  = item.get("concept_relations") or [],
+            concept_roles      = _normalize_concept_roles(item.get("concept_roles")),
+            concept_relations  = _normalize_concept_relations(item.get("concept_relations")),
             communities        = item.get("communities") or [],
             pedagogy           = item.get("pedagogy") or {},
             diagnostics        = item.get("diagnostics") or {},
@@ -209,8 +253,8 @@ class MetadataCollection:
             duration_sec       = row.get("duration_sec") or 0.0,
             summary            = row.get("summary") or "",
             keywords           = row.get("keywords") or [],
-            concept_roles      = row.get("concept_roles") or {},
-            concept_relations  = row.get("concept_relations") or [],
+            concept_roles      = _normalize_concept_roles(row.get("concept_roles")),
+            concept_relations  = _normalize_concept_relations(row.get("concept_relations")),
             communities        = row.get("communities") or [],
             pedagogy           = row.get("pedagogy") or {},
             diagnostics        = row.get("diagnostics") or {},

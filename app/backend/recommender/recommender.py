@@ -5,7 +5,6 @@ recommender.py
 
 변경 이력:
   v3: Gemini가 메타데이터 keyword pool에서 직접 선택 (자유 생성 → vocabulary 고정)
-  v4: prerequisite 타입 제거, focus_concept → depth_score
   v5: 인텐트별 동적 가중치, Min-Max 정규화, 파편화 패널티, MIN_SCORE 필터
   v6: 벡터 유사도 방식 전환 (ko-sroberta + LanceDB)
   v7: 필드별 분리 벡터 + Gemini search_text 변환
@@ -52,6 +51,7 @@ from recommender.scoring import (
     _detect_comparison_intent,
     _direct_match_score,
     _direct_match_score_tfirf,
+    _lecture_subject_terms,
     _required_subject_match_type,
     _required_subject_terms,
     _topic_centrality_profile,
@@ -113,6 +113,10 @@ class Recommender:
         self._concept_index = _build_query_concept_index(metadata_lectures)
         self._lexical_stats = _build_lexical_stats(scoring_lectures)
         self._community_index = CommunityIndex(scoring_lectures)
+        self._subject_terms_cache: dict[str, list[str]] = {
+            lec.video_id: _lecture_subject_terms(lec)
+            for lec in scoring_lectures
+        }
         print(f"  → {len(self._index_rows)}개 레코드 로드\n")
         if not self._index_rows and metadata_lectures:
             print("  ⚠ LanceDB lectures 테이블 없음/비어 있음 — 벡터 검색 없이 metadata 기반 추천으로 동작합니다.\n")
@@ -778,23 +782,7 @@ class Recommender:
             0.0
         )
 
-        # ── 비교 분석형 보너스 ────────────────────────────────
-        # 비교 의도 질의 + 강의 내 대조형 relation 비율 → 가산
         contrast_signal = _compute_contrast_signal(lec)
-        contrast_bonus  = (
-            self.cfg.W_CONTRAST_BOOST * contrast_signal
-            if ctx.comparison_intent else 0.0
-        )
-        total = min(total + contrast_bonus, 1.0)
-
-        # ── 패널티 체계 ───────────────────────────────────────
-        # 도메인 상위 카테고리 불일치 패널티
-        if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
-            if ctx.query_type != "topic_browse":
-                total *= self.cfg.DOMAIN_MISMATCH_PENALTY
-        elif ctx.domain:
-            if ctx.domain != lec.domain:
-                total *= self.cfg.DOMAIN_MISMATCH_PENALTY
 
         return {
             "score":                round(total, 4),
@@ -844,7 +832,7 @@ class Recommender:
             "weight_boost":         round(weights["boost"], 4),
             "depth_score":          round(depth_score, 4),
             "contrast_signal":      round(contrast_signal, 4),
-            "contrast_bonus":       round(contrast_bonus, 4),
+            "contrast_bonus":       0.0,
             "boost_signal":         round(boost_signal, 4),
             "combined_boost":       round(boost_signal, 4),
             "duration_score":       round(duration_fit_score, 4),
@@ -875,28 +863,42 @@ class Recommender:
             lec = self.collection.get(video_id)
             if lec is None:
                 continue
-            subject_match_type = _required_subject_match_type(lec, required_subject_terms)
+            cached_terms = getattr(self, "_subject_terms_cache", {}).get(lec.video_id)
+            subject_match_type = _required_subject_match_type(lec, required_subject_terms, cached_terms)
             detail = self._score_candidate(
-                row,
-                lec,
-                ctx,
-                query_vec,
-                query_concepts,
-                query_terms,
-                weights,
+                row, lec, ctx, query_vec, query_concepts, query_terms, weights,
             )
             detail["required_subject_terms"] = sorted(required_subject_terms)
             detail["required_subject_match"] = subject_match_type
-            topic_profile = _topic_centrality_profile(
-                lec,
-                required_subject_terms or query_concepts,
-            )
+            topic_profile = _topic_centrality_profile(lec, required_subject_terms or query_concepts)
             detail.update(topic_profile)
+
+            score = detail["score"]
+
+            # ── 패널티·보너스 파이프라인 (선언 순서대로 적용) ────────────
+            # 1. 비교 분석형 보너스
+            contrast_bonus = (
+                self.cfg.W_CONTRAST_BOOST * detail["contrast_signal"]
+                if ctx.comparison_intent else 0.0
+            )
+            score = min(score + contrast_bonus, 1.0)
+            detail["contrast_bonus"] = round(contrast_bonus, 4)
+
+            # 2. 도메인 불일치 페널티 (topic_browse는 서브도메인 페널티 면제)
+            if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
+                if ctx.query_type != "topic_browse":
+                    score *= self.cfg.DOMAIN_MISMATCH_PENALTY
+            elif ctx.domain and ctx.domain != lec.domain:
+                score *= self.cfg.DOMAIN_MISMATCH_PENALTY
+
+            # 3. Subject 미매칭 페널티
             if subject_match_type == "none":
-                detail["score"] = round(detail["score"] * self.cfg.Q_KW_MISMATCH_PENALTY, 4)
-                detail["subject_mismatch_penalty"] = self.cfg.Q_KW_MISMATCH_PENALTY
+                score *= self.cfg.SUBJECT_MISMATCH_PENALTY
+                detail["subject_mismatch_penalty"] = self.cfg.SUBJECT_MISMATCH_PENALTY
             else:
                 detail["subject_mismatch_penalty"] = 1.0
+
+            # 4. 주제 중심성 캡
             if required_subject_terms:
                 cap = _topic_score_cap(
                     detail["topic_match_level"],
@@ -904,31 +906,28 @@ class Recommender:
                     detail["topic_all_terms_matched"],
                 )
                 detail["topic_score_cap"] = cap
-                if detail["score"] > cap:
-                    detail["score"] = round(cap, 4)
-                    detail["topic_cap_applied"] = True
-                else:
-                    detail["topic_cap_applied"] = False
+                detail["topic_cap_applied"] = score > cap
+                if detail["topic_cap_applied"]:
+                    score = cap
             else:
                 detail["topic_score_cap"] = 1.0
                 detail["topic_cap_applied"] = False
-            if (
-                ctx.query_specificity == "specific"
-                and bm25_ids is not None
-                and video_id not in bm25_ids
-            ):
-                detail["score"] = round(detail["score"] * self.cfg.SPECIFICITY_BM25_MISS_PENALTY, 4)
+
+            # 5. Specificity × BM25 미매칭 페널티
+            if ctx.query_specificity == "specific" and bm25_ids is not None and video_id not in bm25_ids:
+                score *= self.cfg.SPECIFICITY_BM25_MISS_PENALTY
                 detail["specificity_penalty_applied"] = True
             else:
                 detail["specificity_penalty_applied"] = False
-            if (
-                ctx.query_type == "concept_depth"
-                and detail.get("topic_match_level") not in {"core", "keyword_high"}
-            ):
-                detail["score"] = round(detail["score"] * self.cfg.CONCEPT_DEPTH_WEAK_TOPIC_PENALTY, 4)
+
+            # 6. concept_depth 약주제 페널티
+            if ctx.query_type == "concept_depth" and detail.get("topic_match_level") not in {"core", "keyword_high"}:
+                score *= self.cfg.CONCEPT_DEPTH_WEAK_TOPIC_PENALTY
                 detail["concept_depth_penalty_applied"] = True
             else:
                 detail["concept_depth_penalty_applied"] = False
+
+            detail["score"] = round(score, 4)
             candidates.append((lec, detail))
 
         candidates.sort(key=lambda x: x[1]["score"], reverse=True)
@@ -1004,7 +1003,7 @@ class Recommender:
         """
         자연어 질의를 분석하고 관련 강의를 추천한다.
 
-        v12 흐름 (BM25/vector 후보 검색 + RRF 통합):
+        흐름 (BM25/vector 후보 검색 + RRF 통합):
           1. analyze_query — search_text / domain / focus_concept 추출
           2. 비교 의도 감지 (_detect_comparison_intent)
           3. search_text → Gemini embedding-001 벡터화
@@ -1012,12 +1011,14 @@ class Recommender:
           5. RRF candidate_ids에 대해:
              - vec_score / dm_score 계산
              - depth_score: BFS 홉 거리 기반 (concept_relations 활용)
+          6. 패널티·보너스 파이프라인 (순서대로 적용):
              - contrast_bonus: 비교 의도 × 대조형 relation 비율
-          6. 패널티 체계:
-             - dm_keyword==0 패널티 (×0.6)
-             - 원본 query_keyword 완전 미매칭 패널티 (×Q_KW_MISMATCH_PENALTY)
-             - 도메인 상위 카테고리 불일치 패널티 (×DOMAIN_MISMATCH_PENALTY)
-          7. 이중 레이어 임계값 + gap 자연 경계 → direct/related 분류
+             - 도메인 불일치 패널티 (×DOMAIN_MISMATCH_PENALTY, topic_browse 면제)
+             - subject 미매칭 패널티 (×SUBJECT_MISMATCH_PENALTY)
+             - 주제 중심성 캡 (topic_score_cap)
+             - specificity × BM25 미매칭 패널티
+             - concept_depth 약주제 패널티
+          7. ABS_MIN_SCORE 필터 → direct/related 분류
         """
         ctx = self._prepare_query_context(query)
 
@@ -1126,7 +1127,7 @@ if __name__ == "__main__":
     parser.add_argument("--top_k", type=int, default=5,
                         help="추천 결과 수 (기본: 5)")
     parser.add_argument("--min_score", type=float, default=None,
-                        help="ABS_MIN_SCORE 오버라이드 0~1 (기본: cfg.ABS_MIN_SCORE=0.30).")
+                        help="ABS_MIN_SCORE 오버라이드 0~1 (기본: cfg.ABS_MIN_SCORE=0.22).")
     args = parser.parse_args()
 
     rec = Recommender()

@@ -228,64 +228,14 @@ def _role_weight_for_concept(
 ) -> float:
     if not concept:
         return 0.0
-
-    role_weights = {
-        "core": core_weight,
-        "introduced": intro_weight,
-        "prerequisite": 0.60,
-    }
-    concept_roles = lec.concept_roles
+    role_weights = {"core": core_weight, "introduced": intro_weight}
     best = 0.0
-
-    if isinstance(concept_roles, dict):
-        for role, concepts in concept_roles.items():
-            weight = role_weights.get(role, 0.0)
-            for role_concept in (concepts or []):
-                if _concept_match(str(role_concept), concept):
-                    best = max(best, weight)
-    elif isinstance(concept_roles, list):
-        for cr in (concept_roles or []):
-            if not isinstance(cr, dict):
-                continue
-            if _concept_match(str(cr.get("concept", "")), concept):
-                best = max(best, role_weights.get(cr.get("role", ""), 0.0))
-
+    for role, concepts in (lec.concept_roles or {}).items():
+        weight = role_weights.get(role, 0.0)
+        for role_concept in (concepts or []):
+            if _concept_match(str(role_concept), concept):
+                best = max(best, weight)
     return best
-
-
-def _query_concept_in_role(
-    lec: LectureMetadata,
-    query_concepts: set[str],
-    target_role: str,
-) -> bool:
-    concepts = {
-        _normalize_term(concept)
-        for concept in query_concepts
-        if _normalize_term(concept)
-    }
-    if not concepts:
-        return False
-
-    role_terms: list[str] = []
-    concept_roles = lec.concept_roles
-    if isinstance(concept_roles, dict):
-        _append_terms(role_terms, concept_roles.get(target_role, []))
-    elif isinstance(concept_roles, list):
-        for item in concept_roles:
-            if not isinstance(item, dict) or item.get("role") != target_role:
-                continue
-            _append_terms(role_terms, item.get("concept"))
-
-    normalized_roles = [
-        _normalize_term(term)
-        for term in role_terms
-        if _normalize_term(term)
-    ]
-    return any(
-        _concept_match(role_term, query_term)
-        for role_term in normalized_roles
-        for query_term in concepts
-    )
 
 
 # ── 그래프 점수 ───────────────────────────────────────────────────────────────
@@ -306,28 +256,21 @@ def _compute_graph_score(
     ]
     role_score = sum(role_hits) / len(query_concepts)
 
-    graph: dict[str, list[tuple[str, float]]] = {}
+    graph: dict[str, list[str]] = {}
     for rel in (lec.concept_relations or []):
-        src = rel.get("from", rel.get("source", ""))
-        dst = rel.get("to", rel.get("target", ""))
-        weight = float(rel.get("weight") or 1.0)
-        if src and dst:
-            graph.setdefault(src, []).append((dst, weight))
-            graph.setdefault(dst, []).append((src, weight))
+        src = rel["from"]
+        dst = rel["to"]
+        graph.setdefault(src, []).append(dst)
+        graph.setdefault(dst, []).append(src)
 
     relation_scores = []
-    for node, neighbor_weights in graph.items():
+    for node, neighbors in graph.items():
         if not any(_concept_match(node, qc) for qc in query_concepts):
             continue
-        if not neighbor_weights:
+        if not neighbors:
             continue
-        total_weight = sum(w for _, w in neighbor_weights) or 1.0
-        related_weight = sum(
-            w
-            for neighbor, w in neighbor_weights
-            if any(_concept_match(neighbor, qc) for qc in query_concepts)
-        )
-        relation_scores.append(related_weight / total_weight)
+        related = sum(1 for n in neighbors if any(_concept_match(n, qc) for qc in query_concepts))
+        relation_scores.append(related / len(neighbors))
 
     relation_score = (
         sum(relation_scores) / len(relation_scores)
@@ -350,66 +293,44 @@ def _compute_depth_score(focus_concept: str, target: LectureMetadata) -> float:
         return 0.0
 
     # ── 1. role 점수 (concept_roles 기반) ──────────────────────────
-    role_score    = 0.0
-    concept_roles = target.concept_roles
-    if isinstance(concept_roles, dict):
-        ROLE_WEIGHTS = {"core": 1.0, "introduced": 0.1}
-        for role, concepts in concept_roles.items():
-            weight = ROLE_WEIGHTS.get(role, 0.0)
-            for concept in (concepts or []):
-                if _concept_match(concept, focus_concept):
-                    role_score = max(role_score, weight)
-    else:
-        for cr in (concept_roles or []):
-            if not isinstance(cr, dict):
-                continue
-            if _concept_match(cr.get("concept", ""), focus_concept):
-                role = cr.get("role", "")
-                if role == "core":
-                    role_score = 1.0
-                elif role == "introduced":
-                    role_score = max(role_score, 0.1)
+    role_score = 0.0
+    ROLE_WEIGHTS = {"core": 1.0, "introduced": 0.1}
+    for role, concepts in (target.concept_roles or {}).items():
+        weight = ROLE_WEIGHTS.get(role, 0.0)
+        for concept in (concepts or []):
+            if _concept_match(concept, focus_concept):
+                role_score = max(role_score, weight)
 
-    # ── 2. 로컬 그래프 구성 (weighted) ─────────────────────────────
-    graph: dict[str, list[tuple[str, float]]] = {}
+    # ── 2. 로컬 그래프 구성 ─────────────────────────────────────────
+    graph: dict[str, list[str]] = {}
     for rel in (target.concept_relations or []):
-        src = rel.get("from", rel.get("source", ""))
-        dst = rel.get("to",   rel.get("target", ""))
-        w_raw = float(rel.get("weight") or 1.0)
-        weight = min(max(w_raw, 0.0), 1.0)
-        if src and dst:
-            graph.setdefault(src, []).append((dst, weight))
-            graph.setdefault(dst, []).append((src, weight))
+        src = rel["from"]
+        dst = rel["to"]
+        graph.setdefault(src, []).append(dst)
+        graph.setdefault(dst, []).append(src)
 
     focus_node = next(
         (n for n in graph if _concept_match(n, focus_concept)),
         None
     )
 
-    # ── 3. BFS 홉 거리 점수 (weighted) ─────────────────────────────
+    # ── 3. BFS 홉 거리 점수 ─────────────────────────────────────────
+    # 정규화 기준: 5개 1홉 노드 → hop_score=1.0
     if focus_node:
         dist_map: dict[str, int] = {focus_node: 0}
-        weight_map: dict[str, float] = {focus_node: 1.0}
         frontier = [focus_node]
         for _ in range(3):
             next_frontier = []
             for node in frontier:
-                for neighbor, w in graph.get(node, []):
+                for neighbor in graph.get(node, []):
                     if neighbor and neighbor not in dist_map:
                         dist_map[neighbor] = dist_map[node] + 1
-                        weight_map[neighbor] = min(weight_map[node], w)
                         next_frontier.append(neighbor)
             frontier = next_frontier
             if not frontier:
                 break
 
-        # 거리 d, 경로 weight w인 노드 기여: w / (d+1)
-        # 정규화 기준: 5개 1홉 노드가 모두 weight=1 → hop_score=1.0
-        hop_score = sum(
-            weight_map.get(n, 1.0) / (d + 1)
-            for n, d in dist_map.items()
-            if n != focus_node and d > 0
-        )
+        hop_score = sum(1.0 / (d + 1) for d in dist_map.values() if d > 0)
         hop_score = min(hop_score / 5.0, 1.0)
     else:
         sub_kw_count = sum(
@@ -432,13 +353,8 @@ def _compute_contrast_signal(lec: LectureMetadata) -> float:
     relations = lec.concept_relations or []
     if not relations:
         return 0.0
-    total_weight = sum(float(rel.get("weight") or 1.0) for rel in relations) or 1.0
-    contrast_weight = sum(
-        float(rel.get("weight") or 1.0)
-        for rel in relations
-        if rel.get("type", "").lower() in _CONTRAST_TYPES
-    )
-    return round(min(contrast_weight / total_weight, 1.0), 4)
+    contrast = sum(1 for rel in relations if rel.get("type", "") in _CONTRAST_TYPES)
+    return round(contrast / len(relations), 4)
 
 
 def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
@@ -449,24 +365,16 @@ def _detect_comparison_intent(query_keywords: list[str], query: str) -> bool:
     )
 
 
-def _compute_fragmentation_penalty(concept_roles) -> float:
+def _compute_fragmentation_penalty(concept_roles: dict) -> float:
     """
     core 비율 낮고 introduced 비율 높을수록 패널티.
     반환: 0.0(응집) ~ 1.0(파편화)
     """
-    if isinstance(concept_roles, dict):
-        n_core  = len(concept_roles.get("core", []))
-        n_intro = len(concept_roles.get("introduced", []))
-    elif isinstance(concept_roles, list):
-        n_core  = sum(1 for cr in concept_roles if isinstance(cr, dict) and cr.get("role") == "core")
-        n_intro = sum(1 for cr in concept_roles if isinstance(cr, dict) and cr.get("role") == "introduced")
-    else:
-        return 0.0
-
+    n_core  = len((concept_roles or {}).get("core", []))
+    n_intro = len((concept_roles or {}).get("introduced", []))
     total = n_core + n_intro
     if total == 0:
         return 0.0
-
     core_ratio  = n_core  / total
     intro_ratio = n_intro / total
     return float(min(intro_ratio * (1.0 - core_ratio), 1.0))
@@ -714,8 +622,6 @@ def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
             continue
         _append_terms(terms, relation.get("from"))
         _append_terms(terms, relation.get("to"))
-        _append_terms(terms, relation.get("source"))
-        _append_terms(terms, relation.get("target"))
     for community in lec.communities or []:
         if not isinstance(community, dict):
             continue
@@ -729,10 +635,31 @@ def _lecture_subject_terms(lec: LectureMetadata) -> list[str]:
     return [_normalize_term(term) for term in terms if _normalize_term(term)]
 
 
-def _required_subject_match_type(lec: LectureMetadata, required_terms: set[str]) -> str:
+def _subject_concept_match(lecture_term: str, required_term: str) -> bool:
+    """Subject 판단 전용: required_term이 lecture_term 안에 포함될 때만 허용.
+    lecture_term이 required_term의 prefix인 경우(짧은 일반어 오탐)는 제외한다."""
+    concept_norm = _normalize_term(lecture_term)
+    focus_norm   = _normalize_term(required_term)
+    if not concept_norm or not focus_norm:
+        return False
+    if concept_norm == focus_norm:
+        return True
+    if _compact_term(concept_norm) == _compact_term(focus_norm):
+        return True
+    if _term_lookup_keys(concept_norm) & _term_lookup_keys(focus_norm):
+        return True
+    return focus_norm in concept_norm
+
+
+def _required_subject_match_type(
+    lec: LectureMetadata,
+    required_terms: set[str],
+    lecture_terms: Optional[list[str]] = None,
+) -> str:
     if not required_terms:
         return "not_required"
-    lecture_terms = _lecture_subject_terms(lec)
+    if lecture_terms is None:
+        lecture_terms = _lecture_subject_terms(lec)
     if not lecture_terms:
         return "none"
 
@@ -746,7 +673,7 @@ def _required_subject_match_type(lec: LectureMetadata, required_terms: set[str])
     if lecture_keys & required_keys:
         return "canonical"
     if any(
-        _concept_match(lecture_term, required_term)
+        _subject_concept_match(lecture_term, required_term)
         for lecture_term in lecture_terms
         for required_term in required_terms
     ):
