@@ -20,7 +20,6 @@ from recommender.utils import (
     _normalize_term,
     _term_lookup_keys,
     _tokenize_text,
-    _expanded_topic_terms,
 )
 
 
@@ -240,11 +239,22 @@ def _role_weight_for_concept(
 
 # ── 그래프 점수 ───────────────────────────────────────────────────────────────
 
+# 파이프라인 스키마상 의미 변별력이 낮은 범용 관계 타입 (로드 시 소문자 정규화됨).
+_GENERIC_RELATION_TYPES = frozenset({"related_to", "relates_to"})
+# RecommenderConfig.GRAPH_GENERIC_RELATION_WEIGHT의 기본값 원본.
+DEFAULT_GENERIC_RELATION_WEIGHT = 0.30
+
+
+def _relation_type_weight(rel: dict, generic_weight: float) -> float:
+    return generic_weight if rel.get("type") in _GENERIC_RELATION_TYPES else 1.0
+
+
 def _compute_graph_score(
     lec: LectureMetadata,
     query_concepts: set[str],
     core_weight: float = 1.0,
     intro_weight: float = 0.35,
+    generic_relation_weight: float = DEFAULT_GENERIC_RELATION_WEIGHT,
 ) -> float:
     query_concepts = {c for c in query_concepts if c}
     if not query_concepts:
@@ -256,21 +266,27 @@ def _compute_graph_score(
     ]
     role_score = sum(role_hits) / len(query_concepts)
 
-    graph: dict[str, list[str]] = {}
+    # 관계 타입별 가중 그래프 — 범용 관계(related_to)는 기여를 낮춘다.
+    graph: dict[str, list[tuple[str, float]]] = {}
     for rel in (lec.concept_relations or []):
         src = rel["from"]
         dst = rel["to"]
-        graph.setdefault(src, []).append(dst)
-        graph.setdefault(dst, []).append(src)
+        weight = _relation_type_weight(rel, generic_relation_weight)
+        graph.setdefault(src, []).append((dst, weight))
+        graph.setdefault(dst, []).append((src, weight))
 
     relation_scores = []
     for node, neighbors in graph.items():
         if not any(_concept_match(node, qc) for qc in query_concepts):
             continue
-        if not neighbors:
+        total_weight = sum(w for _, w in neighbors)
+        if total_weight <= 0:
             continue
-        related = sum(1 for n in neighbors if any(_concept_match(n, qc) for qc in query_concepts))
-        relation_scores.append(related / len(neighbors))
+        related_weight = sum(
+            w for n, w in neighbors
+            if any(_concept_match(n, qc) for qc in query_concepts)
+        )
+        relation_scores.append(related_weight / total_weight)
 
     relation_score = (
         sum(relation_scores) / len(relation_scores)
@@ -382,6 +398,30 @@ def _compute_fragmentation_penalty(concept_roles: dict) -> float:
 
 # ── 질의 주제 중심성 ─────────────────────────────────────────────────────────
 
+# 레벨별 topic 캡: level → (전체 질의어 매칭 시, 일부만 매칭 시).
+# RecommenderConfig.TOPIC_SCORE_CAPS의 기본값 원본 (단일 소스).
+DEFAULT_TOPIC_SCORE_CAPS: dict[str, tuple[float, float]] = {
+    "core":         (1.00, 1.00),
+    "keyword_high": (1.00, 1.00),
+    "introduced":   (0.68, 0.58),
+    "keyword_low":  (0.62, 0.52),
+    "relation":     (0.52, 0.42),
+    "community":    (0.48, 0.40),
+    "mention":      (0.45, 0.40),
+    "summary":      (0.42, 0.35),
+    "none":         (0.30, 0.30),
+}
+DEFAULT_TOPIC_CAP_SUMMARY_MIN_CENTRALITY = 0.20
+
+# 중심성 신호 배수 — 레벨 판정 임계값과 결합된 내부 상수
+_CENTRALITY_KEYWORD_WEIGHT   = 0.90
+_CENTRALITY_RELATION_WEIGHT  = 0.45
+_CENTRALITY_COMMUNITY_WEIGHT = 0.35
+_CENTRALITY_MENTION_WEIGHT   = 0.30
+# 텍스트 필드 매칭 강도 (title은 강한 주제 신호, summary는 배경 언급 수준)
+_TEXT_TITLE_STRENGTH   = 0.90
+_TEXT_SUMMARY_STRENGTH = 0.20
+
 def _keyword_score_bounds(lec: LectureMetadata) -> tuple[float, float]:
     scores = []
     for item in lec.keywords or []:
@@ -426,18 +466,9 @@ def _relation_match_strength(lec: LectureMetadata, term: str) -> float:
     total_weight = 0.0
     hit_weight = 0.0
     for rel in relations:
-        if not isinstance(rel, dict):
-            continue
-        try:
-            weight = max(float(rel.get("weight") or 1.0), 0.0)
-        except (TypeError, ValueError):
-            weight = 1.0
-        nodes = [
-            str(rel.get("from", rel.get("source", ""))),
-            str(rel.get("to", rel.get("target", ""))),
-        ]
+        weight = _relation_type_weight(rel, generic_weight=DEFAULT_GENERIC_RELATION_WEIGHT)
         total_weight += weight
-        if any(_concept_match(node, term) for node in nodes):
+        if _concept_match(rel["from"], term) or _concept_match(rel["to"], term):
             hit_weight += weight
     if total_weight <= 0.0:
         return 0.0
@@ -479,15 +510,15 @@ def _mentioned_term_strength(lec: LectureMetadata, term: str) -> float:
 
 def _text_mention_strength(lec: LectureMetadata, term: str) -> float:
     if _concept_match(lec.title, term):
-        return 0.9
+        return _TEXT_TITLE_STRENGTH
     title_terms = _tokenize_text(lec.title)
     if any(_concept_match(title_term, term) for title_term in title_terms):
-        return 0.9
+        return _TEXT_TITLE_STRENGTH
     if _concept_match(lec.summary, term):
-        return 0.2
+        return _TEXT_SUMMARY_STRENGTH
     summary_terms = _tokenize_text(lec.summary)
     if any(_concept_match(summary_term, term) for summary_term in summary_terms):
-        return 0.2
+        return _TEXT_SUMMARY_STRENGTH
     return 0.0
 
 
@@ -505,11 +536,11 @@ def _topic_centrality_for_term(lec: LectureMetadata, term: str) -> tuple[float, 
 
     centrality = max(
         role,
-        keyword * 0.9,
+        keyword * _CENTRALITY_KEYWORD_WEIGHT,
         text,
-        relation * 0.45,
-        community * 0.35,
-        mention * 0.30,
+        relation * _CENTRALITY_RELATION_WEIGHT,
+        community * _CENTRALITY_COMMUNITY_WEIGHT,
+        mention * _CENTRALITY_MENTION_WEIGHT,
     )
     if role >= 0.95:
         level = "core"
@@ -581,32 +612,38 @@ def _topic_centrality_profile(
     }
 
 
-def _topic_score_cap(level: str, centrality: float, all_terms_matched: bool) -> float:
-    if level in {"core", "keyword_high"}:
-        return 1.0
-    if level == "introduced":
-        return 0.68 if all_terms_matched else 0.58
-    if level == "keyword_low":
-        return 0.62 if all_terms_matched else 0.52
-    if level == "relation":
-        return 0.52 if all_terms_matched else 0.42
-    if level == "community":
-        return 0.48 if all_terms_matched else 0.40
-    if level == "mention":
-        return 0.45 if all_terms_matched else 0.40
+def _topic_score_cap(
+    level: str,
+    centrality: float,
+    all_terms_matched: bool,
+    caps: Optional[dict[str, tuple[float, float]]] = None,
+    summary_min_centrality: float = DEFAULT_TOPIC_CAP_SUMMARY_MIN_CENTRALITY,
+) -> float:
+    table = caps or DEFAULT_TOPIC_SCORE_CAPS
+    matched_cap, partial_cap = table.get(level, table["none"])
     if level == "summary":
-        return 0.42 if all_terms_matched and centrality >= 0.2 else 0.35
-    return 0.30
+        # summary 단독 매칭은 중심성 하한까지 만족해야 상위 캡을 허용
+        if all_terms_matched and centrality >= summary_min_centrality:
+            return matched_cap
+        return partial_cap
+    return matched_cap if all_terms_matched else partial_cap
 
 
 # ── subject 매칭 ─────────────────────────────────────────────────────────────
 
 def _required_subject_terms(ctx: QueryContext) -> set[str]:
+    """Subject 매칭·topic 캡 기준 용어 집합.
+
+    query_keywords만 사용한다. 약어의 등가 표기(예: "nlp"→"자연어 처리")는
+    질의 분석 LLM이 equivalent_keywords로 반환해 query_keywords에 병합되므로
+    여기서 별도 확장이 필요 없다. inferred_keywords(연관 개념)는 포함하지
+    않는다 — 연관 개념이 core라는 이유로 topic 캡이 풀리면 안 되기 때문.
+    """
     if ctx.intent != "recommend":
         return set()
     return {
         _normalize_term(term)
-        for term in _expanded_topic_terms(ctx.query_keywords)
+        for term in ctx.query_keywords
         if _normalize_term(term)
     }
 

@@ -7,11 +7,17 @@ recommender/config.py
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 from google import genai
+
+from recommender.scoring import (
+    DEFAULT_GENERIC_RELATION_WEIGHT,
+    DEFAULT_TOPIC_CAP_SUMMARY_MIN_CENTRALITY,
+    DEFAULT_TOPIC_SCORE_CAPS,
+)
 
 load_dotenv()
 
@@ -75,6 +81,17 @@ class RecommenderConfig:
     # graph_score role 가중치
     GRAPH_CORE_WEIGHT:   float = 1.00
     GRAPH_INTRO_WEIGHT:  float = 0.35
+    # 범용 관계(related_to)의 그래프 기여 가중치.
+    # 실데이터 관계의 96%가 RELATED_TO라 균등 카운트 시 relation 성분이 무변별해짐.
+    GRAPH_GENERIC_RELATION_WEIGHT: float = DEFAULT_GENERIC_RELATION_WEIGHT
+    # content 블렌딩 상한 — boost/패널티 반영 여유 확보용
+    CONTENT_SCORE_CAP:   float = 0.85
+    # 레벨별 topic 캡 테이블: level → (전체 질의어 매칭 시, 부분 매칭 시)
+    TOPIC_SCORE_CAPS: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: dict(DEFAULT_TOPIC_SCORE_CAPS)
+    )
+    # summary 단독 매칭이 상위 캡을 받기 위한 최소 중심성
+    TOPIC_CAP_SUMMARY_MIN_CENTRALITY: float = DEFAULT_TOPIC_CAP_SUMMARY_MIN_CENTRALITY
     # depth boost (focus_concept 지정 시에만 활성)
     W_DEPTH_BOOST:       float = 0.30
     # 파편화 패널티 강도 λ

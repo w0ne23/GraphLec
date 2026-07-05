@@ -65,9 +65,7 @@ from recommender.types import (
 )
 from recommender.utils import (
     _add_lexical_variants,
-    _append_topic_expansions,
     _cosine_sim,
-    _infer_domain_filters,
     _normalize_subdomain,
     _normalize_term,
     _normalize_vector,
@@ -175,12 +173,15 @@ class Recommender:
 
     def _prepare_query_context(self, query: str) -> QueryContext:
         print(f"[질의 분석] {query}")
-        fast_analysis = _fast_list_query_analysis(query, self._available_domains, self._available_subdomains)
+        fast_analysis = _fast_list_query_analysis(query)
         if fast_analysis:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = fast_analysis
         else:
             intent, search_text, query_keywords, inferred_keywords, domain, focus_concept, duration_max_sec, conditions = analyze_query(
-                query, self._available_domains, self._available_keywords
+                query,
+                self._available_domains,
+                self._available_keywords,
+                self._available_subdomains,
             )
         raw_query_keywords = list(query_keywords)
         raw_inferred_keywords = list(inferred_keywords)
@@ -206,29 +207,8 @@ class Recommender:
         query_type        = conditions.get("query_type", "topic_browse")
         query_specificity = conditions.get("query_specificity", "broad")
         subdomain = _normalize_subdomain(conditions.get("subdomain"))
-        if not subdomain:
-            inferred_domain, inferred_subdomain = _infer_domain_filters(
-                query,
-                self._available_domains,
-                self._available_subdomains,
-            )
-            domain = inferred_domain or domain
-            subdomain = _normalize_subdomain(inferred_subdomain)
         if subdomain not in self._available_subdomains:
             subdomain = None
-        inferred_keywords = _append_topic_expansions(
-            query_keywords,
-            inferred_keywords,
-            seed_terms=[query],
-        )
-        inferred_keywords, expansion_matches, expansion_unmatched = self._canonicalize_query_terms(
-            inferred_keywords,
-            existing=set(query_keywords),
-        )
-        canonical_matches.update(expansion_matches)
-        for term in expansion_unmatched:
-            if term not in unmatched_query_terms:
-                unmatched_query_terms.append(term)
         search_text = " ".join(query_keywords + inferred_keywords) or search_text or query
         comparison_intent = _detect_comparison_intent(query_keywords, query)
         issue_free_preference = bool(conditions.get("issue_free"))
@@ -685,12 +665,12 @@ class Recommender:
             self.cfg.W_SUMMARY * dm["summary"]
         )
 
-        # 블렌딩 — content 최대 0.85로 제한 (boost 여유 확보)
+        # 블렌딩 — content 상한 제한 (boost/패널티 반영 여유 확보)
         vec_blend = self.cfg.VEC_BLEND if has_vector_row else 0.0
         content_score = min(
             vec_blend       * vec_score +
             (1 - vec_blend) * dm_score,
-            0.85
+            self.cfg.CONTENT_SCORE_CAP,
         )
 
         # domain boost 신호
@@ -710,7 +690,10 @@ class Recommender:
             query_concepts,
             core_weight=self.cfg.GRAPH_CORE_WEIGHT,
             intro_weight=self.cfg.GRAPH_INTRO_WEIGHT,
+            generic_relation_weight=self.cfg.GRAPH_GENERIC_RELATION_WEIGHT,
         )
+        # community_score는 총점에 반영하지 않는 디버그/표시 전용 신호다.
+        # (community 신호는 topic centrality의 community 레벨로 흡수됨)
         community_score = self._community_index.score(
             lec.video_id,
             query_terms,
@@ -884,12 +867,15 @@ class Recommender:
             score = min(score + contrast_bonus, 1.0)
             detail["contrast_bonus"] = round(contrast_bonus, 4)
 
-            # 2. 도메인 불일치 페널티 (topic_browse는 서브도메인 페널티 면제)
-            if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
-                if ctx.query_type != "topic_browse":
+            # 2. 도메인 불일치 페널티
+            #    topic_browse(광역 탐색)는 domain/subdomain 페널티 모두 면제 —
+            #    도메인 라벨 오분류(예: 실데이터의 NLP 강의가 economics로 분류)에
+            #    정답이 깎이지 않도록 boost 부재로만 차등을 둔다.
+            if ctx.query_type != "topic_browse":
+                if ctx.subdomain and lec.graph_subdomain != ctx.subdomain:
                     score *= self.cfg.DOMAIN_MISMATCH_PENALTY
-            elif ctx.domain and ctx.domain != lec.domain:
-                score *= self.cfg.DOMAIN_MISMATCH_PENALTY
+                elif ctx.domain and ctx.domain != lec.domain:
+                    score *= self.cfg.DOMAIN_MISMATCH_PENALTY
 
             # 3. Subject 미매칭 페널티
             if subject_match_type == "none":
@@ -904,6 +890,8 @@ class Recommender:
                     detail["topic_match_level"],
                     detail["topic_centrality"],
                     detail["topic_all_terms_matched"],
+                    caps=self.cfg.TOPIC_SCORE_CAPS,
+                    summary_min_centrality=self.cfg.TOPIC_CAP_SUMMARY_MIN_CENTRALITY,
                 )
                 detail["topic_score_cap"] = cap
                 detail["topic_cap_applied"] = score > cap

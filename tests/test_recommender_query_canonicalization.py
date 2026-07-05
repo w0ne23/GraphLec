@@ -98,7 +98,7 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
     def test_prepare_query_context_canonicalizes_llm_output(self):
         original = recmod.analyze_query
 
-        def fake_analyze_query(query, available_domains, available_keywords):
+        def fake_analyze_query(query, available_domains, available_keywords, available_subdomains=None):
             return (
                 "recommend",
                 query,
