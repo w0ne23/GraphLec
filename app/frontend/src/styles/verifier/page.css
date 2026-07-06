@@ -3,6 +3,23 @@
   display: flex; flex-direction: column;
   height: 100%; overflow: hidden;
   background: var(--bg);
+  line-height: 1.6;
+}
+
+/* ── 공용 링크 스타일(추후 common으로 이동 고려) ── */
+.vf-link-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.vf-link {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: underline;
+  color: var(--blue);
+  font-size: 12px;
+  min-width: 0;
 }
 
 /* ── 업로드 / 상태 공통: 중앙 정렬 래퍼 ── */

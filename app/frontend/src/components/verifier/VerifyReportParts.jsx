@@ -7,6 +7,7 @@ import {
   formatScore,
   formatUnitValue,
   getScore,
+  groundingStatusLabel,
   hasIssueInComparison,
   hideMissingImage,
   resultFileUrl,
@@ -509,6 +510,46 @@ export function ModelDecisionStrip({ models }) {
         )
       })}
     </div>
+  )
+}
+
+export function WebGroundingBlock({ grounding }) {
+  if (!grounding || typeof grounding !== 'object' || !grounding.status) return null
+  if (grounding.status === 'not_applicable') {
+    return <div className="vf-report-note" data-report-note="true">웹 근거 확인 대상이 아닌 유형입니다</div>
+  }
+  const statusText = groundingStatusLabel(grounding.status)
+  if (!statusText) return null
+  const urls = asArray(grounding.evidence_sources)
+    .map(s => typeof s === 'string' ? s : s?.url)
+    .filter(Boolean)
+  return (
+    <details className="vf-model-evidence-accordion">
+      <summary>
+        <span>웹 근거 확인</span>
+        <i aria-hidden="true" />
+      </summary>
+      <div className="vf-model-evidence">
+        <div className="vf-model-card">
+          <div className="vf-model-card-head">
+            <span className="vf-bold">{statusText}</span>
+          </div>
+          <TextBlock label="웹 근거 기반 설명">{grounding.reason}</TextBlock>
+          {urls.length > 0 && (
+            <div className="vf-text-block" data-text-block="true">
+              <span>근거 출처</span>
+              <div className="vf-link-list">
+                {urls.map((url, index) => {
+                  let label
+                  try { label = new URL(url).hostname } catch { label = `source ${index + 1}` }
+                  return <a key={`${url}-${index}`} className="vf-link" href={url} target="_blank" rel="noreferrer">{label}</a>
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </details>
   )
 }
 

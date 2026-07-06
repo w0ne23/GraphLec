@@ -793,8 +793,13 @@
   min-width: 0;
   font-size: 12px;
   color: var(--t2);
-  line-height: 1.75;
   overflow-wrap: anywhere;
+}
+
+.vf-grounding-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .vf-watch-location {
@@ -920,19 +925,6 @@
   font-weight: 800;
 }
 
-.vf-evidence-block {
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--b1);
-}
-
-.vf-evidence-title {
-  font-size: 12px;
-  font-weight: 800;
-  color: var(--t1);
-  margin-bottom: 7px;
-}
-
 .vf-verdict-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -975,25 +967,6 @@
 
 .vf-verdict-meta {
   color: var(--t3);
-}
-
-.vf-source-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.vf-source-list a {
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  border: 1px solid var(--blue-br);
-  border-radius: 4px;
-  padding: 4px 7px;
-  background: var(--blue-bg);
-  color: var(--blue);
-  font-size: 12px;
 }
 
 .vf-typo-slide-card {

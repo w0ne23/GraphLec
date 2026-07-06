@@ -102,6 +102,18 @@ export function statusLabel(status) {
   return compactText(status)
 }
 
+const WEB_GROUNDING_STATUS_LABELS = {
+  supports_issue: '웹 근거가 이슈를 지지함',
+  refutes_issue: '웹 근거가 이슈를 반박함',
+  insufficient_evidence: '웹 근거가 부족함',
+  grounding_unavailable: '확인 실패',
+  not_applicable: '확인 대상이 아닌 유형',
+}
+
+export function groundingStatusLabel(status) {
+  return WEB_GROUNDING_STATUS_LABELS[status] || compactText(status)
+}
+
 export function firstFilled(...values) {
   return values.find(value => String(value ?? '').trim()) ?? ''
 }
