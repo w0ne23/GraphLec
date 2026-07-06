@@ -25,6 +25,7 @@ import {
   ModelEvidenceSection,
   RowMeta,
   TextBlock,
+  WebGroundingBlock,
 } from '../VerifyReportParts'
 
 function cx(...classes) {
@@ -218,6 +219,10 @@ export function renderIssueClassificationRows(rows) {
   )
 }
 
+function getWebGrounding(severity) {
+  return severity?.evidence?.web_grounding || severity?.classified_issue_verifier?.web_grounding || severity?.web_grounding
+}
+
 function FinalVerificationRow({ row, displayId }) {
   const source = getClaimFlowSource(row)
   const severity = row.severity
@@ -245,7 +250,8 @@ function FinalVerificationRow({ row, displayId }) {
         {severity ? (
           <>
             <FinalScoreSummary severity={severity} />
-            <ModelEvidenceAccordion items={severity.model_judgments} valueFormat="unit" />
+            <ModelEvidenceAccordion items={asArray(severity?.model_judgments)} valueFormat="unit" />
+            <WebGroundingBlock grounding={getWebGrounding(severity)} />
           </>
         ) : (
           <div className="vf-report-note" data-report-note="true">멀티 LLM 검증 데이터가 없습니다.</div>

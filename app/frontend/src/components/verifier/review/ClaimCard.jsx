@@ -9,6 +9,7 @@ import {
   scoreLabel,
   uniqueDetailValue,
 } from './verifierReviewUtils'
+import { groundingStatusLabel } from '../verifierUtils'
 
 const ISSUE_CHIP_CLASS = {
   confusing_explanation: 'vf-chip--confusing_explanation',
@@ -149,38 +150,14 @@ function TranscriptRow({ contexts, highlightText }) {
   )
 }
 
-function EvidenceSources({ sources }) {
-  const items = asArray(sources).slice(0, 5)
-  if (!items.length) return null
-  return (
-    <div className="vf-evidence-block">
-      <div className="vf-evidence-title">근거 링크</div>
-      <div className="vf-source-list">
-        {items.map((source, idx) => {
-          const url = typeof source === 'string' ? source : source?.url
-          const label = source?.title || source?.domain || url || `source ${idx + 1}`
-          if (!url) return null
-          return (
-            <a key={`${url}-${idx}`} href={url} target="_blank" rel="noreferrer">
-              {label}
-            </a>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
   const title = claim.claim_text || claim.resolved_claim || claim.problematic_content || '-'
   const startTime = Number(claim.start_time)
   const canWatch = Number.isFinite(startTime)
-  const grounding = claim.grounding || {}
+  const grounding = claim.web_grounding || claim.grounding || {}
   const displayIssueKey = claimDisplayIssueKey(claim)
   const displayIssueLabel = labelForClaimIssue(claim)
-  const sources = asArray(grounding.evidence_sources).length
-    ? grounding.evidence_sources
-    : asArray(claim.evidence_sources)
+  const groundingSources = asArray(grounding.evidence_sources)
   const hasCrosscheckScore = claim.crosscheck_score !== undefined && claim.crosscheck_score !== null
   const crosscheckStatus = claim.crosscheck_weighted_status || claim.crosscheck_score_verdict
   const whyWrong = uniqueDetailValue(claim.why_wrong, [claim.issue])
@@ -223,12 +200,12 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
       {expanded && (
         <div className="vf-claim-detail">
           <dl>
+            <DetailRow label="수정 제안" value={claim.correct_info} className="vf-detail-row--separated" />
             <WatchLocationRow canWatch={canWatch} timestamp={formatTime(startTime)} onWatch={onWatch} />
             <TranscriptRow contexts={claim.transcript_contexts} highlightText={claim.transcript_claim_text} />
             <DetailRow label="발화 ID" value={claim.utterance_ids?.length ? claim.utterance_ids.join(', ') : claim.utterance_id} />
             <DetailRow label="유형 근거" value={claim.issue_type_rationale} />
             <DetailRow label="문제점" value={problemsByModel.length ? <ModelProblemList entries={problemsByModel} /> : claim.issue} />
-            <DetailRow label="수정 제안" value={claim.correct_info} className="vf-detail-row--separated" />
             <DetailRow label="학생이 잘못 외울 수 있는 명제" value={claim.student_error} />
             <DetailRow label="왜 문제인가" value={whyWrong} />
             <DetailRow label="반례/조건" value={claim.counterexample_or_condition || claim.counterexample} />
@@ -239,9 +216,34 @@ export default function ClaimCard({ claim, expanded, onToggle, onWatch }) {
             <DetailRow label="문맥 근거" value={evidenceInContext} />
             <DetailRow label="기각/검토 사유" value={claim.rejection_reason || claim.review_reason_code || claim.rejection_reason_code} />
             <DetailRow label="기각 단계" value={claim.rejection_stage} />
-            <DetailRow label="Grounding" value={grounding.status || grounding.reason || claim.grounding_status} />
+            {grounding.status && (
+              <DetailRow
+                label="웹 근거 확인"
+                className="vf-detail-row--separated"
+                value={
+                  grounding.status === 'not_applicable'
+                    ? (groundingStatusLabel(grounding.status))
+                    : (
+                      <div className="vf-grounding-detail">
+                        <p>{groundingStatusLabel(grounding.status)}</p>
+                        {grounding.reason && <p>{grounding.reason}</p>}
+                        <div className="vf-link-list">
+                          {groundingSources.map((source, idx) => {
+                            const url = typeof source === 'string' ? source : source?.url
+                            if (!url) return null
+                            let label
+                            try { label = new URL(url).hostname } catch { label = `source ${idx + 1}` }
+                            return (
+                              <a key={`${url}-${idx}`} className="vf-link" href={url} target="_blank" rel="noreferrer">{label}</a>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                }
+              />
+            )}
           </dl>
-          <EvidenceSources sources={sources} />
         </div>
       )}
     </article>

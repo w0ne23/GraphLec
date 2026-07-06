@@ -621,7 +621,7 @@ export function feedbackItemToClaim(item, claimById) {
     crosscheck_score_verdict: item.crosscheck_score_verdict ?? crosscheck.verdict,
     crosscheck_weighted_status: status,
     model_verdicts: getModelVerdicts(item),
+    web_grounding: evidence.web_grounding || item.web_grounding,
     rejection_reason: status === 'rejected' ? getRejectionReason(item) : item.professor_check_reason || item.review_reason,
-    evidence_sources: evidence.evidence_sources || item.evidence_sources,
   }
 }
