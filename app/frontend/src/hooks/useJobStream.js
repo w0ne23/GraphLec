@@ -19,6 +19,7 @@ import {
   normalizeMode,
   phaseFromStatus,
 } from '../lib/jobStreamUtils'
+import { loadVerifierArtifacts } from '../lib/verifierArtifacts'
 
 const EMPTY_LECTURE = {
   id: '',
@@ -61,8 +62,23 @@ export function useJobStream(lectureId, mode = 'verify') {
   const [expandedClaimKey, setExpandedClaimKey] = useState('')
   const [isVideoMode, setIsVideoMode] = useState(false)
   const [seekToSeconds, setSeekToSeconds] = useState(null)
+  const [loadedArtifacts, setLoadedArtifacts] = useState({})
 
-  const verifierArtifacts = useMemo(() => verifierArtifactsFromResult(verifier), [verifier])
+  // 상세보기에서 analyzer 산출물 파일(issue_judge/issue_judge_compare/issue_types 등)을
+  // 로드한다. 백엔드 응답은 경로만 주므로 fetch가 필요하다.
+  useEffect(() => {
+    let cancelled = false
+    setLoadedArtifacts({})
+    loadVerifierArtifacts(verifier).then(loaded => {
+      if (!cancelled && loaded) setLoadedArtifacts(loaded)
+    })
+    return () => { cancelled = true }
+  }, [verifier])
+
+  const verifierArtifacts = useMemo(
+    () => ({ ...verifierArtifactsFromResult(verifier), ...loadedArtifacts }),
+    [verifier, loadedArtifacts]
+  )
   const isVerified = Boolean(lecture.is_verified)
 
   const pipelineFlowNodes = useMemo(
