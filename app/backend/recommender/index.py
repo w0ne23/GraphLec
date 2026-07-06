@@ -6,14 +6,20 @@ MetadataCollection, CommunityIndex, 인덱스 빌더, DB 로딩.
 
 from __future__ import annotations
 
+import json
 import math
+import os
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from recommender.config import _client, EMBED_MODEL
+from recommender.config import _client, DEFAULT_METADATA_DIR, EMBED_MODEL
+
+# RECOMMENDER_METADATA_SOURCE=files → app/backend/metadata/ JSON 파일 전체 로드 (테스트용)
+# 기본값(db) → DB에서 is_published=TRUE 강의만 로드
+_METADATA_SOURCE = os.getenv("RECOMMENDER_METADATA_SOURCE", "db").strip().lower()
 from recommender.types import (
     CommunityReportDocument,
     LectureLexicalDocument,
@@ -33,6 +39,50 @@ from recommender.utils import (
     _term_lookup_keys,
     _tokenize_text,
 )
+
+
+# ── 로드 시 정규화 ────────────────────────────────────────────────────────────
+
+def _normalize_concept_roles(raw) -> dict[str, list[str]]:
+    """concept_roles를 항상 dict[str, list[str]]로 정규화."""
+    if isinstance(raw, dict):
+        return {
+            role: [str(c) for c in concepts if c]
+            for role, concepts in raw.items()
+            if isinstance(concepts, list)
+        }
+    if isinstance(raw, list):
+        result: dict[str, list[str]] = {}
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "")
+            concept = str(item.get("concept") or "")
+            if role and concept:
+                result.setdefault(role, []).append(concept)
+        return result
+    return {}
+
+
+def _normalize_concept_relations(raw) -> list[dict]:
+    """concept_relations를 항상 {from, to, type} 형식으로 정규화.
+    메타데이터에 weight가 없어 weighted 그래프 계산이 퇴화한 상태이므로 weight 필드는 제거."""
+    if not isinstance(raw, list):
+        return []
+    result = []
+    for rel in raw:
+        if not isinstance(rel, dict):
+            continue
+        src = str(rel.get("from") or rel.get("source") or "").strip()
+        dst = str(rel.get("to") or rel.get("target") or "").strip()
+        if not src or not dst:
+            continue
+        result.append({
+            "from": src,
+            "to": dst,
+            "type": str(rel.get("type") or "").lower(),
+        })
+    return result
 
 
 # ── 임베딩 ────────────────────────────────────────────────────────────────────
@@ -117,10 +167,11 @@ def _fetch_lecture_metadata_rows(database_url: str) -> list[dict]:
 
 class MetadataCollection:
     def __init__(self, _metadata_dir: str | None = None):
-        # metadata_dir is accepted for backward compatibility. Runtime serving
-        # uses the DB as its declared source and does not read artifact files.
         self.lectures: dict[str, LectureMetadata] = {}
-        self._load_db()
+        if _METADATA_SOURCE == "files":
+            self._load_files(_metadata_dir or DEFAULT_METADATA_DIR)
+        else:
+            self._load_db()
 
     def _load_db(self):
         database_url = _database_url_sync()
@@ -142,6 +193,50 @@ class MetadataCollection:
             f"— 총 {len(self.lectures)}개\n"
         )
 
+    def _load_files(self, metadata_dir: str) -> None:
+        meta_path = Path(metadata_dir)
+        if not meta_path.exists():
+            print(f"[파일 로드] 메타데이터 디렉토리 없음: {metadata_dir}\n")
+            return
+        for path in sorted(meta_path.glob("*_metadata*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                items = raw if isinstance(raw, list) else [raw]
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    lec = self._from_json(item)
+                    if lec and lec.video_id:
+                        self.lectures[lec.video_id] = lec
+            except Exception as exc:
+                print(f"  ⚠ 파일 로드 실패: {path.name} ({exc})")
+        print(f"[파일 로드] {len(self.lectures)}개 강의 로드 — {metadata_dir}\n")
+
+    @staticmethod
+    def _from_json(item: dict) -> Optional[LectureMetadata]:
+        video_id = str(item.get("video_id") or "").strip()
+        if not video_id:
+            return None
+        return LectureMetadata(
+            video_id           = video_id,
+            title              = item.get("title") or "Untitled lecture",
+            instructor_id      = item.get("instructor_id") or "",
+            uploaded_at        = item.get("uploaded_at"),
+            domain             = _canonical_domain(item.get("graph_domain") or item.get("domain")),
+            graph_subdomain    = _normalize_subdomain(item.get("graph_subdomain")),
+            difficulty         = item.get("difficulty") or "unknown",
+            duration_sec       = item.get("duration_sec") or 0.0,
+            summary            = item.get("summary") or "",
+            keywords           = item.get("keywords") or [],
+            concept_roles      = _normalize_concept_roles(item.get("concept_roles")),
+            concept_relations  = _normalize_concept_relations(item.get("concept_relations")),
+            communities        = item.get("communities") or [],
+            pedagogy           = item.get("pedagogy") or {},
+            diagnostics        = item.get("diagnostics") or {},
+            visual_concept_terms = item.get("visual_concept_terms") or [],
+            mentioned_terms      = item.get("mentioned_terms") or [],
+        )
+
     @staticmethod
     def _from_db_row(row: dict) -> LectureMetadata:
         uploaded_at = row.get("uploaded_at") or row.get("lecture_created_at")
@@ -158,12 +253,13 @@ class MetadataCollection:
             duration_sec       = row.get("duration_sec") or 0.0,
             summary            = row.get("summary") or "",
             keywords           = row.get("keywords") or [],
-            concept_roles      = row.get("concept_roles") or {},
-            concept_relations  = row.get("concept_relations") or [],
+            concept_roles      = _normalize_concept_roles(row.get("concept_roles")),
+            concept_relations  = _normalize_concept_relations(row.get("concept_relations")),
             communities        = row.get("communities") or [],
             pedagogy           = row.get("pedagogy") or {},
             diagnostics        = row.get("diagnostics") or {},
             visual_concept_terms = row.get("visual_concept_terms") or [],
+            mentioned_terms      = row.get("mentioned_terms") or [],
         )
 
     def get(self, video_id: str) -> Optional[LectureMetadata]:
@@ -233,6 +329,20 @@ def _build_lexical_stats(lectures: list[LectureMetadata]) -> LexicalStats:
                     for key in _term_lookup_keys(token):
                         if key != token:
                             field_tf["keyword"][key] += _COMMUNITY_NODE_WEIGHT * 0.4
+
+        _MENTIONED_TERM_WEIGHT = 0.3
+        for item in (lec.mentioned_terms or []):
+            if not isinstance(item, dict):
+                continue
+            m_term = _normalize_term(str(item.get("term") or ""))
+            if not m_term:
+                continue
+            _add_lexical_variants(field_tf["keyword"], m_term, _MENTIONED_TERM_WEIGHT)
+            for token in _tokenize_text(m_term):
+                field_tf["keyword"][token] += _MENTIONED_TERM_WEIGHT * 0.5
+                for key in _term_lookup_keys(token):
+                    if key != token:
+                        field_tf["keyword"][key] += _MENTIONED_TERM_WEIGHT * 0.4
 
         term_tf = Counter()
         for field_counter in field_tf.values():
@@ -433,6 +543,13 @@ def _metadata_concept_terms(lec: LectureMetadata) -> list[tuple[str, float]]:
 
     for term in lec.visual_concept_terms or []:
         terms.append((str(term), 0.75))
+
+    for item in lec.mentioned_terms or []:
+        if not isinstance(item, dict):
+            continue
+        term = str(item.get("term") or "").strip()
+        if term:
+            terms.append((term, 0.5))
 
     return [(term, weight) for term, weight in terms if _normalize_term(term)]
 

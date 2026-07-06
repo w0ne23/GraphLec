@@ -27,9 +27,8 @@ from recommender.scoring import (
     _content_terms_only,
 )
 from recommender.utils import (
-    _append_topic_expansions,
     _compact_term,
-    _infer_domain_filters,
+    _normalize_subdomain,
     _normalize_term,
     _query_term_base,
     _term_lookup_keys,
@@ -77,10 +76,12 @@ def _analysis_cache_key(
     query: str,
     available_domains: list[str],
     available_keywords: list[str],
-) -> tuple[str, tuple[str, ...], int]:
+    available_subdomains: Optional[list[str]] = None,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], int]:
     return (
         re.sub(r"\s+", " ", str(query or "").strip()),
         tuple(sorted(available_domains)),
+        tuple(sorted(available_subdomains or [])),
         len(available_keywords),
     )
 
@@ -103,40 +104,53 @@ def _copy_analysis_result(result: tuple) -> tuple:
 
 def _fast_list_query_analysis(
     query: str,
-    available_domains: list[str],
-    available_subdomains: list[str],
 ) -> Optional[tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]]:
+    """전체 목록 질의만 LLM 없이 즉시 처리. 도메인별 목록 질의는
+    도메인 추론이 필요하므로 LLM 분석(analyze_query)으로 넘긴다."""
     normalized = _normalize_term(query)
-    has_list_signal = any(
-        signal in normalized
-        for signal in (
-            "뭐 있어", "뭐있어", "목록", "리스트",
-            "전체 강의", "모든 강의", "강의 보여", "강의 알려",
-        )
-    )
-    if not has_list_signal:
+    if "전체 강의" not in normalized and "모든 강의" not in normalized:
         return None
 
-    query_terms = [query]
-    if "전체 강의" in normalized or "모든 강의" in normalized:
-        return "recommend", query, query_terms, [], None, None, None, {}
-
-    domain, subdomain = _infer_domain_filters(query, available_domains, available_subdomains)
-    if domain:
-        return "recommend", query, query_terms, [], domain, None, None, {"subdomain": subdomain}
-
-    return None
+    # 검색 잡음 토큰("강의", "알려줘" 같은 메타 표현·조사)을 걷어낸 나머지를
+    # 키워드로 사용. 정제 결과가 비면 빈 리스트로 두고 하위 fallback
+    # (search_text 토큰화)이 처리한다 — 결과 유무를 제약하는 필터가 아님.
+    query_base = _query_term_base(query)
+    query_terms = [query_base] if query_base else []
+    return "recommend", query, query_terms, [], None, None, None, {}
 
 
 # ── fallback 분석 ─────────────────────────────────────────────────────────────
+
+# LLM 실패 시 query_type 추정용 의도 신호 (언어 기능어 수준 — 주제 지식 아님).
+_DURATION_SIGNALS = ("짧은", "짧게", "분 이내", "분 이하", "분 내외", "이내로")
+_DEPTH_SIGNALS = (
+    "자세히", "깊게", "깊이", "심화", "상세히",
+    "원리", "동작 방식", "동작방식", "내부 동작",
+)
+_RELATED_SIGNALS = (
+    "언급", "나오는", "나온", "등장", "포함된", "포함하는", "다루는",
+)
+
+
+def _fallback_query_type(query: str) -> str:
+    normalized = _normalize_term(query)
+    if any(sig in normalized for sig in _DURATION_SIGNALS):
+        return "condition_first"
+    if any(sig in normalized for sig in _DEPTH_SIGNALS):
+        return "concept_depth"
+    if any(sig in normalized for sig in _RELATED_SIGNALS):
+        return "related_search"
+    return "topic_browse"
+
 
 def _fallback_query_analysis(
     query: str,
     available_domains: list[str],
     available_keywords: list[str],
 ) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]:
-    """LLM 질의 분석 실패 시 metadata keyword pool만으로 안전하게 질의를 해석한다."""
-    domain, subdomain = _infer_domain_filters(query, available_domains, [])
+    """LLM 질의 분석 실패 시 metadata keyword pool만으로 안전하게 질의를 해석한다.
+
+    도메인/세부도메인 추론은 LLM 몫이므로 fallback에서는 시도하지 않는다."""
     query_base = _query_term_base(query)
     query_keys = _term_lookup_keys(query_base or query)
     query_compact = _compact_term(query_base or query)
@@ -162,9 +176,7 @@ def _fallback_query_analysis(
     if not matched and query_base:
         matched = [query_base]
 
-    inferred = _append_topic_expansions(matched, [])
-    inferred = [term for term in inferred if _normalize_term(term) not in {_normalize_term(m) for m in matched}]
-    search_text = " ".join(matched + inferred) or query
+    search_text = " ".join(matched) or query
     focus_concept = matched[0] if len(matched) == 1 and matched[0] in available_keywords else None
     conditions = {
         "issue_free": False,
@@ -173,16 +185,16 @@ def _fallback_query_analysis(
         "prefers_slow_speech": any(term in query for term in _DELIVERY_CONDITION_TERMS),
         "prefers_listenability": any(term in query for term in _DELIVERY_CONDITION_TERMS),
         "prefers_recency": any(term in query for term in _RECENCY_CONDITION_TERMS),
+        "query_type": _fallback_query_type(query),
+        "query_specificity": "broad",
     }
-    if subdomain:
-        conditions["subdomain"] = subdomain
 
     return (
         "recommend",
         search_text,
         matched,
-        inferred[:6],
-        domain,
+        [],
+        None,
         focus_concept,
         None,
         conditions,
@@ -195,6 +207,7 @@ def analyze_query(
     query:              str,
     available_domains:  list[str],
     available_keywords: list[str],
+    available_subdomains: Optional[list[str]] = None,
 ) -> tuple[str, str, list[str], list[str], Optional[str], Optional[str], Optional[int], dict]:
     """
     질의 → intent + search_text + query_keywords + inferred_keywords + domain + focus_concept + duration_max_sec 추출.
@@ -202,20 +215,22 @@ def analyze_query(
     반환:
       intent             : "recommend" | "list_by_topic"
       search_text        : 벡터 임베딩용 전체 텍스트 (query + inferred 합산)
-      query_keywords     : 원본 질의에서 직접 추출한 핵심 용어 (dm 100% 반영)
-      inferred_keywords  : Gemini가 의미 확장한 연관 용어 (dm 50% 반영)
+      query_keywords     : 원본 핵심 용어 + LLM 등가 표기(약어 확장 등) — dm 100% 반영
+      inferred_keywords  : LLM이 의미 확장한 연관 용어 (dm 50% 반영)
       domain             : available_domains 중 하나, 없으면 None
       focus_concept      : 깊이를 측정할 핵심 개념, 없으면 None
       duration_max_sec   : 최대 강의 길이(초), 언급 없으면 None
-      conditions         : 조건 질의 플래그
+      conditions         : 조건 질의 플래그 (+ subdomain — available_subdomains 중 하나)
     """
-    cache_key = _analysis_cache_key(query, available_domains, available_keywords)
+    available_subdomains = available_subdomains or []
+    cache_key = _analysis_cache_key(query, available_domains, available_keywords, available_subdomains)
     cached = _ANALYZE_QUERY_CACHE.get(cache_key)
     if cached:
         return _copy_analysis_result(cached)
 
-    domain_list  = ", ".join(available_domains)
-    keyword_list = ", ".join(available_keywords)
+    domain_list    = ", ".join(available_domains)
+    subdomain_list = ", ".join(available_subdomains)
+    keyword_list   = ", ".join(available_keywords)
 
     prompt = f"""다음 강의 검색 질의를 분석해줘.
 
@@ -224,9 +239,13 @@ def analyze_query(
 다음 JSON 형식으로만 출력해 (설명 없이):
 {{
   "query_keywords": ["원본 질의 핵심 용어1", ...],
+  "equivalent_keywords": ["query_keywords의 등가 표기1", ...],
   "inferred_keywords": ["확장 연관 용어1", ...],
-  "intent": "recommend 또는 list_by_topic",
+  "intent": "recommend",
+  "query_type": "topic_browse | concept_depth | condition_first | related_search",
+  "query_specificity": "broad | specific",
   "domain": "도메인 문자열 또는 null",
+  "subdomain": "세부도메인 문자열 또는 null",
   "focus_concept": "개념 문자열 또는 null",
   "duration_max_sec": 숫자 또는 null,
   "conditions": {{
@@ -239,11 +258,20 @@ def analyze_query(
   }}
 }}
 
-[intent]: 질의 목적 분류
-  - "recommend": 특정 강의를 추천받고 싶은 일반 질의
-    예) "가상 메모리 자세히 설명하는 강의 추천해줘"
-  - "list_by_topic": 특정 주제와 관련된 강의를 넓게/모두 보고 싶은 질의
-    예) "딥러닝 관련 강의 모두 알려줘", "운영체제 관련 강의 다 보여줘", "컴퓨터공학 강의 뭐 있어?"
+[query_type]: 질의 유형 분류
+  - "topic_browse": 넓은 주제 탐색 — 여러 강의 나와도 됨
+    예) "운영체제 강의 추천", "AI 강의 뭐 있어", "미적분 강의 알려줘"
+  - "concept_depth": 특정 개념의 원리·동작 방식 심화 요청
+    예) "가상 메모리 동작 원리 자세히", "커널 구조 깊게 설명하는 강의"
+  - "condition_first": 길이·최신성 등 조건이 명시적 주 요청
+    예) "짧은 AI 강의", "30분 이내 머신러닝 강의", "최근 올라온 딥러닝 강의"
+  - "related_search": 특정 개념이 포함된 강의를 탐색 — 핵심 주제가 아닌 연관 탐색
+    예) "커널 다루는 강의 있어?", "TCP 언급하는 강의 있나요?"
+
+[query_specificity]: 질의어 특이성
+  - "broad": 분야·주제 수준의 일반 용어 — 여러 강의에서 공통으로 다룰 법한 개념
+  - "specific": 특정 알고리즘명·인물·사건·고유 기법처럼 일부 강의만 다룰 법한 용어
+  - 판단 기준: query_keywords가 교과서 목차 수준이면 broad, 특정 챕터나 인물 이름 수준이면 specific
 
 [query_keywords]: 원본 질의에서 직접 등장하는 핵심 학술·기술 용어
 - "찾아줘", "알려줘", "강의", "어떻게" 같은 메타·구어체 표현 제외
@@ -252,17 +280,23 @@ def analyze_query(
 - 예) "TCP와 UDP 차이를 다루는 강의" → ["TCP", "UDP"]
 - 예) "비동기 처리할 때 막혀" → ["비동기"]
 
+[equivalent_keywords]: query_keywords 각 용어의 등가 표기 (0~4개)
+- **표기만 다르고 지시 대상이 완전히 같은 경우만**: 약어 ↔ 정식 명칭, 한국어 ↔ 영어 표기, 표준 동의어
+- 예) query_keywords에 "UN" → ["국제연합"]
+- 지시 대상이 다른 용어(연관·상위·하위·포함 관계 개념)는 절대 넣지 말 것 — 그것은 inferred_keywords 몫
+
 [inferred_keywords]: 질의 의도에서 연관성이 높은 확장 용어 (2~6개)
-- query_keywords와 겹치지 않을 것
-- 영문 약어·영문 기술 용어가 query_keywords에 포함된 경우, 반드시 한국어 학술 용어를 inferred_keywords에 포함할 것
-  (예: "os" → "운영체제", "db" → "데이터베이스", "ml" → "머신러닝", "dl" → "딥러닝",
-       "nlp" → "자연어 처리", "cv" → "컴퓨터 비전", "nn" → "신경망", "oop" → "객체지향 프로그래밍")
+- query_keywords·equivalent_keywords와 겹치지 않을 것
 - 예) "가상 메모리 페이징" → ["페이지 폴트", "페이지 교체", "TLB", "운영체제"]
 - 예) "TCP UDP 차이" → ["프로토콜", "전송 계층", "3-way 핸드셰이크", "흐름 제어"]
 - 예) "비동기" → ["Promise", "async/await", "이벤트 루프", "콜백"]
 
 [domain]: 반드시 아래 목록 중 하나: {domain_list}
   - 확신할 수 없으면 null
+
+[subdomain]: 반드시 아래 목록 중 하나: {subdomain_list}
+  - 질의 주제가 목록의 세부도메인과 명확히 일치할 때만 설정, 확신할 수 없으면 null
+  - 주의: 질의 주제를 포괄하는 세부도메인이 여러 개면(예: "수학" ↔ mathematics/statistics) null로 두고 domain만 설정
 
 [focus_concept]: 특정 개념의 자세한 설명·원리·동작 방식을 명시적으로 요청할 때만 설정
   - 반드시 아래 [키워드 목록]에서만 선택, 해당 없으면 null
@@ -297,12 +331,28 @@ def analyze_query(
         return result
 
     intent            = parsed.get("intent") or "recommend"
+    subdomain         = _normalize_subdomain(parsed.get("subdomain"))
+    if subdomain not in available_subdomains:
+        subdomain = None
     query_keywords    = parsed.get("query_keywords", [])
+    # 등가 표기(약어 확장·동의어)는 같은 개념이므로 query_keywords에 병합 —
+    # subject 페널티와 topic 캡이 등가어 기준으로도 매칭되게 한다.
+    equivalent_keywords = parsed.get("equivalent_keywords", [])
+    if isinstance(equivalent_keywords, list):
+        query_keywords = list(query_keywords) + [
+            term for term in equivalent_keywords if isinstance(term, str)
+        ]
     inferred_keywords = parsed.get("inferred_keywords", [])
     domain            = parsed.get("domain") or None
     focus_concept     = parsed.get("focus_concept") or None
     duration_max_sec  = parsed.get("duration_max_sec") or None
     conditions        = parsed.get("conditions") if isinstance(parsed.get("conditions"), dict) else {}
+
+    _valid_query_types = {"topic_browse", "concept_depth", "condition_first", "related_search"}
+    query_type = parsed.get("query_type") or "topic_browse"
+    if query_type not in _valid_query_types:
+        query_type = "topic_browse"
+    query_specificity = "specific" if parsed.get("query_specificity") == "specific" else "broad"
 
     normalized_conditions = {
         "issue_free":            bool(conditions.get("issue_free")),
@@ -311,17 +361,18 @@ def analyze_query(
         "prefers_slow_speech":   bool(conditions.get("prefers_slow_speech")),
         "prefers_listenability": bool(conditions.get("prefers_listenability")),
         "prefers_recency":       bool(conditions.get("prefers_recency")),
+        "query_type":            query_type,
+        "query_specificity":     query_specificity,
     }
+    if subdomain:
+        normalized_conditions["subdomain"] = subdomain
     query_keywords    = _content_terms_only(query_keywords, normalized_conditions)
     inferred_keywords = _content_terms_only(inferred_keywords, normalized_conditions)
 
     search_text = " ".join(query_keywords + inferred_keywords) or query
 
-    kw_set = set(available_keywords)
     if domain not in available_domains:
         domain = None
-    if focus_concept and focus_concept not in kw_set:
-        focus_concept = None
     if duration_max_sec is not None:
         try:
             duration_max_sec = int(duration_max_sec)

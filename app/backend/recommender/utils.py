@@ -29,92 +29,6 @@ _QUERY_META_PHRASES = (
     "설명해줘", "설명해 주세요", "설명해주세요", "설명", "강의", "관련",
     "대해서", "대해", "관한", "다루는", "배우는", "학습", "수업",
 )
-_DOMAIN_ALIASES = {
-    "컴퓨터공학": "engineering",
-    "컴공": "engineering",
-    "computer science": "engineering",
-    "cs": "engineering",
-    "공학": "engineering",
-    "경제학": "social_science",
-    "경제": "social_science",
-    "경영": "social_science",
-    "비즈니스": "social_science",
-    "마케팅": "social_science",
-    "수학": "natural_science",
-    "자연과학": "natural_science",
-    "의학": "health_sciences",
-    "의료": "health_sciences",
-    "보건": "health_sciences",
-    "생물학": "natural_science",
-    "생명과학": "natural_science",
-    "화학": "natural_science",
-    "물리학": "natural_science",
-    "물리": "natural_science",
-    "환경": "natural_science",
-    "기후": "natural_science",
-    "철학": "humanities",
-    "역사": "humanities",
-    "세계사": "humanities",
-    "한국사": "humanities",
-    "언어학": "humanities",
-    "교육": "education",
-    "교육학": "education",
-    "사회학": "social_science",
-    "사회": "social_science",
-    "디자인": "arts",
-    "예술": "arts",
-    "체육": "sports",
-    "스포츠": "sports",
-}
-_SUBDOMAIN_ALIASES: dict[str, tuple[str, str]] = {
-    "컴퓨터공학": ("engineering", "computer_science"),
-    "컴공": ("engineering", "computer_science"),
-    "computer science": ("engineering", "computer_science"),
-    "cs": ("engineering", "computer_science"),
-    "전기공학": ("engineering", "electrical_engineering"),
-    "전자공학": ("engineering", "electrical_engineering"),
-    "기계공학": ("engineering", "mechanical_engineering"),
-    "화학공학": ("engineering", "chemical_engineering"),
-    "산업공학": ("engineering", "industrial_engineering"),
-    "경제학": ("social_science", "economics"),
-    "경제": ("social_science", "economics"),
-    "경영학": ("social_science", "business"),
-    "경영": ("social_science", "business"),
-    "비즈니스": ("social_science", "business"),
-    "법학": ("social_science", "law"),
-    "정치학": ("social_science", "political_science"),
-    "사회학": ("social_science", "sociology"),
-    "심리학": ("social_science", "psychology"),
-    "교육학": ("education", "education"),
-    "물리학": ("natural_science", "physics"),
-    "물리": ("natural_science", "physics"),
-    "화학": ("natural_science", "chemistry"),
-    "수학": ("natural_science", "mathematics"),
-    "mathematics": ("natural_science", "mathematics"),
-    "math": ("natural_science", "mathematics"),
-    "생물학": ("natural_science", "biology"),
-    "생명과학": ("natural_science", "biology"),
-    "천문학": ("natural_science", "astronomy"),
-    "생태학": ("natural_science", "ecology"),
-    "철학": ("humanities", "philosophy"),
-    "역사학": ("humanities", "history"),
-    "역사": ("humanities", "history"),
-    "언어학": ("humanities", "linguistics"),
-    "문학": ("humanities", "literature"),
-    "종교학": ("humanities", "religion"),
-    "미술": ("arts", "fine_arts"),
-    "음악": ("arts", "music"),
-    "디자인": ("arts", "design"),
-    "영화": ("arts", "film"),
-    "연극": ("arts", "theater"),
-    "해부학": ("health_sciences", "anatomy"),
-    "생리학": ("health_sciences", "physiology"),
-    "약리학": ("health_sciences", "pharmacology"),
-    "공중보건": ("health_sciences", "public_health"),
-    "간호학": ("health_sciences", "nursing"),
-    "체육": ("sports", "physical_education"),
-    "스포츠과학": ("sports", "sports_science"),
-}
 _DOMAIN_LABELS = {
     "engineering": "공학",
     "natural_science": "자연과학",
@@ -126,17 +40,6 @@ _DOMAIN_LABELS = {
     "education": "교육",
     "etc": "기타",
 }
-
-_TOPIC_EXPANSIONS: dict[str, list[str]] = {
-    "파이썬": ["Python"],
-    "python": ["파이썬"],
-    "웹": ["리액트", "컴포넌트", "자바스크립트", "비동기", "Promise", "async/await", "fetch", "JSX", "가상 DOM"],
-    "웹서비스": ["리액트", "컴포넌트", "자바스크립트", "비동기", "Promise", "async/await", "fetch", "JSX", "가상 DOM"],
-    "프론트엔드": ["리액트", "컴포넌트", "자바스크립트", "JSX", "가상 DOM", "렌더링"],
-    "데이터베이스": ["SQL", "JOIN", "트랜잭션", "인덱스", "정규화", "스키마"],
-    "DB": ["데이터베이스", "SQL", "JOIN", "트랜잭션", "인덱스", "정규화"],
-}
-
 
 # ── 도메인 유틸 ───────────────────────────────────────────────────────────────
 
@@ -159,30 +62,6 @@ def _canonical_domain(value: str) -> str:
 
 def _normalize_subdomain(value: str) -> str:
     return str(value or "").strip().lower().replace("-", "_")
-
-
-def _infer_domain_filters(
-    query: str,
-    available_domains: list[str],
-    available_subdomains: list[str],
-) -> tuple[str | None, str | None]:
-    normalized = str(query or "").lower()
-    compact = re.sub(r"\s+", "", normalized)
-    for alias, (domain, subdomain) in _SUBDOMAIN_ALIASES.items():
-        alias_normalized = alias.lower()
-        alias_compact = re.sub(r"\s+", "", alias_normalized)
-        if (
-            (alias_normalized in normalized or alias_compact in compact)
-            and domain in available_domains
-            and subdomain in available_subdomains
-        ):
-            return domain, subdomain
-    for alias, domain in _DOMAIN_ALIASES.items():
-        alias_normalized = alias.lower()
-        alias_compact = re.sub(r"\s+", "", alias_normalized)
-        if (alias_normalized in normalized or alias_compact in compact) and domain in available_domains:
-            return domain, None
-    return None, None
 
 
 # ── 텍스트 정규화 ─────────────────────────────────────────────────────────────
@@ -275,59 +154,19 @@ def _append_terms(target: list[str], values) -> None:
         target.append(str(values))
 
 
-def _expanded_topic_terms(terms: Iterable[str]) -> list[str]:
-    expanded: list[str] = []
-    seen: set[str] = set()
-
-    def add(term: str) -> None:
-        normalized = _normalize_term(term)
-        if not normalized or normalized in seen:
-            return
-        seen.add(normalized)
-        expanded.append(term)
-
-    for term in terms:
-        add(term)
-        normalized = _normalize_term(term)
-        for alias, aliases in _TOPIC_EXPANSIONS.items():
-            normalized_alias = _normalize_term(alias)
-            if normalized == normalized_alias or normalized_alias in normalized or normalized in normalized_alias:
-                for expanded_term in aliases:
-                    add(expanded_term)
-
-    return expanded
-
-
 def _expanded_lookup_terms(terms: Iterable[str]) -> set[str]:
+    """용어별 정규형 + lookup key 집합.
+
+    주제 확장은 하드코딩 사전 없이 질의 분석 LLM(inferred_keywords)과
+    metadata 기반 QueryConceptIndex가 담당한다.
+    """
     expanded: set[str] = set()
-    for term in _expanded_topic_terms(terms):
+    for term in terms:
         normalized = _normalize_term(term)
         if not normalized:
             continue
         expanded.add(normalized)
         expanded.update(_term_lookup_keys(normalized))
-    return expanded
-
-
-def _append_topic_expansions(
-    query_keywords: list[str],
-    inferred_keywords: list[str],
-    seed_terms: list[str] | None = None,
-) -> list[str]:
-    existing = {_normalize_term(term) for term in query_keywords + inferred_keywords}
-    seed_only = {
-        _normalize_term(term)
-        for term in (seed_terms or [])
-        if _normalize_term(term)
-    }
-    expanded = list(inferred_keywords)
-    for term in _expanded_topic_terms(query_keywords + inferred_keywords + (seed_terms or [])):
-        normalized = _normalize_term(term)
-        if normalized in seed_only:
-            continue
-        if normalized and normalized not in existing:
-            existing.add(normalized)
-            expanded.append(term)
     return expanded
 
 

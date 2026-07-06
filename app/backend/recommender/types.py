@@ -7,7 +7,7 @@ recommender/types.py
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -35,6 +35,7 @@ class LectureMetadata:
     pedagogy:          dict
     diagnostics:       dict
     visual_concept_terms: list[str]
+    mentioned_terms:      list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -126,6 +127,8 @@ class QueryContext:
     subdomain:              Optional[str]
     focus_concept:          Optional[str]
     duration_max_sec:       Optional[int]
+    query_type:             str   # topic_browse | concept_depth | condition_first | related_search
+    query_specificity:      str   # broad | specific
     comparison_intent:      bool
     issue_free_preference:  bool
     visual_preference:      bool

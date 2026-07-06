@@ -98,7 +98,7 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
     def test_prepare_query_context_canonicalizes_llm_output(self):
         original = recmod.analyze_query
 
-        def fake_analyze_query(query, available_domains, available_keywords):
+        def fake_analyze_query(query, available_domains, available_keywords, available_subdomains=None):
             return (
                 "recommend",
                 query,
@@ -239,6 +239,8 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
             subdomain=None,
             focus_concept=None,
             duration_max_sec=None,
+            query_type="topic_browse",
+            query_specificity="broad",
             comparison_intent=False,
             issue_free_preference=False,
             visual_preference=False,
@@ -283,6 +285,8 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
             subdomain=None,
             focus_concept=None,
             duration_max_sec=None,
+            query_type="topic_browse",
+            query_specificity="broad",
             comparison_intent=False,
             issue_free_preference=False,
             visual_preference=False,
@@ -357,6 +361,8 @@ class RecommenderQueryCanonicalizationTest(unittest.TestCase):
             subdomain=None,
             focus_concept=None,
             duration_max_sec=None,
+            query_type="topic_browse",
+            query_specificity="broad",
             comparison_intent=False,
             issue_free_preference=False,
             visual_preference=False,
