@@ -109,3 +109,11 @@ huggingface_cache/
 # ── 로그 ─────────────────────────────────────────────────────
 *.log
 logs/
+
+# ── QnA ─────────────────────────────────────────────────────
+!query_service/intent_config.json
+
+# ── 평가 ─────────────────────────────────────────────────────
+evaluations/
+evaluations*/
+app/backend/scripts/eval/

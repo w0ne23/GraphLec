@@ -55,6 +55,7 @@ services:
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password123}
       - GRAPHLEC_LANCE_ROOT=/lance/lancedb
+      - GRAPHLEC_LANCE_MODE=${GRAPHLEC_LANCE_MODE:-bonus_only}
     volumes:
       - lance_data:/lance
       - ./query_service:/app/query_service
@@ -168,7 +169,7 @@ services:
     volumes:
       - ./input:/pipeline/input
       - ./local_storage:/pipeline/local_storage
-      - ./evaluations:/evaluations
+      # - ./evaluations:/evaluations
       - lance_data:/lance
       - ./app/backend:/app
     extra_hosts:

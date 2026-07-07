@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -200,7 +201,10 @@ class EvidenceItem:
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     retrieval_score: Optional[float] = None
-    score_breakdown: Optional[dict[str, float]] = None
+    score_breakdown: Optional[dict[str, Any]] = None
+    lance_support_bonus: float = 0.0
+    lance_support_hits: int = 0
+    lance_support_reasons: Optional[list[str]] = None
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -790,6 +794,144 @@ def _lance_two_pass(
     return strict_items, soft_items
 
 
+def _lance_mode(cfg: dict[str, Any]) -> str:
+    lance_cfg = cfg.get("lance") if isinstance(cfg.get("lance"), dict) else {}
+    raw = (
+        os.getenv("GRAPHLEC_LANCE_MODE")
+        or cfg.get("lance_mode")
+        or lance_cfg.get("mode")
+        or "bonus_only"
+    )
+    mode = str(raw).strip().lower()
+    if mode in {"off", "disabled", "disable", "none", "false", "0", "no"}:
+        return "off"
+    if mode in {"context", "prompt", "direct", "true", "1", "on"}:
+        return "context"
+    if mode in {"bonus", "bonus_only", "support", "signal"}:
+        return "bonus_only"
+    return "bonus_only"
+
+
+def _lance_support_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg.get("lance_support") if isinstance(cfg.get("lance_support"), dict) else {}
+    base_override = raw.get("base_bonus") if isinstance(raw.get("base_bonus"), dict) else {}
+    weight_override = raw.get("match_weight") if isinstance(raw.get("match_weight"), dict) else {}
+    return {
+        "max_bonus_per_item": float(raw.get("max_bonus_per_item", 0.12)),
+        "base_bonus": {
+            "visual_asset": 0.10,
+            "slide_text": 0.08,
+            "slide_concept": 0.08,
+            "segment": 0.05,
+            "graphrag_entity": 0.05,
+            "graphrag_relationship": 0.03,
+            "sub_concept": 0.03,
+            **base_override,
+        },
+        "match_weight": {
+            "linked_node_id": 1.00,
+            "slide_number": 0.75,
+            "time_overlap": 0.60,
+            **weight_override,
+        },
+    }
+
+
+def _normalize_id(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _add_id(ids: set[str], v: Any) -> None:
+    s = _normalize_id(v)
+    if s:
+        ids.add(s)
+
+
+def _item_ids(it: EvidenceItem) -> set[str]:
+    ids: set[str] = set()
+    _add_id(ids, it.linked_node_id)
+    if ":" in it.uid:
+        for part in it.uid.split(":")[1:]:
+            _add_id(ids, part)
+    row = it.row or {}
+    for fld in (
+        "sub_id",
+        "concept_id",
+        "slide_id",
+        "segment_id",
+        "visual_asset_id",
+        "graphrag_entity_id",
+        "src_id",
+        "tgt_id",
+    ):
+        _add_id(ids, row.get(fld))
+    for fld in ("concept_ids", "slide_ids", "scene_ids", "src_concept_ids", "tgt_concept_ids"):
+        for v in row.get(fld) or []:
+            _add_id(ids, v)
+    return ids
+
+
+def _time_overlaps(a0: Optional[float], a1: Optional[float], b0: Optional[float], b1: Optional[float]) -> bool:
+    if a0 is None or b0 is None:
+        return False
+    a_end = a1 if a1 is not None else a0
+    b_end = b1 if b1 is not None else b0
+    return max(float(a0), float(b0)) <= min(float(a_end), float(b_end)) + 1.0
+
+
+def _lance_match_reasons(it: EvidenceItem, hit: EvidenceItem) -> list[str]:
+    reasons: list[str] = []
+    linked = _normalize_id(hit.linked_node_id)
+    if linked and linked in _item_ids(it):
+        reasons.append("linked_node_id")
+    item_slide = _to_int(it.slide_number)
+    hit_slide = _to_int(hit.slide_number)
+    if item_slide is not None and hit_slide is not None and item_slide == hit_slide:
+        reasons.append("slide_number")
+    if _time_overlaps(it.start_sec, it.end_sec, hit.start_sec, hit.end_sec):
+        reasons.append("time_overlap")
+    return reasons
+
+
+def _apply_lance_support_bonus(
+    items: list[EvidenceItem],
+    lance_hits: list[EvidenceItem],
+    cfg: dict[str, Any],
+) -> None:
+    support_cfg = _lance_support_cfg(cfg)
+    max_bonus = float(support_cfg["max_bonus_per_item"])
+    base_bonus: dict[str, float] = support_cfg["base_bonus"]
+    match_weight: dict[str, float] = support_cfg["match_weight"]
+    for it in items:
+        it.lance_support_bonus = 0.0
+        it.lance_support_hits = 0
+        it.lance_support_reasons = []
+
+    for hit in lance_hits:
+        hit_score = float(hit.lance_score or 0.5)
+        for it in items:
+            if it.kind.startswith("lance"):
+                continue
+            reasons = _lance_match_reasons(it, hit)
+            if not reasons:
+                continue
+            strongest = max(float(match_weight.get(r, 0.0)) for r in reasons)
+            if strongest <= 0:
+                continue
+            base = float(base_bonus.get(it.kind, 0.03))
+            bonus = base * hit_score * strongest
+            if bonus <= 0:
+                continue
+            it.lance_support_bonus = min(max_bonus, it.lance_support_bonus + bonus)
+            it.lance_support_hits += 1
+            reason_text = ",".join(reasons)
+            if it.lance_support_reasons is not None and reason_text not in it.lance_support_reasons:
+                it.lance_support_reasons.append(reason_text)
+
+
 def build_sectioned_context(
     question: str,
     intent_weights: dict[str, float],
@@ -949,14 +1091,24 @@ def run_enhanced_content_pipeline(
     graph_items = graph_items[:cap]
 
     # Lance
-    lance_root = default_lance_root()
-    top1 = int(lim.get("lance_pass1_top_k", 40))
-    top2 = int(lim.get("lance_pass2_top_k", 24))
-    min_strict = int(lim.get("min_strict_lance", 4))
-    strict_l, soft_l = _lance_two_pass(stem, question, lance_root, allowed_ids, top1, top2, min_strict)
+    lance_mode = _lance_mode(cfg)
+    strict_l: list[EvidenceItem] = []
+    soft_l: list[EvidenceItem] = []
+    if lance_mode != "off":
+        lance_root = default_lance_root()
+        top1 = int(lim.get("lance_pass1_top_k", 40))
+        top2 = int(lim.get("lance_pass2_top_k", 24))
+        min_strict = int(lim.get("min_strict_lance", 4))
+        strict_l, soft_l = _lance_two_pass(stem, question, lance_root, allowed_ids, top1, top2, min_strict)
 
-    max_lance_ctx = int(lim.get("max_lance_in_context", 10))
-    all_items = graph_items + strict_l + soft_l[: max(0, max_lance_ctx - len(strict_l))]
+    if lance_mode == "context":
+        max_lance_ctx = int(lim.get("max_lance_in_context", 10))
+        all_items = graph_items + strict_l + soft_l[: max(0, max_lance_ctx - len(strict_l))]
+    else:
+        all_items = graph_items
+        if lance_mode == "bonus_only":
+            max_support_hits = int(lim.get("max_lance_support_hits", 20))
+            _apply_lance_support_bonus(all_items, (strict_l + soft_l)[:max_support_hits], cfg)
 
     if current_slide_number is not None and _is_current_visual_query(question):
         try:
@@ -1090,6 +1242,14 @@ def run_enhanced_content_pipeline(
                 combined[i] += bonus
                 bonus_total += bonus
                 breakdown["example_directness"] = directness
+        if lance_mode == "bonus_only" and it.lance_support_bonus > 0:
+            combined[i] += it.lance_support_bonus
+            bonus_total += it.lance_support_bonus
+            breakdown["lance_support"] = it.lance_support_bonus
+            breakdown["lance_support_hits"] = it.lance_support_hits
+            breakdown["lance_support_reasons"] = it.lance_support_reasons or []
+        else:
+            breakdown["lance_support"] = 0.0
         breakdown["bonus"] = bonus_total
         breakdown["total"] = float(combined[i])
         breakdown["raw_semantic"] = float(sim_to_q[i])
