@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -15,11 +16,27 @@ import lancedb
 import numpy as np
 import pandas as pd
 
-from .embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, get_genai_client
+from .embedding_utils import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROVIDER,
+    default_embedding_model,
+    embed_documents,
+    embed_query,
+    get_embedding_client,
+    normalize_embedding_provider,
+)
 from .utils import resolve_backend_root
 
 CHUNKS_TABLE = "chunks"
 BATCH_SIZE = 16
+
+
+def safe_index_label(label: Optional[str]) -> Optional[str]:
+    if not label:
+        return None
+    cleaned = "".join(ch if ch.isalnum() else "_" for ch in label.strip().lower())
+    cleaned = "_".join(part for part in cleaned.split("_") if part)
+    return cleaned or None
 
 
 def _format_visual_assets(slide: Dict[str, Any]) -> str:
@@ -133,12 +150,18 @@ def ingest_stem_to_lance(
     fused_path: Path,
     output_dir: Path,
     lance_root: Optional[Path] = None,
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER,
+    embedding_model: Optional[str] = None,
+    embedding_dimensions: Optional[int] = None,
+    index_label: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     fused_path의 강의를 임베딩해 LanceDB에 넣는다.
     동일 stem 기존 행은 삭제 후 재삽입한다.
     """
+    embedding_provider = normalize_embedding_provider(embedding_provider)
+    embedding_model = embedding_model or default_embedding_model(embedding_provider)
+    label = safe_index_label(index_label)
     lance_root = lance_root or default_lance_root()
     lance_root.mkdir(parents=True, exist_ok=True)
 
@@ -152,13 +175,21 @@ def ingest_stem_to_lance(
     if not chunks:
         return {"ok": False, "reason": "no chunks", "count": 0}
 
-    client = get_genai_client()
+    client = get_embedding_client(embedding_provider)
     texts = [c["text"] for c in chunks]
     vectors: List[List[float]] = []
 
     for i in range(0, len(texts), BATCH_SIZE):
         batch = texts[i : i + BATCH_SIZE]
-        vectors.extend(embed_documents(client, batch, model=embedding_model))
+        vectors.extend(
+            embed_documents(
+                client,
+                batch,
+                model=embedding_model,
+                provider=embedding_provider,
+                dimensions=embedding_dimensions,
+            )
+        )
 
     rows: List[Dict[str, Any]] = []
     for c, vec in zip(chunks, vectors):
@@ -166,12 +197,15 @@ def ingest_stem_to_lance(
             {
                 **c,
                 "vector": vec,
+                "embedding_provider": embedding_provider,
                 "embedding_model": embedding_model,
+                "embedding_dimensions": int(embedding_dimensions) if embedding_dimensions else len(vec),
             }
         )
 
     df = pd.DataFrame(rows)
-    parquet_path = output_dir / f"{stem}_chunks_lance.parquet"
+    suffix = f"_{label}" if label else ""
+    parquet_path = output_dir / f"{stem}_chunks_lance{suffix}.parquet"
     output_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(parquet_path, index=False)
 
@@ -184,6 +218,24 @@ def ingest_stem_to_lance(
     else:
         db.create_table(CHUNKS_TABLE, data=df)
 
+    manifest_path: Optional[Path] = None
+    if label:
+        manifest_path = output_dir / f"{stem}_lance_{label}_manifest.json"
+        manifest = {
+            "stem": stem,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "provider": embedding_provider,
+            "model": embedding_model,
+            "dimensions": int(embedding_dimensions) if embedding_dimensions else (len(vectors[0]) if vectors else None),
+            "index_label": label,
+            "chunk_count": len(rows),
+            "fused_path": str(fused_path),
+            "parquet_path": str(parquet_path),
+            "lance_root": str(lance_root),
+            "table": CHUNKS_TABLE,
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
     return {
         "ok": True,
         "stem": stem,
@@ -191,7 +243,11 @@ def ingest_stem_to_lance(
         "parquet_path": str(parquet_path),
         "lance_root": str(lance_root),
         "table": CHUNKS_TABLE,
+        "embedding_provider": embedding_provider,
         "embedding_model": embedding_model,
+        "embedding_dimensions": int(embedding_dimensions) if embedding_dimensions else (len(vectors[0]) if vectors else None),
+        "index_label": label,
+        "manifest_path": str(manifest_path) if manifest_path else None,
     }
 
 
@@ -201,11 +257,13 @@ def lance_search(
     query: str,
     lance_root: Optional[Path] = None,
     top_k: int = 8,
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL,
+    embedding_provider: str = DEFAULT_EMBEDDING_PROVIDER,
+    embedding_model: Optional[str] = None,
+    embedding_dimensions: Optional[int] = None,
 ) -> pd.DataFrame:
     """질의 벡터로 stem 범위 내 top-k 검색."""
-    from .embedding_utils import embed_query
-
+    embedding_provider = normalize_embedding_provider(embedding_provider)
+    embedding_model = embedding_model or default_embedding_model(embedding_provider)
     lance_root = lance_root or default_lance_root()
     if not lance_root.exists():
         raise FileNotFoundError(f"LanceDB 경로 없음: {lance_root}")
@@ -214,8 +272,17 @@ def lance_search(
     if CHUNKS_TABLE not in db.table_names():
         raise FileNotFoundError(f"LanceDB에 '{CHUNKS_TABLE}' 테이블이 없습니다. 먼저 파이프라인 Stage 7을 실행하세요.")
 
-    client = get_genai_client()
-    qv = np.array(embed_query(client, query, model=embedding_model), dtype=np.float32)
+    client = get_embedding_client(embedding_provider)
+    qv = np.array(
+        embed_query(
+            client,
+            query,
+            model=embedding_model,
+            provider=embedding_provider,
+            dimensions=embedding_dimensions,
+        ),
+        dtype=np.float32,
+    )
     table = db.open_table(CHUNKS_TABLE)
     stem_sql = stem.replace("'", "''")
     return (
@@ -234,6 +301,10 @@ if __name__ == "__main__":
     p.add_argument("--output-dir", default="output", type=Path, help="분석 출력 디렉터리")
     p.add_argument("--slides-dir", default="output_slides", type=Path, help="슬라이드 디렉터리")
     p.add_argument("--lance-root", default=None, type=Path, help="LanceDB 루트 (기본: 레포 data/lancedb)")
+    p.add_argument("--embedding-provider", choices=["gemini", "openai"], default=DEFAULT_EMBEDDING_PROVIDER)
+    p.add_argument("--embedding-model", default=None, help="임베딩 모델 (기본: provider별 기본값)")
+    p.add_argument("--embedding-dimensions", default=None, type=int, help="OpenAI 임베딩 차원 축소 옵션")
+    p.add_argument("--index-label", default=None, help="별도 실험 인덱스 label. parquet/manifest suffix로 사용")
     args = p.parse_args()
     try:
         from .config import output_paths
@@ -252,5 +323,9 @@ if __name__ == "__main__":
         fused_path=fused,
         output_dir=args.output_dir,
         lance_root=lr,
+        embedding_provider=args.embedding_provider,
+        embedding_model=args.embedding_model,
+        embedding_dimensions=args.embedding_dimensions,
+        index_label=args.index_label,
     )
     print(r)

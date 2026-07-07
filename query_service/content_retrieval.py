@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,13 @@ from typing import Any, Callable, Optional
 
 import numpy as np
 
-from pipeline.embedding_utils import DEFAULT_EMBEDDING_MODEL, embed_documents, embed_query, get_genai_client
+from pipeline.embedding_utils import (
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_PROVIDER,
+    embed_documents,
+    embed_query,
+    get_embedding_client,
+)
 from pipeline.lance_ingest import default_lance_root, lance_search
 
 from .neo4j_content_queries import run_content_queries, run_overview_queries
@@ -194,7 +201,10 @@ class EvidenceItem:
     start_sec: Optional[float] = None
     end_sec: Optional[float] = None
     retrieval_score: Optional[float] = None
-    score_breakdown: Optional[dict[str, float]] = None
+    score_breakdown: Optional[dict[str, Any]] = None
+    lance_support_bonus: float = 0.0
+    lance_support_hits: int = 0
+    lance_support_reasons: Optional[list[str]] = None
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -473,6 +483,47 @@ def _is_exam_prep_query(question: str) -> bool:
     return any(k in q for k in ("시험", "출제", "시험대비", "나올것같", "나올만한"))
 
 
+def _is_example_query(question: str, intent_weights: dict[str, float] | None = None) -> bool:
+    if intent_weights and _intent_weight(intent_weights, "example") >= 0.25:
+        return True
+    q = question.replace(" ", "")
+    return any(k in q for k in ("예시", "사례", "예를들", "예는", "예가", "예로"))
+
+
+def _example_subject_terms(question: str, keywords: list[str]) -> list[str]:
+    terms: list[str] = []
+    m = re.search(r"(.+?)의\s*(?:예시|사례|예는|예가|예로)", question.strip())
+    if m:
+        subject = m.group(1).strip(" ?!.,，。")
+        if subject:
+            terms.append(subject)
+    for kw in keywords:
+        kw = str(kw or "").strip()
+        if len(kw) >= 2 and kw not in {"예시", "사례"} and kw not in terms:
+            terms.append(kw)
+    return terms[:5]
+
+
+def _example_directness_score(it: EvidenceItem, subject_terms: list[str]) -> float:
+    raw = it.text or ""
+    compact = re.sub(r"\s+", "", raw.lower())
+    if not compact or not subject_terms:
+        return 0.0
+    has_subject = any(
+        term.lower() in raw.lower() or term.lower().replace(" ", "") in compact
+        for term in subject_terms
+    )
+    if not has_subject:
+        return 0.0
+    if any(marker in compact for marker in ("예시", "사례", "예를들", "예로", "대표적예")):
+        return 1.0
+    if "등" in compact:
+        return 0.75
+    if re.search(r"\([^)]*,[^)]*\)", raw):
+        return 0.6
+    return 0.0
+
+
 def _is_overview_item(it: EvidenceItem) -> bool:
     text = (it.text or "").replace(" ", "").lower()
     return any(k in text for k in ("강의목표", "강의의목표", "학습목표", "목차", "개요", "chapter"))
@@ -743,6 +794,144 @@ def _lance_two_pass(
     return strict_items, soft_items
 
 
+def _lance_mode(cfg: dict[str, Any]) -> str:
+    lance_cfg = cfg.get("lance") if isinstance(cfg.get("lance"), dict) else {}
+    raw = (
+        os.getenv("GRAPHLEC_LANCE_MODE")
+        or cfg.get("lance_mode")
+        or lance_cfg.get("mode")
+        or "bonus_only"
+    )
+    mode = str(raw).strip().lower()
+    if mode in {"off", "disabled", "disable", "none", "false", "0", "no"}:
+        return "off"
+    if mode in {"context", "prompt", "direct", "true", "1", "on"}:
+        return "context"
+    if mode in {"bonus", "bonus_only", "support", "signal"}:
+        return "bonus_only"
+    return "bonus_only"
+
+
+def _lance_support_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg.get("lance_support") if isinstance(cfg.get("lance_support"), dict) else {}
+    base_override = raw.get("base_bonus") if isinstance(raw.get("base_bonus"), dict) else {}
+    weight_override = raw.get("match_weight") if isinstance(raw.get("match_weight"), dict) else {}
+    return {
+        "max_bonus_per_item": float(raw.get("max_bonus_per_item", 0.12)),
+        "base_bonus": {
+            "visual_asset": 0.10,
+            "slide_text": 0.08,
+            "slide_concept": 0.08,
+            "segment": 0.05,
+            "graphrag_entity": 0.05,
+            "graphrag_relationship": 0.03,
+            "sub_concept": 0.03,
+            **base_override,
+        },
+        "match_weight": {
+            "linked_node_id": 1.00,
+            "slide_number": 0.75,
+            "time_overlap": 0.60,
+            **weight_override,
+        },
+    }
+
+
+def _normalize_id(v: Any) -> Optional[str]:
+    if v is None:
+        return None
+    s = str(v).strip()
+    return s or None
+
+
+def _add_id(ids: set[str], v: Any) -> None:
+    s = _normalize_id(v)
+    if s:
+        ids.add(s)
+
+
+def _item_ids(it: EvidenceItem) -> set[str]:
+    ids: set[str] = set()
+    _add_id(ids, it.linked_node_id)
+    if ":" in it.uid:
+        for part in it.uid.split(":")[1:]:
+            _add_id(ids, part)
+    row = it.row or {}
+    for fld in (
+        "sub_id",
+        "concept_id",
+        "slide_id",
+        "segment_id",
+        "visual_asset_id",
+        "graphrag_entity_id",
+        "src_id",
+        "tgt_id",
+    ):
+        _add_id(ids, row.get(fld))
+    for fld in ("concept_ids", "slide_ids", "scene_ids", "src_concept_ids", "tgt_concept_ids"):
+        for v in row.get(fld) or []:
+            _add_id(ids, v)
+    return ids
+
+
+def _time_overlaps(a0: Optional[float], a1: Optional[float], b0: Optional[float], b1: Optional[float]) -> bool:
+    if a0 is None or b0 is None:
+        return False
+    a_end = a1 if a1 is not None else a0
+    b_end = b1 if b1 is not None else b0
+    return max(float(a0), float(b0)) <= min(float(a_end), float(b_end)) + 1.0
+
+
+def _lance_match_reasons(it: EvidenceItem, hit: EvidenceItem) -> list[str]:
+    reasons: list[str] = []
+    linked = _normalize_id(hit.linked_node_id)
+    if linked and linked in _item_ids(it):
+        reasons.append("linked_node_id")
+    item_slide = _to_int(it.slide_number)
+    hit_slide = _to_int(hit.slide_number)
+    if item_slide is not None and hit_slide is not None and item_slide == hit_slide:
+        reasons.append("slide_number")
+    if _time_overlaps(it.start_sec, it.end_sec, hit.start_sec, hit.end_sec):
+        reasons.append("time_overlap")
+    return reasons
+
+
+def _apply_lance_support_bonus(
+    items: list[EvidenceItem],
+    lance_hits: list[EvidenceItem],
+    cfg: dict[str, Any],
+) -> None:
+    support_cfg = _lance_support_cfg(cfg)
+    max_bonus = float(support_cfg["max_bonus_per_item"])
+    base_bonus: dict[str, float] = support_cfg["base_bonus"]
+    match_weight: dict[str, float] = support_cfg["match_weight"]
+    for it in items:
+        it.lance_support_bonus = 0.0
+        it.lance_support_hits = 0
+        it.lance_support_reasons = []
+
+    for hit in lance_hits:
+        hit_score = float(hit.lance_score or 0.5)
+        for it in items:
+            if it.kind.startswith("lance"):
+                continue
+            reasons = _lance_match_reasons(it, hit)
+            if not reasons:
+                continue
+            strongest = max(float(match_weight.get(r, 0.0)) for r in reasons)
+            if strongest <= 0:
+                continue
+            base = float(base_bonus.get(it.kind, 0.03))
+            bonus = base * hit_score * strongest
+            if bonus <= 0:
+                continue
+            it.lance_support_bonus = min(max_bonus, it.lance_support_bonus + bonus)
+            it.lance_support_hits += 1
+            reason_text = ",".join(reasons)
+            if it.lance_support_reasons is not None and reason_text not in it.lance_support_reasons:
+                it.lance_support_reasons.append(reason_text)
+
+
 def build_sectioned_context(
     question: str,
     intent_weights: dict[str, float],
@@ -758,7 +947,27 @@ def build_sectioned_context(
         "[검색·재순위로 선택된 근거]",
         "아래 내용만 사실로 사용한다. 서로 다른 출처를 골랐다.",
     ]
-    # group by kind for readability
+    for context in build_prompt_contexts(intent_weights, items, max_chars):
+        lines.append(context)
+        lines.append("")
+    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
+        lines.append(
+            "강의 전체 요약 질문이다. 슬라이드 순서를 중심으로 전체 흐름을 요약하고, 핵심 개념과 중요한 시각자료/강조 근거는 보조로만 사용한다. "
+            "답변은 한 문장 요약, 강의 흐름 3~5개, 핵심 개념 3~5개로 간결하게 작성한다."
+        )
+    else:
+        lines.append(
+            "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
+            "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
+        )
+    return "\n".join(lines).strip()
+
+
+def _prompt_ordered_items(
+    intent_weights: dict[str, float],
+    items: list[EvidenceItem],
+) -> list[EvidenceItem]:
+    """Return evidence in the same order used inside the answer prompt."""
     buckets: dict[str, list[EvidenceItem]] = {}
     for it in items:
         buckets.setdefault(it.kind, []).append(it)
@@ -787,40 +996,40 @@ def build_sectioned_context(
             "lance_strict",
             "lance_soft",
         ]
+    ordered: list[EvidenceItem] = []
     for bk in order:
-        for it in buckets.get(bk, []):
-            tag = {
-                "sub_concept": "개념 관계",
-                "graphrag_entity": "GraphRAG 개념",
-                "graphrag_relationship": "GraphRAG 개념 관계",
-                "visual_asset": "시각자료",
-                "slide_text": "슬라이드 본문",
-                "slide_concept": "슬라이드-개념",
-                "segment": "음성 구간",
-                "lance_strict": "의미 검색(그래프 연동)",
-                "lance_soft": "의미 검색(보조)",
-            }.get(bk, bk)
-            meta = f"[{tag}]"
-            if it.slide_number is not None:
-                meta += f" 슬라이드 {it.slide_number}"
-            if it.start_sec is not None:
-                meta += f" · 약 {it.start_sec:.1f}초"
-            if it.kind == "lance_soft":
-                meta += " (그래프 id 미일치 보조)"
-            chunk = it.text[:max_chars]
-            lines.append(f"{meta}\n{chunk}")
-            lines.append("")
-    if _intent_weight(intent_weights, "lecture_overview") >= 0.25:
-        lines.append(
-            "강의 전체 요약 질문이다. 슬라이드 순서를 중심으로 전체 흐름을 요약하고, 핵심 개념과 중요한 시각자료/강조 근거는 보조로만 사용한다. "
-            "답변은 한 문장 요약, 강의 흐름 3~5개, 핵심 개념 3~5개로 간결하게 작성한다."
-        )
-    else:
-        lines.append(
-            "질문에 정의·예시·설명 등 여러 요구가 섞여 있으면, 위 근거에서 가능한 범위로 각각에 답하고 "
-            "특정 유형에 근거가 없으면 그 점을 정중하게 짧게 밝힌다."
-        )
-    return "\n".join(lines).strip()
+        ordered.extend(buckets.get(bk, []))
+    return ordered
+
+
+def build_prompt_contexts(
+    intent_weights: dict[str, float],
+    items: list[EvidenceItem],
+    max_chars: int,
+) -> list[str]:
+    """Build evidence snippets in the exact evidence order used by the prompt."""
+    contexts: list[str] = []
+    for it in _prompt_ordered_items(intent_weights, items):
+        tag = {
+            "sub_concept": "개념 관계",
+            "graphrag_entity": "GraphRAG 개념",
+            "graphrag_relationship": "GraphRAG 개념 관계",
+            "visual_asset": "시각자료",
+            "slide_text": "슬라이드 본문",
+            "slide_concept": "슬라이드-개념",
+            "segment": "음성 구간",
+            "lance_strict": "의미 검색(그래프 연동)",
+            "lance_soft": "의미 검색(보조)",
+        }.get(it.kind, it.kind)
+        meta = f"[{tag}]"
+        if it.slide_number is not None:
+            meta += f" 슬라이드 {it.slide_number}"
+        if it.start_sec is not None:
+            meta += f" · 약 {it.start_sec:.1f}초"
+        if it.kind == "lance_soft":
+            meta += " (그래프 id 미일치 보조)"
+        contexts.append(f"{meta}\n{it.text[:max_chars]}")
+    return contexts
 
 
 def run_enhanced_content_pipeline(
@@ -882,14 +1091,24 @@ def run_enhanced_content_pipeline(
     graph_items = graph_items[:cap]
 
     # Lance
-    lance_root = default_lance_root()
-    top1 = int(lim.get("lance_pass1_top_k", 40))
-    top2 = int(lim.get("lance_pass2_top_k", 24))
-    min_strict = int(lim.get("min_strict_lance", 4))
-    strict_l, soft_l = _lance_two_pass(stem, question, lance_root, allowed_ids, top1, top2, min_strict)
+    lance_mode = _lance_mode(cfg)
+    strict_l: list[EvidenceItem] = []
+    soft_l: list[EvidenceItem] = []
+    if lance_mode != "off":
+        lance_root = default_lance_root()
+        top1 = int(lim.get("lance_pass1_top_k", 40))
+        top2 = int(lim.get("lance_pass2_top_k", 24))
+        min_strict = int(lim.get("min_strict_lance", 4))
+        strict_l, soft_l = _lance_two_pass(stem, question, lance_root, allowed_ids, top1, top2, min_strict)
 
-    max_lance_ctx = int(lim.get("max_lance_in_context", 10))
-    all_items = graph_items + strict_l + soft_l[: max(0, max_lance_ctx - len(strict_l))]
+    if lance_mode == "context":
+        max_lance_ctx = int(lim.get("max_lance_in_context", 10))
+        all_items = graph_items + strict_l + soft_l[: max(0, max_lance_ctx - len(strict_l))]
+    else:
+        all_items = graph_items
+        if lance_mode == "bonus_only":
+            max_support_hits = int(lim.get("max_lance_support_hits", 20))
+            _apply_lance_support_bonus(all_items, (strict_l + soft_l)[:max_support_hits], cfg)
 
     if current_slide_number is not None and _is_current_visual_query(question):
         try:
@@ -908,15 +1127,15 @@ def run_enhanced_content_pipeline(
         return "", intent_weights, allowed_ids, structured, []
 
     # Embedding rerank + MMR
-    client = get_genai_client()
+    client = get_embedding_client(DEFAULT_EMBEDDING_PROVIDER)
     model = DEFAULT_EMBEDDING_MODEL
     texts = [it.text[:8000] for it in all_items]
-    q_emb = np.array(embed_query(client, question, model=model), dtype=np.float32)
+    q_emb = np.array(embed_query(client, question, model=model, provider=DEFAULT_EMBEDDING_PROVIDER), dtype=np.float32)
     doc_embs: list[np.ndarray] = []
     bs = 32
     for i in range(0, len(texts), bs):
         batch = texts[i : i + bs]
-        vecs = embed_documents(client, batch, model=model)
+        vecs = embed_documents(client, batch, model=model, provider=DEFAULT_EMBEDDING_PROVIDER)
         doc_embs.extend([np.array(v, dtype=np.float32) for v in vecs])
 
     sim_to_q = np.array(
@@ -935,6 +1154,8 @@ def run_enhanced_content_pipeline(
     current_visual_query = _is_current_visual_query(question)
     emphasis_overview_query = _is_emphasis_overview_query(question)
     core_keyword_query = _is_core_keyword_query(question)
+    example_query = _is_example_query(question, intent_weights)
+    example_subject_terms = _example_subject_terms(question, keywords) if example_query else []
     max_slide_emphasis = max(
         [_row_float(it.row, "emphasis_total") for it in all_items if it.kind in {"slide_text", "slide_concept"}] or [0.0]
     )
@@ -1009,6 +1230,26 @@ def run_enhanced_content_pipeline(
                 bonus = 0.15 * (_row_float(it.row, "emphasis_total") / max_slide_emphasis)
                 combined[i] += bonus
                 bonus_total += bonus
+        if example_query:
+            directness = _example_directness_score(it, example_subject_terms)
+            if directness > 0:
+                if it.kind in {"visual_asset", "slide_text", "slide_concept"}:
+                    bonus = 0.45 * directness
+                elif it.kind in {"graphrag_entity", "graphrag_relationship"}:
+                    bonus = 0.35 * directness
+                else:
+                    bonus = 0.18 * directness
+                combined[i] += bonus
+                bonus_total += bonus
+                breakdown["example_directness"] = directness
+        if lance_mode == "bonus_only" and it.lance_support_bonus > 0:
+            combined[i] += it.lance_support_bonus
+            bonus_total += it.lance_support_bonus
+            breakdown["lance_support"] = it.lance_support_bonus
+            breakdown["lance_support_hits"] = it.lance_support_hits
+            breakdown["lance_support_reasons"] = it.lance_support_reasons or []
+        else:
+            breakdown["lance_support"] = 0.0
         breakdown["bonus"] = bonus_total
         breakdown["total"] = float(combined[i])
         breakdown["raw_semantic"] = float(sim_to_q[i])

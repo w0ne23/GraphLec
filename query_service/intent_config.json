@@ -1,0 +1,77 @@
+{
+  "intent_source_prior": {
+    "definition": {
+      "slide_text": 1.0,
+      "slide_concept": 0.9,
+      "segment": 0.55,
+      "sub_concept": 0.88,
+      "lance": 0.82
+    },
+    "example": {
+      "slide_text": 0.45,
+      "slide_concept": 0.5,
+      "segment": 0.95,
+      "sub_concept": 0.42,
+      "lance": 0.88
+    },
+    "explanation": {
+      "slide_text": 0.75,
+      "slide_concept": 0.7,
+      "segment": 0.85,
+      "sub_concept": 0.65,
+      "lance": 0.8
+    },
+    "comparison": {
+      "slide_text": 0.8,
+      "slide_concept": 0.85,
+      "segment": 0.7,
+      "sub_concept": 0.75,
+      "lance": 0.78
+    },
+    "temporal": {
+      "slide_text": 0.5,
+      "slide_concept": 0.45,
+      "segment": 0.95,
+      "sub_concept": 0.4,
+      "lance": 0.65
+    },
+    "location": {
+      "slide_text": 0.9,
+      "slide_concept": 0.85,
+      "segment": 0.55,
+      "sub_concept": 0.5,
+      "lance": 0.6
+    },
+    "general": {
+      "slide_text": 0.75,
+      "slide_concept": 0.72,
+      "segment": 0.78,
+      "sub_concept": 0.7,
+      "lance": 0.85
+    }
+  },
+  "scoring": {
+    "semantic_weight": 0.52,
+    "intent_weight": 0.33,
+    "keyword_weight": 0.15,
+    "emphasis_weight": 0.08
+  },
+  "mmr": {
+    "lambda_default": 0.78,
+    "lambda_example_heavy": 0.62
+  },
+  "limits": {
+    "graph_candidate_cap": 96,
+    "mmr_pick_k": 18,
+    "max_context_chars_per_item": 900,
+    "lance_pass1_top_k": 40,
+    "lance_pass2_top_k": 24,
+    "min_strict_lance": 4,
+    "max_lance_in_context": 10
+  },
+  "neo4j_limits": {
+    "seg_per_kw": 22,
+    "slide_per_kw": 10,
+    "sub_per_kw": 28
+  }
+}
